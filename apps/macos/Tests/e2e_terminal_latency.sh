@@ -337,34 +337,43 @@ def first_performance_event(
     )
 
 
-def target_revision_for_mac_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[str | None, int | None]:
-    # First-after, never latest-in-window. The upper bound here is `visible_ns`, which is observed by
-    # polling a subprocess and so stretches with machine load; picking the *latest* export inside a
-    # stretched window selects an export belonging to a later keystroke, which both inflates the phase
-    # and leaves this keystroke's own apply unmatched. The first export after the key event is
-    # unambiguously this keystroke's, whatever the bound does.
-    frame_export = first_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+def first_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+    """The first frame this event produced on the host.
+
+    First-after, never latest-in-window. The upper bound here is `visible_ns`, which is observed by
+    polling a subprocess and so stretches with machine load; picking the *latest* export inside a
+    stretched window selects an export belonging to a later keystroke, which both inflates the phase
+    and leaves this keystroke's own apply unmatched. The first export after the key event is
+    unambiguously this keystroke's, whatever the bound does.
+    """
+    return first_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+
+
+def mac_frame_apply_for_export(
+    session_id: str, frame_export: tuple[dict, int] | None, visible_ns: int
+) -> tuple[dict, int] | None:
+    """The client apply that carried the revision this host export shipped.
+
+    Pairing by revision rather than by time is what lets the phase split add up: every stage is
+    resolved against the same frame, so `frame_export_to_frame_apply_ms` measures one frame's trip to
+    the client instead of subtracting one frame's export from another frame's apply.
+    """
     if not frame_export:
-        return None, None
+        return None
     target_revision = (frame_export[0].get("attributes") or {}).get("target_revision")
-    return (target_revision if target_revision and target_revision != "nil" else None), frame_export[1]
-
-
-def first_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
-    target_revision, frame_export_ns = target_revision_for_mac_apply(session_id, begin_ns, visible_ns)
-    attribute_filter = {"applied_revision": target_revision} if target_revision else None
+    attribute_filter = {"applied_revision": target_revision} if target_revision and target_revision != "nil" else None
     return first_performance_event(
         session_id,
         "mac-mirror",
         "render_frame_mirror_apply",
-        frame_export_ns if frame_export_ns is not None else begin_ns,
+        frame_export[1],
         before_ns=visible_ns,
         attribute_equals=attribute_filter,
     )
 
 
-def settled_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
-    """The client applying the frame that settled the screen the command changed.
+def settled_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+    """The host export of the frame that settled the screen the command changed.
 
     A keystroke that echoes one character produces one frame, so those scenarios pair on the first
     export after the key event. One Return does not: it produces a burst of around 18 exports over
@@ -383,21 +392,16 @@ def settled_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> 
     settled_revision = (settled[0].get("attributes") or {}).get("target_revision")
     if not settled_revision or settled_revision == "nil":
         return None
-    settled_export = first_performance_event(
-        session_id,
-        "mac-host",
-        "render_frame_export_end",
-        begin_ns,
-        before_ns=visible_ns,
-        attribute_equals={"target_revision": settled_revision},
-    )
-    return first_performance_event(
-        session_id,
-        "mac-mirror",
-        "render_frame_mirror_apply",
-        settled_export[1] if settled_export else settled[1],
-        before_ns=visible_ns,
-        attribute_equals={"applied_revision": settled_revision},
+    return (
+        first_performance_event(
+            session_id,
+            "mac-host",
+            "render_frame_export_end",
+            begin_ns,
+            before_ns=visible_ns,
+            attribute_equals={"target_revision": settled_revision},
+        )
+        or settled
     )
 
 
@@ -655,17 +659,24 @@ def summarize_phases(measurements: list[dict]) -> dict:
     }
 
 
-def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int | None, visible_ns: int) -> dict:
-    before_ns = frame_apply_ns if frame_apply_ns is not None else visible_ns
-    # Each stage takes the first event after the previous stage resolved, so the chain walks this
-    # keystroke's own events in order. Taking the latest in the window instead paired stages across
-    # keystrokes and reported phases that never happened: state_change -> frame_export came out
-    # trimodal at ~1ms / ~22ms / ~93ms purely from which later export the window happened to include.
+def mac_host_latency_split(
+    session_id: str, begin_ns: int, frame_export_ns: int | None, frame_apply_ns: int | None, visible_ns: int
+) -> dict:
+    """Split one measurement across the host frame its client apply was paired to.
+
+    The export is passed in rather than rediscovered here, so the split describes the same frame the
+    headline total ends at. Rediscovering it by walking first-after from `state_change` selects a
+    different, later export whenever output triggers an export before the state-change callback runs,
+    and then `frame_export_to_frame_apply_ms` subtracts one revision's export from another revision's
+    apply. Everything upstream of the export is read backwards from it for the same reason: the last
+    state change at or before this export is the one that produced it.
+    """
+    before_ns = frame_export_ns if frame_export_ns is not None else visible_ns
     owner_activity = first_performance_event(
         session_id, "mac-host", "owner_input_activity", begin_ns, before_ns=before_ns, require_render_frame=False
     )
     owner_activity_ns = owner_activity[1] if owner_activity else None
-    state_change = first_performance_event(
+    state_change = last_performance_event(
         session_id,
         "mac-host",
         "state_change",
@@ -674,14 +685,6 @@ def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int |
         require_render_frame=False,
     )
     state_change_ns = state_change[1] if state_change else None
-    frame_export = first_performance_event(
-        session_id,
-        "mac-host",
-        "render_frame_export_end",
-        state_change_ns if state_change_ns is not None else begin_ns,
-        before_ns=before_ns,
-    )
-    frame_export_ns = frame_export[1] if frame_export else None
     return {
         "owner_input_activity_to_state_change_ms": (
             ms_between(owner_activity_ns, state_change_ns) if owner_activity_ns is not None and state_change_ns is not None else None
@@ -741,11 +744,13 @@ def run_mac_input_latency() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, expected_text=expected_text: expected_text in compact_rendered_output(state), 5, probe_id)
-        frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+        frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-        stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+        stage_split = mac_host_latency_split(
+            session_id, begin_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_input_frame_applied",
@@ -859,11 +864,13 @@ def run_mac_scrollback_latency(
             visible_state, visible_ns = wait_for_state(session_id, lambda state, before=before: rendered_output(state) != before, 5, probe_id)
             rendered_change_latency_ms = ms_between(begin_ns, visible_ns)
             rpc_end_to_render_visible_ms = ms_between(rpc_end_ns, visible_ns)
-            frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+            frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+            frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
             frame_apply_ns = frame_apply[1] if frame_apply else None
             event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
             frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-            stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+            stage_split = mac_host_latency_split(
+                session_id, begin_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
             if frame_apply_ns is not None:
                 event(
                     "mac_scroll_frame_applied",
@@ -886,9 +893,13 @@ def run_mac_scrollback_latency(
         except TimeoutError:
             no_op = True
             visible_state = dump_state(session_id, f"{probe_id}-noop")
+            # Every key `mac_host_latency_split` returns, because the measurement below reads all of
+            # them: a short dict here turns a supported no-op into a KeyError.
             stage_split = {
                 "owner_input_activity_to_state_change_ms": None,
                 "state_change_to_frame_export_ms": None,
+                "event_to_host_publish_ms": None,
+                "host_publish_to_client_visible_ms": None,
                 "frame_export_to_frame_apply_ms": None,
             }
             event("mac_scroll_noop", scenario, probe_id, now_ns(), delta_y=delta_y)
@@ -936,14 +947,20 @@ def run_mac_command_output_catchup() -> dict:
     session_id = start_terminal(title, None)
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
-    def type_shell_command(command_text: str) -> tuple[int, int, int]:
+    def type_shell_command(command_text: str, echoed_text: str, probe_id: str) -> tuple[int, int, int]:
         # Emulates a user typing a command: the line is typed, then Return is pressed as its own
         # keystroke. Deliberately NOT the `append_newline` submit path — that is the orchestration
         # /notification composer path, which sends the text as a paste before its Enter so agent TUIs
         # read the two as separate events. Keeping the two paths distinct keeps this scenario measuring
         # the render cost of typing and pressing Return, which is what it exists to track.
         # The timed window opens at the Return keystroke, since that is the event that produces output.
+        # Waiting for the typed line to render first is what keeps that window clean: the text write and
+        # the Return are separate requests, and without the wait the echo of the typed line is still
+        # exporting frames when the window opens, so its first frame belongs to the typing rather than
+        # to the command. The wait sits outside the window and changes nothing it measures.
         send_terminal_control(session_id, "send", text=command_text, timeout=15)
+        wait_for_state(
+            session_id, lambda state, echoed=echoed_text: echoed in compact_rendered_output(state), 8, f"{probe_id}-typed")
         begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "key", key="enter", timeout=15)
         key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
@@ -952,7 +969,7 @@ def run_mac_command_output_catchup() -> dict:
     warmup_suffix = uuid.uuid4().hex[:10]
     warmup_marker = f"{warmup_prefix}{warmup_suffix}__"
     warmup_command = f"echo '{warmup_prefix}'\"{warmup_suffix}\"'__'"
-    type_shell_command(warmup_command)
+    type_shell_command(warmup_command, warmup_prefix, "warmup")
     wait_for_state(session_id, lambda state, marker=warmup_marker: marker in compact_rendered_output(state), 8, "warmup")
 
     measurements = []
@@ -966,7 +983,7 @@ def run_mac_command_output_catchup() -> dict:
         event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
         event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        begin_ns, key_up_ns, rpc_end_ns = type_shell_command(command_text)
+        begin_ns, key_up_ns, rpc_end_ns = type_shell_command(command_text, marker_prefix, probe_id)
         event("mac_command_begin", scenario, probe_id, begin_ns, marker=marker)
         event(
             "mac_command_rpc_end",
@@ -981,17 +998,19 @@ def run_mac_command_output_catchup() -> dict:
             session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
         # The Return's first frame is the line break, not the command's output, so it is reported as
         # the moment the screen first answered and the gated total is taken from the settled frame.
-        first_frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        first_frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+        first_frame_apply = mac_frame_apply_for_export(session_id, first_frame_export, visible_ns)
         first_frame_apply_ns = first_frame_apply[1] if first_frame_apply else None
         event_to_first_frame_apply_ms = ms_between(begin_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
-        frame_apply = settled_mac_frame_apply(session_id, begin_ns, visible_ns)
+        frame_apply = mac_frame_apply_for_export(
+            session_id, settled_mac_frame_export(session_id, begin_ns, visible_ns), visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-        # Bounded by the first apply, not the settled one: every stage below is a first-after step, so
-        # widening the bound to the settled frame would pair this chain's first export against a frame
-        # applied many exports later.
-        stage_split = mac_host_latency_split(session_id, begin_ns, first_frame_apply_ns, visible_ns)
+        # Split across the first frame, not the settled one: the settled frame is many exports later,
+        # and the phases below describe how one frame reached the screen.
+        stage_split = mac_host_latency_split(
+            session_id, begin_ns, first_frame_export[1] if first_frame_export else None, first_frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_command_frame_applied",
@@ -1083,7 +1102,10 @@ for name, result in scenario_results.items():
         # normal-looking number while the attempts that did not are exactly the ones a regression
         # would show up in.
         resolved = result["summary"]["count"]
-        attempted = len(result["measurements"])
+        # No-op scroll gestures are excluded from the denominator, not from the check: a gesture at the
+        # scrollback boundary is expected to render nothing, so it has no frame apply to resolve, while
+        # every attempt that did change the screen still has to.
+        attempted = sum(1 for item in result["measurements"] if not item.get("no_op"))
         if p95 is None:
             failures.append(
                 f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
