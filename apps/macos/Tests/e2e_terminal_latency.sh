@@ -363,13 +363,41 @@ def first_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tu
     )
 
 
-def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple[dict, int] | None:
+def settled_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+    """The client applying the frame that settled the screen the command changed.
+
+    A keystroke that echoes one character produces one frame, so those scenarios pair on the first
+    export after the key event. One Return does not: it produces a burst of around 18 exports over
+    tens of milliseconds as the line break, the command's output, and the redrawn prompt arrive, and
+    the first of them carries none of the output this scenario exists to time.
+
+    That burst is the only thing writing to this session, so its revision stream stops once the screen
+    settles. Taking the last revision exported before the marker was seen identifies the settled
+    screen, and timing the *first* export that carried that revision makes the measurement independent
+    of how late the polling loop was to notice: a window stretched by host load can only swallow
+    repeat exports of that same revision, never a newer one.
+    """
+    settled = last_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+    if not settled:
+        return None
+    settled_revision = (settled[0].get("attributes") or {}).get("target_revision")
+    if not settled_revision or settled_revision == "nil":
+        return None
+    settled_export = first_performance_event(
+        session_id,
+        "mac-host",
+        "render_frame_export_end",
+        begin_ns,
+        before_ns=visible_ns,
+        attribute_equals={"target_revision": settled_revision},
+    )
     return first_performance_event(
         session_id,
         "mac-mirror",
         "render_frame_mirror_apply",
-        submit_ns,
-        timeout=1.0,
+        settled_export[1] if settled_export else settled[1],
+        before_ns=visible_ns,
+        attribute_equals={"applied_revision": settled_revision},
     )
 
 
@@ -614,8 +642,7 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "enqueue_to_rpc_begin": summarize_latencies(measurements, "enqueue_to_rpc_begin_ms"),
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
         "command_typing_duration": summarize_latencies(measurements, "command_typing_duration_ms"),
-        "command_submit_to_first_frame_apply": summarize_latencies(measurements, "command_submit_to_first_frame_apply_ms"),
-        "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
+        "event_to_first_frame_apply": summarize_latencies(measurements, "event_to_first_frame_apply_ms"),
         "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
         "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
         "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
@@ -952,17 +979,19 @@ def run_mac_command_output_catchup() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
-        first_frame_apply = first_mac_frame_apply_after_submit(session_id, key_up_ns)
+        # The Return's first frame is the line break, not the command's output, so it is reported as
+        # the moment the screen first answered and the gated total is taken from the settled frame.
+        first_frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
         first_frame_apply_ns = first_frame_apply[1] if first_frame_apply else None
-        command_submit_to_first_frame_apply_ms = (
-            ms_between(key_up_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
-        )
-        frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        event_to_first_frame_apply_ms = ms_between(begin_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
+        frame_apply = settled_mac_frame_apply(session_id, begin_ns, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
-        command_submit_to_render_visible_ms = ms_between(key_up_ns, visible_ns)
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-        stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+        # Bounded by the first apply, not the settled one: every stage below is a first-after step, so
+        # widening the bound to the settled frame would pair this chain's first export against a frame
+        # applied many exports later.
+        stage_split = mac_host_latency_split(session_id, begin_ns, first_frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_command_frame_applied",
@@ -980,7 +1009,6 @@ def run_mac_command_output_catchup() -> dict:
             probe_id,
             visible_ns,
             rpc_end_to_render_visible_ms=ms_between(rpc_end_ns, visible_ns),
-            command_submit_to_render_visible_ms=command_submit_to_render_visible_ms,
             event_to_visible_ms=ms_between(begin_ns, visible_ns),
         )
         measurements.append(
@@ -997,9 +1025,8 @@ def run_mac_command_output_catchup() -> dict:
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
-                "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
+                "event_to_first_frame_apply_ms": event_to_first_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
-                "command_submit_to_render_visible_ms": command_submit_to_render_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
                 "visible_latency_ms": ms_between(begin_ns, visible_ns),
                 "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
@@ -1099,8 +1126,7 @@ for name, result in scenario_results.items():
             f"enqueue_to_rpc_begin p95={format_ms(phases['enqueue_to_rpc_begin']['p95_ms'])}, "
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
             f"typing p95={format_ms(phases['command_typing_duration']['p95_ms'])}, "
-            f"submit_to_first_apply p95={format_ms(phases['command_submit_to_first_frame_apply']['p95_ms'])}, "
-            f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
+            f"event_to_first_apply p95={format_ms(phases['event_to_first_frame_apply']['p95_ms'])}, "
             f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
             f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
             f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
