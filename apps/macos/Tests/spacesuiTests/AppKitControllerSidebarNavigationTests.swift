@@ -3,6 +3,18 @@ import Testing
 @testable import spacesui
 
 @Suite struct AppKitControllerSidebarNavigationTests {
+    @Test func clearingSelectionForAutomationsKeepsTheAutomationsPane() {
+        #expect(AppKitController.sidebarClearedSelectionPresentsPlaceholder(showingAlerts: false, showingAutomations: true) == false)
+    }
+
+    @Test func clearingSelectionForAlertsKeepsTheAlertsPane() {
+        #expect(AppKitController.sidebarClearedSelectionPresentsPlaceholder(showingAlerts: true, showingAutomations: false) == false)
+    }
+
+    @Test func clearingSelectionWithNoPaneShowingFallsBackToThePlaceholder() {
+        #expect(AppKitController.sidebarClearedSelectionPresentsPlaceholder(showingAlerts: false, showingAutomations: false))
+    }
+
     @Test func downArrowFromAlertsSelectsAutomations() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
