@@ -46,11 +46,30 @@
         /// finalized ghostty config handle. Embedded terminals load ONLY this generated config — never the
         /// user's `~/.config/ghostty` files — so the look is owned by the active Spaces theme.
         static func makeThemeConfiguration() throws -> ghostty_config_t {
-            guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
             let configRoot = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
                 "ghostty", isDirectory: true)
-            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor, configRootDirectory: configRoot).withCString { path in
-                ghostty_config_load_file(config, path)
+            let configPath = try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor, configRootDirectory: configRoot)
+
+            // ghostty_config_new allocates and ghostty_config_load_file fully parses the generated
+            // config, walking deep into Zig-side parsing/allocation code (the same class of
+            // large-stack consumer as `ghostty_session_new_headless`; see the SIGBUS this fixes,
+            // diagnosed in GhosttyEmbeddedTerminalSessionDriver.configureNewSession()). Both calls run
+            // on a dedicated large-stack thread rather than inline on the engine actor's home thread,
+            // which can be a libdispatch workqueue thread with only ~512 KB of stack.
+            guard
+                let config = try configPath.withCString({ path -> ghostty_config_t? in
+                    // Read-only input to the large-stack thread's closure, never touched again by
+                    // this thread while it runs (the thread call blocks until the closure returns),
+                    // so the concurrent access the compiler cannot verify never happens.
+                    nonisolated(unsafe) let pathForCall = path
+                    return try runOnDedicatedLargeStackThread { () -> ghostty_config_t? in
+                        guard let config = ghostty_config_new() else { return nil }
+                        ghostty_config_load_file(config, pathForCall)
+                        return config
+                    }
+                })
+            else {
+                throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed")
             }
             ghostty_config_finalize(config)
             return config
