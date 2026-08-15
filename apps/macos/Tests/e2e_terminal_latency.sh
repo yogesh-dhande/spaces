@@ -891,7 +891,13 @@ def run_mac_scrollback_latency(
                 event_to_visible_ms=rendered_change_latency_ms,
             )
         except TimeoutError:
-            no_op = True
+            # A gesture at the scrollback boundary renders nothing, and so does a regression that stops
+            # the screen updating; the timeout alone cannot tell them apart. The host can: at a boundary
+            # ghostty has nothing to redraw and exports no frame, so an attempt that did export one is
+            # an unresolved sample rather than a no-op, and stays in the coverage denominator to fail
+            # the run instead of being excused.
+            timeout_ns = now_ns()
+            no_op = first_mac_frame_export(session_id, begin_ns, timeout_ns) is None
             visible_state = dump_state(session_id, f"{probe_id}-noop")
             # Every key `mac_host_latency_split` returns, because the measurement below reads all of
             # them: a short dict here turns a supported no-op into a KeyError.
@@ -902,7 +908,13 @@ def run_mac_scrollback_latency(
                 "host_publish_to_client_visible_ms": None,
                 "frame_export_to_frame_apply_ms": None,
             }
-            event("mac_scroll_noop", scenario, probe_id, now_ns(), delta_y=delta_y)
+            event(
+                "mac_scroll_noop" if no_op else "mac_scroll_unrendered_frame",
+                scenario,
+                probe_id,
+                timeout_ns,
+                delta_y=delta_y,
+            )
         measurements.append(
             {
                 "sample_index": index + 1,
@@ -947,20 +959,23 @@ def run_mac_command_output_catchup() -> dict:
     session_id = start_terminal(title, None)
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
-    def type_shell_command(command_text: str, echoed_text: str, probe_id: str) -> tuple[int, int, int]:
+    def type_shell_line(command_text: str, echoed_text: str, probe_id: str) -> None:
         # Emulates a user typing a command: the line is typed, then Return is pressed as its own
         # keystroke. Deliberately NOT the `append_newline` submit path — that is the orchestration
         # /notification composer path, which sends the text as a paste before its Enter so agent TUIs
         # read the two as separate events. Keeping the two paths distinct keeps this scenario measuring
         # the render cost of typing and pressing Return, which is what it exists to track.
-        # The timed window opens at the Return keystroke, since that is the event that produces output.
-        # Waiting for the typed line to render first is what keeps that window clean: the text write and
+        # Waiting for the typed line to render is what keeps the measurement clean: the text write and
         # the Return are separate requests, and without the wait the echo of the typed line is still
-        # exporting frames when the window opens, so its first frame belongs to the typing rather than
-        # to the command. The wait sits outside the window and changes nothing it measures.
+        # exporting frames when the timed window opens, so its first frame belongs to the typing rather
+        # than to the command. Both this request and this wait run before the probe starts timing, so
+        # neither lands in a reported phase.
         send_terminal_control(session_id, "send", text=command_text, timeout=15)
         wait_for_state(
             session_id, lambda state, echoed=echoed_text: echoed in compact_rendered_output(state), 8, f"{probe_id}-typed")
+
+    def press_return() -> tuple[int, int, int]:
+        # Every timed phase starts here, because Return is the event that produces the command output.
         begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "key", key="enter", timeout=15)
         key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
@@ -969,7 +984,8 @@ def run_mac_command_output_catchup() -> dict:
     warmup_suffix = uuid.uuid4().hex[:10]
     warmup_marker = f"{warmup_prefix}{warmup_suffix}__"
     warmup_command = f"echo '{warmup_prefix}'\"{warmup_suffix}\"'__'"
-    type_shell_command(warmup_command, warmup_prefix, "warmup")
+    type_shell_line(warmup_command, warmup_prefix, "warmup")
+    press_return()
     wait_for_state(session_id, lambda state, marker=warmup_marker: marker in compact_rendered_output(state), 8, "warmup")
 
     measurements = []
@@ -979,11 +995,12 @@ def run_mac_command_output_catchup() -> dict:
         marker_suffix = uuid.uuid4().hex[:10]
         marker = f"{marker_prefix}{marker_suffix}__"
         command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
+        type_shell_line(command_text, marker_prefix, probe_id)
         enqueue_ns = now_ns()
         event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
         event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        begin_ns, key_up_ns, rpc_end_ns = type_shell_command(command_text, marker_prefix, probe_id)
+        begin_ns, key_up_ns, rpc_end_ns = press_return()
         event("mac_command_begin", scenario, probe_id, begin_ns, marker=marker)
         event(
             "mac_command_rpc_end",
