@@ -338,7 +338,12 @@ def first_performance_event(
 
 
 def target_revision_for_mac_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[str | None, int | None]:
-    frame_export = last_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+    # First-after, never latest-in-window. The upper bound here is `visible_ns`, which is observed by
+    # polling a subprocess and so stretches with machine load; picking the *latest* export inside a
+    # stretched window selects an export belonging to a later keystroke, which both inflates the phase
+    # and leaves this keystroke's own apply unmatched. The first export after the key event is
+    # unambiguously this keystroke's, whatever the bound does.
+    frame_export = first_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
     if not frame_export:
         return None, None
     target_revision = (frame_export[0].get("attributes") or {}).get("target_revision")
@@ -610,7 +615,6 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
         "command_typing_duration": summarize_latencies(measurements, "command_typing_duration_ms"),
         "command_submit_to_first_frame_apply": summarize_latencies(measurements, "command_submit_to_first_frame_apply_ms"),
-        "command_submit_to_frame_apply": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
         "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
         "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
         "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
@@ -626,11 +630,15 @@ def summarize_phases(measurements: list[dict]) -> dict:
 
 def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int | None, visible_ns: int) -> dict:
     before_ns = frame_apply_ns if frame_apply_ns is not None else visible_ns
-    owner_activity = last_performance_event(
+    # Each stage takes the first event after the previous stage resolved, so the chain walks this
+    # keystroke's own events in order. Taking the latest in the window instead paired stages across
+    # keystrokes and reported phases that never happened: state_change -> frame_export came out
+    # trimodal at ~1ms / ~22ms / ~93ms purely from which later export the window happened to include.
+    owner_activity = first_performance_event(
         session_id, "mac-host", "owner_input_activity", begin_ns, before_ns=before_ns, require_render_frame=False
     )
     owner_activity_ns = owner_activity[1] if owner_activity else None
-    state_change = last_performance_event(
+    state_change = first_performance_event(
         session_id,
         "mac-host",
         "state_change",
@@ -639,7 +647,7 @@ def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int |
         require_render_frame=False,
     )
     state_change_ns = state_change[1] if state_change else None
-    frame_export = last_performance_event(
+    frame_export = first_performance_event(
         session_id,
         "mac-host",
         "render_frame_export_end",
@@ -758,12 +766,15 @@ def run_mac_input_latency() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        # The enforced headline is the end-to-end keystroke->visible measure, the only phase this
-        # scenario samples for every attempt. `event_to_frame_apply_ms` needs a correlated mac-host
-        # frame-apply event and routinely resolves for none of them (issue #358), which left the
-        # gross budget checking an empty sample set and passing unconditionally.
-        "summary": summarize_latencies(measurements, "event_to_visible_ms"),
-        "summary_metric": "event_to_visible_ms",
+        # The enforced headline is keystroke -> the client applying the frame, measured end to end
+        # from instrumented events on both sides. `event_to_visible_ms` is still reported, but it
+        # cannot gate: its endpoint is observed by polling a subprocess, so it measures the machine's
+        # scheduler as much as the product and swings by >100ms with unrelated host load.
+        # `event_to_frame_apply_ms` used to resolve for almost no attempts (issue #358) because the
+        # phase chain paired events latest-in-window; with first-after pairing it resolves for every
+        # attempt, which the coverage check below enforces.
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -949,7 +960,6 @@ def run_mac_command_output_catchup() -> dict:
         frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
-        command_submit_to_frame_apply_ms = ms_between(key_up_ns, frame_apply_ns) if frame_apply_ns is not None else None
         command_submit_to_render_visible_ms = ms_between(key_up_ns, visible_ns)
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
         stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
@@ -988,7 +998,6 @@ def run_mac_command_output_catchup() -> dict:
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
-                "command_submit_to_frame_apply_ms": command_submit_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
                 "command_submit_to_render_visible_ms": command_submit_to_render_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
@@ -1005,8 +1014,13 @@ def run_mac_command_output_catchup() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
-        "summary_metric": "command_submit_to_frame_apply_ms",
+        # Anchored on the Return keystroke, like every other gated scenario here. The obvious-looking
+        # anchor, `key_up_ns`, is the moment the send-key RPC *returned*, roughly 19ms after the key
+        # event it delivered, so a frame applied 3ms after the keystroke subtracts to a negative
+        # latency that passes any budget. Nothing user-visible happens at RPC completion; the
+        # keystroke is the event the render answers.
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -1037,11 +1051,22 @@ for name, result in scenario_results.items():
     p95 = result["summary"]["p95_ms"]
     if result.get("budget_enforced", True):
         # An enforced budget with no samples is a harness failure, not a pass: a metric that stops
-        # resolving silently disables its own budget check.
+        # resolving silently disables its own budget check. Partial coverage fails the same way and
+        # is harder to notice, because a p95 over the attempts that did resolve still prints as a
+        # normal-looking number while the attempts that did not are exactly the ones a regression
+        # would show up in.
+        resolved = result["summary"]["count"]
+        attempted = len(result["measurements"])
         if p95 is None:
             failures.append(
                 f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
                 f"{budgets[name]['gross_p95_ms']}ms could not be enforced"
+            )
+        elif resolved != attempted:
+            failures.append(
+                f"{name} resolved {result.get('summary_metric')} for only {resolved} of {attempted} "
+                f"attempts, so its gross budget {budgets[name]['gross_p95_ms']}ms was enforced against "
+                f"a partial sample set"
             )
         elif p95 > budgets[name]["gross_p95_ms"]:
             failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
@@ -1075,7 +1100,6 @@ for name, result in scenario_results.items():
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
             f"typing p95={format_ms(phases['command_typing_duration']['p95_ms'])}, "
             f"submit_to_first_apply p95={format_ms(phases['command_submit_to_first_frame_apply']['p95_ms'])}, "
-            f"submit_to_apply p95={format_ms(phases['command_submit_to_frame_apply']['p95_ms'])}, "
             f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
             f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
             f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
