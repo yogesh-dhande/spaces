@@ -93,22 +93,37 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        /// Owner input activity is recorded before the delivery it describes, matching how the scroll and
+        /// mouse-button paths record theirs. The event marks the host taking delivery of the input, and the
+        /// mac latency gate anchors its total there, so recording it after the write would leave ghostty's
+        /// key encoding and the PTY write inside neither end of the gate and hide a regression in them.
+        /// Everything the record schedules is deferred (a coalesced broadcast, an output-gate window), so
+        /// nothing it triggers can observe the terminal before this write lands.
+        ///
+        /// Accepted risk: when the E2E performance log is enabled, recording the event appends a line to
+        /// that log synchronously, so its cost lands between the timestamp and this write and counts
+        /// inside the gated latency total. The same is already true at the far end, where the export
+        /// event is written before the frame is handed to the client, so a log-based harness cannot
+        /// place instrumentation outside its own gate. The cost is bounded: an append of one record
+        /// measures 30us at p50 and 207us at the worst of 5000, against a gate measuring 4.9ms p95
+        /// with a 15ms budget. Deferring the write would mean carrying a timestamp through product
+        /// code for measurement alone, which buys less than the noise it removes.
         func sendRawBytes(_ data: Data) {
-            sessionDriver.sendRawBytes(data)
             inputActivityHandler?(data.count)
+            sessionDriver.sendRawBytes(data)
         }
 
         /// Sends a named key press, letting ghostty encode it against the live terminal state. The
         /// encoded length is not observable from here, so owner input activity counts the press itself.
         func sendKey(_ spec: TerminalKeySpec) {
-            GhosttyEmbeddedKeyEvent.withKeyEvent(for: spec) { sessionDriver.sendKey($0) }
             inputActivityHandler?(1)
+            GhosttyEmbeddedKeyEvent.withKeyEvent(for: spec) { sessionDriver.sendKey($0) }
         }
 
         @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
             guard !text.isEmpty else { return false }
-            sessionDriver.sendTextAsPaste(text)
             inputActivityHandler?(text.utf8.count)
+            sessionDriver.sendTextAsPaste(text)
             return true
         }
 

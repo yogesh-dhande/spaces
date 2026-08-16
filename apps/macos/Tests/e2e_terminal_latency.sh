@@ -195,11 +195,19 @@ events: list[dict] = []
 scenario_results: dict[str, dict] = {}
 socket_path_cache: dict[str, Path] = {}
 
+# Budgets for `host_input_to_frame_apply_ms`: the host receiving the input to the client applying the
+# frame it produced. They are set from measured p95s with headroom rather than round numbers, because
+# the metric no longer carries the CLI spawn that used to dominate it and dwarf any render cost.
+# Measured p95 over two runs of 12 samples each: input 4.9-5.0ms, scrollback 6.1ms, partial scrollback
+# 5.6-9.9ms, command catchup 23.2-24.5ms. Each budget clears the wider of the two, because a run to run
+# spread this size is the machine, not the product. Catchup is the outlier by design: one Return
+# produces the line break, the command's own output, and the redrawn prompt, and its total ends at the
+# last of those.
 budgets = {
-    "mac-input-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
-    "mac-scrollback-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
-    "mac-scrollback-partial-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
-    "mac-command-output-catchup": {"gross_p95_ms": 100, "target_p95_ms": 100},
+    "mac-input-latency": {"gross_p95_ms": 15, "target_p95_ms": 10},
+    "mac-scrollback-latency": {"gross_p95_ms": 18, "target_p95_ms": 12},
+    "mac-scrollback-partial-latency": {"gross_p95_ms": 18, "target_p95_ms": 12},
+    "mac-command-output-catchup": {"gross_p95_ms": 50, "target_p95_ms": 35},
 }
 
 
@@ -255,6 +263,21 @@ def performance_event_uptime(record: dict) -> int | None:
         return None
 
 
+def attributes_at_least(attributes: dict, minimums: dict[str, int]) -> bool:
+    """Whether every named attribute parses as a number that reached its minimum.
+
+    An attribute that is absent or unparseable fails the match rather than passing it, so a record
+    that never carried the attribute cannot be selected by a threshold on it.
+    """
+    for key, minimum in minimums.items():
+        try:
+            if int(attributes.get(key)) < minimum:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def performance_event(
     session_id: str,
     source: str,
@@ -264,6 +287,7 @@ def performance_event(
     timeout: float = 1.0,
     require_render_frame: bool = True,
     attribute_equals: dict[str, str] | None = None,
+    attribute_at_least: dict[str, int] | None = None,
     latest: bool = True,
 ) -> tuple[dict, int] | None:
     deadline = time.monotonic() + timeout
@@ -282,6 +306,8 @@ def performance_event(
                 if attributes.get("render_frame") != "1" or attributes.get("drop_reason") not in (None, "none"):
                     continue
             if attribute_equals and any(attributes.get(key) != value for key, value in attribute_equals.items()):
+                continue
+            if attribute_at_least and not attributes_at_least(attributes, attribute_at_least):
                 continue
             candidates.append((emitted_ns, record))
         if candidates:
@@ -323,6 +349,7 @@ def first_performance_event(
     timeout: float = 1.0,
     require_render_frame: bool = True,
     attribute_equals: dict[str, str] | None = None,
+    attribute_at_least: dict[str, int] | None = None,
 ) -> tuple[dict, int] | None:
     return performance_event(
         session_id,
@@ -333,38 +360,143 @@ def first_performance_event(
         timeout=timeout,
         require_render_frame=require_render_frame,
         attribute_equals=attribute_equals,
+        attribute_at_least=attribute_at_least,
         latest=False,
     )
 
 
-def target_revision_for_mac_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[str | None, int | None]:
-    frame_export = last_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+def first_mac_frame_export(session_id: str, host_input_ns: int | None, visible_ns: int) -> tuple[dict, int] | None:
+    """The first frame this event produced on the host.
+
+    Searched from the host's own record of taking delivery of the input, never from the harness's
+    clock. That clock is read around 45ms earlier, before the probe spawns the `spacese2e` CLI, and a
+    frame exported inside that gap belongs to whatever ran before this sample: the typed line's echo
+    can arm an input/output resync that exports while the CLI is still starting. Pairing with it would
+    run the gated total from this sample's host input to a previous frame's apply, which can invert
+    and still pass an upper-bound budget. Starting here makes an inverted pair impossible, since the
+    apply is in turn searched from the export.
+
+    First-after, never latest-in-window. The upper bound here is `visible_ns`, which is observed by
+    polling a subprocess and so stretches with machine load; picking the *latest* export inside a
+    stretched window selects an export belonging to a later keystroke, which both inflates the phase
+    and leaves this keystroke's own apply unmatched. The first export after the key event is
+    unambiguously this keystroke's, whatever the bound does.
+    """
+    if host_input_ns is None:
+        return None
+    return first_performance_event(session_id, "mac-host", "render_frame_export_end", host_input_ns, before_ns=visible_ns)
+
+
+def mac_frame_apply_for_export(
+    session_id: str, frame_export: tuple[dict, int] | None, visible_ns: int
+) -> tuple[dict, int] | None:
+    """The client apply that first put this host export's revision on screen.
+
+    Pairing by revision rather than by time is what lets the phase split add up: every stage is
+    resolved against the same frame, so `frame_export_to_frame_apply_ms` measures one frame's trip to
+    the client instead of subtracting one frame's export from another frame's apply.
+
+    Matched at or above the exported revision, not equal to it. The client's apply mailbox
+    deliberately collapses frames that queue up together and applies only the newest, so the exported
+    revision often has no apply of its own while a newer revision carrying the same content is on
+    screen promptly. Demanding equality left that sample unresolved and failed the coverage check on a
+    healthy run; revisions only move forward, so the first apply that reached this one is the apply
+    that showed it.
+    """
     if not frame_export:
-        return None, None
+        return None
     target_revision = (frame_export[0].get("attributes") or {}).get("target_revision")
-    return (target_revision if target_revision and target_revision != "nil" else None), frame_export[1]
-
-
-def first_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
-    target_revision, frame_export_ns = target_revision_for_mac_apply(session_id, begin_ns, visible_ns)
-    attribute_filter = {"applied_revision": target_revision} if target_revision else None
+    try:
+        revision_floor = {"applied_revision": int(target_revision)}
+    except (TypeError, ValueError):
+        revision_floor = None
     return first_performance_event(
         session_id,
         "mac-mirror",
         "render_frame_mirror_apply",
-        frame_export_ns if frame_export_ns is not None else begin_ns,
+        frame_export[1],
         before_ns=visible_ns,
-        attribute_equals=attribute_filter,
+        attribute_at_least=revision_floor,
     )
 
 
-def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple[dict, int] | None:
+def host_input_activity(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+    """When the host took delivery of the input this measurement was driven by.
+
+    The harness's own clock cannot anchor a gated total. It is read just before the probe spawns the
+    `spacese2e` CLI, so it carries process startup and IPC that belong to the test driver: around 45ms
+    of a 50ms end-to-end total was that spawn, which left the gate insensitive to the render cost it
+    exists to protect. The host logs this event as it receives the keystroke or scroll, putting both
+    ends of the gated total on instrumented host events. The spawn stays visible as
+    `event_to_host_input_ms`.
+
+    Unambiguous because the probes are serialized: the only input this session sees between the
+    request starting and its frame becoming visible is this one. That is also why the catchup probe
+    waits for the typed line to render before pressing Return, since the text write emits this event
+    too.
+
+    Every input kind logs it before the delivery it describes, so ghostty's key encoding and the write
+    to the PTY are inside the gated total rather than straddling its start.
+
+    Accepted limit: a key or text write is logged from inside the write the control input sequencer
+    runs, so the sequencer hop sits outside the gated total. It is left outside rather than
+    instrumented because these probes are serialized and never queue behind another input, so the hop
+    they would measure is an empty queue, and any real growth there still shows in the reported
+    `rpc_ms` and `event_to_host_input_ms`.
+    """
     return first_performance_event(
         session_id,
-        "mac-mirror",
-        "render_frame_mirror_apply",
-        submit_ns,
-        timeout=1.0,
+        "mac-host",
+        "owner_input_activity",
+        begin_ns,
+        before_ns=visible_ns,
+        require_render_frame=False,
+    )
+
+
+def settled_mac_frame_export(session_id: str, host_input_ns: int | None, visible_ns: int) -> tuple[dict, int] | None:
+    """The host export of the frame that settled the screen the command changed.
+
+    A keystroke that echoes one character produces one frame, so those scenarios pair on the first
+    export after the key event. One Return does not: it produces a burst of around 18 exports over
+    tens of milliseconds as the line break, the command's output, and the redrawn prompt arrive, and
+    the first of them carries none of the output this scenario exists to time.
+
+    That burst is the only thing writing to this session, so its revision stream stops once the screen
+    settles. Taking the last revision exported before the marker was seen identifies the settled
+    screen, and timing the *first* export that carried that revision makes the measurement independent
+    of how late the polling loop was to notice: a window stretched by host load can only swallow
+    repeat exports of that same revision, never a newer one.
+
+    Accepted behaviour: the marker is what ends the search, so exports that land after it are outside
+    the gate. When the shell redraws its prompt in an export of its own after the output was seen, a
+    regression that delayed only that redraw would not fail this budget. That is the scenario's
+    definition rather than a gap in it: it gates when the command's output reaches the screen, and
+    stretching the window to a quiet period would put the gate back on a polling cadence, which is the
+    dependency the settled-revision pairing exists to remove.
+
+    Searched from the host's own record of taking delivery of the Return, for the reason given on
+    `first_mac_frame_export`: the harness clock is read before the CLI spawns, and a frame exported in
+    that gap belongs to the line that was typed before this sample.
+    """
+    if host_input_ns is None:
+        return None
+    settled = last_performance_event(session_id, "mac-host", "render_frame_export_end", host_input_ns, before_ns=visible_ns)
+    if not settled:
+        return None
+    settled_revision = (settled[0].get("attributes") or {}).get("target_revision")
+    if not settled_revision or settled_revision == "nil":
+        return None
+    return (
+        first_performance_event(
+            session_id,
+            "mac-host",
+            "render_frame_export_end",
+            host_input_ns,
+            before_ns=visible_ns,
+            attribute_equals={"target_revision": settled_revision},
+        )
+        or settled
     )
 
 
@@ -609,50 +741,56 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "enqueue_to_rpc_begin": summarize_latencies(measurements, "enqueue_to_rpc_begin_ms"),
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
         "command_typing_duration": summarize_latencies(measurements, "command_typing_duration_ms"),
-        "command_submit_to_first_frame_apply": summarize_latencies(measurements, "command_submit_to_first_frame_apply_ms"),
-        "command_submit_to_frame_apply": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
-        "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
-        "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
-        "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
+        "event_to_first_frame_apply": summarize_latencies(measurements, "event_to_first_frame_apply_ms"),
+        "host_input_to_frame_export": summarize_latencies(measurements, "host_input_to_frame_export_ms"),
+        "host_input_to_state_change": summarize_latencies(measurements, "host_input_to_state_change_ms"),
         "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
         "host_publish_to_client_visible": summarize_latencies(measurements, "host_publish_to_client_visible_ms"),
         "frame_export_to_frame_apply": summarize_latencies(measurements, "frame_export_to_frame_apply_ms"),
+        "event_to_host_input": summarize_latencies(measurements, "event_to_host_input_ms"),
         "event_to_frame_apply": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "host_input_to_frame_apply": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
         "frame_apply_to_visible": summarize_latencies(measurements, "frame_apply_to_visible_ms"),
         "rpc_end_to_render_visible": summarize_latencies(measurements, "rpc_end_to_render_visible_ms"),
         "event_to_visible_total": summarize_latencies(measurements, "event_to_visible_ms"),
     }
 
 
-def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int | None, visible_ns: int) -> dict:
-    before_ns = frame_apply_ns if frame_apply_ns is not None else visible_ns
-    owner_activity = last_performance_event(
-        session_id, "mac-host", "owner_input_activity", begin_ns, before_ns=before_ns, require_render_frame=False
-    )
-    owner_activity_ns = owner_activity[1] if owner_activity else None
-    state_change = last_performance_event(
+def mac_host_latency_split(
+    session_id: str, begin_ns: int, host_input_ns: int | None, frame_export_ns: int | None, frame_apply_ns: int | None,
+    visible_ns: int
+) -> dict:
+    """Split one measurement across the host frame its client apply was paired to.
+
+    The export and the host input are passed in rather than rediscovered here, so the split describes
+    the same input and the same frame the headline total runs between. Rediscovering the export by
+    walking first-after from a state change selects a different, later export whenever output triggers
+    an export before the state-change callback runs, and then `frame_export_to_frame_apply_ms`
+    subtracts one revision's export from another revision's apply.
+
+    `host_input_to_state_change_ms` is reported as a host signal on its own, not as a phase of the
+    gated total, because the screen state-change callback is not on the path to the frame the gate
+    pairs. A keystroke exports on the output write first, at the revision before the callback runs,
+    and ghostty logs the screen state change a millisecond or so later, which exports again. So the
+    state change lands *after* the paired export, and no ordering of the two belongs in a sum. The
+    scroll scenarios report it as `n/a` because a viewport scroll produces no screen state change at
+    all: their frame comes from the scroll response, so there is no such event rather than a missed one.
+    """
+    state_change = first_performance_event(
         session_id,
         "mac-host",
         "state_change",
-        owner_activity_ns if owner_activity_ns is not None else begin_ns,
-        before_ns=before_ns,
+        host_input_ns if host_input_ns is not None else begin_ns,
+        before_ns=visible_ns,
         require_render_frame=False,
     )
     state_change_ns = state_change[1] if state_change else None
-    frame_export = last_performance_event(
-        session_id,
-        "mac-host",
-        "render_frame_export_end",
-        state_change_ns if state_change_ns is not None else begin_ns,
-        before_ns=before_ns,
-    )
-    frame_export_ns = frame_export[1] if frame_export else None
     return {
-        "owner_input_activity_to_state_change_ms": (
-            ms_between(owner_activity_ns, state_change_ns) if owner_activity_ns is not None and state_change_ns is not None else None
+        "host_input_to_frame_export_ms": (
+            ms_between(host_input_ns, frame_export_ns) if host_input_ns is not None and frame_export_ns is not None else None
         ),
-        "state_change_to_frame_export_ms": (
-            ms_between(state_change_ns, frame_export_ns) if state_change_ns is not None and frame_export_ns is not None else None
+        "host_input_to_state_change_ms": (
+            ms_between(host_input_ns, state_change_ns) if host_input_ns is not None and state_change_ns is not None else None
         ),
         "event_to_host_publish_ms": ms_between(begin_ns, frame_export_ns) if frame_export_ns is not None else None,
         "host_publish_to_client_visible_ms": ms_between(frame_export_ns, visible_ns) if frame_export_ns is not None else None,
@@ -706,11 +844,19 @@ def run_mac_input_latency() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, expected_text=expected_text: expected_text in compact_rendered_output(state), 5, probe_id)
-        frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        host_input = host_input_activity(session_id, begin_ns, visible_ns)
+        host_input_ns = host_input[1] if host_input else None
+        frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
+        frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
+        event_to_host_input_ms = ms_between(begin_ns, host_input_ns) if host_input_ns is not None else None
+        host_input_to_frame_apply_ms = (
+            ms_between(host_input_ns, frame_apply_ns) if host_input_ns is not None and frame_apply_ns is not None else None
+        )
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-        stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+        stage_split = mac_host_latency_split(
+            session_id, begin_ns, host_input_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_input_frame_applied",
@@ -737,12 +883,14 @@ def run_mac_input_latency() -> dict:
                 "input_text": input_text,
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
+                "event_to_host_input_ms": event_to_host_input_ms,
+                "host_input_to_frame_apply_ms": host_input_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
                 "visible_latency_ms": ms_between(begin_ns, visible_ns),
@@ -758,12 +906,17 @@ def run_mac_input_latency() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        # The enforced headline is the end-to-end keystroke->visible measure, the only phase this
-        # scenario samples for every attempt. `event_to_frame_apply_ms` needs a correlated mac-host
-        # frame-apply event and routinely resolves for none of them (issue #358), which left the
-        # gross budget checking an empty sample set and passing unconditionally.
-        "summary": summarize_latencies(measurements, "event_to_visible_ms"),
-        "summary_metric": "event_to_visible_ms",
+        # The enforced headline is the host receiving the request -> the client applying the frame,
+        # so both ends are instrumented events and the total is the product's work alone. The two
+        # totals that bracket it are reported and never gated: `event_to_frame_apply_ms` starts at the
+        # harness's clock and so carries CLI spawn (`event_to_host_input_ms`, tens of ms), and
+        # `event_to_visible_ms` ends at a polled subprocess and swings by >100ms with unrelated host
+        # load. Either one would let a real render regression hide inside driver noise.
+        # The gated metric used to resolve for almost no attempts (issue #358) because the phase chain
+        # paired events latest-in-window; with revision pairing it resolves for every attempt, which
+        # the coverage check below enforces.
+        "summary": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
+        "summary_metric": "host_input_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -815,17 +968,27 @@ def run_mac_scrollback_latency(
         rendered_change_latency_ms = None
         rpc_end_to_render_visible_ms = None
         event_to_frame_apply_ms = None
+        event_to_host_input_ms = None
+        host_input_to_frame_apply_ms = None
         frame_apply_to_visible_ms = None
-        no_op = False
+        unrendered_with_frame = False
         try:
             visible_state, visible_ns = wait_for_state(session_id, lambda state, before=before: rendered_output(state) != before, 5, probe_id)
             rendered_change_latency_ms = ms_between(begin_ns, visible_ns)
             rpc_end_to_render_visible_ms = ms_between(rpc_end_ns, visible_ns)
-            frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+            host_input = host_input_activity(session_id, begin_ns, visible_ns)
+            host_input_ns = host_input[1] if host_input else None
+            frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
+            frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
             frame_apply_ns = frame_apply[1] if frame_apply else None
             event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
+            event_to_host_input_ms = ms_between(begin_ns, host_input_ns) if host_input_ns is not None else None
+            host_input_to_frame_apply_ms = (
+                ms_between(host_input_ns, frame_apply_ns) if host_input_ns is not None and frame_apply_ns is not None else None
+            )
             frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-            stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+            stage_split = mac_host_latency_split(
+                session_id, begin_ns, host_input_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
             if frame_apply_ns is not None:
                 event(
                     "mac_scroll_frame_applied",
@@ -846,14 +1009,36 @@ def run_mac_scrollback_latency(
                 event_to_visible_ms=rendered_change_latency_ms,
             )
         except TimeoutError:
-            no_op = True
-            visible_state = dump_state(session_id, f"{probe_id}-noop")
+            # Every gesture here is expected to move the screen, so a timeout is a failure and stays in
+            # the coverage denominator. The fixture prints 1600 lines and the probe alternates one fixed
+            # delta against its own inverse, so the viewport oscillates between the bottom and one delta
+            # above it and never reaches a scrollback boundary. Whether the host exported a frame is
+            # recorded to tell the two shapes of failure apart: no export means the gesture never
+            # reached ghostty, and an export means it did and the screen still did not change. It is
+            # deliberately not read as a boundary no-op, because a boundary gesture exports a frame too:
+            # `controlResponseForScrollRequest` broadcasts whenever the driver accepted the scroll, and
+            # the driver accepts every scroll on a live surface.
+            timeout_ns = now_ns()
+            timed_out_host_input = host_input_activity(session_id, begin_ns, timeout_ns)
+            unrendered_with_frame = first_mac_frame_export(
+                session_id, timed_out_host_input[1] if timed_out_host_input else None, timeout_ns) is not None
+            visible_state = dump_state(session_id, f"{probe_id}-unrendered")
+            # Every key `mac_host_latency_split` returns, because the measurement below reads all of
+            # them: a short dict here turns a supported no-op into a KeyError.
             stage_split = {
-                "owner_input_activity_to_state_change_ms": None,
-                "state_change_to_frame_export_ms": None,
+                "host_input_to_frame_export_ms": None,
+                "host_input_to_state_change_ms": None,
+                "event_to_host_publish_ms": None,
+                "host_publish_to_client_visible_ms": None,
                 "frame_export_to_frame_apply_ms": None,
             }
-            event("mac_scroll_noop", scenario, probe_id, now_ns(), delta_y=delta_y)
+            event(
+                "mac_scroll_unrendered_with_frame" if unrendered_with_frame else "mac_scroll_unrendered_no_frame",
+                scenario,
+                probe_id,
+                timeout_ns,
+                delta_y=delta_y,
+            )
         measurements.append(
             {
                 "sample_index": index + 1,
@@ -863,18 +1048,20 @@ def run_mac_scrollback_latency(
                 "event_to_visible_ms": rendered_change_latency_ms,
                 "visible_latency_ms": rendered_change_latency_ms,
                 "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
+                "event_to_host_input_ms": event_to_host_input_ms,
+                "host_input_to_frame_apply_ms": host_input_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
                 "rendered_change_latency_ms": rendered_change_latency_ms,
                 "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
                 "rpc_begin_to_scroll_event_ms": ms_between(rpc_begin_ns, begin_ns),
                 "scroll_end_to_rpc_end_ms": ms_between(scroll_end_ns, rpc_end_ns),
-                "no_op": no_op,
+                "unrendered_with_frame": unrendered_with_frame,
                 "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
             }
         )
@@ -883,11 +1070,11 @@ def run_mac_scrollback_latency(
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
-        "summary_metric": "event_to_frame_apply_ms",
+        "summary": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
+        "summary_metric": "host_input_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
-        "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
-        "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
+        "unrendered_gestures": sum(1 for item in measurements if item.get("event_to_visible_ms") is None),
+        "rendered_change_count": sum(1 for item in measurements if item.get("event_to_visible_ms") is not None),
         "budget_enforced": True,
     }
 
@@ -898,14 +1085,29 @@ def run_mac_command_output_catchup() -> dict:
     session_id = start_terminal(title, None)
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
-    def type_shell_command(command_text: str) -> tuple[int, int, int]:
+    def type_shell_line(command_text: str, probe_id: str) -> None:
         # Emulates a user typing a command: the line is typed, then Return is pressed as its own
         # keystroke. Deliberately NOT the `append_newline` submit path — that is the orchestration
         # /notification composer path, which sends the text as a paste before its Enter so agent TUIs
         # read the two as separate events. Keeping the two paths distinct keeps this scenario measuring
         # the render cost of typing and pressing Return, which is what it exists to track.
-        # The timed window opens at the Return keystroke, since that is the event that produces output.
+        # Waiting for the typed line to render is what keeps the measurement clean: the text write and
+        # the Return are separate requests, and without the wait the echo of the typed line is still
+        # exporting frames when the timed window opens, so its first frame belongs to the typing rather
+        # than to the command. Both this request and this wait run before the probe starts timing, so
+        # neither lands in a reported phase.
+        #
+        # The wait matches the whole typed line rather than a prefix of it: a PTY echo split across
+        # render updates would satisfy a prefix while the rest of the line was still exporting frames,
+        # which is the attribution this wait exists to prevent. Matching against whitespace-stripped
+        # rendered output makes that whole-line match immune to where the line wraps.
         send_terminal_control(session_id, "send", text=command_text, timeout=15)
+        echoed_text = "".join(command_text.split())
+        wait_for_state(
+            session_id, lambda state, echoed=echoed_text: echoed in compact_rendered_output(state), 8, f"{probe_id}-typed")
+
+    def press_return() -> tuple[int, int, int]:
+        # Every timed phase starts here, because Return is the event that produces the command output.
         begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "key", key="enter", timeout=15)
         key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
@@ -914,7 +1116,8 @@ def run_mac_command_output_catchup() -> dict:
     warmup_suffix = uuid.uuid4().hex[:10]
     warmup_marker = f"{warmup_prefix}{warmup_suffix}__"
     warmup_command = f"echo '{warmup_prefix}'\"{warmup_suffix}\"'__'"
-    type_shell_command(warmup_command)
+    type_shell_line(warmup_command, "warmup")
+    press_return()
     wait_for_state(session_id, lambda state, marker=warmup_marker: marker in compact_rendered_output(state), 8, "warmup")
 
     measurements = []
@@ -924,11 +1127,12 @@ def run_mac_command_output_catchup() -> dict:
         marker_suffix = uuid.uuid4().hex[:10]
         marker = f"{marker_prefix}{marker_suffix}__"
         command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
+        type_shell_line(command_text, probe_id)
         enqueue_ns = now_ns()
         event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
         event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        begin_ns, key_up_ns, rpc_end_ns = type_shell_command(command_text)
+        begin_ns, key_up_ns, rpc_end_ns = press_return()
         event("mac_command_begin", scenario, probe_id, begin_ns, marker=marker)
         event(
             "mac_command_rpc_end",
@@ -941,18 +1145,28 @@ def run_mac_command_output_catchup() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
-        first_frame_apply = first_mac_frame_apply_after_submit(session_id, key_up_ns)
+        host_input = host_input_activity(session_id, begin_ns, visible_ns)
+        host_input_ns = host_input[1] if host_input else None
+        # The Return's first frame is the line break, not the command's output, so it is reported as
+        # the moment the screen first answered and the gated total is taken from the settled frame.
+        first_frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
+        first_frame_apply = mac_frame_apply_for_export(session_id, first_frame_export, visible_ns)
         first_frame_apply_ns = first_frame_apply[1] if first_frame_apply else None
-        command_submit_to_first_frame_apply_ms = (
-            ms_between(key_up_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
-        )
-        frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        event_to_first_frame_apply_ms = ms_between(begin_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
+        frame_apply = mac_frame_apply_for_export(
+            session_id, settled_mac_frame_export(session_id, host_input_ns, visible_ns), visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
-        command_submit_to_frame_apply_ms = ms_between(key_up_ns, frame_apply_ns) if frame_apply_ns is not None else None
-        command_submit_to_render_visible_ms = ms_between(key_up_ns, visible_ns)
+        event_to_host_input_ms = ms_between(begin_ns, host_input_ns) if host_input_ns is not None else None
+        host_input_to_frame_apply_ms = (
+            ms_between(host_input_ns, frame_apply_ns) if host_input_ns is not None and frame_apply_ns is not None else None
+        )
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
-        stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+        # Split across the first frame, not the settled one: the settled frame is many exports later,
+        # and the phases below describe how one frame reached the screen.
+        stage_split = mac_host_latency_split(
+            session_id, begin_ns, host_input_ns, first_frame_export[1] if first_frame_export else None,
+            first_frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_command_frame_applied",
@@ -970,7 +1184,6 @@ def run_mac_command_output_catchup() -> dict:
             probe_id,
             visible_ns,
             rpc_end_to_render_visible_ms=ms_between(rpc_end_ns, visible_ns),
-            command_submit_to_render_visible_ms=command_submit_to_render_visible_ms,
             event_to_visible_ms=ms_between(begin_ns, visible_ns),
         )
         measurements.append(
@@ -981,16 +1194,16 @@ def run_mac_command_output_catchup() -> dict:
                 "marker": marker,
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
-                "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
-                "command_submit_to_frame_apply_ms": command_submit_to_frame_apply_ms,
+                "event_to_host_input_ms": event_to_host_input_ms,
+                "host_input_to_frame_apply_ms": host_input_to_frame_apply_ms,
+                "event_to_first_frame_apply_ms": event_to_first_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
-                "command_submit_to_render_visible_ms": command_submit_to_render_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
                 "visible_latency_ms": ms_between(begin_ns, visible_ns),
                 "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
@@ -1005,8 +1218,13 @@ def run_mac_command_output_catchup() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
-        "summary_metric": "command_submit_to_frame_apply_ms",
+        # Anchored on the Return keystroke, like every other gated scenario here. The obvious-looking
+        # anchor, `key_up_ns`, is the moment the send-key RPC *returned*, roughly 19ms after the key
+        # event it delivered, so a frame applied 3ms after the keystroke subtracts to a negative
+        # latency that passes any budget. Nothing user-visible happens at RPC completion; the
+        # keystroke is the event the render answers.
+        "summary": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
+        "summary_metric": "host_input_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -1037,11 +1255,25 @@ for name, result in scenario_results.items():
     p95 = result["summary"]["p95_ms"]
     if result.get("budget_enforced", True):
         # An enforced budget with no samples is a harness failure, not a pass: a metric that stops
-        # resolving silently disables its own budget check.
+        # resolving silently disables its own budget check. Partial coverage fails the same way and
+        # is harder to notice, because a p95 over the attempts that did resolve still prints as a
+        # normal-looking number while the attempts that did not are exactly the ones a regression
+        # would show up in.
+        resolved = result["summary"]["count"]
+        # Every attempt counts. No scenario here makes an input the product is allowed to ignore, so
+        # there is no attempt that legitimately has no frame to resolve, and nothing may leave the
+        # denominator: an excused attempt is exactly the shape a regression takes.
+        attempted = len(result["measurements"])
         if p95 is None:
             failures.append(
                 f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
                 f"{budgets[name]['gross_p95_ms']}ms could not be enforced"
+            )
+        elif resolved != attempted:
+            failures.append(
+                f"{name} resolved {result.get('summary_metric')} for only {resolved} of {attempted} "
+                f"attempts, so its gross budget {budgets[name]['gross_p95_ms']}ms was enforced against "
+                f"a partial sample set"
             )
         elif p95 > budgets[name]["gross_p95_ms"]:
             failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
@@ -1074,23 +1306,23 @@ for name, result in scenario_results.items():
             f"enqueue_to_rpc_begin p95={format_ms(phases['enqueue_to_rpc_begin']['p95_ms'])}, "
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
             f"typing p95={format_ms(phases['command_typing_duration']['p95_ms'])}, "
-            f"submit_to_first_apply p95={format_ms(phases['command_submit_to_first_frame_apply']['p95_ms'])}, "
-            f"submit_to_apply p95={format_ms(phases['command_submit_to_frame_apply']['p95_ms'])}, "
-            f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
-            f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
-            f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
+            f"event_to_first_apply p95={format_ms(phases['event_to_first_frame_apply']['p95_ms'])}, "
+            f"host_input_to_frame_export p95={format_ms(phases['host_input_to_frame_export']['p95_ms'])}, "
+            f"host_input_to_state_change p95={format_ms(phases['host_input_to_state_change']['p95_ms'])}, "
             f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
             f"host_publish_to_client_visible p95={format_ms(phases['host_publish_to_client_visible']['p95_ms'])}, "
             f"frame_export_to_apply p95={format_ms(phases['frame_export_to_frame_apply']['p95_ms'])}, "
+            f"event_to_host_input p95={format_ms(phases['event_to_host_input']['p95_ms'])}, "
             f"event_to_frame_apply p95={format_ms(phases['event_to_frame_apply']['p95_ms'])}, "
+            f"host_input_to_frame_apply p95={format_ms(phases['host_input_to_frame_apply']['p95_ms'])}, "
             f"frame_apply_to_visible p95={format_ms(phases['frame_apply_to_visible']['p95_ms'])}, "
             f"rpc_end_to_visible p95={format_ms(phases['rpc_end_to_render_visible']['p95_ms'])}, "
             f"event_to_visible p95={format_ms(phases['event_to_visible_total']['p95_ms'])}"
         )
     if result.get("measurements"):
         print(f"  samples: {sample_series(result['measurements'], result.get('summary_metric', 'event_to_visible_ms'))}")
-    if "no_op_gestures" in result:
-        print(f"  scroll movement: rendered_changes={result['rendered_change_count']} no_ops={result['no_op_gestures']}")
+    if "unrendered_gestures" in result:
+        print(f"  scroll movement: rendered_changes={result['rendered_change_count']} unrendered={result['unrendered_gestures']}")
 if failures:
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
