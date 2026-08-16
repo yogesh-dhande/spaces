@@ -365,8 +365,16 @@ def first_performance_event(
     )
 
 
-def first_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+def first_mac_frame_export(session_id: str, host_input_ns: int | None, visible_ns: int) -> tuple[dict, int] | None:
     """The first frame this event produced on the host.
+
+    Searched from the host's own record of taking delivery of the input, never from the harness's
+    clock. That clock is read around 45ms earlier, before the probe spawns the `spacese2e` CLI, and a
+    frame exported inside that gap belongs to whatever ran before this sample: the typed line's echo
+    can arm an input/output resync that exports while the CLI is still starting. Pairing with it would
+    run the gated total from this sample's host input to a previous frame's apply, which can invert
+    and still pass an upper-bound budget. Starting here makes an inverted pair impossible, since the
+    apply is in turn searched from the export.
 
     First-after, never latest-in-window. The upper bound here is `visible_ns`, which is observed by
     polling a subprocess and so stretches with machine load; picking the *latest* export inside a
@@ -374,7 +382,9 @@ def first_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> t
     and leaves this keystroke's own apply unmatched. The first export after the key event is
     unambiguously this keystroke's, whatever the bound does.
     """
-    return first_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+    if host_input_ns is None:
+        return None
+    return first_performance_event(session_id, "mac-host", "render_frame_export_end", host_input_ns, before_ns=visible_ns)
 
 
 def mac_frame_apply_for_export(
@@ -444,7 +454,7 @@ def host_input_activity(session_id: str, begin_ns: int, visible_ns: int) -> tupl
     )
 
 
-def settled_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> tuple[dict, int] | None:
+def settled_mac_frame_export(session_id: str, host_input_ns: int | None, visible_ns: int) -> tuple[dict, int] | None:
     """The host export of the frame that settled the screen the command changed.
 
     A keystroke that echoes one character produces one frame, so those scenarios pair on the first
@@ -464,8 +474,14 @@ def settled_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) ->
     definition rather than a gap in it: it gates when the command's output reaches the screen, and
     stretching the window to a quiet period would put the gate back on a polling cadence, which is the
     dependency the settled-revision pairing exists to remove.
+
+    Searched from the host's own record of taking delivery of the Return, for the reason given on
+    `first_mac_frame_export`: the harness clock is read before the CLI spawns, and a frame exported in
+    that gap belongs to the line that was typed before this sample.
     """
-    settled = last_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
+    if host_input_ns is None:
+        return None
+    settled = last_performance_event(session_id, "mac-host", "render_frame_export_end", host_input_ns, before_ns=visible_ns)
     if not settled:
         return None
     settled_revision = (settled[0].get("attributes") or {}).get("target_revision")
@@ -476,7 +492,7 @@ def settled_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) ->
             session_id,
             "mac-host",
             "render_frame_export_end",
-            begin_ns,
+            host_input_ns,
             before_ns=visible_ns,
             attribute_equals={"target_revision": settled_revision},
         )
@@ -827,7 +843,7 @@ def run_mac_input_latency() -> dict:
             session_id, lambda state, expected_text=expected_text: expected_text in compact_rendered_output(state), 5, probe_id)
         host_input = host_input_activity(session_id, begin_ns, visible_ns)
         host_input_ns = host_input[1] if host_input else None
-        frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+        frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
         frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
@@ -959,7 +975,7 @@ def run_mac_scrollback_latency(
             rpc_end_to_render_visible_ms = ms_between(rpc_end_ns, visible_ns)
             host_input = host_input_activity(session_id, begin_ns, visible_ns)
             host_input_ns = host_input[1] if host_input else None
-            frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+            frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
             frame_apply = mac_frame_apply_for_export(session_id, frame_export, visible_ns)
             frame_apply_ns = frame_apply[1] if frame_apply else None
             event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
@@ -1000,7 +1016,9 @@ def run_mac_scrollback_latency(
             # `controlResponseForScrollRequest` broadcasts whenever the driver accepted the scroll, and
             # the driver accepts every scroll on a live surface.
             timeout_ns = now_ns()
-            unrendered_with_frame = first_mac_frame_export(session_id, begin_ns, timeout_ns) is not None
+            timed_out_host_input = host_input_activity(session_id, begin_ns, timeout_ns)
+            unrendered_with_frame = first_mac_frame_export(
+                session_id, timed_out_host_input[1] if timed_out_host_input else None, timeout_ns) is not None
             visible_state = dump_state(session_id, f"{probe_id}-unrendered")
             # Every key `mac_host_latency_split` returns, because the measurement below reads all of
             # them: a short dict here turns a supported no-op into a KeyError.
@@ -1124,17 +1142,17 @@ def run_mac_command_output_catchup() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
+        host_input = host_input_activity(session_id, begin_ns, visible_ns)
+        host_input_ns = host_input[1] if host_input else None
         # The Return's first frame is the line break, not the command's output, so it is reported as
         # the moment the screen first answered and the gated total is taken from the settled frame.
-        first_frame_export = first_mac_frame_export(session_id, begin_ns, visible_ns)
+        first_frame_export = first_mac_frame_export(session_id, host_input_ns, visible_ns)
         first_frame_apply = mac_frame_apply_for_export(session_id, first_frame_export, visible_ns)
         first_frame_apply_ns = first_frame_apply[1] if first_frame_apply else None
         event_to_first_frame_apply_ms = ms_between(begin_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
         frame_apply = mac_frame_apply_for_export(
-            session_id, settled_mac_frame_export(session_id, begin_ns, visible_ns), visible_ns)
+            session_id, settled_mac_frame_export(session_id, host_input_ns, visible_ns), visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
-        host_input = host_input_activity(session_id, begin_ns, visible_ns)
-        host_input_ns = host_input[1] if host_input else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
         event_to_host_input_ms = ms_between(begin_ns, host_input_ns) if host_input_ns is not None else None
         host_input_to_frame_apply_ms = (
