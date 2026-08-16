@@ -425,11 +425,14 @@ def host_input_activity(session_id: str, begin_ns: int, visible_ns: int) -> tupl
     waits for the typed line to render before pressing Return, since the text write emits this event
     too.
 
-    Accepted limit: a scroll logs this as the host takes the request, but a key or text write logs it
-    from inside the write itself, which the control input sequencer runs, so the sequencer hop sits
-    outside the gated total. It is left outside rather than instrumented because these probes are
-    serialized and never queue behind another input, so the hop they would measure is an empty queue,
-    and any real growth there still shows in the reported `rpc_ms` and `event_to_host_input_ms`.
+    Every input kind logs it before the delivery it describes, so ghostty's key encoding and the write
+    to the PTY are inside the gated total rather than straddling its start.
+
+    Accepted limit: a key or text write is logged from inside the write the control input sequencer
+    runs, so the sequencer hop sits outside the gated total. It is left outside rather than
+    instrumented because these probes are serialized and never queue behind another input, so the hop
+    they would measure is an empty queue, and any real growth there still shows in the reported
+    `rpc_ms` and `event_to_host_input_ms`.
     """
     return first_performance_event(
         session_id,
@@ -454,6 +457,13 @@ def settled_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) ->
     screen, and timing the *first* export that carried that revision makes the measurement independent
     of how late the polling loop was to notice: a window stretched by host load can only swallow
     repeat exports of that same revision, never a newer one.
+
+    Accepted behaviour: the marker is what ends the search, so exports that land after it are outside
+    the gate. When the shell redraws its prompt in an export of its own after the output was seen, a
+    regression that delayed only that redraw would not fail this budget. That is the scenario's
+    definition rather than a gap in it: it gates when the command's output reaches the screen, and
+    stretching the window to a quiet period would put the gate back on a polling cadence, which is the
+    dependency the settled-revision pairing exists to remove.
     """
     settled = last_performance_event(session_id, "mac-host", "render_frame_export_end", begin_ns, before_ns=visible_ns)
     if not settled:
