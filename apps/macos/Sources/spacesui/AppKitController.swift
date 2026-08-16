@@ -79,11 +79,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     enum AlertsIconTint: Sendable, Equatable {
-        case browser
+        /// Terminal-origin alerts: an exited process, a session bell.
         case terminal
-        case code
-        case success
+        /// A coding agent blocked on the human, and a failed automation run.
         case warning
+        /// A coding agent that finished its turn.
+        case done
     }
 
     struct AlertsAttentionEntry: Sendable {
@@ -2988,13 +2989,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
     }
 
+    /// Agent-state tints resolve through `SidebarAttentionStatus.indicatorColor` — the one runtime-state color
+    /// vocabulary — so an alert reads in the same color as the sidebar row it came from. `terminal` is an
+    /// identity tint for the terminal glyph, not a state, so it keeps its own color.
     static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
         switch tint {
-        case .browser: .systemBlue
         case .terminal: .systemGreen
-        case .code: .systemPurple
-        case .success: .systemGreen
-        case .warning: .systemOrange
+        case .warning: SidebarAttentionStatus.blocked.indicatorColor
+        case .done: SidebarAttentionStatus.done.indicatorColor
         }
     }
 
@@ -3181,9 +3183,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             for agent in workspace.codingAgentRows where agent.activityState == .waiting || agent.activityState == .done {
                 let eventDate = agent.updatedAt.flatMap { iso8601Formatter.date(from: $0) }
                 // Both states keep the cpu.fill agent identity; the tint alone carries the state —
-                // `waiting` (blocked on the user) is the warning orange, `done` the success green
-                // matching the status dots — so a finished agent doesn't read as still needing attention.
-                let iconTint: AlertsIconTint = agent.activityState == .done ? .success : .warning
+                // `waiting` (blocked on the user) is amber and `done` is blue, the same colors the row wears
+                // in the sidebar — so a finished agent doesn't read as still needing attention.
+                let iconTint: AlertsIconTint = agent.activityState == .done ? .done : .warning
                 items.append(
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
@@ -4571,11 +4573,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The status glyph name and tint for a settled (non-spinning) agent status. Single source of truth shared
-    /// by `windowRow`'s indicator and the automations run agent chips so agent state reads identically.
+    /// by `windowRow`'s indicator, the alerts rows built on it, and the automations run agent chips so agent
+    /// state reads identically. The active states borrow `SidebarAttentionStatus.indicatorColor` so a dot never
+    /// disagrees with the sidebar row for the same agent; the settled-neutral states stay label-gray.
     static func agentStatusSymbolAndColor(_ status: AgentWindowStatus) -> (symbol: String, color: NSColor) {
         switch status {
-        case .waiting: ("exclamationmark.triangle.fill", .systemOrange)
-        case .done: ("circle.fill", .systemGreen)
+        case .waiting: ("exclamationmark.triangle.fill", SidebarAttentionStatus.blocked.indicatorColor)
+        case .done: ("circle.fill", SidebarAttentionStatus.done.indicatorColor)
         // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
         case .exited: ("circle", .tertiaryLabelColor)
         case .spinning, .idle: ("circle.fill", .tertiaryLabelColor)

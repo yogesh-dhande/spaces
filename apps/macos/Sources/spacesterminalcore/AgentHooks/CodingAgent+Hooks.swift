@@ -30,6 +30,19 @@ extension CodingAgent {
     /// (`PermissionDenied` exists in the registry but is not the interactive-denial signal). Nothing can
     /// be bound for it; the row leaves `blocked` on the human's next prompt instead.
     ///
+    /// **A question to the human is the same state as a permission prompt.** Claude Code's
+    /// `AskUserQuestion` is a tool, so asking one fires `PermissionRequest` and lands the row in
+    /// `blocked` exactly like a gated command does (verified against claude-code 2.1.220, including
+    /// under `--dangerously-skip-permissions`, where question prompts still fire it). Codex's approval
+    /// dialog and opencode's `permission.asked` behave the same way. Spaces deliberately keeps one
+    /// waiting state for both: what the human needs to know is that the agent stopped for them, and the
+    /// pane itself shows which kind of answer it wants.
+    ///
+    /// **A turn that ends with a prose question reads as `done`, not `blocked`** — the agent emits
+    /// `Stop` and nothing distinguishes "here is your answer" from "what should I do next?". Accepted:
+    /// both mean the agent stopped and the turn is over, and blue-with-an-alert already brings the human
+    /// back to the pane.
+    ///
     /// The daemon suppresses the repeat `working` signals these events produce while the agent is
     /// already spinning.
     var jsonEventBindings: [AgentHookJSONWriter.EventBinding] {

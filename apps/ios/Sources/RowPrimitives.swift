@@ -14,8 +14,12 @@ import spacesterminalcore
 struct StatusDot: View {
     enum Kind {
         case running
-        /// Solid green with no halo or pulse — a finished coding agent, distinct from the running dot.
+        /// Solid blue — a coding agent that finished its turn. Blue rather than green so a settled agent
+        /// never reads as still working, matching the Mac's done tint.
         case done
+        /// Solid green — a clean run of something that finished successfully (an automation run). Outcome,
+        /// not agent state, so it keeps the healthy green while `done` carries agent state.
+        case succeeded
         case idle
         case exited
         case waiting
@@ -36,6 +40,8 @@ struct StatusDot: View {
                 Circle().fill(Theme.statusRunningHalo).frame(width: 14, height: 14)
                 Circle().fill(Theme.green).frame(width: 8, height: 8)
             } else if kind == .done {
+                Circle().fill(Theme.blue).frame(width: 8, height: 8)
+            } else if kind == .succeeded {
                 Circle().fill(Theme.green).frame(width: 8, height: 8)
             } else if kind == .waiting {
                 Circle().fill(Theme.orange).frame(width: 8, height: 8)

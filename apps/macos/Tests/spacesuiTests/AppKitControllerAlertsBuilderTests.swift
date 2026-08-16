@@ -106,11 +106,11 @@ struct AppKitControllerAlertsBuilderTests {
         #expect(groups[0].items.first?.attentionID == "alert:local:agent:ag-2:done:2026-06-28T09:30:00Z")
 
         // A finished agent isn't still blocking on the user, so it must render distinctly from a
-        // waiting agent by tint alone (same cpu.fill identity, green vs warning).
+        // waiting agent by tint alone (same cpu.fill identity, done blue vs waiting amber).
         let doneItem = groups[0].items.first { $0.agentStatus == .done }
         let waitingItem = groups[0].items.first { $0.agentStatus == .waiting }
         #expect(doneItem?.icon == "cpu.fill")
-        #expect(doneItem?.iconTint == .success)
+        #expect(doneItem?.iconTint == .done)
         #expect(waitingItem?.icon == "cpu.fill")
         #expect(waitingItem?.iconTint == .warning)
         #expect(doneItem?.iconTint != waitingItem?.iconTint)

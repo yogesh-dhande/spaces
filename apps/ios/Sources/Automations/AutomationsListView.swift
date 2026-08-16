@@ -222,13 +222,13 @@ struct AutomationRunsView: View {
 
 extension StatusDot.Kind {
     /// Maps an `AutomationRunStatus` raw value (or nil, meaning "never run") to the dot's three-way
-    /// signal: `.running` for an in-flight run, `.done` for a clean success, `.exited` for a failure
+    /// signal: `.running` for an in-flight run, `.succeeded` for a clean success, `.exited` for a failure
     /// (failed or timed out — both read as the same "needs attention" red ring), and `.idle` for
     /// everything else (queued, canceled, skipped, or no run yet).
     init(automationRunStatus status: String?) {
         switch status {
         case "running": self = .running
-        case "succeeded": self = .done
+        case "succeeded": self = .succeeded
         case "failed", "timed_out": self = .exited
         default: self = .idle
         }
