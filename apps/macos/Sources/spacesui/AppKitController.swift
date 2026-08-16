@@ -10746,6 +10746,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return false
     }
 
+    /// Whether clearing the outline selection should fall back to the detail placeholder.
+    ///
+    /// Alerts and Automations both clear the outline selection while presenting themselves, and that
+    /// `deselectAll` re-enters `outlineViewSelectionDidChange` synchronously. Presenting the placeholder
+    /// from there resets the detail pane to `.none` underneath the pane that just opened, which leaves
+    /// the pane rendered but no longer identified as showing. Sidebar arrow navigation reads those pane
+    /// flags to know where the selection currently sits, so it then has neither a pane nor a selected
+    /// row to move from and stops responding.
+    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(showingAlerts: Bool, showingAutomations: Bool) -> Bool {
+        !showingAlerts && !showingAutomations
+    }
+
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
         selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, direction: Int

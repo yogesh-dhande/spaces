@@ -2490,7 +2490,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedProjectID = nil
             host.selectedWorkspaceID = nil
             host.showingSettings = false
-            if !host.showingAlerts { host.showPlaceholder(presentation: .userNavigation) }
+            if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations) {
+                host.showPlaceholder(presentation: .userNavigation)
+            }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
