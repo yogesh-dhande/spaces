@@ -246,9 +246,25 @@
             sessionConfig.surface.userdata = Unmanaged.passUnretained(surfaceUserData).toOpaque()
 
             let workingDirectory = launchConfiguration.workingDirectory
-            let createdSession = workingDirectory.withCString { cwd in
-                sessionConfig.surface.working_directory = cwd
-                return ghostty_session_new_headless(app, &sessionConfig)
+            // ghostty_session_new_headless is reached ~65 Swift frames deep and its Zig-side init
+            // walks further still. The engine actor runs wherever its caller called from (see
+            // `TerminalEngineActor.runSynchronously`'s `queue.sync` bridge), which for a terminal
+            // create request over the device API is a libdispatch workqueue thread with only ~512 KB
+            // of stack (not enough: it has faulted at the stack guard page with SIGBUS /
+            // KERN_PROTECTION_FAILURE a few frames inside Ghostty). Running the call on a thread sized
+            // like the main thread removes that overflow risk.
+            let createdSession = try workingDirectory.withCString { cwd -> ghostty_session_t? in
+                var configForCall = sessionConfig
+                configForCall.surface.working_directory = cwd
+                // Both captures are read-only inputs to the large-stack thread's closure and are
+                // never touched again by this thread while it runs (the thread call blocks until the
+                // closure returns), so the concurrent access the compiler cannot verify never happens.
+                nonisolated(unsafe) let appForCall = app
+                nonisolated(unsafe) let configSnapshot = configForCall
+                return try runOnDedicatedLargeStackThread {
+                    var mutableConfig = configSnapshot
+                    return ghostty_session_new_headless(appForCall, &mutableConfig)
+                }
             }
             guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 

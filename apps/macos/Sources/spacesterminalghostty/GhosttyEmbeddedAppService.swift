@@ -65,7 +65,23 @@ import Foundation
                 Task { @TerminalEngineActor in surfaceUserData.handleClose() }
             }
 
-            guard let app = ghostty_app_new(&runtimeConfig, config) else {
+            // ghostty_app_new drives Ghostty's app-init path deep into Zig-side code, the same class
+            // of large-stack consumer as `ghostty_session_new_headless` (see the SIGBUS this fixes,
+            // diagnosed in GhosttyEmbeddedTerminalSessionDriver.configureNewSession()). The engine
+            // actor's home thread here is a libdispatch workqueue thread with only ~512 KB of stack,
+            // so this runs on a dedicated large-stack thread rather than inline.
+            //
+            // Both captures below are read-only inputs to the large-stack thread's closure and are
+            // never touched again by this thread while it runs (the thread call blocks until the
+            // closure returns), so the concurrent access the compiler cannot verify never happens.
+            nonisolated(unsafe) let runtimeConfigForCall = runtimeConfig
+            nonisolated(unsafe) let configForCall = config
+            guard
+                let app = try runOnDedicatedLargeStackThread({ () -> ghostty_app_t? in
+                    var mutableRuntimeConfig = runtimeConfigForCall
+                    return ghostty_app_new(&mutableRuntimeConfig, configForCall)
+                })
+            else {
                 ghostty_config_free(config)
                 throw GhosttyEmbeddedAppServiceError.configuration("ghostty_app_new failed")
             }
