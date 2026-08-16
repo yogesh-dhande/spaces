@@ -124,12 +124,23 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         /// that happens to arrive first.
         private var awaitedCommandName: String?
         private var awaitedCommandContinuation: CheckedContinuation<Void, Never>?
+        /// Holds the first control request inside `send` until the test releases it, so a test can finish
+        /// enqueuing a backlog before that request's scripted failure is allowed to act on the queue.
+        private let firstControlRequestGate: DispatchSemaphore?
 
-        init(payload: GhosttyRemoteSessionStatePayload, controlError: any Error, failFirstControlRequestOnly: Bool = false) {
+        init(
+            payload: GhosttyRemoteSessionStatePayload, controlError: any Error, failFirstControlRequestOnly: Bool = false,
+            holdFirstControlRequest: Bool = false
+        ) {
             self.payload = payload
             self.controlError = controlError
             self.failFirstControlRequestOnly = failFirstControlRequestOnly
+            self.firstControlRequestGate = holdFirstControlRequest ? DispatchSemaphore(value: 0) : nil
         }
+
+        /// Lets the held first control request proceed to its scripted outcome. Safe to call from the main
+        /// actor: the request blocks a queue worker, never the caller.
+        func releaseFirstControlRequest() { firstControlRequestGate?.signal() }
 
         /// Suspends until a control request named `commandName` (e.g. "scroll", "resize") is recorded.
         /// Returns immediately if one already was before this call. The check-or-register happens in a
@@ -181,6 +192,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 }
                 lock.unlock()
                 resumingContinuation?.resume()
+                // Waits outside the lock so `awaitControlRequest` and `controlRequestTexts` stay live while
+                // this request is held.
+                if requestNumber == 1 { firstControlRequestGate?.wait() }
                 if !failFirstControlRequestOnly || requestNumber == 1 { throw controlError }
                 return TerminalServiceResponse(
                     ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
@@ -3095,12 +3109,17 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     /// The regression Change 2 fixes: a keystroke typed while the link is down used to keep buffering
     /// behind the failed one, then deliver in full — including any Enter — once the link recovered
-    /// minutes later. `TerminalInputSerialQueue.enqueue` chains every send behind its predecessor, so
-    /// enqueuing three sends back to back before any of them has run guarantees the second and third are
-    /// still queued behind the first when it fails; `inputFailureHandler` answering `true` (the model's
-    /// verdict that the link is gone) must make the host discard that backlog instead of letting the
-    /// second and third sends reach the daemon once it "recovers" (the sender scripted to fail only the
-    /// first).
+    /// minutes later. `TerminalInputSerialQueue.enqueue` chains every send behind its predecessor, so the
+    /// second and third sends are still queued behind the first when it fails; `inputFailureHandler`
+    /// answering `true` (the model's verdict that the link is gone) must make the host discard that
+    /// backlog instead of letting them reach the daemon once it "recovers" (the sender scripted to fail
+    /// only the first).
+    ///
+    /// The first send is held inside the sender until all three are enqueued. Without that hold the first
+    /// send's task can fail while the test is still enqueuing, and `cancelAll`'s generation bump then
+    /// lands mid-backlog: a send enqueued after the bump carries the new generation, survives the discard,
+    /// and reaches the daemon — the queue behaving correctly, but the test measuring a backlog it never
+    /// actually assembled.
     @MainActor func testTransportFailureDiscardsQueuedInputInsteadOfDeliveringItLate() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -3109,7 +3128,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // Only the first control request fails; every later one would succeed — proving a later send was
         // never attempted, not merely that it also failed.
         let sender = ScriptedControlRequestSender(
-            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true)
+            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true,
+            holdFirstControlRequest: true)
         let host = RemoteGhosttySessionHost(
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
             inputFailureHandler: { _ in true })
@@ -3121,6 +3141,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(host.sendTextAsPaste("first"))
         XCTAssertTrue(host.sendTextAsPaste("second"))
         XCTAssertTrue(host.sendTextAsPaste("third"))
+        // The whole backlog is queued under one generation; let the first send fail against it.
+        sender.releaseFirstControlRequest()
 
         await host.drainInputQueueForTesting()
         XCTAssertEqual(
