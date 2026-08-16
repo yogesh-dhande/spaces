@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import workspacecore
 
 @testable import spacesui
 
@@ -39,6 +40,19 @@ import Testing
     }
 
     @Test func workingAttentionUsesSharedBrandGreenToken() { #expect(SidebarAttentionStatus.working.indicatorColor === Theme.green) }
+
+    /// An agent wears one color per state no matter which surface shows it: the sidebar row, the alerts card
+    /// glyph, and the status dot inside any window row all resolve to the same token, so a finished agent
+    /// never reads as done in one place and still-working in another.
+    @Test func agentStateColorsMatchAcrossSidebarAlertsAndWindowRows() {
+        #expect(SidebarAttentionStatus.done.indicatorColor === Theme.blue)
+        #expect(AppKitController.alertsIconColor(.done) === Theme.blue)
+        #expect(AppKitController.agentStatusSymbolAndColor(.done).color === Theme.blue)
+
+        #expect(SidebarAttentionStatus.blocked.indicatorColor === Theme.orange)
+        #expect(AppKitController.alertsIconColor(.warning) === Theme.orange)
+        #expect(AppKitController.agentStatusSymbolAndColor(.waiting).color === Theme.orange)
+    }
 
     @Test func failedAttentionDotIsHollowWhileBlockedAttentionDotIsFilled() throws {
         let failed = RowPrimitives.attentionStatusDot(.failed)

@@ -175,7 +175,7 @@
 
         func testStatusDotKindMapsRunStatusToThreeWaySignal() {
             XCTAssertEqual(StatusDot.Kind(automationRunStatus: "running"), .running)
-            XCTAssertEqual(StatusDot.Kind(automationRunStatus: "succeeded"), .done)
+            XCTAssertEqual(StatusDot.Kind(automationRunStatus: "succeeded"), .succeeded)
             XCTAssertEqual(StatusDot.Kind(automationRunStatus: "failed"), .exited)
             XCTAssertEqual(StatusDot.Kind(automationRunStatus: "timed_out"), .exited)
             XCTAssertEqual(StatusDot.Kind(automationRunStatus: "queued"), .idle)
