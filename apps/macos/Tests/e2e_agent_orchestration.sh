@@ -426,12 +426,16 @@ PROBE
 part_a_hookless_exit() {
   [[ -n "${SHELL:-}" ]] || fail "SHELL must be set: this step runs the same login shell Spaces launches sessions with."
   local K W agent_id agent_pid
-  # The inner interactive login shell is what hands the agent the terminal foreground (job control),
-  # exactly as a user-typed `codex` gets it. `read` is a shell builtin, so once the agent is gone the
-  # shell ITSELF is the foreground process — the plain-shell revert the reconciler finalizes on, with the
-  # terminal still alive.
-  open_session child-K "exec $SHELL -ilc '\"$FAKE_AGENT_BIN\" 600; read -r _'"
+  # The child has to sit at a genuinely BARE interactive login shell and receive the agent command as
+  # typed input, exactly as a user types `codex` at a prompt. That is what the reconciler's revert rule
+  # requires: `TerminalBareShellForeground.isBareShell` accepts a foreground shell whose argv past argv[0]
+  # is flags only, so a shell carrying a `-c` script argument is deliberately NOT bare and no revert is
+  # ever finalized for it. Once the agent is gone this shell itself becomes the foreground process, still
+  # bare, with the terminal alive.
+  open_session child-K "exec $SHELL -il"
   K="$OPENED_SESSION_ID"
+  "$SPACES_CLI" terminal send text "$K" "'$FAKE_AGENT_BIN' 600" --submit >/dev/null \
+    || fail "could not type the agent command into K=$K"
   open_session orch-W 'stty -echo; cat'
   W="$OPENED_SESSION_ID"
   printf '[agent-e2e] hookless child K=%s watcher W=%s\n' "$K" "$W"
