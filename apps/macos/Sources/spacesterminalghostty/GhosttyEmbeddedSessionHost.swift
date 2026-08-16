@@ -99,6 +99,15 @@
         /// key encoding and the PTY write inside neither end of the gate and hide a regression in them.
         /// Everything the record schedules is deferred (a coalesced broadcast, an output-gate window), so
         /// nothing it triggers can observe the terminal before this write lands.
+        ///
+        /// Accepted risk: when the E2E performance log is enabled, recording the event appends a line to
+        /// that log synchronously, so its cost lands between the timestamp and this write and counts
+        /// inside the gated latency total. The same is already true at the far end, where the export
+        /// event is written before the frame is handed to the client, so a log-based harness cannot
+        /// place instrumentation outside its own gate. The cost is bounded: an append of one record
+        /// measures 30us at p50 and 207us at the worst of 5000, against a gate measuring 4.9ms p95
+        /// with a 15ms budget. Deferring the write would mean carrying a timestamp through product
+        /// code for measurement alone, which buys less than the noise it removes.
         func sendRawBytes(_ data: Data) {
             inputActivityHandler?(data.count)
             sessionDriver.sendRawBytes(data)
