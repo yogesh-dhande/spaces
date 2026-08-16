@@ -742,8 +742,8 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
         "command_typing_duration": summarize_latencies(measurements, "command_typing_duration_ms"),
         "event_to_first_frame_apply": summarize_latencies(measurements, "event_to_first_frame_apply_ms"),
-        "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
-        "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
+        "host_input_to_frame_export": summarize_latencies(measurements, "host_input_to_frame_export_ms"),
+        "host_input_to_state_change": summarize_latencies(measurements, "host_input_to_state_change_ms"),
         "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
         "host_publish_to_client_visible": summarize_latencies(measurements, "host_publish_to_client_visible_ms"),
         "frame_export_to_frame_apply": summarize_latencies(measurements, "frame_export_to_frame_apply_ms"),
@@ -757,37 +757,40 @@ def summarize_phases(measurements: list[dict]) -> dict:
 
 
 def mac_host_latency_split(
-    session_id: str, begin_ns: int, frame_export_ns: int | None, frame_apply_ns: int | None, visible_ns: int
+    session_id: str, begin_ns: int, host_input_ns: int | None, frame_export_ns: int | None, frame_apply_ns: int | None,
+    visible_ns: int
 ) -> dict:
     """Split one measurement across the host frame its client apply was paired to.
 
-    The export is passed in rather than rediscovered here, so the split describes the same frame the
-    headline total ends at. Rediscovering it by walking first-after from `state_change` selects a
-    different, later export whenever output triggers an export before the state-change callback runs,
-    and then `frame_export_to_frame_apply_ms` subtracts one revision's export from another revision's
-    apply. Everything upstream of the export is read backwards from it for the same reason: the last
-    state change at or before this export is the one that produced it.
+    The export and the host input are passed in rather than rediscovered here, so the split describes
+    the same input and the same frame the headline total runs between. Rediscovering the export by
+    walking first-after from a state change selects a different, later export whenever output triggers
+    an export before the state-change callback runs, and then `frame_export_to_frame_apply_ms`
+    subtracts one revision's export from another revision's apply.
+
+    `host_input_to_state_change_ms` is reported as a host signal on its own, not as a phase of the
+    gated total, because the screen state-change callback is not on the path to the frame the gate
+    pairs. A keystroke exports on the output write first, at the revision before the callback runs,
+    and ghostty logs the screen state change a millisecond or so later, which exports again. So the
+    state change lands *after* the paired export, and no ordering of the two belongs in a sum. The
+    scroll scenarios report it as `n/a` because a viewport scroll produces no screen state change at
+    all: their frame comes from the scroll response, so there is no such event rather than a missed one.
     """
-    before_ns = frame_export_ns if frame_export_ns is not None else visible_ns
-    owner_activity = first_performance_event(
-        session_id, "mac-host", "owner_input_activity", begin_ns, before_ns=before_ns, require_render_frame=False
-    )
-    owner_activity_ns = owner_activity[1] if owner_activity else None
-    state_change = last_performance_event(
+    state_change = first_performance_event(
         session_id,
         "mac-host",
         "state_change",
-        owner_activity_ns if owner_activity_ns is not None else begin_ns,
-        before_ns=before_ns,
+        host_input_ns if host_input_ns is not None else begin_ns,
+        before_ns=visible_ns,
         require_render_frame=False,
     )
     state_change_ns = state_change[1] if state_change else None
     return {
-        "owner_input_activity_to_state_change_ms": (
-            ms_between(owner_activity_ns, state_change_ns) if owner_activity_ns is not None and state_change_ns is not None else None
+        "host_input_to_frame_export_ms": (
+            ms_between(host_input_ns, frame_export_ns) if host_input_ns is not None and frame_export_ns is not None else None
         ),
-        "state_change_to_frame_export_ms": (
-            ms_between(state_change_ns, frame_export_ns) if state_change_ns is not None and frame_export_ns is not None else None
+        "host_input_to_state_change_ms": (
+            ms_between(host_input_ns, state_change_ns) if host_input_ns is not None and state_change_ns is not None else None
         ),
         "event_to_host_publish_ms": ms_between(begin_ns, frame_export_ns) if frame_export_ns is not None else None,
         "host_publish_to_client_visible_ms": ms_between(frame_export_ns, visible_ns) if frame_export_ns is not None else None,
@@ -853,7 +856,7 @@ def run_mac_input_latency() -> dict:
         )
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
         stage_split = mac_host_latency_split(
-            session_id, begin_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
+            session_id, begin_ns, host_input_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_input_frame_applied",
@@ -880,8 +883,8 @@ def run_mac_input_latency() -> dict:
                 "input_text": input_text,
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
@@ -985,7 +988,7 @@ def run_mac_scrollback_latency(
             )
             frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
             stage_split = mac_host_latency_split(
-                session_id, begin_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
+                session_id, begin_ns, host_input_ns, frame_export[1] if frame_export else None, frame_apply_ns, visible_ns)
             if frame_apply_ns is not None:
                 event(
                     "mac_scroll_frame_applied",
@@ -1023,8 +1026,8 @@ def run_mac_scrollback_latency(
             # Every key `mac_host_latency_split` returns, because the measurement below reads all of
             # them: a short dict here turns a supported no-op into a KeyError.
             stage_split = {
-                "owner_input_activity_to_state_change_ms": None,
-                "state_change_to_frame_export_ms": None,
+                "host_input_to_frame_export_ms": None,
+                "host_input_to_state_change_ms": None,
                 "event_to_host_publish_ms": None,
                 "host_publish_to_client_visible_ms": None,
                 "frame_export_to_frame_apply_ms": None,
@@ -1045,8 +1048,8 @@ def run_mac_scrollback_latency(
                 "event_to_visible_ms": rendered_change_latency_ms,
                 "visible_latency_ms": rendered_change_latency_ms,
                 "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
@@ -1162,7 +1165,8 @@ def run_mac_command_output_catchup() -> dict:
         # Split across the first frame, not the settled one: the settled frame is many exports later,
         # and the phases below describe how one frame reached the screen.
         stage_split = mac_host_latency_split(
-            session_id, begin_ns, first_frame_export[1] if first_frame_export else None, first_frame_apply_ns, visible_ns)
+            session_id, begin_ns, host_input_ns, first_frame_export[1] if first_frame_export else None,
+            first_frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
             event(
                 "mac_command_frame_applied",
@@ -1190,8 +1194,8 @@ def run_mac_command_output_catchup() -> dict:
                 "marker": marker,
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
-                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
-                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "host_input_to_frame_export_ms": stage_split["host_input_to_frame_export_ms"],
+                "host_input_to_state_change_ms": stage_split["host_input_to_state_change_ms"],
                 "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
                 "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
@@ -1303,8 +1307,8 @@ for name, result in scenario_results.items():
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
             f"typing p95={format_ms(phases['command_typing_duration']['p95_ms'])}, "
             f"event_to_first_apply p95={format_ms(phases['event_to_first_frame_apply']['p95_ms'])}, "
-            f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
-            f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
+            f"host_input_to_frame_export p95={format_ms(phases['host_input_to_frame_export']['p95_ms'])}, "
+            f"host_input_to_state_change p95={format_ms(phases['host_input_to_state_change']['p95_ms'])}, "
             f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
             f"host_publish_to_client_visible p95={format_ms(phases['host_publish_to_client_visible']['p95_ms'])}, "
             f"frame_export_to_apply p95={format_ms(phases['frame_export_to_frame_apply']['p95_ms'])}, "
