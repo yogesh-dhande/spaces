@@ -1064,7 +1064,7 @@ def run_mac_command_output_catchup() -> dict:
     session_id = start_terminal(title, None)
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
-    def type_shell_line(command_text: str, echoed_text: str, probe_id: str) -> None:
+    def type_shell_line(command_text: str, probe_id: str) -> None:
         # Emulates a user typing a command: the line is typed, then Return is pressed as its own
         # keystroke. Deliberately NOT the `append_newline` submit path — that is the orchestration
         # /notification composer path, which sends the text as a paste before its Enter so agent TUIs
@@ -1075,7 +1075,13 @@ def run_mac_command_output_catchup() -> dict:
         # exporting frames when the timed window opens, so its first frame belongs to the typing rather
         # than to the command. Both this request and this wait run before the probe starts timing, so
         # neither lands in a reported phase.
+        #
+        # The wait matches the whole typed line rather than a prefix of it: a PTY echo split across
+        # render updates would satisfy a prefix while the rest of the line was still exporting frames,
+        # which is the attribution this wait exists to prevent. Matching against whitespace-stripped
+        # rendered output makes that whole-line match immune to where the line wraps.
         send_terminal_control(session_id, "send", text=command_text, timeout=15)
+        echoed_text = "".join(command_text.split())
         wait_for_state(
             session_id, lambda state, echoed=echoed_text: echoed in compact_rendered_output(state), 8, f"{probe_id}-typed")
 
@@ -1089,7 +1095,7 @@ def run_mac_command_output_catchup() -> dict:
     warmup_suffix = uuid.uuid4().hex[:10]
     warmup_marker = f"{warmup_prefix}{warmup_suffix}__"
     warmup_command = f"echo '{warmup_prefix}'\"{warmup_suffix}\"'__'"
-    type_shell_line(warmup_command, warmup_prefix, "warmup")
+    type_shell_line(warmup_command, "warmup")
     press_return()
     wait_for_state(session_id, lambda state, marker=warmup_marker: marker in compact_rendered_output(state), 8, "warmup")
 
@@ -1100,7 +1106,7 @@ def run_mac_command_output_catchup() -> dict:
         marker_suffix = uuid.uuid4().hex[:10]
         marker = f"{marker_prefix}{marker_suffix}__"
         command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
-        type_shell_line(command_text, marker_prefix, probe_id)
+        type_shell_line(command_text, probe_id)
         enqueue_ns = now_ns()
         event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
