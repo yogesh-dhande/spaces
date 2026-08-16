@@ -1443,6 +1443,46 @@ def sample_series(measurements: list[dict], key: str = "event_to_visible_ms", li
     return ", ".join(samples)
 
 
+def send_typed_text(session_id: str, client_id: str, text: str, terminal_target: str):
+    """Types characters the way the app does: `GhosttyRemoteTerminalHostView.insertText` forwards them as
+    a `send` carrying only the characters, with no newline.
+
+    Deliberately NOT `appendNewline`. That is the submit path `spaces terminal send --submit` uses, and it
+    paces an unframed submit's carriage return by 500ms and holds the following write back by another 500ms
+    (`TerminalControlInputSequencer`, issue #187) so an agent composer reads the Enter as its own keystroke.
+    No iOS input path pays that: Return is a separate `key` request from both the keyboard and the composer.
+    Measuring input latency through the submit path measures that pacing instead of the render round trip.
+    """
+    return request(
+        {
+            "command": "send",
+            "authToken": auth_token,
+            "clientApp": client_app,
+            "sessionID": session_id,
+            "clientID": client_id,
+            "text": text,
+        },
+        terminal_target,
+    )
+
+
+def send_return_key(session_id: str, client_id: str, terminal_target: str) -> None:
+    """Presses Return the way the app does: `insertText` turns a newline into `sendAccessoryKey("enter")`,
+    and `sendComposedMessage` ends its send with the same `key` request."""
+    response, _ = request(
+        {
+            "command": "key",
+            "authToken": auth_token,
+            "clientApp": client_app,
+            "sessionID": session_id,
+            "clientID": client_id,
+            "key": "enter",
+        },
+        terminal_target,
+    )
+    assert response["ok"], response
+
+
 def run_ios_input_latency(terminal_target: str) -> dict:
     scenario = "ios-input-latency"
     title = f"{scenario}-{network_profile}-{terminal_target}-{uuid.uuid4().hex[:8]}"
@@ -1451,20 +1491,11 @@ def run_ios_input_latency(terminal_target: str) -> dict:
     measurements = []
     try:
         warmup_token = f"ioswarmup{uuid.uuid4().hex[:8]}"
-        response, _ = request(
-            {
-                "command": "send",
-                "authToken": auth_token,
-                "clientApp": client_app,
-                "sessionID": session_id,
-                "clientID": mobile_client_id,
-                "text": warmup_token,
-                "appendNewline": True,
-            },
-            terminal_target,
-        )
+        response, _ = send_typed_text(session_id, mobile_client_id, warmup_token, terminal_target)
         assert response["ok"], response
         wait_for_line(stream, lambda payload, token=warmup_token: token in plain_text(payload), timeout=10)
+        send_return_key(session_id, mobile_client_id, terminal_target)
+        wait_for_line(stream, lambda payload, token=warmup_token: plain_text(payload).count(token) >= 2, timeout=10)
 
         for index in range(sample_count):
             probe_id = f"ios-input-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
@@ -1485,18 +1516,7 @@ def run_ios_input_latency(terminal_target: str) -> dict:
             event("ios_input_flush", scenario, probe_id, flush_ns)
             rpc_begin_ns = now_ns()
             event("ios_input_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-            response, rpc_ms = request(
-                {
-                    "command": "send",
-                    "authToken": auth_token,
-                    "clientApp": client_app,
-                    "sessionID": session_id,
-                    "clientID": mobile_client_id,
-                    "text": token,
-                    "appendNewline": True,
-                },
-                terminal_target,
-            )
+            response, rpc_ms = send_typed_text(session_id, mobile_client_id, token, terminal_target)
             assert response["ok"], response
             rpc_end_ns = now_ns()
             rpc_duration_ms = ms_between(rpc_begin_ns, rpc_end_ns)
@@ -1562,6 +1582,11 @@ def run_ios_input_latency(terminal_target: str) -> dict:
             }
             measurement.update(visible_meta)
             measurements.append(measurement)
+            # Return after the measurement, not inside it: a user's Enter is its own request, and letting
+            # `cat` echo the completed line keeps the next sample's token a fresh same-shape delta instead
+            # of one progressively wrapping line.
+            send_return_key(session_id, mobile_client_id, terminal_target)
+            wait_for_line(stream, lambda payload, token=token: plain_text(payload).count(token) >= 2, timeout=10)
     finally:
         if stream is not None:
             close_stream(stream)
