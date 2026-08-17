@@ -77,6 +77,165 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         func release() { releaseNow.signal() }
     }
 
+    /// Builds a started, unattached PTY-backed core. Separate from the attach so the two once-per-lifecycle
+    /// writes this suite measures — the session row and the attachment — can be timed independently.
+    @TerminalEngineActor private static func makeStartedCoreBox(tag: String) throws -> CoreBox {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launch = TerminalSessionLaunchConfiguration(
+            sessionID: "engine-lifecycle-\(tag)-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-07-21T00:00:00Z",
+            workspaceID: "workspace-1", kind: .shell)
+        let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
+        try core.startIfNeeded()
+        return CoreBox(core: core, paths: paths, root: root)
+    }
+
+    private static let ownerClient = TerminalClient(
+        id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+
+    /// Opens this process's read and write database lanes (and applies the profile's migrations) before a
+    /// test contends the write lock. A daemon has both lanes open long before any session is created, so
+    /// without this a test that creates its first session under the held lock would time the migrator's first
+    /// open rather than the session's own durable writes.
+    private static func warmDatabaseConnections() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launch = TerminalSessionLaunchConfiguration(
+            sessionID: "engine-lifecycle-warmup-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-07-21T00:00:00Z",
+            workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launch, paths: paths)
+        _ = try TerminalSessionPersistence.activeAttachments(paths: paths)
+    }
+
+    /// Creating a session and attaching its first client are the two once-per-lifecycle durable writes a
+    /// terminal makes. Both must stay off the engine executor: the reproduction is opening a terminal (or an
+    /// iPhone attaching to one) while an agent hook bursts writes at the profile database, which before the
+    /// fix froze the engine — and with it every other live session — on the session-row and attachment writes
+    /// for up to SQLite's 5s busy timeout.
+    ///
+    /// Ordering is asserted with the same run: the attach is enqueued while the session row is still queued
+    /// behind the held lock, so only the persistence queue's serial FIFO makes the attach's
+    /// `existingSessionID` validation find the row. If the attach could pass the session row, it would fail
+    /// with `unknownSession` and the durable mirror would hold no attachment at all.
+    func testCreatingAndAttachingUnderAHeldWriteLockStayFastAndConvergeDurably() async throws {
+        try Self.warmDatabaseConnections()
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        var released = false
+        let releaseLock = {
+            if !released {
+                released = true
+                lockHolder.release()
+            }
+        }
+        defer { releaseLock() }
+
+        let created = try await TerminalEngineActor.run { () -> (box: CoreBox, elapsed: TimeInterval) in
+            let startedAt = Date()
+            let box = try Self.makeStartedCoreBox(tag: "create-under-lock")
+            return (box, Date().timeIntervalSince(startedAt))
+        }
+        defer { try? FileManager.default.removeItem(at: created.box.root) }
+        XCTAssertLessThan(
+            created.elapsed, 0.5,
+            "creating a session took \(created.elapsed)s while the DB write lock was held — the engine blocked on the session-row write")
+
+        let attachElapsed = try await TerminalEngineActor.run { () -> TimeInterval in
+            let startedAt = Date()
+            try created.box.core.attachClient(Self.ownerClient, mode: .owner)
+            return Date().timeIntervalSince(startedAt)
+        }
+        XCTAssertLessThan(
+            attachElapsed, 0.5, "attaching a client took \(attachElapsed)s while the DB write lock was held — the engine blocked on the attach write")
+
+        // Enforcement and broadcasts read the in-memory snapshot, so the attaching owner owns the terminal
+        // immediately — long before its durable mirror can commit against the held lock.
+        let ownerBeforeCommit = TerminalEngineActor.runSynchronously { created.box.core.activeOwnerClientID() }
+        XCTAssertEqual(ownerBeforeCommit, Self.ownerClient.id, "the attached owner must own the session in memory while its mirror is still queued")
+
+        releaseLock()
+        TerminalEngineActor.runSynchronously { created.box.core.debugDrainPersistenceQueue() }
+
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: created.box.paths).sessionID,
+            TerminalEngineActor.runSynchronously { created.box.core.launchConfiguration.sessionID },
+            "the session row must commit once the lock is released")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: created.box.paths).map(\.clientID), [Self.ownerClient.id],
+            "the attach must commit after the session row it validates against, not fail with unknownSession")
+
+        TerminalEngineActor.runSynchronously { created.box.core.terminate() }
+    }
+
+    /// Creating a session must not stall other live sessions either: every core shares the one engine
+    /// executor, so a create that wrote its session row inline held that executor — and every other session's
+    /// control path — for the duration of the contended write.
+    func testCreatingASessionUnderAHeldWriteLockDoesNotStallAnotherCoresControl() async throws {
+        let liveBox = try await TerminalEngineActor.run { () -> CoreBox in
+            let box = try Self.makeStartedCoreBox(tag: "live")
+            try box.core.attachClient(Self.ownerClient, mode: .owner)
+            return box
+        }
+        defer { try? FileManager.default.removeItem(at: liveBox.root) }
+        TerminalEngineActor.runSynchronously { liveBox.core.debugDrainPersistenceQueue() }
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        var released = false
+        let releaseLock = {
+            if !released {
+                released = true
+                lockHolder.release()
+            }
+        }
+        defer { releaseLock() }
+
+        // Create a second session on a background thread so it is in flight on the shared engine while the
+        // lock is held, then time the FIRST session's control round-trip through the same engine.
+        let createdBox = UncheckedBox<CoreBox?>(nil)
+        let created = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let box = TerminalEngineActor.runSynchronously { try? Self.makeStartedCoreBox(tag: "create-while-live") }
+            createdBox.value = box
+            created.signal()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let startedAt = Date()
+        let ok = TerminalEngineActor.runSynchronously { () -> Bool in
+            liveBox.core.handleControlRequest(.init(command: "send", text: "create-marker\n", clientID: Self.ownerClient.id, appendNewline: false)).ok
+        }
+        let roundTrip = Date().timeIntervalSince(startedAt)
+        XCTAssertTrue(ok, "the live core's owner send should be accepted while another session is created under the held lock")
+        XCTAssertLessThan(
+            roundTrip, 0.5,
+            "creating a session under a held write lock stalled another core's control for \(roundTrip)s — the create blocked the engine")
+        XCTAssertEqual(
+            created.wait(timeout: .now() + 1), .success, "startIfNeeded did not return promptly — its session-row write blocked the engine")
+
+        releaseLock()
+        TerminalEngineActor.runSynchronously {
+            liveBox.core.terminate()
+            createdBox.value?.core.terminate()
+        }
+        if let root = createdBox.value?.root { try? FileManager.default.removeItem(at: root) }
+    }
+
+    /// Carries a value written on one thread and read on another; the test's own semaphore orders the two.
+    private final class UncheckedBox<Value>: @unchecked Sendable {
+        var value: Value
+        init(_ value: Value) { self.value = value }
+    }
+
     func testControlSendsStayFastWhileCompetingWriterHoldsTheDatabaseWriteLock() async throws {
         // A PTY-backed `cat` session that echoes stdin, so a control send's bytes come back in the transcript.
         let box = try await TerminalEngineActor.run { () -> CoreBox in

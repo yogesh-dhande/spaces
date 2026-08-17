@@ -284,7 +284,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // production delay: it proves the first attempt genuinely failed and is now paused before we restore
         // the database.
         let retryGate = RetryGate()
-        let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry", writeRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         let updatedState = makeRunningState(sessionID: launchConfiguration.sessionID, title: "after")
         queue.enqueueRuntimeStateWrite(updatedState, at: Date(), paths: paths) { state, _ in recorder.record(state.title ?? "") }
@@ -323,8 +323,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // genuine failure, so the test can interject deterministically instead of racing real sleeps sized to
         // outlast the production delay.
         let retryGate = RetryGate()
-        let queue = TerminalCorePersistenceQueue(
-            label: "test.persistence.supersede-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.supersede-retry", writeRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         queue.enqueueRuntimeStateWrite(makeRunningState(sessionID: launchConfiguration.sessionID, title: "old"), at: Date(), paths: paths) {
             state, _ in recorder.record(state.title ?? "")
@@ -385,8 +384,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
 
         let retryGate = RetryGate()
-        let queue = TerminalCorePersistenceQueue(
-            label: "test.persistence.termination-fence", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.termination-fence", writeRetryDelay: 0.001, sleep: retryGate.sleep)
         let exitedState = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
             updatedAt: "2026-05-17T00:01:00Z", exitedAt: "2026-05-17T00:01:00Z", title: "shell", workingDirectory: "/tmp/original")
@@ -413,6 +411,84 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         XCTAssertTrue(
             try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
             "the detach released by the fence must commit after it, so it lands post-recovery instead of being lost")
+    }
+
+    /// A lifecycle mirror write (the launch-configuration row, a client upsert/attach/detach, an ownership
+    /// transfer) is a unique mutation nothing supersedes, so a failure has only two honest outcomes: land it on
+    /// a later attempt, or tell the core its in-memory snapshot has outrun the durable mirror. This drives the
+    /// second: every attempt fails, so the write must exhaust `writeMaxAttempts` and then report back exactly
+    /// once — a failure swallowed here is a session enforcing an ownership no out-of-core reader can see. The
+    /// write that follows proves the exhausted retry released its slot rather than wedging the queue.
+    func testLifecycleWriteExhaustingItsRetriesReportsTheFailureAndReleasesTheQueue() async throws {
+        struct WriteFailure: Error {}
+        let attempts = AttemptCounter()
+        let failureReported = DispatchSemaphore(value: 0)
+        let retryGate = RetryGate()
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.lifecycle-failure", writeRetryDelay: 0.001, sleep: retryGate.sleep)
+
+        queue.enqueueLifecycleWrite(
+            "attach",
+            write: { _ in
+                attempts.record()
+                throw WriteFailure()
+            }, onFailure: { failureReported.signal() })
+
+        // One release per back-off between attempts; the last attempt fails without sleeping again.
+        for _ in 1..<TerminalCorePersistenceQueue.writeMaxAttempts {
+            XCTAssertTrue(retryGate.waitForRetry(), "each failed attempt must park in the injected back-off before the next one")
+            retryGate.releaseOneRetry()
+        }
+        XCTAssertEqual(failureReported.wait(timeout: .now() + 5), .success, "the core must be told once the write has run out of attempts")
+        XCTAssertEqual(
+            attempts.count, TerminalCorePersistenceQueue.writeMaxAttempts, "the write must be attempted exactly its bounded number of times")
+
+        let follower = DispatchSemaphore(value: 0)
+        queue.enqueueWrite { _ in follower.signal() }
+        XCTAssertEqual(follower.wait(timeout: .now() + 5), .success, "a write enqueued behind an exhausted lifecycle write must still run")
+        await queue.drainAsync()
+    }
+
+    /// An enqueue-time profile-resolution failure is also a final failure for a lifecycle write, not a
+    /// silently dropped one: `onFailure` must run (it is the core's only cue that its in-memory snapshot has
+    /// outrun the durable mirror), and the write closure must never run since there is no database to run it
+    /// against. There is nothing to retry here — resolution was captured once at enqueue time.
+    ///
+    /// Resolution failing is reachable, not theoretical (see the analogous runtime-state test above): binding
+    /// `SPACES_DB_PATH` inside the account's live profile root makes the enqueue-time resolution throw, and it
+    /// does so without ever touching the filesystem, so this needs no teardown of its own.
+    func testLifecycleWriteWithUnresolvedProfileReportsFailureWithoutRunningTheWrite() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+        let refusedDatabasePath = accountHomeURL.appendingPathComponent(".spaces/spaces.db").path
+        setenv("SPACES_DB_PATH", refusedDatabasePath, 1)
+
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.lifecycle-unresolved-profile")
+        let writeAttempts = AttemptCounter()
+        let failureReported = DispatchSemaphore(value: 0)
+        queue.enqueueLifecycleWrite(
+            "launch-configuration",
+            write: { _ in writeAttempts.record() }, onFailure: { failureReported.signal() })
+
+        XCTAssertEqual(
+            failureReported.wait(timeout: .now() + 5), .success, "an unresolved enqueue-time profile must be reported as a final failure")
+        queue.drain()
+        XCTAssertEqual(writeAttempts.count, 0, "the write closure must never run when there is no database to write it against")
+    }
+
+    private final class AttemptCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempts = 0
+
+        func record() {
+            lock.lock()
+            attempts += 1
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return attempts
+        }
     }
 
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,

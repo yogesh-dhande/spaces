@@ -143,6 +143,8 @@ func makeTestOrchestrator(
     builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
     builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
     builtInTerminalForegroundProcessSampler: WorkspaceOrchestrator.BuiltInTerminalForegroundProcessSampler? = nil,
+    builtInTerminalLiveOwnerAttachmentProber: WorkspaceOrchestrator.BuiltInTerminalLiveOwnerAttachmentProber? = nil,
+    builtInTerminalLiveActiveAttachmentProber: WorkspaceOrchestrator.BuiltInTerminalLiveActiveAttachmentProber? = nil,
     daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
     WorkspaceOrchestrator(
@@ -151,6 +153,8 @@ func makeTestOrchestrator(
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, deliversTerminalWindowOpens: deliversTerminalWindowOpens,
         builtInTerminalWindowFocuser: builtInTerminalWindowFocuser, builtInTerminalWindowCloser: builtInTerminalWindowCloser,
         builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-        builtInTerminalForegroundProcessSampler: builtInTerminalForegroundProcessSampler, daemonHandoffInProgress: daemonHandoffInProgress,
+        builtInTerminalForegroundProcessSampler: builtInTerminalForegroundProcessSampler,
+        builtInTerminalLiveOwnerAttachmentProber: builtInTerminalLiveOwnerAttachmentProber,
+        builtInTerminalLiveActiveAttachmentProber: builtInTerminalLiveActiveAttachmentProber, daemonHandoffInProgress: daemonHandoffInProgress,
         currentDate: currentDate)
 }

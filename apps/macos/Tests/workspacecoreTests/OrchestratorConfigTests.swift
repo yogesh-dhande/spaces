@@ -622,6 +622,94 @@ extension OrchestratorTests {
         XCTAssertTrue(try orchestrator.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    /// The durable attachment mirror in SQLite is write-behind on the core's persistence queue, so a
+    /// client's just-applied owner attach can be visible to the live core hosting the session in this
+    /// process before its durable row commits. A tracked window past the 60 second launch grace must not
+    /// be pruned in that gap: `builtInTrackedWindowIsStillLive` must consult
+    /// `builtInTerminalLiveActiveAttachmentProber` before falling back to the durable
+    /// `builtInSessionHasActiveAttachments` read, the same way the ad-hoc stop path already consults
+    /// `builtInTerminalLiveOwnerAttachmentProber` ahead of its durable owner-row read.
+    func testBuiltInTrackedWindowIsStillLiveWithLiveInMemoryAttachmentAheadOfDurableMirror() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db")
+        let store = try SQLiteStore(path: dbPath.path)
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalLiveActiveAttachmentProber: { _ in true })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        _ = project
+
+        let sessionID = "spaces-ad-hoc-session-live-in-memory-attach"
+        let window = WindowRecord(
+            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
+            targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+        try store.upsert(window: window)
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            // Past the 60 second launch grace, so `builtInSessionLaunchIsPendingBeforeOwnerAttachment` no
+            // longer covers the window: only the live-attachment prober can keep it alive here.
+            let createdAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
+                    createdAt: createdAt, workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: createdAt), paths: paths)
+            // Deliberately no attachment rows written: the owner's attach is applied in the live core only,
+            // its durable mirror still queued behind this process's persistence writer.
+
+            XCTAssertTrue(
+                orchestrator.builtInTrackedWindowIsStillLive(window: window),
+                "a live in-memory attachment reported by the prober must keep the tracked window alive while the durable attach mirror is still queued"
+            )
+        }
+    }
+
+    /// With no live core answering for the session (prober returns nil) and no durable attachment row
+    /// either, the decision falls back to the durable read exactly as it did before the prober existed.
+    func testBuiltInTrackedWindowIsStillLiveFallsBackToDurableReadWithNoLiveAttachment() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db")
+        let store = try SQLiteStore(path: dbPath.path)
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalLiveActiveAttachmentProber: { _ in nil })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        _ = project
+
+        let sessionID = "spaces-ad-hoc-session-no-live-attach"
+        let window = WindowRecord(
+            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
+            targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+        try store.upsert(window: window)
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            let createdAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
+                    createdAt: createdAt, workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: createdAt), paths: paths)
+
+            XCTAssertFalse(
+                orchestrator.builtInTrackedWindowIsStillLive(window: window),
+                "with no live core answering and no durable attachment row, the durable fallback must still prune the window")
+        }
+    }
+
     // Tests launch workspace reuses existing browser matches and tracks all matching tabs by arranging representative inputs and asserting the expected result.
 
     // Tests launch workspace opens missing browser sessions as tabs in one Chrome window by arranging representative inputs and asserting the expected result.

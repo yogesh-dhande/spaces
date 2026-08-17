@@ -156,14 +156,19 @@
             }
         }
 
-        @discardableResult private func attachOwner(sessionID: String, paths: TerminalSessionPaths, clientID: String = "owner-client") throws
-            -> String
-        {
+        /// Attaches through the session's own control request, the only way a client ever reaches a
+        /// session: the core resolves the clipboard's owner from the attachment state it holds in memory,
+        /// so a client written straight into the database would be a client this session never saw.
+        @discardableResult private func attachOwner(_ core: GhosttyEmbeddedSessionCore, clientID: String = "owner-client") -> String {
+            TerminalEngineActor.runSynchronously { Self.attachOwner(core, clientID: clientID) }
+            return clientID
+        }
+
+        @TerminalEngineActor private static func attachOwner(_ core: GhosttyEmbeddedSessionCore, clientID: String) {
             let client = TerminalClient(
                 id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-07-28T00:00:01Z")
-            try TerminalSessionPersistence.attachClient(
-                sessionID: sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-07-28T00:00:01Z")
-            return clientID
+            let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
+            #expect(response.ok, "attaching the clipboard owner must succeed: \(response.message)")
         }
 
         private func releaseChild(_ goFile: String) { _ = FileManager.default.createFile(atPath: goFile, contents: nil) }
@@ -209,7 +214,7 @@
             let core = try await startCore(configuration, paths: paths).value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            let ownerID = try attachOwner(sessionID: configuration.sessionID, paths: paths)
+            let ownerID = attachOwner(core)
             let subscriber = StateStreamSubscriber()
             try subscriber.start(socketPath: paths.subscriptionSocketPath)
             defer { subscriber.stop() }
@@ -257,7 +262,7 @@
             let core = try await startCore(configuration, paths: paths).value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            let ownerID = try attachOwner(sessionID: configuration.sessionID, paths: paths)
+            let ownerID = attachOwner(core)
             let subscriber = StateStreamSubscriber()
             try subscriber.start(socketPath: paths.subscriptionSocketPath)
             defer { subscriber.stop() }
@@ -282,7 +287,7 @@
             let core = try await startCore(configuration, paths: paths).value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            try attachOwner(sessionID: configuration.sessionID, paths: paths)
+            attachOwner(core)
             let subscriber = StateStreamSubscriber()
             try subscriber.start(socketPath: paths.subscriptionSocketPath)
             defer { subscriber.stop() }
@@ -313,7 +318,7 @@
 
             let configuration = makeConfiguration(named: "clipboard-handoff", goFile: goFile, script: osc52("copied before the update"))
             let core = try await startCore(configuration, paths: paths).value
-            try attachOwner(sessionID: configuration.sessionID, paths: paths)
+            attachOwner(core)
             releaseChild(goFile)
             try await waitForSettledTranscript(paths.outputPath)
 
@@ -338,7 +343,7 @@
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
-            let ownerID = try attachOwner(sessionID: configuration.sessionID, paths: paths)
+            let ownerID = attachOwner(resumedCore)
             let subscriber = StateStreamSubscriber()
             try subscriber.start(socketPath: paths.subscriptionSocketPath)
             defer { subscriber.stop() }

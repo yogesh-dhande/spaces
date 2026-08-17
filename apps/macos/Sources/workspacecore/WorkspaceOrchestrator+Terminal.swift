@@ -152,10 +152,19 @@ extension WorkspaceOrchestrator {
     /// daemon applies everywhere (`liveAttachments`), so a remote viewer whose lease lapsed without ever
     /// sending a detach does not count.
     ///
+    /// A live core hosted in this process is asked first, through `builtInTerminalLiveOwnerAttachmentProber`:
+    /// its in-memory snapshot is the attachment authority and is always at least as current as the durable
+    /// mirror (this core is the only writer of its own attachment rows), so when a live core answers, that
+    /// answer wins. This matters specifically because the closing client's own detach is applied to that
+    /// snapshot before its durable mirror commits, so a durable read taken right after can still see the
+    /// just-detached owner. The durable read below remains the fallback for a session with no live core in
+    /// this process (e.g. it already ended).
+    ///
     /// Fails closed: a session whose paths or attachment snapshot cannot be read is presumed owned. This
     /// answer gates a termination, and the two mistakes are not symmetric: a wrongful stop destroys a
     /// terminal the user cannot get back, while a session wrongly kept costs one more close.
     func builtInTerminalSessionHasLiveOwnerAttachment(sessionID: String) -> Bool {
+        if let liveAnswer = builtInTerminalLiveOwnerAttachmentProber(sessionID) { return liveAnswer }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return true }
         guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: currentDate()) else { return true }
         return liveAttachments.contains { $0.mode == .owner }
@@ -491,12 +500,27 @@ extension WorkspaceOrchestrator {
 
     func builtInSessionLaunchIsPending(sessionID: String, now: Date = Date()) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        // Registry before any durable read: a pending entry is cleared only after its row commits, so in
+        // this order a miss means the rows are durably readable below or the session is genuinely gone.
+        // The reverse order could miss on both sides of a commit-then-clear and misread a live
+        // just-created session as vanished.
+        //
+        // This branch also deliberately ignores the durable runtime row. On a relaunch of the same
+        // session id, the previous run's row can still read .exited or .failed while the new run's
+        // replacement writes are queued behind its launch write, so that row is the old run's leftover,
+        // not a verdict on this launch; trusting it would let liveness probes tear down a live relaunch.
+        if let pending = TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: sessionID) {
+            guard let createdAt = TerminalSessionTimestamp.date(from: pending.createdAt) else { return false }
+            let age = now.timeIntervalSince(createdAt)
+            return age >= -5 && age < 60
+        }
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths),
             runtimeState.state != .starting && runtimeState.state != .running
         {
             return false
         }
-        guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+        guard
+            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
             let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
         let age = now.timeIntervalSince(createdAt)
@@ -540,7 +564,21 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Whether the session currently has any active attachment (owner or viewer).
+    ///
+    /// A live core hosted in this process is asked first, through `builtInTerminalLiveActiveAttachmentProber`:
+    /// its in-memory snapshot is the attachment authority and is always at least as current as the durable
+    /// mirror (this core is the only writer of its own attachment rows), so when a live core answers, that
+    /// answer wins. This matters specifically because a just-applied attach can be visible to the live core
+    /// before its durable mirror commits: a just-applied attach whose mirror is still queued behind a
+    /// contended SQLite lock still counts here, and a just-applied detach stops counting immediately. The
+    /// durable read below remains the fallback for a session with no live core in this process.
+    ///
+    /// This gates tracked-window pruning in `builtInTrackedWindowIsStillLive`, where the two mistakes are
+    /// not symmetric: wrongly pruning drops a live window's tracked row, while wrongly keeping it costs one
+    /// more refresh cycle.
     func builtInSessionHasActiveAttachments(sessionID: String) -> Bool {
+        if let liveAnswer = builtInTerminalLiveActiveAttachmentProber(sessionID) { return liveAnswer }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
         return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty == false
     }

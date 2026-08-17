@@ -54,8 +54,25 @@ public enum ProfileDatabaseMigrationGuard {
         processMigrationLock.lock()
         defer { processMigrationLock.unlock() }
 
-        let profile = try SpacesProfile.current()
-        guard SpacesProfile.canonicalPath(databasePath) == SpacesProfile.canonicalPath(profile.databasePath) else { return try migration() }
+        // The profile is resolved only to decide whether `databasePath` is this process's own profile
+        // database, the sole case where the daemon-ownership handshake below applies. A process whose
+        // resolution refuses (a test host with no isolated SPACES_* environment) or that resolves to no
+        // profile at all cannot be serving any profile database, so an explicitly named database is
+        // opened and migrated directly, without the handshake. That is what lets a test hand every
+        // persistence call its own throwaway database path instead of rebinding the process-wide
+        // SPACES_* environment, which would race sibling suites running in parallel under Swift Testing.
+        //
+        // The live-root check runs first and independently of that collapse: folding a refusal into
+        // `nil` must not quietly drop the test-host protection for a test that names a live profile
+        // database explicitly, so a live root is refused before resolution is even attempted.
+        if SpacesTestHost.isRunningUnderXCTest(), SpacesProfile.isLiveUserProfilePath(databasePath) {
+            throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(component: .database, path: databasePath)
+        }
+        let profile: SpacesProfile?
+        do { profile = try SpacesProfile.currentOrNilIfUnresolved() } catch is SpacesProfileResolutionError { profile = nil }
+        guard let profile, SpacesProfile.canonicalPath(databasePath) == SpacesProfile.canonicalPath(profile.databasePath) else {
+            return try migration()
+        }
 
         let lockPath = try TerminalServicePaths.instanceLockPath()
         if try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath) == ProcessInfo.processInfo.processIdentifier {

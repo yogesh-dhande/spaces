@@ -285,7 +285,7 @@ public struct SpacesProfile: Sendable, Equatable {
     /// An unreadable password database answers `true`. That is the safety decision, not a convenience:
     /// "the account home could not be identified" must never be reported as "this is not a live profile",
     /// which would drop the protection in exactly the case where nothing can vouch for the path.
-    private static func isLiveUserProfilePath(_ path: String) -> Bool {
+    static func isLiveUserProfilePath(_ path: String) -> Bool {
         guard let accountHomePath = accountHomeDirectoryPath() else { return true }
         let accountHome = URL(fileURLWithPath: accountHomePath, isDirectory: true)
         let liveProfileRoots = [
@@ -602,7 +602,8 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
                 + "profile roots (~/.spaces and ~/.spaces-dev/profiles). Refusing it so tests cannot read or write a profile the app, "
                 + "daemon, or CLI is serving. Isolate the test by setting \(component.environmentVariable) to a path OUTSIDE those roots "
                 + "— one under the system temporary directory — for the whole test, including any work its background queues finish "
-                + "later. Both \(SpacesProfile.databasePathEnvironmentVariable) and "
+                + "later. Alternatively, pass the test's own throwaway database path explicitly to the APIs under test; explicitly "
+                + "scoped calls never resolve the profile at all. Both \(SpacesProfile.databasePathEnvironmentVariable) and "
                 + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable) have to be isolated, or neither: binding one and inheriting the "
                 + "other leaves the test half-attached to a live profile."
         case .explicitDatabasePathInsideLiveUserProfile(let path):

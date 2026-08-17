@@ -44,6 +44,9 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
             try core.attachClient(owner, mode: .owner)
+            // The session row and the attach are mirrored to the database off the engine; the sentinel these
+            // tests write straight into that mirror only lands once the attach it targets has committed.
+            core.debugDrainPersistenceQueue()
             return CoreBox(core: core, paths: paths, root: root)
         }
     }
@@ -156,6 +159,9 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
         try await TerminalEngineActor.run {
             try box.core.detach(clientID: client.id)
             try box.core.attachClient(client, mode: .owner)
+            // The re-attach is mirrored to the database off the engine; the sentinel below only lands once
+            // that write has committed.
+            box.core.debugDrainPersistenceQueue()
         }
         try writeSentinelLease(for: client.id, on: box)
         heartbeat(from: client.id, on: box)
