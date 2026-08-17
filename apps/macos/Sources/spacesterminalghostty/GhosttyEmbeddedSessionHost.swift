@@ -392,6 +392,12 @@
         /// exhausted its retries, an expiry transaction that rolled back, or one reported `.superseded`. In each
         /// case memory asserts something durable state does not, so the next read reseeds from committed truth.
         ///
+        /// A reseed can still read stale rows even when nothing invalidated the cache: a mutation applied while
+        /// the cache was empty (see `pendingAttachmentMutations`) has its durable write enqueued but not yet
+        /// committed, and a concurrent reseed can read the database before that write lands. `mutateAttachmentSnapshot`
+        /// and `currentAttachmentSnapshot()` hold and replay such mutations rather than losing them; see
+        /// `pendingAttachmentMutations`.
+        ///
         /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
         /// attachment/client rows, which is what lets memory lead the mirror. Every attach, detach,
         /// heartbeat-lease touch, ownership transfer, and stale-client expiry routes through this core's
@@ -400,6 +406,18 @@
         /// core (crashed-prior-daemon sessions, never-started reservations), so they can never race one. A
         /// fresh core (daemon restart, exec-in-place handoff) reseeds from the mirror.
         private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
+        /// apply them to (cache empty AND the reseeding disk read also failed). The caller's durable mirror
+        /// write is enqueued regardless of whether the transform could be applied here, so the mutation is
+        /// held rather than dropped: `currentAttachmentSnapshot()` replays these, in order, on top of the next
+        /// successful reseed, which reconstructs the acknowledged state even if that reseed's read predates the
+        /// still-queued write. INVARIANT: a non-nil `cachedAttachmentSnapshot` implies this is empty — entries
+        /// accumulate only while every reseed fails, and are drained together the moment one succeeds.
+        private var pendingAttachmentMutations: [(TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot] = []
+        /// Test-only: when set, `currentAttachmentSnapshot()` treats its reseeding disk read as failed without
+        /// touching the database, so a test can exercise the `pendingAttachmentMutations` path deterministically.
+        /// See `debugSetForceAttachmentSnapshotReseedFailureForTesting`.
+        private var forceAttachmentSnapshotReseedFailureForTesting = false
         /// Last heartbeat instant per remote client, recorded synchronously on the engine the moment a
         /// heartbeat lands — independent of when its coalesced durable lease write commits and of the
         /// attachment-snapshot cache's invalidation lifecycle. `expireStaleRemoteClientsIfNeeded` consults
@@ -821,9 +839,13 @@
 
         /// Applies an attachment mutation to the authoritative in-memory snapshot. A nil snapshot means the
         /// cache is empty AND the reseeding disk read failed; the caller's durable mirror write still goes
-        /// out, and the next successful reseed carries it.
-        private func mutateAttachmentSnapshot(_ transform: (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
-            guard let snapshot = currentAttachmentSnapshot() else { return }
+        /// out regardless, so the transform is held in `pendingAttachmentMutations` instead of being dropped —
+        /// `currentAttachmentSnapshot()` replays it once a reseed succeeds.
+        private func mutateAttachmentSnapshot(_ transform: @escaping (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
+            guard let snapshot = currentAttachmentSnapshot() else {
+                pendingAttachmentMutations.append(transform)
+                return
+            }
             cachedAttachmentSnapshot = transform(snapshot)
         }
 
@@ -2346,10 +2368,26 @@
 
         /// The session's attachment snapshot, served from `cachedAttachmentSnapshot` and read from disk only
         /// on a cache miss. See `cachedAttachmentSnapshot` for the single-writer invariant that makes serving
-        /// the cache on the hot path sound.
+        /// the cache on the hot path sound. A successful reseed replays `pendingAttachmentMutations` on top of
+        /// the rows it read before caching the result: those transforms were already acknowledged to their
+        /// callers and their durable writes are still queued, so the reseed's rows can predate them, and
+        /// replaying is what makes the result equal the acknowledged state rather than a stale one.
+        ///
+        /// Accepted risk: the replay does not distinguish a pending transform whose own durable write later
+        /// exhausted its retries, so a reseed triggered by that write's failure re-applies it anyway. Reaching
+        /// that state needs a database that fails a read (the only way a transform lands in the pending list)
+        /// and then keeps failing the same mutation's write for its full retry span before recovering — and
+        /// even then memory keeps exactly what the caller was acknowledged, the very next reseed converges on
+        /// committed truth (pending is emptied here), and a daemon restart rebuilds attachments from live
+        /// clients. Threading per-write outcome tokens through both cores to exclude that one transform is
+        /// complexity this corner does not justify.
         private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
             if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
+            guard !forceAttachmentSnapshotReseedFailureForTesting,
+                var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            else { return nil }
+            for transform in pendingAttachmentMutations { snapshot = transform(snapshot) }
+            pendingAttachmentMutations.removeAll()
             cachedAttachmentSnapshot = snapshot
             return snapshot
         }
@@ -2374,7 +2412,9 @@
 
         /// Drops the in-memory attachment snapshot so the next read reseeds from the durable mirror. Called
         /// only to reconcile after a durable write did not take what memory already asserts (see
-        /// `cachedAttachmentSnapshot`).
+        /// `cachedAttachmentSnapshot`). Deliberately leaves `pendingAttachmentMutations` untouched: those
+        /// transforms were acknowledged separately from the write that failed here, and their own writes are
+        /// still queued, so they must still replay onto the reseed this triggers.
         private func invalidateAttachmentSnapshotCache() { cachedAttachmentSnapshot = nil }
 
         /// Marks every still-active attachment detached in the in-memory cache so the terminated payload
@@ -2815,6 +2855,13 @@
         func debugHandleTerminalGridReflowForTesting(columns: Int, rows: Int) { handleTerminalGridReflow(columns: columns, rows: rows) }
         func debugHandleSessionClosed() { handleSessionClosed() }
         func debugMarkStartedForTesting() { started = true }
+        /// Test-only: forces the attachment cache empty, exactly as `invalidateAttachmentSnapshotCache()` does
+        /// on the real reconcile path.
+        func debugInvalidateAttachmentSnapshotCacheForTesting() { invalidateAttachmentSnapshotCache() }
+        /// Test-only: see `forceAttachmentSnapshotReseedFailureForTesting`.
+        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) {
+            forceAttachmentSnapshotReseedFailureForTesting = forced
+        }
 
         private func trace(_ message: @autoclosure () -> String) { ghosttyEmbeddedSessionTrace(launchConfiguration.sessionID, message()) }
 
@@ -2974,6 +3021,10 @@
         }
         func debugHandleSessionClosed() { core.debugHandleSessionClosed() }
         func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
+        func debugInvalidateAttachmentSnapshotCacheForTesting() { core.debugInvalidateAttachmentSnapshotCacheForTesting() }
+        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) {
+            core.debugSetForceAttachmentSnapshotReseedFailureForTesting(forced)
+        }
     }
 
 #endif

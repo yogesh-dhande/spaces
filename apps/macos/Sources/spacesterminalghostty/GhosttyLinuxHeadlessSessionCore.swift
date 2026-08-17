@@ -169,8 +169,11 @@
         /// stores nil on a failed read instead, and `currentAttachmentSnapshot()` retries the disk read lazily
         /// on the next access, caching only a successful one. Readers that need a concrete snapshot fall back
         /// to an empty one locally, without ever writing that fallback back into this property, so the next
-        /// read retries; mutators skip applying to a nil snapshot while still enqueueing their durable mirror
-        /// write, and the next successful reseed carries the mutation's data forward from that write.
+        /// read retries; mutators that cannot apply to a nil snapshot hold their transform in
+        /// `pendingAttachmentMutations` instead of dropping it, because the caller's durable mirror write still
+        /// goes out regardless. A reseed can read the database before that write commits, so it is the pending
+        /// transform's own replay — not the reseed's rows alone — that carries the mutation's data forward; see
+        /// `pendingAttachmentMutations`.
         ///
         /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
         /// attachment/client rows, which is what lets memory lead the mirror. Every attach, detach,
@@ -181,6 +184,14 @@
         /// the mirror. Termination's detach-all is durable-only: the control server is gone by then, so nothing
         /// reads this snapshot again.
         private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
+        /// apply them to (cache empty AND the reseeding disk read also failed). Replayed, in order, by
+        /// `seedAttachmentSnapshot` the next time a reseed reads successfully — including a reseed triggered
+        /// from `reconcileAfterFailedLifecycleWrite` — even though that reseed's rows can predate the still-queued
+        /// writes these transforms represent. INVARIANT: a non-nil `cachedAttachmentSnapshot` implies this is
+        /// empty — entries accumulate only while every reseed fails, and are drained together the moment one
+        /// succeeds.
+        private var pendingAttachmentMutations: [(TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot] = []
         /// Rate-limits the durable client lease mirror writes this core enqueues (see `touchClientLease`); the
         /// in-memory lease is refreshed on every heartbeat regardless. Reset for a client on attach and detach —
         /// the only ways this core changes that client's durable row — and wholesale on termination's detach-all.
@@ -1214,20 +1225,24 @@
         }
 
         /// The session's attachment snapshot, served from `cachedAttachmentSnapshot` and read from disk only on
-        /// a cache miss. See `cachedAttachmentSnapshot` for the single-writer invariant that makes serving the
-        /// cache on the hot path sound, and for why a failed disk read on a miss is deliberately not cached.
+        /// a cache miss (via `seedAttachmentSnapshot`, which also replays any `pendingAttachmentMutations`). See
+        /// `cachedAttachmentSnapshot` for the single-writer invariant that makes serving the cache on the hot
+        /// path sound, and for why a failed disk read on a miss is deliberately not cached.
         private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
             if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
-            cachedAttachmentSnapshot = snapshot
-            return snapshot
+            seedAttachmentSnapshot()
+            return cachedAttachmentSnapshot
         }
 
         /// Applies an attachment mutation to the authoritative in-memory snapshot. A nil snapshot means the
         /// cache is empty and the reseeding disk read is currently failing; the caller's durable mirror write
-        /// still goes out, and the next successful reseed carries it.
-        private func mutateAttachmentSnapshot(_ transform: (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
-            guard let snapshot = currentAttachmentSnapshot() else { return }
+        /// still goes out regardless, so the transform is held in `pendingAttachmentMutations` instead of being
+        /// dropped — the next successful reseed replays it (see `seedAttachmentSnapshot`).
+        private func mutateAttachmentSnapshot(_ transform: @escaping (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
+            guard let snapshot = currentAttachmentSnapshot() else {
+                pendingAttachmentMutations.append(transform)
+                return
+            }
             cachedAttachmentSnapshot = transform(snapshot)
         }
 
@@ -1600,8 +1615,28 @@
         /// would silently and permanently convert them into "nobody attached," with nothing left to retry it
         /// (see `cachedAttachmentSnapshot`). `currentAttachmentSnapshot()` retries the read lazily on the next
         /// access and caches only a successful one.
+        ///
+        /// A successful read replays `pendingAttachmentMutations` on top of the rows it read before caching the
+        /// result: those transforms were already acknowledged to their callers and their durable writes are
+        /// still queued, so the read can predate them, and replaying is what makes the cached result equal the
+        /// acknowledged state rather than a stale one.
+        ///
+        /// Accepted risk: the replay does not distinguish a pending transform whose own durable write later
+        /// exhausted its retries, so a reseed triggered by that write's failure re-applies it anyway. Reaching
+        /// that state needs a database that fails a read (the only way a transform lands in the pending list)
+        /// and then keeps failing the same mutation's write for its full retry span before recovering — and
+        /// even then memory keeps exactly what the caller was acknowledged, the very next reseed converges on
+        /// committed truth (pending is emptied here), and a daemon restart rebuilds attachments from live
+        /// clients. Threading per-write outcome tokens through both cores to exclude that one transform is
+        /// complexity this corner does not justify.
         private func seedAttachmentSnapshot() {
-            cachedAttachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            guard var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else {
+                cachedAttachmentSnapshot = nil
+                return
+            }
+            for transform in pendingAttachmentMutations { snapshot = transform(snapshot) }
+            pendingAttachmentMutations.removeAll()
+            cachedAttachmentSnapshot = snapshot
         }
 
         /// The label `enqueueLaunchConfigurationWrite` enqueues under. Every other durable write this core

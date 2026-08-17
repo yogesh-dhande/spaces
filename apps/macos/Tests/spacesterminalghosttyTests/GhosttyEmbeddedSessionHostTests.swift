@@ -3969,6 +3969,63 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// Reproduces the ordering hole `pendingAttachmentMutations` closes: a mutation is acknowledged (its
+    /// durable write goes out) while the cache is empty AND the reseeding disk read is also failing, so it has
+    /// nowhere to apply. Before the fix, `mutateAttachmentSnapshot` silently dropped the transform in that
+    /// case; a later reseed that ran ahead of the still-queued write would then cache stale, pre-mutation rows
+    /// forever, since the cache is only ever invalidated by a write-failure reconcile. This test forces that
+    /// exact window with the `forceAttachmentSnapshotReseedFailureForTesting` seam and a held persistence
+    /// queue, then proves the detach still resolves correctly once the seam is lifted and a reseed runs.
+    func testAttachmentMutationAcknowledgedDuringFailedReseedSurvivesALaggingReseed() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-pending-attachment-mutation", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+
+            let owner = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            try host.attach(client: owner, mode: .owner, into: nil)
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(host.activeOwnerClientID(), owner.id)
+
+            // Empty the cache and make the reseed that would normally repopulate it fail, exactly as a real
+            // reseed racing a busy write lock would: there is neither a cache nor a readable disk row to apply
+            // the coming detach to.
+            host.debugInvalidateAttachmentSnapshotCacheForTesting()
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(true)
+
+            // Park the persistence queue so the detach's durable write is enqueued but held. When the seam is
+            // lifted below, the reseed it triggers reads the DB exactly as it stood before this detach — the
+            // pre-commit rows the real ordering hole exposes.
+            let gate = host.debugHoldPersistenceQueue()
+
+            try host.detach(clientID: owner.id)
+
+            // Lift the seam and force a reseed through an owner-gating read. Its disk read still shows the
+            // owner attached (the parked write hasn't committed), so this only proves the fix if the pending
+            // detach transform is replayed on top of that stale read.
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(false)
+            XCTAssertNil(
+                host.activeOwnerClientID(),
+                "a detach acknowledged while the cache and reseed were both unavailable must survive a reseed that reads pre-commit rows")
+
+            // Release the gate and drain: the durable mirror must converge to the same answer once the parked
+            // write actually commits, proving nothing was lost, only delayed.
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertFalse(activeAttachments.contains { $0.clientID == owner.id })
+        }
+    }
+
     func testDetachingViewerKeepsOwnerFocusState() {
         XCTAssertFalse(
             GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: "owner-client"))
