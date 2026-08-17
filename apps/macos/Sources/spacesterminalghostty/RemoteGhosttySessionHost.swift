@@ -15,12 +15,14 @@
     /// Returns whether the failure is CONCLUSIVE proof the link is gone, not merely that this one send
     /// failed. When `true`, the host discards this pane's queued input (`TerminalInputSerialQueue.cancelAll()`)
     /// instead of letting a backlog typed during the outage drain and deliver late — including any Enter —
-    /// once the link recovers. A bare request timeout answers `false`: the failed send is still reported
-    /// (whatever failure surfacing the model does for it — the disconnect notice, the paced reconnect —
-    /// runs the same as for any other transport failure), but the timeout alone does not prove the queued
-    /// backlog would go nowhere. The interactive control deadline is tight enough
+    /// once the link recovers. Only a connection-level failure (refused, closed, every candidate address
+    /// unreachable) — or a repeat failure during an outage already confirmed — answers `true`.
+    ///
+    /// A bare request timeout answers `false`, and the model does not treat it as an outage either: it
+    /// leaves the pane's state subscription installed and corroborates the timeout with a `.ping` before
+    /// deciding anything. The interactive control deadline is tight enough
     /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that a live but
-    /// congested link can miss it on its own: the send path never touches the main actor
+    /// congested link misses it on its own: the send path never touches the main actor
     /// (`TerminalInputSerialQueue.enqueue` hands off to a detached task that talks to the pinned-TLS
     /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
     /// request client, which acquires its request lock before starting the per-operation deadline, so a
@@ -28,11 +30,9 @@
     /// 5s window once its turn comes. What actually burns that window is the daemon's own answer running
     /// late: under heavy streaming the daemon's serial terminal-engine queue is saturated, so a
     /// keystroke's response can genuinely time out with nothing wrong with the link. Discarding a live
-    /// pane's backlog on that false alarm is the bug this distinction exists to avoid — and a silently
-    /// dead link (nothing ever answers) produces the identical timeout, so the timeout by itself is not
-    /// conclusive either way. Only a connection-level failure (refused, closed, every candidate address
-    /// unreachable) — or a repeat failure during an outage a prior conclusive failure already confirmed —
-    /// answers `true`.
+    /// pane's backlog — or putting a "connection lost" banner over a working pane — on that false alarm is
+    /// the bug this distinction exists to avoid, and a silently dead link (nothing ever answers) produces
+    /// the identical timeout, so the timeout by itself is not conclusive either way.
     public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (

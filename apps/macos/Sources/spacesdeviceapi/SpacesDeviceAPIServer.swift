@@ -78,6 +78,23 @@ extension SpacesDeviceAPICommand {
         default: false
         }
     }
+
+    /// Commands that wait on a terminal session's engine. The control commands each make a synchronous
+    /// round trip over that session's control socket and get no answer until the engine drains what it is
+    /// already working on; `.state` waits on the same engine from the other side, since a session this
+    /// daemon hosts live is read straight out of its core (`liveTerminalSessionStateProvider`, a
+    /// `TerminalEngineActor.runSynchronously` export) rather than over the socket. Run inline on the
+    /// serial state queue they hold it for that whole wait, so a session saturated by output stalls every
+    /// other request on the daemon — including the `.ping` a client sends precisely to ask whether the
+    /// link is still alive after an input send timed out. That probe would then time out too and the
+    /// client would tear down a healthy stream. Both transports divert these to `terminalControlQueue`
+    /// instead.
+    fileprivate var runsOnTerminalControlQueue: Bool {
+        switch self {
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
+        default: false
+        }
+    }
 }
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
@@ -351,10 +368,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         }
                         return
                     }
+                    // Diverting a command to a worker queue lets a later request from another connection
+                    // finish first. That reorders nothing a client can observe: this connection reads one
+                    // response before it sends its next request, so its own commands stay ordered, and
+                    // requests racing in on separate connections have no ordering guarantee to begin with.
                     if request.command.isAgentHookCommand {
                         server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnWorkspaceTeardownQueue {
                         server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnTerminalControlQueue {
+                        server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else {
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
@@ -570,12 +593,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
                     let response: SpacesDeviceAPIResponse
                     do {
+                        // Authorization stays on the state queue; only the long or engine-blocking work
+                        // moves off it. A command answered from a worker queue can finish after one that
+                        // arrived later on another connection, which reorders nothing a client observes:
+                        // each connection reads its response before sending its next request, and separate
+                        // connections have no ordering guarantee to begin with.
                         if request.command.isAgentHookCommand {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleAgentHookRequestOnWorkerQueue(request)
                         } else if request.command.runsOnWorkspaceTeardownQueue {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnTerminalControlQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleTerminalControlRequestOnWorkerQueue(request)
                         } else {
                             response = try server.syncOnQueue {
                                 try server.authorize(request)
@@ -824,6 +855,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// cannot stall every other client's overview polls behind it. Serial rather than concurrent because
     /// two teardowns in the same repository would otherwise race on the same git index lock.
     private let workspaceTeardownQueue = DispatchQueue(label: "spaces.device.api.workspace-teardown", qos: .userInitiated)
+    /// Terminal input and control round trips block on the target session's engine (see
+    /// `runsOnTerminalControlQueue`). Serialize them here so a stalled engine holds up only other
+    /// terminal controls and never the state queue that answers pings, overviews, and state reads.
+    private let terminalControlQueue = DispatchQueue(label: "spaces.device.api.terminal-control", qos: .userInitiated)
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1264,10 +1299,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
-        case .state(let payload): return try handleStateRequest(payload)
-        case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
-        case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
-        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        // Both transports divert engine-blocking terminal commands to `terminalControlQueue` before they
+        // reach here (see `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: return try handleTerminalControlQueueRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
@@ -1369,6 +1403,39 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #if os(Linux) && canImport(OpenSSL)
         private func handleWorkspaceTeardownRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try workspaceTeardownQueue.sync { try handleWorkspaceTeardownRequest(request) }
+        }
+    #endif
+
+    /// Runs one engine-blocking terminal command (see `runsOnTerminalControlQueue`).
+    ///
+    /// These handlers read session files and talk to the session's control socket, and `.state` reads the
+    /// live core through the immutable provider closure and emits a metric; they touch none of the server
+    /// state the Device API queue confines, so they need nothing hoisted out before the hop.
+    private func handleTerminalControlQueueRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        switch request.command {
+        case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
+        case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
+        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        case .state(let payload): return try handleStateRequest(payload)
+        default: preconditionFailure("Only engine-blocking terminal commands run on the terminal-control queue.")
+        }
+    }
+
+    #if canImport(Network) && canImport(Security)
+        private func handleTerminalControlRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            terminalControlQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleTerminalControlQueueRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
+        private func handleTerminalControlRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try terminalControlQueue.sync { try handleTerminalControlQueueRequest(request) }
         }
     #endif
 
