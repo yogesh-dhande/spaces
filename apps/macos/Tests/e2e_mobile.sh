@@ -37,7 +37,11 @@ E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
-TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
+# Deep enough that the path wraps across several rows on the phone and across more than one row on the
+# owner's wider grid, which is what makes the link a soft-wrapped line rather than a single row of text.
+# The scenario taps it while the phone still shows the owner's grid cropped to phone width, where a link
+# reassembled from wrapped rows would be missing everything past the crop (#492).
+TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/spaces-mobile-e2e-link-preview/apps/macos/prototypes/status-tabs-command-palette/artifacts/wrapped-path-fixture/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
 SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll workspace-delete-tab-lists session-end-scroll)
 REMOTE_UI_SCENARIOS=(takeover two-session)

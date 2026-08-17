@@ -27,10 +27,25 @@ public enum GhosttyTerminalSnapshotViewport {
         return crop(snapshot, window: window)
     }
 
+    /// Whether `window` shows `snapshot` whole, which is exactly the condition under which ``crop(_:window:)``
+    /// hands the snapshot back untouched.
+    public static func covers(_ snapshot: GhosttyTerminalSnapshot, window: Window) -> Bool {
+        coversColumns(snapshot, window: window) && window.rowOffset == 0 && window.rows == snapshot.rows
+    }
+
+    /// Whether `window` keeps every row it shows at its full width.
+    ///
+    /// This is the axis that decides whether a logical line can be read back out of a displayed frame.
+    /// Soft-wrap metadata is carried per cell, so a column crop keeps each row's "wraps into the next row"
+    /// bit while the columns past the window are gone, and anything that reassembles a wrapped line from
+    /// such a frame reads a line that was never on screen: each row's visible slice, concatenated. A row
+    /// window drops whole rows instead, which leaves the rows it does show intact.
+    public static func coversColumns(_ snapshot: GhosttyTerminalSnapshot, window: Window) -> Bool {
+        window.columnOffset == 0 && window.columns == snapshot.columns
+    }
+
     public static func crop(_ snapshot: GhosttyTerminalSnapshot, window: Window) -> GhosttyTerminalSnapshot {
-        guard window.columns != snapshot.columns || window.rows != snapshot.rows || window.columnOffset != 0 || window.rowOffset != 0 else {
-            return snapshot
-        }
+        guard !covers(snapshot, window: window) else { return snapshot }
 
         let columnOffset = min(max(window.columnOffset, 0), max(snapshot.columns - 1, 0))
         let rowOffset = min(max(window.rowOffset, 0), max(snapshot.rows - 1, 0))

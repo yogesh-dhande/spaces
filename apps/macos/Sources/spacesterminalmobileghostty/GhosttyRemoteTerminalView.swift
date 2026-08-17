@@ -254,6 +254,22 @@ import Foundation
         /// leaves the cropped frame byte-identical), so it is cleared there too rather than skipped as a
         /// no-op.
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
+        /// Whether ``currentRenderedSnapshot`` keeps every row it shows at the host's full width rather
+        /// than slicing columns off it.
+        private var renderedSnapshotCoversHostColumns = false
+        /// Whether the frame the mirror surface currently holds keeps every row it shows at the host's
+        /// full width. Link activation is gated on this: soft-wrap metadata rides on every cell, so a
+        /// column crop keeps each row's "wraps into the next row" bit while the columns it dropped are
+        /// gone, and Ghostty's link hit-test joins wrapped rows. Probing a column-cropped frame therefore
+        /// assembles a link out of each row's visible slice with the rest of the line missing: a
+        /// phone-width view of a Mac-width grid during ownership takeover turns a wrapped file path into a
+        /// path that resolves to nothing (#492). Rows are deliberately not part of this: the phone shows
+        /// fewer rows than the session routinely (the keyboard alone takes a third of them), and dropping
+        /// whole rows leaves the rows it does show readable, so gating on them would suppress ordinary
+        /// link taps. False until a frame has actually been applied, and cleared wherever the surface this
+        /// describes goes away or is rebound, so a rebound surface never inherits the coverage of the
+        /// previous holder's frame.
+        private var appliedFrameCoversHostColumns = false
         private var lastSurfaceGeometry: SurfaceGeometry?
         private var keyboardViewportRefreshTask: Task<Void, Never>?
         private var pendingKeyboardViewportSettlementID: UUID?
@@ -297,6 +313,13 @@ import Foundation
         /// Stands in for the live mirror surface's mouse-capture state, which only exists once a real
         /// surface has applied a frame.
         var debugMouseCapturedForTesting: Bool?
+        /// Reads back, and stands in for, what the render path recorded about the frame the mirror surface
+        /// holds. Like the capture state above, the real value only exists once a real surface has applied
+        /// a frame.
+        var debugAppliedFrameCoversHostColumnsForTesting: Bool {
+            get { appliedFrameCoversHostColumns }
+            set { appliedFrameCoversHostColumns = newValue }
+        }
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
@@ -421,6 +444,7 @@ import Foundation
             latestRenderFrame = nil
             latestSnapshot = nil
             currentRenderedSnapshot = nil
+            renderedSnapshotCoversHostColumns = false
             lastSurfaceGeometry = nil
             releaseSharedMirror()
             reportInputReadinessIfNeeded(force: true)
@@ -437,6 +461,7 @@ import Foundation
             mirror = nil
             lastSurfaceGeometry = nil
             lastAppliedRenderFrameIdentity = nil
+            appliedFrameCoversHostColumns = false
             GhosttySharedTerminalMirror.shared.release(from: self)
         }
 
@@ -456,6 +481,7 @@ import Foundation
             mirror = nil
             lastSurfaceGeometry = nil
             lastAppliedRenderFrameIdentity = nil
+            appliedFrameCoversHostColumns = false
             didSurrenderSharedMirror = true
             setNeedsDisplay()
             reportInputReadinessIfNeeded()
@@ -866,6 +892,7 @@ import Foundation
             renderLatestSnapshotCallCountForTesting += 1
             guard let latestSnapshot else {
                 currentRenderedSnapshot = nil
+                renderedSnapshotCoversHostColumns = false
                 latestRenderFrame = nil
                 setNeedsDisplay()
                 emitRenderedTextIfNeeded(force: false)
@@ -877,6 +904,7 @@ import Foundation
             let window = viewportWindow(for: latestSnapshot)
             let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
             currentRenderedSnapshot = cropped
+            renderedSnapshotCoversHostColumns = GhosttyTerminalSnapshotViewport.coversColumns(latestSnapshot, window: window)
             emitHostRenderEvent(
                 "host_view_snapshot_ready", dedupeKey: lastRenderKey,
                 attributes: ["snapshot_columns": "\(cropped.columns)", "snapshot_rows": "\(cropped.rows)"])
@@ -936,6 +964,7 @@ import Foundation
                 // cells, so this view's next frame has to be applied even if it matches its own last one.
                 lastSurfaceGeometry = nil
                 lastAppliedRenderFrameIdentity = nil
+                appliedFrameCoversHostColumns = false
                 updateSurfaceGeometry()
                 if let surface = mirrorSurface() {
                     GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
@@ -968,7 +997,25 @@ import Foundation
             }
         }
 
+        /// Probes the mirror for a link under the tap, reporting whether one opened.
+        ///
+        /// A frame narrower than the host's grid is never probed. Ghostty resolves a link by joining the
+        /// rows the frame says are soft-wrapped, and a column crop keeps those wrap bits while dropping
+        /// the columns past the phone's width, so the probe would assemble a link out of each row's
+        /// visible slice. Rather than open a link the user never saw, the tap falls through to the
+        /// ordinary non-link handling; the crop is only ever a transient (a phone-width viewport showing a
+        /// Mac-width grid until the owner runtime resizes), and the same tap a moment later opens the
+        /// complete link.
+        ///
+        /// Row crops are deliberately allowed. The keyboard shortens the viewport every time it appears,
+        /// so gating on full row coverage would disable link taps for as long as the keyboard is up. The
+        /// residual risk is a wrapped link that straddles the first or last visible row: its off-screen
+        /// rows are gone from the mirror, so the probe reassembles only the visible suffix or prefix.
+        /// That requires tapping the one wrapped line cut by the viewport edge and is accepted; the
+        /// mirror does not report which rows a resolved link spans, so rejecting only boundary-crossing
+        /// lines is not possible from here.
         private func openTerminalLink(at location: CGPoint) -> Bool {
+            guard appliedFrameCoversHostColumns else { return false }
             if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
             guard let surface = mirrorSurface() else { return false }
             let position = Self.ghosttyMousePosition(for: location)
@@ -1066,11 +1113,18 @@ import Foundation
         private func applyLatestRenderFrameIfPossible() {
             guard let mirror, let frame = mirrorRenderFrame() else {
                 lastAppliedRenderFrameIdentity = nil
+                appliedFrameCoversHostColumns = false
                 setNeedsDisplay()
                 return
             }
             let identity = appliedRenderFrameIdentity(for: frame)
-            guard identity != lastAppliedRenderFrameIdentity else { return }
+            guard identity != lastAppliedRenderFrameIdentity else {
+                // The surface already holds this frame, so its coverage is this frame's: a host grid that
+                // widened without changing the cells this viewport can crop leaves the frame
+                // byte-identical while turning it into a column slice of a wider grid.
+                appliedFrameCoversHostColumns = renderedSnapshotCoversHostColumns
+                return
+            }
             let applyStartedAt = Date()
             // The draw-free apply: the `ghostty_surface_refresh` below is what wakes the render thread
             // to build and present this frame, so a synchronous draw here would only block on the swap
@@ -1089,12 +1143,14 @@ import Foundation
             }
             if applied {
                 lastAppliedRenderFrameIdentity = identity
+                appliedFrameCoversHostColumns = renderedSnapshotCoversHostColumns
                 if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
                 // The shared surface stays hidden from the moment it is handed over until a frame of
                 // this view's own session has landed on it, so a rebind never shows the previous
                 // session's pixels inside this view.
                 GhosttySharedTerminalMirror.shared.revealSurface(from: self)
             } else {
+                appliedFrameCoversHostColumns = false
                 ghosttyRemoteTerminalTrace("mirror_apply_failed")
                 setNeedsDisplay()
             }

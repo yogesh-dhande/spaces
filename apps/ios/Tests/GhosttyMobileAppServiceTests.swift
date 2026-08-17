@@ -3125,6 +3125,7 @@
         func testRemoteTerminalHostViewTapOnLinkConsumesTapBeforeFocus() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugTapLinkHandlerForTesting = { point in
                 XCTAssertEqual(point, CGPoint(x: 12, y: 18))
                 return true
@@ -3149,6 +3150,7 @@
         func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugTapLinkHandlerForTesting = { _ in false }
             hostView.debugMouseCapturedForTesting = true
             var sentButtons: [(button: UInt8, pressed: Bool)] = []
@@ -3171,6 +3173,7 @@
         func testRemoteTerminalHostViewTapOnLinkOpensLocallyInsteadOfClickingTheTrackingApplication() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugMouseCapturedForTesting = true
             var probedPoints: [CGPoint] = []
             hostView.debugTapLinkHandlerForTesting = { point in
@@ -3186,6 +3189,77 @@
 
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .sentClick)
             XCTAssertEqual(sentButtons.map(\.pressed), [true, false], "a tap off a link still drives the application")
+        }
+
+        /// While the phone shows a frame narrower than the host's grid (every frame between taking
+        /// ownership and the owner runtime resizing to the phone's width), a tap must not activate a link
+        /// at all. The probe joins the rows the frame marks as soft-wrapped, and those marks survive a
+        /// column crop while the columns past the phone's width do not, so probing there yields a link the
+        /// user never saw (#492). The tap falls through to the ordinary handling instead, and the same tap
+        /// once the frame is full width opens the link.
+        func testRemoteTerminalHostViewTapDoesNotProbeForLinksWhileTheFrameIsCropped() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            var probeCount = 0
+            hostView.debugTapLinkHandlerForTesting = { _ in
+                probeCount += 1
+                return true
+            }
+
+            XCTAssertFalse(
+                hostView.debugAppliedFrameCoversHostColumnsForTesting, "a view that has applied no frame must not be treated as showing one")
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+            XCTAssertEqual(probeCount, 0, "a frame narrower than the host's grid must not be probed for links")
+
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink)
+            XCTAssertEqual(probeCount, 1)
+        }
+
+        /// The coverage the link guard reads is recorded from the frame the mirror applied, so it has to
+        /// track the width the phone is cropping away: a Mac-width snapshot in a phone-width viewport
+        /// reaches the surface with columns missing, and the same snapshot at the viewport's own width
+        /// reaches it whole. A snapshot with more rows than the viewport shows is still full width, so it
+        /// stays link-activatable: the phone shows fewer rows than the session constantly (the keyboard
+        /// alone takes a third of them), and the rows it does show are intact.
+        func testRemoteTerminalHostViewRecordsWhetherTheAppliedFrameCoversTheHostWidth() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "host-grid-coverage") { view in
+                view.setSurfaceViewportSizeForTesting(columns: 49, rows: 20)
+            }
+            defer { hostView.removeFromSuperview() }
+
+            hostView.update(snapshot: filledSnapshot(columns: 105, rows: 20), renderStateKey: "owner|mac-width", fallbackText: "")
+            XCTAssertFalse(
+                hostView.debugAppliedFrameCoversHostColumnsForTesting, "a 105-column host grid in a 49-column viewport reaches the surface as a slice"
+            )
+
+            hostView.update(snapshot: filledSnapshot(columns: 49, rows: 20), renderStateKey: "owner|phone-width", fallbackText: "")
+            XCTAssertTrue(hostView.debugAppliedFrameCoversHostColumnsForTesting, "a host grid the viewport fits reaches the surface whole")
+
+            hostView.update(snapshot: filledSnapshot(columns: 49, rows: 40), renderStateKey: "owner|phone-width-tall", fallbackText: "")
+            XCTAssertTrue(
+                hostView.debugAppliedFrameCoversHostColumnsForTesting,
+                "a grid taller than the viewport still shows its rows at full width, so links stay activatable")
+
+            hostView.prepareForDismantle()
+            XCTAssertFalse(hostView.debugAppliedFrameCoversHostColumnsForTesting, "releasing the mirror drops what it recorded about the surface")
+        }
+
+        private func filledSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
+            GhosttyTerminalSnapshot(
+                columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
+                defaultBackgroundRGB: 0x1A1E26,
+                cells: (0..<(columns * rows)).map { index in
+                    GhosttyTerminalSnapshot.Cell(
+                        codepoint: UnicodeScalar("a").value + UInt32(index % 26), foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
+                })
         }
 
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {

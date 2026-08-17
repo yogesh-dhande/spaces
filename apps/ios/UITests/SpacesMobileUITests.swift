@@ -206,14 +206,34 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
-        try takeOverSessionFromList(
-            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview")
         let linkText = configuration.terminalLinkText
         XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
+
+        // Opening the session starts the owner's render epoch on the daemon's bootstrap snapshot, which is
+        // still at the previous owner's width, so the phone shows that frame cropped to phone width until
+        // its own resize round-trips. A tap in that window must not open anything: the frame on screen
+        // carries each wrapped row's soft-wrap metadata without the columns the crop dropped, so a link
+        // resolved from it is a path the user never saw (#492).
+        var croppedTapReport = CroppedFrameTapReport()
+        try takeOverSessionFromList(
+            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview",
+            afterOpeningSession: {
+                croppedTapReport = tapTerminalTextWhileHostGridIsCropped(
+                    String(linkText.prefix(24)), in: app, configuration: configuration, timeout: 20)
+            })
+        print("terminal-link-preview cropped-frame window: \(croppedTapReport)")
+        XCTAssertGreaterThan(
+            croppedTapReport.tapCount, 0,
+            "No tap reached the phone while it was showing the host grid cropped. \(croppedTapReport) "
+                + "\(latestRenderDump(configuration: configuration).map { "\($0)" } ?? "No render dump was available.")")
+
         XCTAssertTrue(tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20), "Unable to tap terminal text \(linkText)")
         XCTAssertTrue(
             waitForE2EEvent(configuration: configuration, kind: "open_link", detailContains: linkText, timeout: 10),
             "The terminal did not report opening \(linkText)")
+        for opened in e2eEventDetails(configuration: configuration, kind: "open_link") {
+            XCTAssertEqual(opened, linkText, "The terminal opened a link that was never on screen whole")
+        }
         XCTAssertTrue(
             waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
             "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))")
@@ -714,6 +734,11 @@ final class SpacesMobileUITests: XCTestCase {
                     isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
                 })
         else { return false }
+        return tapTerminalText(target, in: app, configuration: configuration, dump: dump)
+    }
+
+    /// Taps the text where the given dump says it is, reporting whether a tap was delivered.
+    private func tapTerminalText(_ target: String, in app: XCUIApplication, configuration: UITestConfiguration, dump: UITestRenderDump) -> Bool {
         let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let columns = dump.viewportColumns, columns > 0 else { return false }
         let configuredRows = dump.viewportRows ?? lines.count
@@ -726,6 +751,74 @@ final class SpacesMobileUITests: XCTestCase {
             return true
         }
         return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
+    }
+
+    /// What a run of `tapTerminalTextWhileHostGridIsCropped` observed, in seconds from the moment it
+    /// started watching, so a failure says whether the window was missed or never opened at all.
+    private struct CroppedFrameTapReport: CustomStringConvertible {
+        var tapCount = 0
+        var croppedObservations = 0
+        var openedAt: TimeInterval?
+        var closedAt: TimeInterval?
+        var tapRequestedAt: TimeInterval?
+        var tapDeliveredAt: TimeInterval?
+        var stillCroppedAfterTap = false
+
+        var description: String {
+            let format: (TimeInterval?) -> String = { $0.map { String(format: "%.3f", $0) } ?? "never" }
+            return "croppedTaps=\(tapCount) croppedObservations=\(croppedObservations) openedAt=\(format(openedAt)) "
+                + "closedAt=\(format(closedAt)) tapRequestedAt=\(format(tapRequestedAt)) tapDeliveredAt=\(format(tapDeliveredAt)) "
+                + "stillCroppedAfterTap=\(stillCroppedAfterTap)"
+        }
+    }
+
+    /// Watches for the window in which the phone is showing a slice of a wider host grid and taps the text
+    /// as soon as it opens.
+    ///
+    /// That window opens when this device claims the session: the owner's render epoch starts on the
+    /// daemon's bootstrap snapshot, which is still the previous owner's grid, and closes as soon as this
+    /// device's own resize round-trips and the daemon sends a frame at phone width. It is short and it is
+    /// the only place the phone applies a cropped frame at all (a viewer renders no live frames), so the
+    /// dump is polled tightly rather than at the leisurely cadence the settled-state waits use.
+    ///
+    /// A cropped frame keeps each row's soft-wrap metadata while dropping the columns past the phone's
+    /// width, so resolving a link from it assembles a value out of each row's visible slice: a file path
+    /// with its middle missing that the daemon then rejects (#492). Tapping here is how the test reaches
+    /// that state; what it asserts is what the tap produced, not how many landed.
+    private func tapTerminalTextWhileHostGridIsCropped(
+        _ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval
+    ) -> CroppedFrameTapReport {
+        var report = CroppedFrameTapReport()
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeout)
+        while Date() < deadline {
+            guard let dump = latestRenderDump(configuration: configuration), dump.sessionID == configuration.sessionID, dump.showsTerminalSurface
+            else {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                continue
+            }
+            guard dump.showsCroppedHostGrid else {
+                // The phone reflows to its own width exactly once, so once the window has closed waiting
+                // out the rest of the timeout would only delay the result.
+                if report.openedAt != nil {
+                    report.closedAt = Date().timeIntervalSince(start)
+                    return report
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                continue
+            }
+            report.croppedObservations += 1
+            if report.openedAt == nil { report.openedAt = Date().timeIntervalSince(start) }
+            guard report.tapCount == 0 else {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                continue
+            }
+            report.tapRequestedAt = Date().timeIntervalSince(start)
+            if tapTerminalText(target, in: app, configuration: configuration, dump: dump) { report.tapCount += 1 }
+            report.tapDeliveredAt = Date().timeIntervalSince(start)
+            report.stillCroppedAfterTap = latestRenderDump(configuration: configuration)?.showsCroppedHostGrid == true
+        }
+        return report
     }
 
     private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
@@ -919,13 +1012,18 @@ final class SpacesMobileUITests: XCTestCase {
         return row.exists && row.isEnabled && row.isHittable
     }
 
+    /// - Parameter afterOpeningSession: Runs as soon as the session row has been tapped, before any wait
+    ///   for the detail view or for ownership. Opening a session claims it, so this is the earliest a
+    ///   caller can observe the render epoch that starts on the previous owner's wider grid.
     private func takeOverSessionFromList(
-        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String
+        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String,
+        afterOpeningSession: () -> Void = {}
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
         XCTAssertTrue(revealTerminalRow(sessionRow, in: app, timeout: 8), "Terminal row \(sessionID) was not ready for interaction during \(context)")
         sessionRow.tap()
+        afterOpeningSession()
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
         if !sessionDetail.waitForExistence(timeout: 8) {
@@ -1154,6 +1252,19 @@ final class SpacesMobileUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return e2eEventExists(at: url, kind: kind, detailContains: detailContains)
+    }
+
+    /// Every detail the app recorded for the given event kind, in the order it recorded them.
+    private func e2eEventDetails(configuration: UITestConfiguration, kind: String) -> [String] {
+        guard let eventLogPath = configuration.eventLogPath, let data = try? Data(contentsOf: URL(fileURLWithPath: eventLogPath)),
+            let text = String(data: data, encoding: .utf8)
+        else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let lineData = String(line).data(using: .utf8), let event = try? JSONDecoder().decode(UITestE2EEvent.self, from: lineData),
+                event.kind == kind
+            else { return nil }
+            return event.detail ?? ""
+        }
     }
 
     private func e2eEventExists(at url: URL, kind: String, detailContains: String) -> Bool {
@@ -1397,6 +1508,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let isInputSurfaceReady: Bool
     let viewportColumns: Int?
     let viewportRows: Int?
+    let snapshotColumns: Int?
+    let snapshotRows: Int?
     let snapshotText: String?
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
@@ -1417,6 +1530,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case isInputSurfaceReady
         case viewportColumns
         case viewportRows
+        case snapshotColumns
+        case snapshotRows
         case snapshotText
         case errorMessage
         case isPreparingLinkPreview
@@ -1439,6 +1554,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         isInputSurfaceReady = try container.decode(Bool.self, forKey: .isInputSurfaceReady)
         viewportColumns = try container.decodeIfPresent(Int.self, forKey: .viewportColumns)
         viewportRows = try container.decodeIfPresent(Int.self, forKey: .viewportRows)
+        snapshotColumns = try container.decodeIfPresent(Int.self, forKey: .snapshotColumns)
+        snapshotRows = try container.decodeIfPresent(Int.self, forKey: .snapshotRows)
         snapshotText = try container.decodeIfPresent(String.self, forKey: .snapshotText)
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         isPreparingLinkPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreparingLinkPreview) ?? false
@@ -1451,6 +1568,14 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     }
 
     var combinedText: String { [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n") }
+
+    /// Whether the phone is showing a slice of a wider host grid. The render path crops the host's
+    /// snapshot to the viewport, so while this holds every row on screen is missing the columns past the
+    /// viewport's width.
+    var showsCroppedHostGrid: Bool {
+        guard let snapshotColumns, let viewportColumns, viewportColumns > 0 else { return false }
+        return snapshotColumns > viewportColumns
+    }
 
     var hasError: Bool {
         guard let errorMessage else { return false }
@@ -1473,7 +1598,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         [
             "sessionID=\(sessionID)", "renderMode=\(renderMode)", "isOwner=\(isOwner)", "showsTerminalSurface=\(showsTerminalSurface)",
             "isBusy=\(isBusy)", "isPreparingInput=\(isPreparingInput)", "isInputSurfaceReady=\(isInputSurfaceReady)",
-            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
+            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")",
+            "snapshot=\(snapshotColumns.map(String.init) ?? "?")x\(snapshotRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
             "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
             "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")", "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)", "snapshotTextLength=\(snapshotText?.count ?? 0)", "renderedTextLength=\(renderedText.count)",
