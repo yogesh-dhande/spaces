@@ -899,6 +899,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Without it every state read — including the one behind each pane attach — makes the daemon connect to
     /// its own session's subscription socket and export a full frame back over that unix round trip.
     private let liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider?
+    /// Catalog entries for the daemon's live in-process cores, injected so the overview (and the other
+    /// live-session listings below) can cover the write-behind window before a freshly created session's
+    /// lifecycle rows commit. Nil in tests or a misconfigured daemon; the merge then falls back to the
+    /// DB-only listing, same as before this provider existed.
+    private let liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
@@ -998,6 +1003,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
         liveTerminalSessionStateProvider = nil
+        liveInMemoryTerminalSessionsProvider = nil
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
@@ -1019,6 +1025,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil, liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
+        liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -1036,6 +1043,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
+        self.liveInMemoryTerminalSessionsProvider = liveInMemoryTerminalSessionsProvider
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
@@ -1898,7 +1906,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     agentWindows: try store.agentWindows(workspaceID: workspace.id))
             }
         }
-        let liveTerminals = (try? TerminalSessionCatalog.listLiveSessions().count) ?? 0
+        let liveTerminals = ((try? liveTerminalSessions()) ?? []).count
         return makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
     }
 
@@ -1996,7 +2004,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil))
             }
         }
-        let localSessions = try TerminalSessionCatalog.listLiveSessions()
+        let localSessions = try liveTerminalSessions()
         let sessions = mergedTerminalSessions(localSessions)
         // One query for the whole build: the alternative asked per row, and each answer opened its own
         // connection and JSON-decoded a ~36 KB payload to test a single field.
@@ -2042,6 +2050,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
         return (automationSummaries, runSummaries)
+    }
+
+    /// The live-session listing every Device API endpoint below reads instead of calling
+    /// `TerminalSessionCatalog.listLiveSessions()` directly, so all of them see the same in-memory merge.
+    /// The merge itself lives on `TerminalSessionCatalog` (spacesterminalcore) rather than here so
+    /// `SpacesdMain`, which imports `spacesdeviceapi` only conditionally, can share it too.
+    private func liveTerminalSessions() throws -> [TerminalSessionCatalogEntry] {
+        TerminalSessionCatalog.mergingLiveInMemorySessions(
+            try TerminalSessionCatalog.listLiveSessions(), inMemory: liveInMemoryTerminalSessionsProvider?() ?? [])
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -2935,7 +2952,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// breakdown (built once for the whole listing against the daemon's current live-session set).
     private func automationRunSummaries(_ runs: [AutomationRun], store: SQLiteStore) throws -> [TerminalServiceAutomationRunSummary] {
         guard !runs.isEmpty else { return [] }
-        let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
+        let liveSessions = (try? liveTerminalSessions()) ?? []
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
         let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: runs.map(\.id))
         var namesByAutomationID: [String: String] = [:]

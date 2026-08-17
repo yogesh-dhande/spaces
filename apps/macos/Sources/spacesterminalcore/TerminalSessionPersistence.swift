@@ -220,12 +220,32 @@ public enum TerminalSessionPersistence {
     /// Writes the launch-time configuration. `user_title` is intentionally excluded: it is owned
     /// by `writeUserTitle` (the rename command), so launch-config rewrites can never clobber a
     /// manual rename.
-    public static func writeLaunchConfiguration(_ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
+    public static func writeLaunchConfiguration(
+        _ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
+        clearingPreviousRunRuntimeState: Bool = true, databasePath: String? = nil
+    ) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             try database.execute(
                 sql: "DELETE FROM terminal_sessions WHERE root_directory = ? AND session_id <> ?", bindings: [root, configuration.sessionID])
+            // A terminal-state (exited/failed) runtime row under this root always belongs to a finished
+            // previous run. Leaving it in place would let launch-pending probes read a same-session-id
+            // relaunch as dead in the gap between this commit (which clears the pending-launch registry
+            // entry) and the new run's first runtime-state write, which lands later behind this write on
+            // the core's serial persistence queue. Deleting only the non-interactive states leaves a live
+            // handoff's starting/running row untouched. `readRuntimeState` is keyed by root_directory, so
+            // root is the right scope here too.
+            //
+            // A handoff resume re-issues this same write for a session whose exited/failed runtime row is
+            // not a previous run's leftover: it is the current run's state carried across the daemon-update
+            // handoff, and its `bell_at` column is the bell alert's dismissal identity that the resumed core
+            // republishes. `resumeFromHandoff` passes `clearingPreviousRunRuntimeState: false` so that row
+            // survives this write.
+            if clearingPreviousRunRuntimeState {
+                try database.execute(
+                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND state IN ('exited', 'failed')", bindings: [root])
+            }
             try database.execute(
                 sql: """
                     INSERT INTO terminal_sessions(
@@ -414,10 +434,10 @@ public enum TerminalSessionPersistence {
         return try decodeRuntimeState(row: row)
     }
 
-    public static func readAttachmentSnapshot(paths: TerminalSessionPaths) throws -> TerminalSessionAttachmentSnapshot {
+    public static func readAttachmentSnapshot(paths: TerminalSessionPaths, databasePath: String? = nil) throws -> TerminalSessionAttachmentSnapshot {
         let root = normalizedRootDirectory(paths.rootDirectory)
         // See `readLaunchConfiguration`: the lane returns the raw rows, decoding happens after it releases.
-        let (clientRows, attachmentRows) = try withProfileDatabase { database -> ([[String]], [[String]]) in
+        let (clientRows, attachmentRows) = try withProfileDatabase(at: databasePath) { database -> ([[String]], [[String]]) in
             let clients = try database.queryRows(
                 sql: """
                     SELECT client_id, kind, identity_label, COALESCE(identity_host_name, ''), COALESCE(identity_device_name, ''),
@@ -458,11 +478,13 @@ public enum TerminalSessionPersistence {
         return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
     }
 
-    public static func appendPendingAgentSignal(_ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths) throws {
+    public static func appendPendingAgentSignal(
+        _ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths, databasePath: String? = nil
+    ) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let environmentKeysJSON = try encodeEnvironmentKeys(event.environmentKeys)
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             let sessionID = try existingSessionID(rootDirectory: root, database: database)
             guard sessionID == event.sessionID else { throw TerminalSessionPersistenceError.unknownSession(event.sessionID) }
             try database.execute(
@@ -531,9 +553,9 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func upsertClient(_ client: TerminalClient, paths: TerminalSessionPaths) throws {
+    public static func upsertClient(_ client: TerminalClient, paths: TerminalSessionPaths, databasePath: String? = nil) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             let sessionID = try existingSessionID(rootDirectory: root, database: database)
             try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
         }
@@ -559,11 +581,12 @@ public enum TerminalSessionPersistence {
     }
 
     public static func attachClient(
-        sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, paths: TerminalSessionPaths, attachedAt: String
+        sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, paths: TerminalSessionPaths, attachedAt: String,
+        databasePath: String? = nil
     ) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try paths.ensureDirectories()
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
             guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
             let connectedClient = TerminalClient(
@@ -605,9 +628,9 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func detachClient(id clientID: String, paths: TerminalSessionPaths, detachedAt: String) throws {
+    public static func detachClient(id clientID: String, paths: TerminalSessionPaths, detachedAt: String, databasePath: String? = nil) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             try database.execute(
                 sql: """
                     UPDATE terminal_clients
@@ -782,9 +805,11 @@ public enum TerminalSessionPersistence {
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
     ) throws -> [String] { try staleRemoteClients(paths: paths, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval).map(\.clientID) }
 
-    public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
+    public static func transferOwnership(
+        sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String, databasePath: String? = nil
+    ) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabaseTransaction { database in
+        try withProfileDatabaseTransaction(at: databasePath) { database in
             let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
             guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
             guard

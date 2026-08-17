@@ -84,31 +84,35 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// Coalescing key for the runtime-state write chain; a fresh persist supersedes any still-queued one.
     /// Namespaced so it never collides with per-client lease-touch keys (`lease:<clientID>`).
     public static let runtimeStateCoalescingKey = "runtime_state"
-    /// Bounded retry policy for a failed runtime-state write, applied to every state (not just `.exited`). The
-    /// Linux headless core has no periodic runtime-state refresh — its persists are purely event-driven
-    /// (startup, per output chunk, attach/detach/takeover/resize/handoff, terminate) — so a dropped write of
-    /// any state leaves stale durable metadata until the next event. A superseded write abandons its retry
-    /// (latest-wins), so a running-state retry can never overwrite a newer state.
-    public static let runtimeStateWriteMaxAttempts = 5
-    /// Production back-off between retry attempts. Injectable via `init` (see `runtimeStateWriteRetryDelay`
-    /// below) so tests can virtualize the wait instead of stepping over it with a real sleep; this default is
-    /// what every production call site gets.
-    public static let runtimeStateWriteRetryDelay: TimeInterval = 0.2
+    /// Bounded retry policy shared by the two write kinds that must not be dropped: runtime state (applied to
+    /// every state, not just `.exited`) and the once-per-lifecycle mirror writes (launch configuration, client
+    /// upsert/attach/detach, ownership transfer). The Linux headless core has no periodic runtime-state
+    /// refresh — its persists are purely event-driven (startup, per output chunk,
+    /// attach/detach/takeover/resize/handoff, terminate) — so a dropped write of any state leaves stale durable
+    /// metadata until the next event; a dropped lifecycle write leaves the durable mirror disagreeing with the
+    /// authoritative in-memory snapshot that out-of-core readers (the orchestrator's session listing) still read
+    /// through. A superseded runtime-state write abandons its retry (latest-wins), so a running-state retry can
+    /// never overwrite a newer state.
+    public static let writeMaxAttempts = 5
+    /// Production back-off between retry attempts. Injectable via `init` (see `writeRetryDelay` below) so tests
+    /// can virtualize the wait instead of stepping over it with a real sleep; this default is what every
+    /// production call site gets.
+    public static let writeRetryDelay: TimeInterval = 0.2
 
     private let queue: DispatchQueue
     private let coalescingGate = PersistenceCoalescingGate()
-    private let runtimeStateWriteRetryDelay: TimeInterval
-    /// Back-off primitive for the runtime-state retry loop, defaulting to a real `Thread.sleep`. Tests inject
-    /// a non-blocking closure (e.g. one that just signals a semaphore) to observe/synchronize on a retry
+    private let writeRetryDelay: TimeInterval
+    /// Back-off primitive for the retry loops, defaulting to a real `Thread.sleep`. Tests inject a
+    /// non-blocking closure (e.g. one that just signals a semaphore) to observe/synchronize on a retry
     /// attempt without spending wall-clock time on it.
     private let sleep: @Sendable (TimeInterval) -> Void
 
     public init(
-        label: String, runtimeStateWriteRetryDelay: TimeInterval = TerminalCorePersistenceQueue.runtimeStateWriteRetryDelay,
+        label: String, writeRetryDelay: TimeInterval = TerminalCorePersistenceQueue.writeRetryDelay,
         sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) {
         queue = DispatchQueue(label: label)
-        self.runtimeStateWriteRetryDelay = runtimeStateWriteRetryDelay
+        self.writeRetryDelay = writeRetryDelay
         self.sleep = sleep
     }
 
@@ -186,8 +190,62 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// `execv`s or `exit`s.
     public func drainAsync() async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } }
 
+    /// Runs one durable once-per-lifecycle mirror write on the serial queue: the launch configuration a core
+    /// writes at create/handoff-resume, and the client upsert/attach/detach/ownership-transfer writes that
+    /// mirror an attachment change the engine has already applied to its in-memory snapshot. Each is a unique
+    /// mutation, so unlike the runtime-state chain nothing supersedes it; it retries IN PLACE (same policy and
+    /// FIFO-slot semantics as `enqueueRuntimeStateWrite`) so a contended write lock delays the mirror instead
+    /// of losing it, and so writes enqueued behind it — the attach that must land after its session row exists,
+    /// the terminated payload — stay ordered behind it.
+    ///
+    /// `onFailure` runs on the persistence queue after the final attempt and is the core's cue that the
+    /// in-memory snapshot it already applied no longer matches the durable mirror. It must hop back to the
+    /// engine asynchronously (one-way rule), and the label decides its remedy there: an attachment write
+    /// (client upsert/attach/detach/ownership-transfer) reconciles by dropping the cached snapshot and
+    /// reseeding from committed truth, while the launch-configuration write terminates the core instead:
+    /// every later mirror write validates against the `terminal_sessions` row that write creates, so a
+    /// reconcile with no such row would just make every later write fail as `unknownSession`.
+    ///
+    /// An enqueue-time profile-resolution failure (`database` is `.unresolved`) counts as a final failure
+    /// too, and also invokes `onFailure`: dropping the write silently, the way `withEnqueueTimeDatabase`
+    /// does for the other enqueue methods, would leave the engine's in-memory authority permanently ahead
+    /// of a mirror that never received the write, and for the launch-configuration label specifically would
+    /// leave a live core registered with no `terminal_sessions` row at all. There is no retry to attempt:
+    /// the resolution failure was captured once at enqueue time and cannot change inside this work item.
+    public func enqueueLifecycleWrite(_ label: String, write: @escaping @Sendable (String) throws -> Void, onFailure: @escaping @Sendable () -> Void)
+    {
+        let maxAttempts = Self.writeMaxAttempts
+        let retryDelay = writeRetryDelay
+        let sleep = self.sleep
+        let database = Self.enqueueTimeDatabase()
+        queue.async {
+            switch database {
+            case .resolved(let databasePath):
+                var attempt = 0
+                while true {
+                    do { try write(databasePath) } catch {
+                        attempt += 1
+                        guard attempt < maxAttempts else {
+                            FileHandle.standardError.write(
+                                Data("spaces: terminal-session \(label) write failed after \(maxAttempts) attempts: \(error)\n".utf8))
+                            onFailure()
+                            return
+                        }
+                        sleep(retryDelay)
+                        continue
+                    }
+                    return
+                }
+            case .unresolved(let reason):
+                FileHandle.standardError.write(
+                    Data("spaces: terminal-session \(label) write abandoned; its profile could not be resolved when it was enqueued: \(reason)\n".utf8))
+                onFailure()
+            }
+        }
+    }
+
     /// Runs one durable runtime-state write on the serial queue. On failure it retries IN PLACE inside the
-    /// single queued work item — looping up to `runtimeStateWriteMaxAttempts` with the injected `sleep`
+    /// single queued work item — looping up to `writeMaxAttempts` with the injected `sleep`
     /// back-off (real `Thread.sleep` in production, a virtualized wait in tests) between attempts — rather
     /// than re-enqueuing. Every state retries, not just `.exited`: the Linux headless
     /// core has no periodic refresh, so a dropped write of any state (running included) would otherwise leave
@@ -207,8 +265,8 @@ public final class TerminalCorePersistenceQueue: Sendable {
         onPersisted: @escaping @Sendable (TerminalSessionRuntimeState, Date) -> Void
     ) {
         let key = Self.runtimeStateCoalescingKey
-        let maxAttempts = Self.runtimeStateWriteMaxAttempts
-        let retryDelay = runtimeStateWriteRetryDelay
+        let maxAttempts = Self.writeMaxAttempts
+        let retryDelay = writeRetryDelay
         let sleep = self.sleep
         let gate = coalescingGate
         let generation = gate.nextGeneration(forKey: key)

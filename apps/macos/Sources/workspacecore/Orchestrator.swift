@@ -27,6 +27,19 @@ public final class WorkspaceOrchestrator {
     /// before closing. Returns nil when the session is not live in this process or its foreground cannot
     /// be resolved.
     public typealias BuiltInTerminalForegroundProcessSampler = @Sendable (String) -> BuiltInTerminalForegroundReading?
+    /// Reports whether a live core hosted in this process currently has a live owner-mode attachment for a
+    /// built-in terminal session, by session id. The parameter is the session id; nil means this process
+    /// hosts no live core for it (the durable mirror decides instead), and a non-nil `Bool` is authoritative.
+    /// The conditional ad-hoc stop reads owner-attachment liveness through this so the closing client's
+    /// just-applied detach (whose durable mirror is still queued) is visible to the keep-or-stop decision.
+    public typealias BuiltInTerminalLiveOwnerAttachmentProber = @Sendable (String) -> Bool?
+    /// Reports whether a live core hosted in this process currently has any live attachment (owner or
+    /// viewer) for a built-in terminal session, by session id. The parameter is the session id; nil means
+    /// this process hosts no live core for it (the durable mirror decides instead), and a non-nil `Bool` is
+    /// authoritative. Tracked-window pruning reads attachment liveness through this so a just-applied
+    /// attach whose durable mirror is still queued keeps the window, and a just-applied detach stops
+    /// counting immediately.
+    public typealias BuiltInTerminalLiveActiveAttachmentProber = @Sendable (String) -> Bool?
     /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.
@@ -68,6 +81,8 @@ public final class WorkspaceOrchestrator {
     private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
     private static let builtInTerminalForegroundProcessSamplerOverrideStore = LockedBox<BuiltInTerminalForegroundProcessSampler?>(nil)
+    private static let builtInTerminalLiveOwnerAttachmentProberOverrideStore = LockedBox<BuiltInTerminalLiveOwnerAttachmentProber?>(nil)
+    private static let builtInTerminalLiveActiveAttachmentProberOverrideStore = LockedBox<BuiltInTerminalLiveActiveAttachmentProber?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
     static let builtInTerminalSessionInputWriterOverrideStore = LockedBox<BuiltInTerminalSessionInputWriter?>(nil)
@@ -148,6 +163,22 @@ public final class WorkspaceOrchestrator {
     /// without one resolve no foreground at all, which the conditional stop reads as a bare shell.
     public static func setProcessWideBuiltInTerminalForegroundProcessSampler(_ sampler: BuiltInTerminalForegroundProcessSampler?) {
         builtInTerminalForegroundProcessSamplerOverrideStore.set(sampler)
+    }
+
+    /// Installs the process-wide live-owner-attachment prober. Only the daemon owns live sessions, and it
+    /// serves the conditional ad-hoc stop from transient per-request orchestrators, so the prober is installed
+    /// once for the process rather than threaded through every construction site. Orchestrators built without
+    /// one always fall through to the durable read (unchanged behavior).
+    public static func setProcessWideBuiltInTerminalLiveOwnerAttachmentProber(_ prober: BuiltInTerminalLiveOwnerAttachmentProber?) {
+        builtInTerminalLiveOwnerAttachmentProberOverrideStore.set(prober)
+    }
+
+    /// Installs the process-wide live-active-attachment prober. Only the daemon owns live sessions, and it
+    /// serves tracked-window pruning from transient per-request orchestrators, so the prober is installed
+    /// once for the process rather than threaded through every construction site. Orchestrators built
+    /// without one always fall through to the durable read (unchanged behavior).
+    public static func setProcessWideBuiltInTerminalLiveActiveAttachmentProber(_ prober: BuiltInTerminalLiveActiveAttachmentProber?) {
+        builtInTerminalLiveActiveAttachmentProberOverrideStore.set(prober)
     }
 
     /// Installs a process-wide notification deliverer used when an orchestrator is
@@ -341,6 +372,8 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
     let builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler
+    let builtInTerminalLiveOwnerAttachmentProber: BuiltInTerminalLiveOwnerAttachmentProber
+    let builtInTerminalLiveActiveAttachmentProber: BuiltInTerminalLiveActiveAttachmentProber
     /// Reports whether the owning daemon is mid exec-in-place handoff. During a handoff the daemon's
     /// terminal terminator no-ops (live sessions are quiesced and carried across the exec, not killed),
     /// so a destructive workspace operation that deleted its process/window/agent rows would leave the
@@ -378,10 +411,16 @@ public final class WorkspaceOrchestrator {
         builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil, builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
         builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler? = nil,
+        builtInTerminalLiveOwnerAttachmentProber: BuiltInTerminalLiveOwnerAttachmentProber? = nil,
+        builtInTerminalLiveActiveAttachmentProber: BuiltInTerminalLiveActiveAttachmentProber? = nil,
         daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.builtInTerminalForegroundProcessSampler =
             builtInTerminalForegroundProcessSampler ?? Self.builtInTerminalForegroundProcessSamplerOverrideStore.get() ?? { _ in nil }
+        self.builtInTerminalLiveOwnerAttachmentProber =
+            builtInTerminalLiveOwnerAttachmentProber ?? Self.builtInTerminalLiveOwnerAttachmentProberOverrideStore.get() ?? { _ in nil }
+        self.builtInTerminalLiveActiveAttachmentProber =
+            builtInTerminalLiveActiveAttachmentProber ?? Self.builtInTerminalLiveActiveAttachmentProberOverrideStore.get() ?? { _ in nil }
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git

@@ -59,9 +59,11 @@ extension WorkspaceOrchestrator {
 
     /// Whether a built-in terminal session's launch is still pending — its runtime row is absent or stale
     /// (write-behind persistence, post-#224, has not landed it yet) while a recent launch configuration says
-    /// it is coming up. Exposed for the automation executor's poll paths, which must read an absent runtime
-    /// row within this grace window as indeterminate (session still launching) rather than as a completed or
-    /// dead session that should finalize the run.
+    /// it is coming up. The launch-configuration row itself is write-behind too, so a just-created session
+    /// can briefly have no durable row at all; `TerminalSessionPendingLaunchRegistry` keeps a queued launch
+    /// discoverable until its row commits. Exposed for the automation executor's poll paths, which must read
+    /// an absent runtime row within this grace window as indeterminate (session still launching) rather than
+    /// as a completed or dead session that should finalize the run.
     func automationSessionLaunchIsPending(sessionID: String) -> Bool { builtInSessionLaunchIsPending(sessionID: sessionID) }
 
     /// Terminates a built-in terminal session through the daemon's existing termination machinery.

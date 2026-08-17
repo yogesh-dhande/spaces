@@ -29,7 +29,8 @@ extension OrchestratorTests {
     private func makeAdHocCloseFixture(
         sessionID: String, kind: TerminalSessionKind = .shell, foreground: TerminalForegroundProcessSnapshot?,
         readingWithUninspectableForeground: Bool = false, shellHasChildProcesses: Bool = false, state: TerminalSessionState = .running,
-        daemonHandoffInProgress: (@Sendable () -> Bool)? = nil
+        daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
+        builtInTerminalLiveOwnerAttachmentProber: WorkspaceOrchestrator.BuiltInTerminalLiveOwnerAttachmentProber? = nil
     ) throws -> AdHocCloseFixture {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -42,7 +43,8 @@ extension OrchestratorTests {
                     return BuiltInTerminalForegroundReading(process: nil, shellHasChildProcesses: shellHasChildProcesses)
                 }
                 return foreground.map { BuiltInTerminalForegroundReading(process: $0, shellHasChildProcesses: shellHasChildProcesses) }
-            }, daemonHandoffInProgress: daemonHandoffInProgress)
+            }, builtInTerminalLiveOwnerAttachmentProber: builtInTerminalLiveOwnerAttachmentProber,
+            daemonHandoffInProgress: daemonHandoffInProgress)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -174,6 +176,59 @@ extension OrchestratorTests {
 
         try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
             try attachOwnerClient(sessionID: fixture.sessionID, clientID: "surviving-owner")
+            XCTAssertFalse(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+        XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// A live-owner-attachment prober answering `false` overrides a durable owner row that has not
+    /// finished detaching yet: the in-process authority wins, so the close proceeds even though the
+    /// durable mirror still shows an owner.
+    func testConditionalCloseStopsSessionWhenLiveProberOverridesDurableOwnerRow() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-prober-overrides-durable-keep", foreground: bareShellForeground(),
+            builtInTerminalLiveOwnerAttachmentProber: { _ in false })
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            try attachOwnerClient(sessionID: fixture.sessionID, clientID: "stale-durable-owner")
+            XCTAssertTrue(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertEqual(fixture.terminateCapture.sessionIDs, [fixture.sessionID])
+        XCTAssertTrue(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// A live-owner-attachment prober answering `true` overrides an absent durable owner row: the
+    /// in-process authority wins, so the session is kept even though no durable attachment row exists yet.
+    func testConditionalCloseKeepsSessionWhenLiveProberOverridesMissingDurableOwnerRow() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-prober-overrides-durable-stop", foreground: bareShellForeground(),
+            builtInTerminalLiveOwnerAttachmentProber: { _ in true })
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertFalse(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+        XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// With no prober installed (the default `nil`), the close decision falls back to the durable read
+    /// exactly as it did before the prober existed.
+    func testConditionalCloseFallsBackToDurableReadWithNoProberInstalled() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-no-prober-installed", foreground: bareShellForeground(), builtInTerminalLiveOwnerAttachmentProber: nil)
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            try attachOwnerClient(sessionID: fixture.sessionID, clientID: "durable-owner")
             XCTAssertFalse(
                 try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
                     workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))

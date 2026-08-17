@@ -1155,6 +1155,131 @@ import spacesterminalcore
         XCTAssertTrue(harness.host.terminated.contains(sessionID), "the launch-pending session is terminated via the no-PID fallback")
     }
 
+    /// `builtInSessionLaunchIsPending` consults the pending-launch registry before the durable launch-
+    /// configuration row, so a session whose row has not committed yet (the write-behind window the
+    /// launch-configuration write goes through, see `TerminalSessionPendingLaunchRegistry`) still reads as
+    /// launch-pending purely from the registry entry. This covers the registry-only path: no row is ever
+    /// written to disk here, only the registry is populated and cleared directly.
+    func testBuiltInSessionLaunchIsPendingReadsTheRegistryBeforeTheDurableRow() throws {
+        let harness = try Harness(self)
+        let sessionID = UUID().uuidString
+        // Tracks the generation of whichever recordPending call is most recent, so the teardown defer
+        // clears exactly the entry left standing at the end of the test, not a stale generation.
+        var pendingGeneration: UInt64?
+        defer {
+            if let pendingGeneration {
+                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
+            }
+        }
+
+        XCTAssertFalse(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "a session with no durable row and no registry entry is not launch-pending")
+
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+            createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation)
+        pendingGeneration = TerminalSessionPendingLaunchRegistry.shared.recordPending(configuration)
+        XCTAssertTrue(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "a recent registry entry alone must read as launch-pending, with no durable row required")
+
+        TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration!)
+        XCTAssertFalse(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "clearing the registry entry with no durable row drops it back to not-pending")
+
+        let staleConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+            createdAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-120)), workspaceID: "workspace-1", kind: .automation)
+        pendingGeneration = TerminalSessionPendingLaunchRegistry.shared.recordPending(staleConfiguration)
+        XCTAssertFalse(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "a registry entry older than the launch-pending grace window is not launch-pending, same as a stale durable row")
+    }
+
+    /// Reproduces a relaunch under the same session id: the previous run's write-behind rows are already
+    /// durably committed as `.exited`, and a fresh core for the relaunch records a registry entry before its
+    /// own replacement rows land. `builtInSessionLaunchIsPending` must trust that fresh registry entry over
+    /// the stale durable row, but its runtime-state check runs before the registry consult and returns false
+    /// on sight of the exited row, so a live relaunch reads as not launch-pending and a liveness probe can
+    /// tear it down mid-launch.
+    func testBuiltInSessionLaunchIsPendingTrustsTheRegistryOverAStaleExitedRuntimeRowOnRelaunch() throws {
+        let harness = try Harness(self)
+        let sessionID = UUID().uuidString
+        var pendingGeneration: UInt64?
+        defer {
+            if let pendingGeneration {
+                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
+            }
+        }
+
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-120)), workspaceID: "workspace-1", kind: .automation),
+            paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited,
+                updatedAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-119)),
+                exitedAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-119)), title: "cmd"), paths: paths)
+
+        XCTAssertFalse(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "the previous run's exited row is past the grace window on its own, before any relaunch")
+
+        let relaunchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+            createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation)
+        pendingGeneration = TerminalSessionPendingLaunchRegistry.shared.recordPending(relaunchConfiguration)
+        XCTAssertTrue(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "a fresh pending relaunch must read as launch-pending even while the previous run's exited runtime row is still the committed truth")
+    }
+
+    /// On a same-session-id relaunch, the launch-configuration write commits and clears the
+    /// `TerminalSessionPendingLaunchRegistry` entry before the new run's first runtime-state write lands. In that
+    /// gap the previous run's `.exited` runtime row in `terminal_runtime_states` is still the committed truth, since
+    /// `writeLaunchConfiguration` does not touch it, and the registry has nothing recorded for the fresh launch.
+    /// `builtInSessionLaunchIsPending` must still read the freshly committed launch row as pending rather than
+    /// trusting the leftover exited runtime row, or a liveness probe running in this gap can tear down the live
+    /// relaunch.
+    func testBuiltInSessionLaunchIsPendingTreatsAFreshlyCommittedLaunchRowAsPendingAfterTheRegistryClears() throws {
+        let harness = try Harness(self)
+        let sessionID = UUID().uuidString
+        // No recordPending here: this test targets the post-commit, post-clear gap where the registry has
+        // nothing recorded for the session id, so there is no registry entry to tear down at teardown.
+
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-120)), workspaceID: "workspace-1", kind: .automation),
+            paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited,
+                updatedAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-119)),
+                exitedAt: TerminalSessionTimestamp.string(from: Date().addingTimeInterval(-119)), title: "cmd"), paths: paths)
+
+        // Simulate the relaunch's launch write having just committed and the registry having just cleared: the
+        // same session ID gets a fresh launch-configuration row, but nothing is recorded in the registry, matching
+        // the post-commit, post-clear gap this test targets.
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation),
+            paths: paths)
+
+        XCTAssertTrue(
+            harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
+            "a freshly committed relaunch row must read as launch-pending until the new run's runtime state commits, even though the previous run's exited runtime row is still on disk")
+    }
+
     func testCancelKillsCommandAndRecordsCanceled() throws {
         let harness = try Harness(self)
         let fixture = try AutomationProcessGroupFixture()

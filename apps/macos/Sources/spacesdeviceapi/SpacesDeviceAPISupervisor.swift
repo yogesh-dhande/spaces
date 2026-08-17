@@ -13,6 +13,7 @@ import workspacecore
     private let automationOperations: AutomationOperations?
     private let onRestartRequested: (@Sendable () -> Void)?
     private let liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?
+    private let liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?
 
     private var server: SpacesDeviceAPIServer?
     private var advertiser: (any SpacesDeviceAPIBonjourAdvertising)?
@@ -28,7 +29,8 @@ import workspacecore
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
-        liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil
+        liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil,
+        liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
         self.settingsStore = settingsStore
         self.environment = environment
@@ -39,6 +41,7 @@ import workspacecore
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
+        self.liveInMemoryTerminalSessionsProvider = liveInMemoryTerminalSessionsProvider
     }
 
     public func start() {
@@ -125,7 +128,8 @@ import workspacecore
             host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
             agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
-            liveTerminalSessionStateProvider: liveTerminalSessionStateProvider)
+            liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
+            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
         do {
             try createdServer.start()
             return createdServer

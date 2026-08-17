@@ -61,6 +61,24 @@ public enum TerminalSessionCatalog {
         }
     }
 
+    /// Merges the daemon's live in-memory session entries into a DB-derived catalog listing.
+    /// DB-derived entries come first in their stored order; in-memory entries are appended only when
+    /// interactive and not already present, mirroring `SpacesdMain.listSessionsOffMain()`'s in-memory
+    /// summary merge. In-memory cores are the authority for a session's existence: lifecycle rows are
+    /// write-behind on the per-core persistence queue, so without this merge a freshly created live
+    /// session would vanish from a listing (and, for the Device API overview specifically, its terminal
+    /// window would render as ended) until its queued writes commit.
+    public static func mergingLiveInMemorySessions(
+        _ dbSessions: [TerminalSessionCatalogEntry], inMemory: [TerminalSessionCatalogEntry]
+    ) -> [TerminalSessionCatalogEntry] {
+        let knownSessionIDs = Set(dbSessions.map(\.sessionID))
+        var merged = dbSessions
+        for entry in inMemory where isInteractiveServiceAlive(for: entry.runtimeState) && !knownSessionIDs.contains(entry.sessionID) {
+            merged.append(entry)
+        }
+        return merged
+    }
+
     public static func isInteractiveServiceAlive(for runtimeState: TerminalSessionRuntimeState) -> Bool {
         guard runtimeState.state.isInteractive else { return false }
         return isProcessAlive(pid: runtimeState.servicePID)

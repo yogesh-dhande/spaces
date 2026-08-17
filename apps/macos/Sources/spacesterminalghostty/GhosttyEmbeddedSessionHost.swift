@@ -371,32 +371,53 @@
             self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.inputOutput)
         }
         private let interactiveOutputGate = InteractiveOutputGate()
-        /// In-memory cache of this session's attachment snapshot (`terminal_clients` + `terminal_attachments`
-        /// rows), consulted on the per-output-chunk broadcast path in place of a disk read.
+        /// This session's attachment snapshot (`terminal_clients` + `terminal_attachments`) held in memory:
+        /// the AUTHORITY for every enforcement and broadcast read, not a cache of the database in front of it.
+        /// Seeded from the durable rows on first read, then advanced in place by each mutation this core makes
+        /// (`applyAttach`, `applyDetach`, `applyOwnershipTransfer`, `applyClientUpsert`,
+        /// `markClientsExpiredInCache`, `markAllAttachmentsDetachedInCache`, `recordClientLeaseTouchInCache`),
+        /// each of which enqueues its durable mirror write onto the per-core persistence queue rather than
+        /// writing on the engine executor.
         ///
-        /// Owner-gating ENFORCEMENT reads the same cache, not the durable mirror: `isOwner`,
-        /// `activeOwnerClientID`, `hasActiveAttachments`, `activeLocalWindowClientID`, and the attach/detach
-        /// mode-change pre-checks all resolve through `currentActiveAttachments()`/`currentAttachmentSnapshot()`.
-        /// This keeps gating and broadcasts on one source of truth: a stale-client expiry promotes the transfer
-        /// target to owner in this cache and broadcasts that immediately, while its atomic `expireClients` write
-        /// is only enqueued (committing ms later, or up to the 5s busy timeout under a held write lock). Were
-        /// enforcement to read the not-yet-committed DB, it would `.ownershipRejected` the very client the
-        /// broadcast just told it owns the terminal — silently dropping its keystrokes. Serving both from the
-        /// cache makes that disagreement impossible.
+        /// The DB is the mirror, so it necessarily lags: a write blocked on SQLite's write lock commits up to
+        /// the 5s busy timeout later, and performing it on the engine would freeze PTY output and control for
+        /// every live session in the daemon for that long. Enforcement therefore reads this snapshot —
+        /// `isOwner`, `activeOwnerClientID`, `hasActiveAttachments`, `activeLocalWindowClientID`, and the
+        /// attach/detach mode-change pre-checks all resolve through
+        /// `currentActiveAttachments()`/`currentAttachmentSnapshot()`. Reading the not-yet-committed DB instead
+        /// would `.ownershipRejected` the very client the broadcast just told owns the terminal, silently
+        /// dropping its keystrokes.
+        ///
+        /// It is dropped (`invalidateAttachmentSnapshotCache`) only to RECONCILE: a lifecycle mirror write that
+        /// exhausted its retries, an expiry transaction that rolled back, or one reported `.superseded`. In each
+        /// case memory asserts something durable state does not, so the next read reseeds from committed truth.
+        ///
+        /// A reseed can still read stale rows even when nothing invalidated the cache: a mutation applied while
+        /// the cache was empty (see `pendingAttachmentMutations`) has its durable write enqueued but not yet
+        /// committed, and a concurrent reseed can read the database before that write lands. `mutateAttachmentSnapshot`
+        /// and `currentAttachmentSnapshot()` hold and replay such mutations rather than losing them; see
+        /// `pendingAttachmentMutations`.
         ///
         /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
-        /// attachment/client rows. Every attach, detach, heartbeat-lease touch, ownership transfer, and
-        /// stale-client expiry routes through this core's control handlers, and each keeps this cache current
-        /// (attach/detach/transfer/expiry via `postAttachmentStateDidChange()` which invalidates; heartbeat
-        /// lease touches update the client's lease in place via `recordClientLeaseTouchInCache(...)`; client
-        /// upserts via an explicit invalidate). The only writers OUTSIDE a
-        /// core — `SpacesdMain.recoverStaleSessions` and `Orchestrator.markReservedWorkspaceTerminalLaunchFailed`
-        /// — act exclusively on sessions with NO live core (crashed-prior-daemon sessions, never-started
-        /// reservations), so they can never race a live core's cache. The DB stays the durable mirror a fresh
-        /// core reseeds from on handoff/restart. Caching this removes a per-output-chunk SQLite connection
-        /// open that otherwise saturated the serial terminal-engine executor and starved input under an agent
-        /// TUI's continuous output.
+        /// attachment/client rows, which is what lets memory lead the mirror. Every attach, detach,
+        /// heartbeat-lease touch, ownership transfer, and stale-client expiry routes through this core's
+        /// control handlers. The only writers OUTSIDE a core — `SpacesdMain.recoverStaleSessions` and
+        /// `Orchestrator.markReservedWorkspaceTerminalLaunchFailed` — act exclusively on sessions with NO live
+        /// core (crashed-prior-daemon sessions, never-started reservations), so they can never race one. A
+        /// fresh core (daemon restart, exec-in-place handoff) reseeds from the mirror.
         private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
+        /// apply them to (cache empty AND the reseeding disk read also failed). The caller's durable mirror
+        /// write is enqueued regardless of whether the transform could be applied here, so the mutation is
+        /// held rather than dropped: `currentAttachmentSnapshot()` replays these, in order, on top of the next
+        /// successful reseed, which reconstructs the acknowledged state even if that reseed's read predates the
+        /// still-queued write. INVARIANT: a non-nil `cachedAttachmentSnapshot` implies this is empty — entries
+        /// accumulate only while every reseed fails, and are drained together the moment one succeeds.
+        private var pendingAttachmentMutations: [(TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot] = []
+        /// Test-only: when set, `currentAttachmentSnapshot()` treats its reseeding disk read as failed without
+        /// touching the database, so a test can exercise the `pendingAttachmentMutations` path deterministically.
+        /// See `debugSetForceAttachmentSnapshotReseedFailureForTesting`.
+        private var forceAttachmentSnapshotReseedFailureForTesting = false
         /// Last heartbeat instant per remote client, recorded synchronously on the engine the moment a
         /// heartbeat lands — independent of when its coalesced durable lease write commits and of the
         /// attachment-snapshot cache's invalidation lifecycle. `expireStaleRemoteClientsIfNeeded` consults
@@ -467,7 +488,7 @@
             let startedAt = Date()
             do {
                 try paths.ensureDirectories()
-                try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+                enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: true)
                 try ensureOutputHandle()
                 rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
                 rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
@@ -500,9 +521,7 @@
             let currentAttachment = activeAttachments.first { $0.clientID == client.id }
             let previousOwnerClientID = activeAttachments.first { $0.mode == .owner }?.clientID
             if currentAttachment?.mode != mode {
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
-                    attachedAt: TerminalSessionTimestamp.string(from: Date()))
+                applyAttach(client: client, mode: mode, attachedAt: TerminalSessionTimestamp.string(from: Date()))
                 leaseTouchCoalescer.forget(clientID: client.id)
                 if mode == .owner, previousOwnerClientID != client.id { advanceOwnerEpoch(reason: "attach") }
                 postAttachmentStateDidChange()
@@ -512,27 +531,19 @@
 
         public func detach(clientID: String) throws {
             let detachedClientWasOwner = isOwner(clientID: clientID)
-            try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: TerminalSessionTimestamp.string(from: Date()))
+            applyDetach(clientID: clientID, detachedAt: TerminalSessionTimestamp.string(from: Date()))
             // The detach rewrote this client's durable row, so its coalesced-write record no longer describes
             // anything: were the same client to re-attach, the first touch of the new attachment must write.
             leaseTouchCoalescer.forget(clientID: clientID)
-            // Derive the ownership successor from the current in-memory snapshot (enforcement's source), treating
-            // the just-detached client as gone — NOT by reseeding from the durable mirror. During a pending
-            // queued stale-client expiry the mirror is still pre-expiry, so a reseed here would see the
-            // already-cache-expired stale owner as still owning and wrongly skip the transfer-back, clobbering
-            // the tick's optimistic cache. `activeLocalWindowClientID(excluding:)` reads the same cache.
-            let remainingActiveAttachments = currentActiveAttachments().filter { $0.clientID != clientID }
-            var remainingOwnerClientID = remainingActiveAttachments.first(where: { $0.mode == .owner })?.clientID
+            // Derive the ownership successor from the in-memory snapshot the detach was just applied to
+            // (enforcement's source) — NOT by reseeding from the durable mirror, whose matching detach is
+            // enqueued and not yet committed. `activeLocalWindowClientID(excluding:)` reads the same snapshot.
+            var remainingOwnerClientID = currentActiveAttachments().first(where: { $0.mode == .owner })?.clientID
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
-                let transferredAt = TerminalSessionTimestamp.string(from: Date())
-                try TerminalSessionPersistence.transferOwnership(
-                    sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: transferredAt)
+                applyOwnershipTransfer(to: localOwnerClientID, transferredAt: TerminalSessionTimestamp.string(from: Date()))
                 remainingOwnerClientID = localOwnerClientID
                 advanceOwnerEpoch(reason: "detach_transfer")
             }
-            // Invalidate synchronously AFTER the committed detach (and optional transfer) so same-call-stack
-            // reads below and the broadcast in `postAttachmentStateDidChange` reseed from committed truth.
-            invalidateAttachmentSnapshotCache()
             if Self.shouldClearFocusAfterDetachingClient(
                 detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID)
             {
@@ -554,6 +565,38 @@
         }
 
         private func hasActiveAttachments() -> Bool { !currentActiveAttachments().isEmpty }
+
+        /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has any live
+        /// attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments` (active AND lease-fresh for the
+        /// client kinds a lease governs). The daemon's `.whileAttached` reaper calls this instead of reading
+        /// the durable mirror: this core is the single writer of its own attachment rows, so memory is always
+        /// at least as current as the database, and a DB read can observe an attach whose durable mirror is
+        /// still queued behind a contended write lock as "no attachment" and reap a session with a live owner.
+        ///
+        /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
+        /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
+        /// case preserves the old DB-reading reaper's `try?` guard, which skipped the session on a failed read
+        /// rather than treating a read failure as grounds to reap it.
+        public func hasLiveAttachments(now: Date = Date()) -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return true }
+            return !snapshot.liveAttachments(now: now).isEmpty
+        }
+
+        /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has a live
+        /// owner-mode attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments`. The close-time ad-hoc
+        /// stop decision calls this through the daemon's prober instead of reading the durable mirror, because
+        /// the closing client's detach is applied to this snapshot before its durable mirror commits: a
+        /// durable read taken right after that detach can still see the just-detached owner and wrongly keep a
+        /// session the user closed.
+        ///
+        /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
+        /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
+        /// case fails closed, the same way `hasLiveAttachments` does: this answer gates a termination, and a
+        /// wrongful stop destroys a terminal the user cannot get back.
+        public func hasLiveOwnerAttachment(now: Date = Date()) -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return true }
+            return snapshot.liveAttachments(now: now).contains { $0.mode == .owner }
+        }
 
         private func activeLocalWindowClientID(excluding excludedClientID: String) -> String? {
             guard let snapshot = currentAttachmentSnapshot() else { return nil }
@@ -701,16 +744,184 @@
             if previousSignature != runtimeStateSignature(for: state) { postRuntimeStateDidChange() }
         }
 
+        // MARK: - Lifecycle writes (in-memory authority, durable mirror off the engine)
+
+        /// The label `enqueueLaunchConfigurationWrite` enqueues under. Every other durable write this core
+        /// makes validates against the `terminal_sessions` row that write creates, so a failure of THIS
+        /// specific write is treated differently in `reconcileAfterFailedLifecycleWrite`: there is no row left
+        /// to reconcile against, only one to terminate the core over.
+        private static let launchConfigurationWriteLabel = "launch_configuration"
+
+        /// Enqueues one once-per-lifecycle durable write with bounded in-place retry (see
+        /// `TerminalCorePersistenceQueue.enqueueLifecycleWrite`). The engine has already applied the mutation
+        /// to the authoritative in-memory snapshot, so this only mirrors it; on final failure the core hands
+        /// the label to `reconcileAfterFailedLifecycleWrite`, which reconciles for an attachment write (drops
+        /// the in-memory snapshot so the next read reseeds from committed truth) or terminates the core for
+        /// the launch-configuration write (there is no session row left for later mirror writes to validate
+        /// against, so reconciling would just make every later write fail as `unknownSession`).
+        private func enqueueLifecycleWrite(_ label: String, _ write: @escaping @Sendable (String) throws -> Void) {
+            persistence.enqueueLifecycleWrite(
+                label, write: write, onFailure: { [weak self] in Task { @TerminalEngineActor in self?.reconcileAfterFailedLifecycleWrite(label) } })
+        }
+
+        /// Handles a lifecycle mirror write that exhausted its retries. The launch-configuration write is the
+        /// FIRST entry on this core's persistence queue and every later write validates against the row it
+        /// creates, so its failure leaves nothing to reconcile: the core terminates rather than reseeding a
+        /// snapshot that would just make every later mirror write fail as `unknownSession`. Any other
+        /// lifecycle write (attach, detach, ownership transfer, client upsert) drops the in-memory snapshot so
+        /// the next read reseeds from committed truth, and re-broadcasts so subscribers and owner gating agree
+        /// with it again. Called only from the persistence queue's engine hop.
+        ///
+        /// The reconcile hop above is itself asynchronous, so the queue can advance to a later write before
+        /// this runs; a reseed can then read the database before that later write commits, leaving memory
+        /// briefly behind the mirror it just reseeded from. Reaching that window needs one write to exhaust
+        /// all retries (roughly 26 seconds of continuous write-lock contention) followed by the database
+        /// recovering immediately with another write already queued behind it. The next lifecycle mutation
+        /// (or an owner re-attach) reseeds again and self-heals it, so ordering the reconcile behind the
+        /// queue, or guarding it with a generation counter, is complexity this corner does not justify.
+        private func reconcileAfterFailedLifecycleWrite(_ label: String) {
+            trace("lifecycle_write_failed write=\(label)")
+            guard label != Self.launchConfigurationWriteLabel else {
+                // The pending-launch registry entry was already cleared by the launch write's own onFailure
+                // closure, core-independently, before this hop ran (see `enqueueLaunchConfigurationWrite`).
+                terminate()
+                // `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path
+                // (`handleSessionClosed()`) does, so without this call the daemon's session registry keeps
+                // this dead core registered for its lifetime, and a later create for the same session id
+                // would hand back the terminated object instead of building a fresh one.
+                onSessionClosed?(self)
+                return
+            }
+            invalidateAttachmentSnapshotCache()
+            postAttachmentStateDidChange()
+        }
+
+        /// The session's `terminal_sessions` row, written as the FIRST entry on this core's persistence queue
+        /// (nothing is enqueued before `startIfNeeded`/`resumeFromHandoff` runs). Every other durable write
+        /// this core makes validates against that row, so serial FIFO ordering — not a blocking wait here — is
+        /// what guarantees they commit after it exists.
+        private func enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: Bool) {
+            let configuration = launchConfiguration
+            let paths = paths
+            // Recorded before the enqueue and cleared only after the row commits: launch-pending probes
+            // (automation polling, tracked-window liveness) read the registry first, so the gap between
+            // this in-memory create and the write-behind row landing is never visible to them. The write's
+            // final failure clears the entry in this write's own onFailure closure below, through the
+            // value-captured session id rather than through the core: the persistence queue holds no
+            // reference to the core, so a fast-exiting core can be deallocated before the failure callback
+            // runs, and clearing inside the weak-self reconcile alone would leak a permanent pending entry
+            // that keeps launch-pending probes and agent-signal requests treating a dead session as launching.
+            // The clear below is generation-scoped: an older still-queued launch write for this same
+            // session id can never erase this launch's entry, only the entry it itself recorded.
+            // The SQL upsert itself is deliberately NOT generation-guarded. A stale queued launch write
+            // could only clobber a successor's `terminal_sessions` row if the same session id were
+            // recreated while the old core's write was still retrying, and no product path reuses a
+            // session id: every create mints a fresh UUID (ad-hoc/agent launches and workspace terminal
+            // reservations alike), a reservation is finished exactly once, and handoff resume drains the
+            // old daemon's queues before execv. Even under a hypothetical reuse, the gated runtime-state
+            // DELETE removes only exited/failed rows, so a live successor's runtime row survives and the
+            // 1Hz signature-gated runtime refresh restores it; only the config columns would go stale.
+            let generation = TerminalSessionPendingLaunchRegistry.shared.recordPending(configuration)
+            persistence.enqueueLifecycleWrite(
+                Self.launchConfigurationWriteLabel,
+                write: { databasePath in
+                    try TerminalSessionPersistence.writeLaunchConfiguration(
+                        configuration, paths: paths, clearingPreviousRunRuntimeState: clearingPreviousRunRuntimeState, databasePath: databasePath)
+                    TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: configuration.sessionID, generation: generation)
+                },
+                onFailure: { [weak self] in
+                    // Cleared here, outside the weak-self hop, so the registry entry never depends on the
+                    // core still being alive when the failure callback runs.
+                    TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: configuration.sessionID, generation: generation)
+                    Task { @TerminalEngineActor in self?.reconcileAfterFailedLifecycleWrite(Self.launchConfigurationWriteLabel) }
+                })
+        }
+
+        /// Applies an attachment mutation to the authoritative in-memory snapshot. A nil snapshot means the
+        /// cache is empty AND the reseeding disk read failed; the caller's durable mirror write still goes
+        /// out regardless, so the transform is held in `pendingAttachmentMutations` instead of being dropped —
+        /// `currentAttachmentSnapshot()` replays it once a reseed succeeds.
+        private func mutateAttachmentSnapshot(_ transform: @escaping (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
+            guard let snapshot = currentAttachmentSnapshot() else {
+                pendingAttachmentMutations.append(transform)
+                return
+            }
+            cachedAttachmentSnapshot = transform(snapshot)
+        }
+
+        /// Applies a client upsert to the in-memory snapshot and enqueues its durable mirror.
+        private func applyClientUpsert(_ client: TerminalClient) {
+            mutateAttachmentSnapshot { $0.applyingClientUpsert(client, leaseRefreshedAt: client.connectedAt) }
+            let paths = paths
+            enqueueLifecycleWrite("client_upsert") { databasePath in
+                try TerminalSessionPersistence.upsertClient(client, paths: paths, databasePath: databasePath)
+            }
+        }
+
+        /// Applies an attach to the in-memory snapshot and enqueues its durable mirror. The session id the
+        /// mirror validates against is this core's own — `writeLaunchConfiguration` deletes every other
+        /// session row for this root before inserting it — so no canonical-id lookup is needed on the engine.
+        private func applyAttach(client: TerminalClient, mode: TerminalAttachmentMode, attachedAt: String) {
+            let sessionID = launchConfiguration.sessionID
+            mutateAttachmentSnapshot { $0.applyingAttach(client: client, mode: mode, sessionID: sessionID, attachedAt: attachedAt) }
+            let paths = paths
+            enqueueLifecycleWrite("attach") { databasePath in
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: attachedAt, databasePath: databasePath)
+            }
+        }
+
+        /// Applies a detach to the in-memory snapshot and enqueues its durable mirror.
+        private func applyDetach(clientID: String, detachedAt: String) {
+            mutateAttachmentSnapshot { $0.applyingDetach(clientID: clientID, detachedAt: detachedAt) }
+            let paths = paths
+            enqueueLifecycleWrite("detach") { databasePath in
+                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt, databasePath: databasePath)
+            }
+        }
+
+        /// Applies an ownership transfer to the in-memory snapshot and enqueues its durable mirror.
+        private func applyOwnershipTransfer(to newOwnerClientID: String, transferredAt: String) {
+            let sessionID = launchConfiguration.sessionID
+            mutateAttachmentSnapshot { $0.applyingOwnershipTransfer(to: newOwnerClientID, sessionID: sessionID, transferredAt: transferredAt) }
+            let paths = paths
+            enqueueLifecycleWrite("ownership_transfer") { databasePath in
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: newOwnerClientID, paths: paths, transferredAt: transferredAt, databasePath: databasePath)
+            }
+        }
+
+        /// Enqueues a durable agent-signal-event append on this core's own serial persistence queue, rather than
+        /// through `enqueueLifecycleWrite`'s shared wrapper: that wrapper's failure path reconciles attachment
+        /// state (drops the cached snapshot, or terminates the core for the launch-configuration label), which
+        /// is unrelated to a signal row. A signal recorded while this core's launch-configuration write is
+        /// still queued must commit after the `terminal_sessions` row exists; FIFO ordering on the serial
+        /// persistence queue is what guarantees that, exactly as it does for the attach and detach mirrors.
+        ///
+        /// On final failure there is nothing to reconcile (no in-memory state mirrors signal rows), so the loss
+        /// is logged and accepted: signal delivery was already best-effort at the sender (agent hooks append
+        /// `|| true`).
+        public func enqueueAgentSignalAppend(_ event: TerminalServiceAgentSignalEvent) {
+            let paths = paths
+            persistence.enqueueLifecycleWrite(
+                "agent_signal",
+                write: { databasePath in
+                    try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath)
+                },
+                onFailure: { [weak self] in Task { @TerminalEngineActor in self?.trace("lifecycle_write_failed write=agent_signal") } })
+        }
+
         /// Records a client's heartbeat-lease touch: refreshes the in-memory cache lease so on-engine reads
         /// reflect it without a disk hit, then enqueues a coalesced durable write. Lease expiry runs on a
         /// multi-second scale, so durable staleness of a coalesced touch between writes is harmless.
         ///
         /// The in-memory half runs on EVERY touch, for every client kind — it is what keeps this session's own
-        /// stale-client expiry and owner gating honest. The durable write is performed only for a client whose
+        /// stale-client expiry and owner gating honest. The daemon's own inactive-session reaper reads that
+        /// same in-memory snapshot (`hasLiveAttachments`) rather than the durable column, so it never lags
+        /// behind an uncommitted touch either. The durable write is performed only for a client whose
         /// liveness the lease actually decides, and then only once per coalescing interval
-        /// (`leaseTouchCoalescer`); only the off-device readers of `lease_refreshed_at` (the daemon's
-        /// inactive-session reaper, the session garbage collector, a fresh core reseeding after handoff) see
-        /// that lag.
+        /// (`leaseTouchCoalescer`); only readers of `lease_refreshed_at` that have no live core to ask (the
+        /// session garbage collector, a fresh core reseeding after handoff) see that lag.
         private func enqueueClientLeaseTouch(clientID: String) {
             let touchedAtDate = Date()
             let touchedAt = TerminalSessionTimestamp.string(from: touchedAtDate)
@@ -744,15 +955,12 @@
             return kind.livenessDependsOnLease
         }
 
-        /// Updates the cached attachment snapshot's client lease in place (no disk read). No-op when the cache
-        /// is unpopulated or the client is absent — the next disk reseed carries the durable lease once written.
+        /// Updates the in-memory snapshot's client lease in place (no disk read). Deliberately reads
+        /// `cachedAttachmentSnapshot` rather than `currentAttachmentSnapshot()`: a lease touch is not worth a
+        /// disk reseed, and the next reseed carries the durable lease once its coalesced write commits.
         private func recordClientLeaseTouchInCache(clientID: String, leaseRefreshedAt: String) {
-            guard var snapshot = cachedAttachmentSnapshot, let index = snapshot.clients.firstIndex(where: { $0.id == clientID }) else { return }
-            let client = snapshot.clients[index]
-            snapshot.clients[index] = TerminalClient(
-                id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: client.disconnectedAt,
-                leaseRefreshedAt: leaseRefreshedAt)
-            cachedAttachmentSnapshot = snapshot
+            guard let snapshot = cachedAttachmentSnapshot else { return }
+            cachedAttachmentSnapshot = snapshot.applyingClientLeaseTouch(clientID: clientID, leaseRefreshedAt: leaseRefreshedAt)
         }
 
         private func handleSessionClosed() {
@@ -877,7 +1085,9 @@
         public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
             try GhosttyEmbeddedAppService.shared.startIfNeeded()
             try paths.ensureDirectories()
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // The runtime row being resumed is this session's current-run state carried across the
+            // handoff, not a previous run's leftover, so this write must not clear it.
+            enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: false)
             // Preserve output.log: adoptFromHandoff replays it to rebuild the screen.
             try openOutputHandlePreservingTranscript()
 
@@ -974,6 +1184,22 @@
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
                 launchConfiguration: launchConfiguration, runtimeState: runtimeState,
                 attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+        }
+
+        /// The catalog entry built entirely from this core's in-memory state, with no DB read. Serves the
+        /// Device API overview's live-session merge the same way `inMemorySessionSummary()` serves the CLI
+        /// list merge: session lifecycle SQLite writes are write-behind on the per-core persistence queue,
+        /// so a session started moments ago can have no committed rows for
+        /// `TerminalSessionCatalog.listLiveSessions()` to find. Socket availability is probed from the
+        /// filesystem exactly as the catalog probes it for DB-derived entries, so a merged entry answers
+        /// the same question the same way.
+        public func inMemoryCatalogEntry(fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
+            guard let runtimeState = latestRuntimeState else { return nil }
+            return TerminalSessionCatalogEntry(
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), paths: paths,
+                isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+                isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
 
         private func startControlServer() throws {
@@ -1091,64 +1317,66 @@
             let mode = request.attachmentMode ?? .viewer
             let attachedAt = nowISO8601()
             let authoritativeClient = Self.clientForAttachLease(client, attachedAt: attachedAt)
-            do {
-                // Adopt the attaching client's light/dark appearance. The Ghostty color scheme is
-                // app-scoped (one ghostty_app_t per daemon), so this re-themes every live surface in
-                // the daemon on a last-writer-wins basis. The io thread applies the colors
-                // asynchronously, so we deliberately do NOT broadcast inline here: an immediate frame
-                // would still carry the pre-retheme colors. Instead we arm forceNextBroadcastFull
-                // below and let the recolored screen reach subscribers through the existing screen
-                // state-change broadcast that Ghostty triggers once the retheme lands (and the
-                // always-fresh initial-frame export for subscribers that connect afterwards).
-                let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
-                let previousOwnerClientID = activeOwnerClientID()
-                try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
-                // The upsert rewrote this client's durable lease, so any coalesced-write record from an
-                // earlier attachment of the same client id is void; the first touch of this attachment writes.
-                leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
-                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
-                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner
-                // in the same mode, which advances no epoch and changes no attachment — while its host
-                // counts serials from zero again. Carrying the previous attachment's high-water mark across
-                // that would reject every serial the reconnected client sends and pin the session to the
-                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
-                // so a resize still in flight from the PREVIOUS host of this same id could land after the
-                // reset and outrank the new host's early serials. That needs a same-process host swap with
-                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
-                // stale mark and every state payload re-announces the viewport), and the alternative —
-                // carrying an attachment incarnation in every resize request — is a wire change this
-                // corner does not justify.
-                lastResizeSerialByClientID.removeValue(forKey: authoritativeClient.id)
-                invalidateAttachmentSnapshotCache()
-                let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
-                let attachmentChanged = currentAttachment?.mode != mode
-                if attachmentChanged {
-                    try TerminalSessionPersistence.attachClient(
-                        sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
-                    if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
-                    postAttachmentStateDidChange()
-                }
-                // Only an attach that actually moved this session's attachments can have changed anything
-                // the runtime state carries. Re-attaching the same client in the same mode — what every
-                // refocus of an already-open pane does — leaves the unforced refresh, which persists only
-                // when the state's own signature moved.
-                refreshRuntimeState(force: attachmentChanged)
-                // Set after the attachment broadcast above so the recolored screen (delivered by the
-                // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
-                // frame rather than a color-only delta from a stale baseline. There is no host-side
-                // screen revision to bump here: lastScreenStateRevision tracks Ghostty's own
-                // revisions, which the retheme advances on its own.
-                if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
-                TerminalPerformance.logMetric(
-                    "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
-                return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
-            } catch {
-                TerminalPerformance.logMetric(
-                    "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
-                return TerminalControlResponse(ok: false, message: String(describing: error))
+            // Adopt the attaching client's light/dark appearance. The Ghostty color scheme is
+            // app-scoped (one ghostty_app_t per daemon), so this re-themes every live surface in
+            // the daemon on a last-writer-wins basis. The io thread applies the colors
+            // asynchronously, so we deliberately do NOT broadcast inline here: an immediate frame
+            // would still carry the pre-retheme colors. Instead we arm forceNextBroadcastFull
+            // below and let the recolored screen reach subscribers through the existing screen
+            // state-change broadcast that Ghostty triggers once the retheme lands (and the
+            // always-fresh initial-frame export for subscribers that connect afterwards).
+            let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
+            let previousOwnerClientID = activeOwnerClientID()
+            applyClientUpsert(authoritativeClient)
+            // An attach is liveness evidence in its own right, not just a lease write: record it in the same
+            // heartbeat map and generation gate a lease touch would (see `enqueueClientLeaseTouch`). Without
+            // this, a client that just reattached has a fresh in-memory lease but an unrecorded heartbeat; if
+            // the durable mirror write from `applyClientUpsert` is still sitting in the persistence queue when
+            // the next 1s stale-client sweep ticks, the sweep derives its candidates from committed DB rows,
+            // sees the old (still-committed) stale lease, and expires this freshly reattached client out from
+            // under it, and with no heartbeat-generation bump either, the queued expiry's own compare-and-set
+            // would have nothing to veto it at commit time.
+            let attachedAtDate = Date()
+            latestRemoteClientHeartbeat[authoritativeClient.id] = attachedAtDate
+            heartbeatGenerationGate.recordHeartbeat(forClientID: authoritativeClient.id)
+            // The upsert rewrote this client's durable lease, so any coalesced-write record from an
+            // earlier attachment of the same client id is void; the first touch of this attachment writes.
+            leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
+            // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+            // to a session it already owns keeps its id — an app relaunch reattaches as the same owner
+            // in the same mode, which advances no epoch and changes no attachment — while its host
+            // counts serials from zero again. Carrying the previous attachment's high-water mark across
+            // that would reject every serial the reconnected client sends and pin the session to the
+            // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+            // so a resize still in flight from the PREVIOUS host of this same id could land after the
+            // reset and outrank the new host's early serials. That needs a same-process host swap with
+            // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+            // stale mark and every state payload re-announces the viewport), and the alternative —
+            // carrying an attachment incarnation in every resize request — is a wire change this
+            // corner does not justify.
+            lastResizeSerialByClientID.removeValue(forKey: authoritativeClient.id)
+            let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
+            let attachmentChanged = currentAttachment?.mode != mode
+            if attachmentChanged {
+                applyAttach(client: authoritativeClient, mode: mode, attachedAt: attachedAt)
+                if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
+                postAttachmentStateDidChange()
             }
+            // Only an attach that actually moved this session's attachments can have changed anything
+            // the runtime state carries. Re-attaching the same client in the same mode — what every
+            // refocus of an already-open pane does — leaves the unforced refresh, which persists only
+            // when the state's own signature moved.
+            refreshRuntimeState(force: attachmentChanged)
+            // Set after the attachment broadcast above so the recolored screen (delivered by the
+            // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
+            // frame rather than a color-only delta from a stale baseline. There is no host-side
+            // screen revision to bump here: lastScreenStateRevision tracks Ghostty's own
+            // revisions, which the retheme advances on its own.
+            if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
+            TerminalPerformance.logMetric(
+                "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
+            return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
         }
 
         private func controlResponseForSetAppearanceRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1465,35 +1693,34 @@
             guard let clientID = request.clientID else {
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
-            do {
-                touchClientLease(clientID)
-                flushPendingIncomingOutputForStateExport()
-                let previousOwnerClientID = activeOwnerClientID()
-                try TerminalSessionPersistence.transferOwnership(
-                    sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
-                    transferredAt: TerminalSessionTimestamp.string(from: Date()))
-                // Invalidate the attachment cache synchronously, right after the committed transfer, so
-                // owner-gating enforcement (which reads the cache) sees the new owner immediately rather than
-                // the pre-takeover owner until the deferred broadcast Task below runs. The notification and
-                // re-broadcast stay deferred so the takeover ack returns without waiting on the full-frame
-                // broadcast; the reseed those reads trigger meanwhile reads the committed transfer.
-                invalidateAttachmentSnapshotCache()
-                if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
-                Task { @TerminalEngineActor [weak self] in
-                    guard let self else { return }
-                    self.postAttachmentStateDidChange()
-                    self.refreshRuntimeState(force: true)
-                }
-                TerminalPerformance.logMetric(
-                    "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-                return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
-            } catch {
+            touchClientLease(clientID)
+            flushPendingIncomingOutputForStateExport()
+            // Mirrors the durable transfer's own precondition (`transferOwnership` throws `unknownClient` for
+            // a client with no row) against the authoritative in-memory snapshot, so a takeover naming a
+            // client this session never saw is still rejected on the spot rather than acked and then failed
+            // by a queued write nobody is waiting on.
+            guard currentAttachmentSnapshot()?.clients.contains(where: { $0.id == clientID }) == true else {
                 TerminalPerformance.logMetric(
                     "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: String(describing: error))
+                return TerminalControlResponse(ok: false, message: String(describing: TerminalSessionPersistenceError.unknownClient(clientID)))
             }
+            let previousOwnerClientID = activeOwnerClientID()
+            // Apply the transfer to the in-memory snapshot synchronously so owner-gating enforcement (which
+            // reads it) sees the new owner immediately rather than the pre-takeover owner until the deferred
+            // broadcast Task below runs. The notification and re-broadcast stay deferred so the takeover ack
+            // returns without waiting on the full-frame broadcast.
+            applyOwnershipTransfer(to: clientID, transferredAt: TerminalSessionTimestamp.string(from: Date()))
+            if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
+            Task { @TerminalEngineActor [weak self] in
+                guard let self else { return }
+                self.postAttachmentStateDidChange()
+                self.refreshRuntimeState(force: true)
+            }
+            TerminalPerformance.logMetric(
+                "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+            return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
         }
 
         private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1720,7 +1947,12 @@
                 // rather than resting on a record the expiry invalidated.
                 leaseTouchCoalescer.forget(clientID: clientID)
             }
-            let activeAttachmentsBeforeExpiry = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+            // In-memory, not a DB read: under write-behind the DB lags the authority by whatever sits in the
+            // persistence queue. If a viewer has taken over ownership in memory while its transfer write is
+            // still queued, a DB read here would still see the stale prior owner and no remaining owner, and
+            // the derivation below would transfer ownership to a local window client and advance the owner
+            // epoch, stomping the acknowledged takeover the live authority already committed to memory.
+            let activeAttachmentsBeforeExpiry = currentActiveAttachments()
             let staleClientIDSet = Set(staleClientIDs)
             let detachedClientWasOwner = activeAttachmentsBeforeExpiry.contains {
                 $0.mode == .owner && $0.detachedAt == nil && staleClientIDSet.contains($0.clientID)
@@ -1728,7 +1960,9 @@
             let detachedAt = TerminalSessionTimestamp.string(from: now)
             let sessionID = launchConfiguration.sessionID
             let paths = paths
-            // Post-expiry owner derived from the pre-expiry snapshot (the enqueued detach has not committed yet).
+            // Post-expiry owner derived from the pre-expiry in-memory snapshot (the enqueued detach has not
+            // committed yet, and the DB itself may still be behind the in-memory authority by whatever the
+            // persistence queue has not yet applied: see the comment on `activeAttachmentsBeforeExpiry` above).
             var remainingOwnerClientID = activeAttachmentsBeforeExpiry.first {
                 $0.mode == .owner && $0.detachedAt == nil && !staleClientIDSet.contains($0.clientID)
             }?.clientID
@@ -1782,17 +2016,15 @@
             }
             // Mirror the atomic write into the in-memory cache BEFORE broadcasting, so the payload advertises
             // the post-expiry attachment state (expired clients gone, transfer target the owner) without
-            // reading the not-yet-committed durable mirror. `postAttachmentStateDidChange(invalidateCache:)` is
-            // called with `invalidateCache: false` so it does not wipe this fresh cache and reseed the stale
-            // pre-commit rows. On write failure `rearmStaleClientExpiryAfterWriteFailure` invalidates the cache
-            // so it reseeds from the (rolled-back, still pre-expiry) durable state — keeping cache and DB
-            // coherent for the retry.
+            // reading the not-yet-committed durable mirror. On write failure
+            // `rearmStaleClientExpiryAfterWriteFailure` invalidates the cache so it reseeds from the
+            // (rolled-back, still pre-expiry) durable state — keeping cache and DB coherent for the retry.
             markClientsExpiredInCache(clientIDs: staleClientIDs, newOwnerClientID: ownershipTransferTarget, detachedAt: detachedAt)
             if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
                 rendererHostStorage.setSurfaceFocused(false)
             }
             if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.releaseRendererSurface() }
-            postAttachmentStateDidChange(invalidateCache: false)
+            postAttachmentStateDidChange()
             refreshRuntimeState(force: true)
             return staleClientIDs
         }
@@ -1802,11 +2034,14 @@
         /// Also invalidates the attachment-snapshot cache, which `expireStaleRemoteClientsIfNeeded` optimistically
         /// mutated to reflect the expiry as if it had committed: the transaction rolled back untouched, so
         /// reseeding from the true (pre-expiry) durable state restores coherence between cache and DB for the
-        /// retry. Called only from the persistence queue's engine hop on write failure.
+        /// retry. Called only from the persistence queue's engine hop on write failure. Rebroadcasts after the
+        /// invalidate so subscribers that already received the optimistic post-expiry payload converge back to
+        /// the (rolled-back) committed truth instead of keeping the wrong advertised state until an unrelated change.
         private func rearmStaleClientExpiryAfterWriteFailure(clientIDs: [String], error: String) {
             trace("stale_client_expiry_write_failed clients=\(clientIDs) error=\(error)")
             expiredRemoteClientIDs.subtract(clientIDs)
             invalidateAttachmentSnapshotCache()
+            postAttachmentStateDidChange()
         }
 
         /// Reconciles the optimistic expiry cache after `expireClients` reported `.superseded`: the durable world
@@ -1816,11 +2051,15 @@
         /// committed whatever remained valid. Retrying the SAME decision would re-apply stale intent (and could
         /// stomp a legitimate new owner), so instead un-mark these clients — letting the next tick derive a FRESH
         /// decision from current durable rows — and reseed the optimistically-mutated cache from committed truth.
-        /// Called only from the persistence queue's engine hop on the `.superseded` signal.
+        /// Called only from the persistence queue's engine hop on the `.superseded` signal. Rebroadcasts after the
+        /// invalidate so subscribers that already received the optimistic post-expiry payload converge back to
+        /// the (partially different) committed truth instead of keeping the wrong advertised state until an
+        /// unrelated change.
         private func reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: [String]) {
             trace("stale_client_expiry_superseded clients=\(clientIDs)")
             expiredRemoteClientIDs.subtract(clientIDs)
             invalidateAttachmentSnapshotCache()
+            postAttachmentStateDidChange()
         }
 
         @discardableResult private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) -> Bool {
@@ -2024,14 +2263,11 @@
             return lastKnownSurfaceSize
         }
 
-        /// Notifies and re-broadcasts after an attachment-row mutation. `invalidateCache` defaults to true so
-        /// this is the single point that drops the attachment-snapshot cache for every attachment-row mutation
-        /// except the heartbeat-lease touch (`touchClientLease`) and the client upsert (invalidated inline).
-        /// The stale-client expiry path passes `false`: it has already mutated the cache in memory to mirror its
-        /// enqueued atomic write (`markClientsExpiredInCache`), and invalidating here would wipe that and reseed
-        /// the not-yet-committed pre-expiry rows from disk — re-advertising the dead client as owner.
-        private func postAttachmentStateDidChange(invalidateCache: Bool = true) {
-            if invalidateCache { invalidateAttachmentSnapshotCache() }
+        /// Notifies and re-broadcasts after an attachment-row mutation. It deliberately does NOT touch the
+        /// in-memory snapshot: every mutation has already been applied there (that snapshot is the authority),
+        /// and its durable mirror is only enqueued — reseeding from disk here would re-advertise pre-mutation
+        /// rows, e.g. a dead client as owner right after a stale-client expiry.
+        private func postAttachmentStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
         }
@@ -2132,10 +2368,26 @@
 
         /// The session's attachment snapshot, served from `cachedAttachmentSnapshot` and read from disk only
         /// on a cache miss. See `cachedAttachmentSnapshot` for the single-writer invariant that makes serving
-        /// the cache on the hot path sound.
+        /// the cache on the hot path sound. A successful reseed replays `pendingAttachmentMutations` on top of
+        /// the rows it read before caching the result: those transforms were already acknowledged to their
+        /// callers and their durable writes are still queued, so the reseed's rows can predate them, and
+        /// replaying is what makes the result equal the acknowledged state rather than a stale one.
+        ///
+        /// Accepted risk: the replay does not distinguish a pending transform whose own durable write later
+        /// exhausted its retries, so a reseed triggered by that write's failure re-applies it anyway. Reaching
+        /// that state needs a database that fails a read (the only way a transform lands in the pending list)
+        /// and then keeps failing the same mutation's write for its full retry span before recovering — and
+        /// even then memory keeps exactly what the caller was acknowledged, the very next reseed converges on
+        /// committed truth (pending is emptied here), and a daemon restart rebuilds attachments from live
+        /// clients. Threading per-write outcome tokens through both cores to exclude that one transform is
+        /// complexity this corner does not justify.
         private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
             if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
+            guard !forceAttachmentSnapshotReseedFailureForTesting,
+                var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            else { return nil }
+            for transform in pendingAttachmentMutations { snapshot = transform(snapshot) }
+            pendingAttachmentMutations.removeAll()
             cachedAttachmentSnapshot = snapshot
             return snapshot
         }
@@ -2158,8 +2410,11 @@
             return snapshot.clients.contains { $0.disconnectedAt == nil && $0.kind.livenessDependsOnLease && attachedClientIDs.contains($0.id) }
         }
 
-        /// Drops the cached attachment snapshot so the next read reseeds from disk. Called by every in-core
-        /// attachment-row write.
+        /// Drops the in-memory attachment snapshot so the next read reseeds from the durable mirror. Called
+        /// only to reconcile after a durable write did not take what memory already asserts (see
+        /// `cachedAttachmentSnapshot`). Deliberately leaves `pendingAttachmentMutations` untouched: those
+        /// transforms were acknowledged separately from the write that failed here, and their own writes are
+        /// still queued, so they must still replay onto the reseed this triggers.
         private func invalidateAttachmentSnapshotCache() { cachedAttachmentSnapshot = nil }
 
         /// Marks every still-active attachment detached in the in-memory cache so the terminated payload
@@ -2193,31 +2448,19 @@
                     id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: detachedAt,
                     leaseRefreshedAt: client.leaseRefreshedAt)
             }
-            var attachments = snapshot.attachments.map { attachment -> TerminalAttachment in
+            let attachments = snapshot.attachments.map { attachment -> TerminalAttachment in
                 guard attachment.detachedAt == nil, staleClientIDs.contains(attachment.clientID) else { return attachment }
                 return TerminalAttachment(
                     id: attachment.id, sessionID: attachment.sessionID, clientID: attachment.clientID, mode: attachment.mode,
                     attachedAt: attachment.attachedAt, detachedAt: detachedAt)
             }
-            if let newOwnerClientID {
-                attachments = attachments.map { attachment -> TerminalAttachment in
-                    guard attachment.detachedAt == nil, attachment.mode == .owner, attachment.clientID != newOwnerClientID else { return attachment }
-                    return TerminalAttachment(
-                        id: attachment.id, sessionID: attachment.sessionID, clientID: attachment.clientID, mode: .viewer,
-                        attachedAt: attachment.attachedAt, detachedAt: nil)
-                }
-                if let index = attachments.firstIndex(where: { $0.detachedAt == nil && $0.clientID == newOwnerClientID }) {
-                    let existing = attachments[index]
-                    attachments[index] = TerminalAttachment(
-                        id: existing.id, sessionID: launchConfiguration.sessionID, clientID: existing.clientID, mode: .owner,
-                        attachedAt: existing.attachedAt, detachedAt: nil)
-                } else {
-                    attachments.append(
-                        TerminalAttachment(sessionID: launchConfiguration.sessionID, clientID: newOwnerClientID, mode: .owner, attachedAt: detachedAt)
-                    )
-                }
+            let expired = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
+            guard let newOwnerClientID else {
+                cachedAttachmentSnapshot = expired
+                return
             }
-            cachedAttachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
+            cachedAttachmentSnapshot = expired.applyingOwnershipTransfer(
+                to: newOwnerClientID, sessionID: launchConfiguration.sessionID, transferredAt: detachedAt)
         }
 
         /// Refreshes a client's heartbeat lease off the engine (see `enqueueClientLeaseTouch`). No-op when the
@@ -2612,6 +2855,13 @@
         func debugHandleTerminalGridReflowForTesting(columns: Int, rows: Int) { handleTerminalGridReflow(columns: columns, rows: rows) }
         func debugHandleSessionClosed() { handleSessionClosed() }
         func debugMarkStartedForTesting() { started = true }
+        /// Test-only: forces the attachment cache empty, exactly as `invalidateAttachmentSnapshotCache()` does
+        /// on the real reconcile path.
+        func debugInvalidateAttachmentSnapshotCacheForTesting() { invalidateAttachmentSnapshotCache() }
+        /// Test-only: see `forceAttachmentSnapshotReseedFailureForTesting`.
+        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) {
+            forceAttachmentSnapshotReseedFailureForTesting = forced
+        }
 
         private func trace(_ message: @autoclosure () -> String) { ghosttyEmbeddedSessionTrace(launchConfiguration.sessionID, message()) }
 
@@ -2737,6 +2987,8 @@
 
         public func inMemorySessionSummary() -> TerminalServiceSessionSummary? { core.inMemorySessionSummary() }
 
+        public func inMemoryCatalogEntry() -> TerminalSessionCatalogEntry? { core.inMemoryCatalogEntry() }
+
         func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse { core.handleControlRequest(request) }
         func applyActionEvent(_ event: GhosttyActionEvent) { core.applyActionEvent(event) }
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) { core.applySessionStateChange(change) }
@@ -2769,6 +3021,10 @@
         }
         func debugHandleSessionClosed() { core.debugHandleSessionClosed() }
         func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
+        func debugInvalidateAttachmentSnapshotCacheForTesting() { core.debugInvalidateAttachmentSnapshotCacheForTesting() }
+        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) {
+            core.debugSetForceAttachmentSnapshotReseedFailureForTesting(forced)
+        }
     }
 
 #endif

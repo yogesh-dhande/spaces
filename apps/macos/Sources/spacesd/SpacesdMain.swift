@@ -197,7 +197,11 @@ enum SpacesDaemonProfileCommandRouting {
         // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
         // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
         // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
-        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal: true
+        // `.terminalList` reaches `listSessionsOffMain`, which merges in-memory core summaries via
+        // `TerminalEngineActor.runSynchronously`, so it belongs in this group too.
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal,
+            .terminalList:
+            true
         // Every automation command is peeled off main for two reasons. First, trigger/cancel/end-agents/delete
         // reach the automation executor's launcher/terminator call graph directly (starting or tearing down a
         // run's terminal/agent session), which hops the engine actor. Second, ALL of them — create/update/list/
@@ -208,7 +212,7 @@ enum SpacesDaemonProfileCommandRouting {
             .automationEndAgents:
             true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
-        case .terminalList, .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
+        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
             .agentUnsubscribe, .agentConsumePendingEvents:
             false
         }
@@ -401,6 +405,13 @@ enum SpacesDaemonErrorClassification {
         // be answered from the live core instead of dialing that core's own subscription socket.
         liveTerminalSessionStateProvider: { [weak self] sessionID in
             TerminalEngineActor.runSynchronously { self?.liveCoreOneShotStatePayload(sessionID: sessionID) }
+        },
+        // Same queue guarantee again: runs on the Device API's own queues, never main, so the engine hop
+        // is deadlock-safe. In-memory cores are the authority for a session's existence (lifecycle rows
+        // are write-behind), so the overview merges these entries to keep a freshly created session
+        // visible before its rows commit, matching listSessionsOffMain's merge for the CLI list.
+        liveInMemoryTerminalSessionsProvider: { [weak self] in
+            TerminalEngineActor.runSynchronously { self?.sessionCores.values.compactMap { $0.inMemoryCatalogEntry() } } ?? []
         })
     /// `nonisolated` so the off-main request handlers can drive git subprocesses from the transport
     /// thread. `RemoteWorkspaceGitClient` is `Sendable` (immutable, subprocess-per-call), so sharing the
@@ -685,6 +696,16 @@ enum SpacesDaemonErrorClassification {
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalForegroundProcessSampler { [weak self] sessionID in
             TerminalEngineActor.runSynchronously { self?.currentForegroundReading(sessionID: sessionID) }
         }
+        // The ad-hoc stop's owner check reads through this rather than the durable attachment rows, whose
+        // matching detach write can still be queued behind a contended lock when the close request arrives.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalLiveOwnerAttachmentProber { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.sessionCores[sessionID]?.hasLiveOwnerAttachment() }
+        }
+        // Tracked-window pruning reads through this instead of the durable attachment rows, whose mirror
+        // write can still be queued.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalLiveActiveAttachmentProber { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.sessionCores[sessionID]?.hasLiveAttachments() }
+        }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
         // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
         // through this submitter. They run on detached tasks/queues, never main, so
@@ -910,6 +931,15 @@ enum SpacesDaemonErrorClassification {
         case .prepareWorkspace(let payload): return prepareWorkspaceOffMain(payload)
         case .create(let payload): return createSessionOffMain(payload)
         case .state(let payload): return loadTerminalStateOffMain(sessionID: payload.sessionID)
+        // `.list` builds its DB-derived pass from disk (no main-actor state) and only needs a narrow engine
+        // hop to merge in-memory core summaries (see `listSessionsOffMain`), so it is peeled off main here
+        // too — mirroring `.state` — rather than falling through to `handle`'s on-main fallback, which would
+        // force the main actor to synchronously wait on the engine actor.
+        case .list: return listSessionsOffMain()
+        // The profile-command listing variant shares the same in-memory merge, so it is peeled off main for
+        // the same reason as `.list` above rather than falling through to `handleProfileCommand`'s on-main
+        // bulk, which would trap `listSessionsOffMain`'s engine hop.
+        case .profileCommand(.terminalList): return terminalListOffMain()
         case .control(let payload): return handleTerminalControlOffMain(payload)
         // `.terminate` now touches the engine-isolated `sessionCores` cluster (Step 1), so it is peeled
         // off main here too — mirroring `.create` — rather than falling through to `handle`'s on-main
@@ -1008,7 +1038,10 @@ enum SpacesDaemonErrorClassification {
         // identical off-main implementation rather than calling the now-engine-isolated `terminateSession`
         // directly, which would force this main-actor method to synchronously wait on the engine actor.
         case .terminate(let payload): return terminateSessionOffMain(payload)
-        case .list: return listSessions()
+        // Same dual-listing as `.terminate` above: `dispatch` normally peels `.list` off main, but the
+        // on-main fallback (a request that reached `handle` directly) routes through the identical off-main
+        // implementation rather than a main-actor-only listing, so the in-memory-summary merge always runs.
+        case .list: return listSessionsOffMain()
         case .state(let payload): return loadTerminalStateOffMain(sessionID: payload.sessionID)
         case .subscribe(let payload): return subscribeTerminalState(sessionID: payload.sessionID)
         case .control(let payload): return handleTerminalControlOffMain(payload)
@@ -1584,12 +1617,46 @@ enum SpacesDaemonErrorClassification {
         return TerminalServiceCommandResult(exitCode: Int(process.terminationStatus), logPath: logPath)
     }
 
-    private func listSessions() -> TerminalServiceResponse {
+    /// RPC `.list` handler, callable off the main actor (peeled by `dispatch`, and reused verbatim by
+    /// `handle`'s main-actor fallback). Builds the DB-derived pass first, purely from disk state via
+    /// `summaryIfLive`, then makes a single narrow engine hop to merge in each live core's in-memory summary.
+    ///
+    /// In-memory cores are the authority for a session's existence, matching what `startSessionCoreResponse`
+    /// already serves on create (see its doc comment): session lifecycle SQLite writes are write-behind on a
+    /// per-core persistence queue, so a session started moments ago can have `terminal_sessions`/
+    /// `terminal_runtime_states` rows that have not committed yet — up to tens of seconds under DB
+    /// contention. Without this merge, a freshly created live session would silently disappear from CLI/
+    /// device list responses until those queued writes land. Only interactive (`starting`/`running`) cores
+    /// not already covered by the DB-derived pass are appended, so ordering stays stable: DB-derived entries
+    /// first, then the in-memory-only ones.
+    private nonisolated func listSessionsOffMain() -> TerminalServiceResponse {
+        // Peeled handlers do not pass through `handle`'s teardown gate, so each one re-checks it first;
+        // this single check also covers `terminalListOffMain`, which wraps this listing.
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let knownSessions = try TerminalSessionPersistence.listKnownSessions()
-            let sessions = try knownSessions.compactMap { knownSession in try summaryIfLive(for: knownSession) }
+            var sessions = try knownSessions.compactMap { knownSession in try summaryIfLive(for: knownSession) }
+            let knownSessionIDs = Set(sessions.map(\.id))
+            let inMemorySummaries = TerminalEngineActor.runSynchronously {
+                self.sessionCores.values.compactMap { $0.inMemorySessionSummary() }
+            }
+            for summary in inMemorySummaries where summary.state.isInteractive && !knownSessionIDs.contains(summary.id) {
+                sessions.append(summary)
+            }
             return TerminalServiceResponse(ok: true, message: "Listed terminal sessions.", sessions: sessions)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
+    }
+
+    /// RPC `.profileCommand(.terminalList)` handler. Wraps `listSessionsOffMain`'s in-memory-merged listing
+    /// into the profile-command envelope. Peeled off main by `dispatch(_:)` — like `.terminalSend` and its
+    /// siblings — because `listSessionsOffMain` now makes a narrow engine hop to merge live core summaries,
+    /// which traps if driven from the main actor (the one-way rule); `runProfileCommand`'s `.terminalList`
+    /// case fails loudly if a request ever reaches it directly instead.
+    private nonisolated func terminalListOffMain() -> TerminalServiceResponse {
+        let response = listSessionsOffMain()
+        guard response.ok else { return response }
+        let profile = TerminalServiceProfileCommandResponse(message: response.message, terminalSessions: response.sessions ?? [])
+        return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
     }
 
     /// RPC `.state` handler. A live in-process core's state read is a narrow main hop
@@ -1600,9 +1667,34 @@ enum SpacesDaemonErrorClassification {
         guard !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            // A pending launch-registry entry does not imply the session row is absent: a daemon handoff resume
+            // re-enqueues the launch write and re-records the registry entry even though the row and real
+            // unacknowledged signal rows already exist from before the handoff. So the read is attempted first,
+            // or those signals would be hidden. Only when that read throws unknownSession while the launch
+            // write is still queued (first launch, or a relaunch whose new row has not replaced the old one
+            // yet) do we report no pending signals, and that is exact, not an approximation: any signal recorded
+            // in that window is queued behind the launch write on the core's own serial persistence queue and
+            // has not committed either.
+            //
+            // The registry is consulted only after the read above throws, and the launch write can commit and
+            // clear the registry entry in the gap between that read observing no row and the registry check
+            // that follows it. The entry is cleared only after the row commits, so when the registry already
+            // reads empty, one re-read settles which case this is: either it finds the row a commit landed in
+            // during that gap, or it throws unknownSession again for a session that is genuinely unknown, and
+            // that second throw is left to propagate out of this do/catch to the function's own catch below.
+            let agentSignals: [TerminalServiceAgentSignalEvent]
+            do {
+                agentSignals = try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths)
+            } catch TerminalSessionPersistenceError.unknownSession {
+                if TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: sessionID) != nil {
+                    agentSignals = []
+                } else {
+                    agentSignals = try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths)
+                }
+            }
             return TerminalServiceResponse(
                 ok: true, message: "Loaded terminal state.", sessionState: try loadCurrentStateOffMain(sessionID: sessionID),
-                agentSignals: try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths))
+                agentSignals: agentSignals)
         } catch { return Self.failureResponse(error) }
     }
 
@@ -1611,6 +1703,42 @@ enum SpacesDaemonErrorClassification {
         guard !event.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
         do {
             let paths = try TerminalSessionPaths.forSession(id: event.sessionID)
+            // The launch-configuration row for this session is still queued behind the persistence queue, so a
+            // direct append here would throw unknownSession and drop a real lifecycle event (the previous
+            // synchronous launch write made the row exist before the child process could ever signal);
+            // enqueueing on the live core's own serial queue restores that ordering. The response below is
+            // optimistic (the append commits asynchronously); the signal surfaces to state polls once it lands.
+            if TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: event.sessionID) != nil {
+                Task { @TerminalEngineActor [weak self] in
+                    guard let core = self?.sessionCores[event.sessionID] else {
+                        // The core died between the registry check above and this hop, but its persistence
+                        // queue outlives it, so the launch write may still be queued. An immediate append would
+                        // throw unknownSession and silently drop a real event, so wait for the registry entry to
+                        // resolve before appending. The registry entry always resolves: the write closure clears
+                        // it on commit, and the write's own onFailure clears it core-independently on final
+                        // failure. The 60 second bound below is double the roughly 26 seconds a launch write can
+                        // spend exhausting five attempts against the 5 second SQLite busy timeout, kept bounded
+                        // only as a backstop so a detached task can never spin forever. After resolution the
+                        // append succeeds if the row committed; if the launch write finally failed, the session
+                        // never durably existed and the signal has nothing to land on. Detached off the engine
+                        // actor: a DB write must never run inline on the engine, which is the whole point of
+                        // this branch.
+                        Task.detached {
+                            var waits = 0
+                            while waits < 600,
+                                TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: event.sessionID) != nil
+                            {
+                                waits += 1
+                                try? await Task.sleep(nanoseconds: 100_000_000)
+                            }
+                            try? TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
+                        }
+                        return
+                    }
+                    core.enqueueAgentSignalAppend(event)
+                }
+                return TerminalServiceResponse(ok: true, message: "Queued agent signal.", agentSignals: [event])
+            }
             try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
             return TerminalServiceResponse(ok: true, message: "Queued agent signal.", agentSignals: [event])
         } catch { return Self.failureResponse(error) }
@@ -1647,15 +1775,13 @@ enum SpacesDaemonErrorClassification {
     /// genuinely daemon-side validation (existence lookups, event-name recognition).
     private func runProfileCommand(_ command: TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse {
         switch command {
-        case .terminalList:
-            let response = listSessions()
-            guard response.ok else { throw SpacesRuntimeError.invalidArgument(message: response.message) }
-            return TerminalServiceProfileCommandResponse(message: response.message, terminalSessions: response.sessions ?? [])
-        // The three engine-touching profile commands are peeled off the main actor by `dispatch(_:)` into
-        // dedicated synchronous off-main handlers (`terminalSendOffMain`, `terminalCommandOffMain`,
-        // `agentSpawnOffMain`); they can never reach this main-actor switch, where creating or sending to a
-        // session would force a forbidden main→engine synchronous wait (see `TerminalEngineActor`'s one-way
-        // rule). Kept in the switch for exhaustiveness and to fail loudly if that peeling ever regresses.
+        // `.terminalList` and the three engine-touching profile commands are peeled off the main actor by
+        // `dispatch(_:)` into dedicated synchronous off-main handlers (`terminalListOffMain`,
+        // `terminalSendOffMain`, `terminalCommandOffMain`, `agentSpawnOffMain`); they can never reach this
+        // main-actor switch, where listing (its in-memory merge) or creating/sending to a session would force
+        // a forbidden main→engine synchronous wait (see `TerminalEngineActor`'s one-way rule). Kept in the
+        // switch for exhaustiveness and to fail loudly if that peeling ever regresses.
+        case .terminalList: preconditionFailure("`.terminalList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .terminalSend: preconditionFailure("`.terminalSend` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .terminalTail(let payload): return try tailProfileTerminalOutput(payload)
         case .projectList:
@@ -1828,7 +1954,12 @@ enum SpacesDaemonErrorClassification {
     private nonisolated func automationRunSummaries(_ runs: [AutomationRun]) throws -> [TerminalServiceAutomationRunSummary] {
         guard !runs.isEmpty else { return [] }
         let store = try makeProfileOrchestrator().store
-        let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
+        // Every caller of this function runs off the main actor (the automation-command family is peeled
+        // off main in `dispatch(_:)`), so the in-memory merge's engine hop is deadlock-safe here, same as
+        // `listSessionsOffMain`'s merge for the CLI list.
+        let inMemoryEntries = TerminalEngineActor.runSynchronously { self.sessionCores.values.compactMap { $0.inMemoryCatalogEntry() } }
+        let liveSessions = TerminalSessionCatalog.mergingLiveInMemorySessions(
+            (try? TerminalSessionCatalog.listLiveSessions()) ?? [], inMemory: inMemoryEntries)
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
         let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: runs.map(\.id))
         var namesByAutomationID: [String: String] = [:]
@@ -2621,7 +2752,9 @@ enum SpacesDaemonErrorClassification {
         return try summary(for: launchConfiguration, paths: paths)
     }
 
-    private func summaryIfLive(for knownSession: KnownTerminalSession) throws -> TerminalServiceSessionSummary? {
+    /// `nonisolated`: reads only `TerminalSessionPersistence` (disk) and a process-alive check, so it runs
+    /// correctly regardless of caller — `listSessionsOffMain` calls it off the main actor.
+    private nonisolated func summaryIfLive(for knownSession: KnownTerminalSession) throws -> TerminalServiceSessionSummary? {
         let launchConfiguration = knownSession.launchConfiguration
         let paths = knownSession.paths
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
@@ -2870,12 +3003,17 @@ enum SpacesDaemonErrorClassification {
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
 
+    /// Reaps `.whileAttached` sessions once nothing still holds them, read from each core's in-memory
+    /// attachment authority (`hasLiveAttachments`) rather than the durable mirror. A core is the sole writer
+    /// of its own attachment rows, but the mirror write it enqueues for a just-applied attach can still be
+    /// queued behind a contended write lock (see `TerminalCorePersistenceQueue`); a DB read here would race
+    /// that queued write and could reap a session with a live owner. `.whileAttached` has no in-product
+    /// creator today (nothing in the repo passes it; it is reachable only through a hand-crafted create
+    /// request), so this loop is latent until that policy is used.
     @TerminalEngineActor private func reapInactiveSessions() {
         for (sessionID, sessionCore) in sessionCores {
             guard sessionCore.launchConfiguration.lifetimePolicy == .whileAttached else { continue }
-            guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: sessionCore.paths), liveAttachments.isEmpty else {
-                continue
-            }
+            guard !sessionCore.hasLiveAttachments() else { continue }
             _ = terminateSession(id: sessionID)
         }
     }
@@ -2998,13 +3136,15 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
-        liveTerminalSessionStateProvider: (@Sendable (String) -> GhosttyRemoteSessionStatePayload?)? = nil
+        liveTerminalSessionStateProvider: (@Sendable (String) -> GhosttyRemoteSessionStatePayload?)? = nil,
+        liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
                 agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
-                liveTerminalSessionStateProvider: liveTerminalSessionStateProvider)
+                liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
+                liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
         #endif
     }
 

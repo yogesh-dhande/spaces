@@ -143,9 +143,58 @@
         /// than the one already applied would otherwise pin the session to a grid the client has left.
         /// Cleared when the owner epoch advances, since serials are per-ownership.
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
-        /// Rate-limits the durable client lease writes this core performs inline on the engine (see
-        /// `touchClientLeaseIfDue`). Reset for a client on attach and detach — the only ways this core
-        /// changes that client's durable row — and wholesale on termination's detach-all.
+        /// This session's attachment snapshot (`terminal_clients` + `terminal_attachments`) held in memory:
+        /// the AUTHORITY for every enforcement and broadcast read, not a cache of the database in front of it.
+        /// Seeded once from the durable rows at `startIfNeeded`/`resumeFromHandoff`, then advanced in place by
+        /// each mutation this core makes (`applyAttach`, `applyDetach`, `applyOwnershipTransfer`,
+        /// `touchClientLease`), each of which enqueues its durable mirror write onto the per-core persistence
+        /// queue rather than writing on the engine executor.
+        ///
+        /// The DB is the mirror, so it necessarily lags: a write blocked on SQLite's write lock commits up to
+        /// the 5s busy timeout later, and performing it on the engine would freeze PTY output and control for
+        /// every live session in the daemon for that long. Enforcement therefore reads this snapshot through
+        /// `currentAttachmentSnapshot()` — `activeOwnerClientID`, `activeOwnerClient`, and every broadcast
+        /// payload resolve through it. Reading the not-yet-committed DB instead would `.ownershipRejected` the
+        /// very client the broadcast just told owns the terminal, silently dropping its keystrokes.
+        ///
+        /// It is reseeded (`seedAttachmentSnapshot`) at `startIfNeeded`/`resumeFromHandoff` and again only to
+        /// RECONCILE after a lifecycle mirror write exhausted its retries, i.e. when memory asserts something
+        /// durable state does not.
+        ///
+        /// Optional: nil means "not yet seeded" or "the last reseed attempt found nothing to read." A failed
+        /// disk read must never collapse into an empty snapshot here: at `resumeFromHandoff` durable
+        /// attachment rows already exist, and caching an empty snapshot over a transient read failure would
+        /// silently and permanently forget every attached client, with no later reseed left to correct it (a
+        /// `.whileAttached` session could then be reaped despite live durable attachments). `seedAttachmentSnapshot`
+        /// stores nil on a failed read instead, and `currentAttachmentSnapshot()` retries the disk read lazily
+        /// on the next access, caching only a successful one. Readers that need a concrete snapshot fall back
+        /// to an empty one locally, without ever writing that fallback back into this property, so the next
+        /// read retries; mutators that cannot apply to a nil snapshot hold their transform in
+        /// `pendingAttachmentMutations` instead of dropping it, because the caller's durable mirror write still
+        /// goes out regardless. A reseed can read the database before that write commits, so it is the pending
+        /// transform's own replay — not the reseed's rows alone — that carries the mutation's data forward; see
+        /// `pendingAttachmentMutations`.
+        ///
+        /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
+        /// attachment/client rows, which is what lets memory lead the mirror. Every attach, detach,
+        /// heartbeat-lease touch, and ownership transfer routes through this core's control handlers. The only
+        /// writers OUTSIDE a core — `SpacesdMain.recoverStaleSessions` and
+        /// `Orchestrator.markReservedWorkspaceTerminalLaunchFailed` — act exclusively on sessions with NO live
+        /// core, so they can never race one. A fresh core (daemon restart, exec-in-place handoff) reseeds from
+        /// the mirror. Termination's detach-all is durable-only: the control server is gone by then, so nothing
+        /// reads this snapshot again.
+        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
+        /// apply them to (cache empty AND the reseeding disk read also failed). Replayed, in order, by
+        /// `seedAttachmentSnapshot` the next time a reseed reads successfully — including a reseed triggered
+        /// from `reconcileAfterFailedLifecycleWrite` — even though that reseed's rows can predate the still-queued
+        /// writes these transforms represent. INVARIANT: a non-nil `cachedAttachmentSnapshot` implies this is
+        /// empty — entries accumulate only while every reseed fails, and are drained together the moment one
+        /// succeeds.
+        private var pendingAttachmentMutations: [(TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot] = []
+        /// Rate-limits the durable client lease mirror writes this core enqueues (see `touchClientLease`); the
+        /// in-memory lease is refreshed on every heartbeat regardless. Reset for a client on attach and detach —
+        /// the only ways this core changes that client's durable row — and wholesale on termination's detach-all.
         private var leaseTouchCoalescer = TerminalClientLeaseTouchCoalescer()
         private var screenStateRevision: UInt64 = 0
         /// Set for the brief exec-in-place quiesce window so no late resync turn
@@ -185,7 +234,8 @@
         public func startIfNeeded() throws {
             guard !started else { return }
             try paths.ensureDirectories()
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: true)
+            seedAttachmentSnapshot()
             try ensureOutputHandle()
             guard let vtSession = makeVTSession(columns: terminalSize.columns, rows: terminalSize.rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
@@ -311,8 +361,9 @@
         /// runtime-state write commits to SQLite through the per-core persistence queue. Platform parity with
         /// the macOS `GhosttyEmbeddedSessionCore.inMemorySessionSummary()`; `SpacesdMain.createSessionOffMain`
         /// compiles for Linux too and calls this. Returns nil only before any runtime state has been computed
-        /// (never started). At session birth no client has attached and no final render exists, so the
-        /// attachment snapshot is empty and `hasFinalRender` is false.
+        /// (never started). The attachment snapshot is this core's in-memory authority, empty at session birth
+        /// (no client has attached yet, so `cachedAttachmentSnapshot` is nil at birth) and no final render
+        /// exists at birth, so `hasFinalRender` is false.
         public func inMemorySessionSummary() -> TerminalServiceSessionSummary? {
             guard let runtimeState = lastRuntimeState else { return nil }
             return TerminalServiceSessionSummary(
@@ -320,8 +371,24 @@
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                hasFinalRender: false)
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+        }
+
+        /// The catalog entry built entirely from this core's in-memory state, with no DB read. Serves the
+        /// Device API overview's live-session merge the same way `inMemorySessionSummary()` serves the CLI
+        /// list merge: session lifecycle SQLite writes are write-behind on the per-core persistence queue,
+        /// so a session started moments ago can have no committed rows for
+        /// `TerminalSessionCatalog.listLiveSessions()` to find. Socket availability is probed from the
+        /// filesystem exactly as the catalog probes it for DB-derived entries, so a merged entry answers
+        /// the same question the same way.
+        public func inMemoryCatalogEntry(fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
+            guard let runtimeState = lastRuntimeState else { return nil }
+            return TerminalSessionCatalogEntry(
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), paths: paths,
+                isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+                isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
 
         /// The session's foreground process read from the PTY right now, not the periodic sample carried
@@ -348,6 +415,18 @@
         /// otherwise a session's durable runtime row stays stuck at `.running` (and, across `execv`,
         /// `recoverStaleSessions` keeps skipping it because the pid is unchanged).
         public func drainPersistenceForShutdown() async { await persistence.drainAsync() }
+
+        /// Blocks until all enqueued durable writes have committed. Test-only fence for the off-engine
+        /// persistence queue so assertions can read the durable mirror.
+        func debugDrainPersistenceQueue() { persistence.drain() }
+        /// Test-only: parks the serial persistence queue on a returned semaphore so a test can enqueue further
+        /// work and observe the in-memory/durable gap deterministically. Signal the semaphore to release the
+        /// queue.
+        func debugHoldPersistenceQueue() -> DispatchSemaphore {
+            let gate = DispatchSemaphore(value: 0)
+            persistence.enqueueOrderedWork { gate.wait() }
+            return gate
+        }
 
         // MARK: - Exec-in-place handoff
 
@@ -487,7 +566,12 @@
         /// macOS core so stage 5's daemon call site compiles unchanged on both platforms.
         public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
             try paths.ensureDirectories()
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // The runtime row being resumed is this session's current-run state carried across the
+            // handoff, not a previous run's leftover, so this write must not clear it.
+            enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: false)
+            // The pre-exec image drained its persistence queue before exec'ing, so the rows this reads are the
+            // attachment state the handed-off session ended with.
+            seedAttachmentSnapshot()
             // Preserve output.log: recreateVTRenderer replays it to rebuild the screen.
             try openOutputHandlePreservingTranscript()
 
@@ -716,100 +800,104 @@
                 return TerminalControlResponse(ok: false, message: "Missing client payload.", errorCode: .invalidArgument)
             }
             let mode = request.attachmentMode ?? .viewer
-            do {
-                // Adopt the attaching client's light/dark appearance before broadcasting, so the
-                // state the client receives on attach already carries the matching theme variant.
-                if let appearance = request.appearance { applyThemeAppearance(appearance) }
-                let previousOwner = activeOwnerClientID()
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths, attachedAt: nowISO8601())
-                // The attach wrote this client's lease and revived its durable row, so any coalescing record
-                // from an earlier attachment of the same client id is void.
-                leaseTouchCoalescer.forget(clientID: client.id)
-                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
-                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner,
-                // which leaves the owner unchanged and so does not advance the epoch — while its host
-                // counts serials from zero again. Carrying the previous attachment's high-water mark across
-                // that would reject every serial the reconnected client sends and pin the session to the
-                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
-                // so a resize still in flight from the PREVIOUS host of this same id could land after the
-                // reset and outrank the new host's early serials. That needs a same-process host swap with
-                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
-                // stale mark and every state payload re-announces the viewport), and the alternative —
-                // carrying an attachment incarnation in every resize request — is a wire change this
-                // corner does not justify.
-                lastResizeSerialByClientID.removeValue(forKey: client.id)
-                if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
-                writeRuntimeState(state: .running)
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
-                return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
-            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+            // Adopt the attaching client's light/dark appearance before broadcasting, so the
+            // state the client receives on attach already carries the matching theme variant.
+            if let appearance = request.appearance { applyThemeAppearance(appearance) }
+            let previousOwner = activeOwnerClientID()
+            applyAttach(client: client, mode: mode, attachedAt: nowISO8601())
+            // The attach refreshed this client's lease and revived its row, so any coalescing record
+            // from an earlier attachment of the same client id is void.
+            leaseTouchCoalescer.forget(clientID: client.id)
+            // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+            // to a session it already owns keeps its id — an app relaunch reattaches as the same owner,
+            // which leaves the owner unchanged and so does not advance the epoch — while its host
+            // counts serials from zero again. Carrying the previous attachment's high-water mark across
+            // that would reject every serial the reconnected client sends and pin the session to the
+            // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+            // so a resize still in flight from the PREVIOUS host of this same id could land after the
+            // reset and outrank the new host's early serials. That needs a same-process host swap with
+            // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+            // stale mark and every state payload re-announces the viewport), and the alternative —
+            // carrying an attachment incarnation in every resize request — is a wire change this
+            // corner does not justify.
+            lastResizeSerialByClientID.removeValue(forKey: client.id)
+            if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+            return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
         }
 
         private func detach(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard let clientID = request.clientID else {
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
-            do {
-                let detachedOwner = activeOwnerClientID() == clientID
-                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: nowISO8601())
-                leaseTouchCoalescer.forget(clientID: clientID)
-                if detachedOwner { advanceOwnerEpoch() }
-                writeRuntimeState(state: .running)
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
-                return TerminalControlResponse(ok: true, message: "Detached terminal client.")
-            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+            let detachedOwner = activeOwnerClientID() == clientID
+            applyDetach(clientID: clientID, detachedAt: nowISO8601())
+            leaseTouchCoalescer.forget(clientID: clientID)
+            if detachedOwner { advanceOwnerEpoch() }
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+            return TerminalControlResponse(ok: true, message: "Detached terminal client.")
         }
 
         private func heartbeat(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard let clientID = request.clientID else {
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
-            do {
-                guard try touchClientLeaseIfDue(clientID: clientID) else {
-                    return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
-                }
-                return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
-            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+            guard touchClientLease(clientID: clientID) else {
+                return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
+            }
+            return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
         }
 
-        /// Refreshes `clientID`'s durable lease unless it was refreshed within the coalescing window, and
-        /// reports whether the client is still attached.
+        /// Refreshes `clientID`'s lease in the authoritative in-memory snapshot and reports whether the client
+        /// is still attached, enqueueing the durable mirror at most once per coalescing window.
         ///
-        /// A skipped write answers from the coalescing record rather than from the database. That is sound
-        /// because this core is the only writer of its session's client rows and it drops a client's record
-        /// whenever it attaches or detaches that client: a surviving record therefore means the client was
-        /// attached at the recorded write and nothing has detached it since. A write that reports the client
-        /// gone — or fails outright — drops the record so the next heartbeat asks the database again.
-        private func touchClientLeaseIfDue(clientID: String) throws -> Bool {
+        /// The attached answer comes from memory, which is where this core decides attachment anyway; the
+        /// durable lease is read only off-device (the daemon's inactive-session reaper, the session garbage
+        /// collector, a fresh core reseeding after handoff), and lease expiry runs on a multi-second scale, so
+        /// the coalesced write's lag is invisible to them.
+        @discardableResult private func touchClientLease(clientID: String) -> Bool {
             let now = Date()
+            let touchedAt = GhosttyRemoteSessionStateTimestamp.string(from: now)
+            // A nil snapshot means the cache is empty and the reseeding disk read is currently failing (see
+            // `cachedAttachmentSnapshot`): there is nothing here to confirm the client's attachment against, so
+            // decline the touch rather than manufacture an attached-or-not answer from unknown state. The
+            // caller reports this exactly as it would a genuinely unattached client; the remote client's own
+            // heartbeat retry recovers it once a later reseed succeeds.
+            guard let snapshot = currentAttachmentSnapshot(),
+                snapshot.clients.contains(where: { $0.id == clientID && $0.disconnectedAt == nil })
+            else { return false }
+            cachedAttachmentSnapshot = snapshot.applyingClientLeaseTouch(clientID: clientID, leaseRefreshedAt: touchedAt)
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: now) else { return true }
-            let attached: Bool
-            do {
-                attached = try TerminalSessionPersistence.touchClient(
-                    id: clientID, paths: paths, touchedAt: GhosttyRemoteSessionStateTimestamp.string(from: now))
-            } catch {
-                leaseTouchCoalescer.forget(clientID: clientID)
-                throw error
+            let paths = paths
+            persistence.enqueueCoalescedWrite(key: "lease:\(clientID)") { databasePath in
+                // `disconnected_at IS NULL` inside `touchClient` makes this a no-op for an already-detached
+                // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
+                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt, databasePath: databasePath)
             }
-            if !attached { leaseTouchCoalescer.forget(clientID: clientID) }
-            return attached
+            return true
         }
 
         private func takeover(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard let clientID = request.clientID else {
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
-            do {
-                _ = try? touchClientLeaseIfDue(clientID: clientID)
-                let previousOwner = activeOwnerClientID()
-                try TerminalSessionPersistence.transferOwnership(
-                    sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: nowISO8601())
-                if previousOwner != clientID { advanceOwnerEpoch() }
-                writeRuntimeState(state: .running)
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
-                return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
-            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+            // Mirrors the precondition `transferOwnership` enforces in SQL: ownership can only move to a client
+            // this session knows. Checked in memory because the durable mirror lags the snapshot that decided
+            // it. A nil snapshot (cache empty, reseed currently failing) has nothing to confirm the client
+            // against, so this rejects the takeover exactly as an unknown client would rather than manufacture
+            // an answer from unknown state.
+            guard let snapshot = currentAttachmentSnapshot(), snapshot.clients.contains(where: { $0.id == clientID }) else {
+                return TerminalControlResponse(ok: false, message: String(describing: TerminalSessionPersistenceError.unknownClient(clientID)))
+            }
+            touchClientLease(clientID: clientID)
+            let previousOwner = activeOwnerClientID()
+            applyOwnershipTransfer(to: clientID, transferredAt: nowISO8601())
+            if previousOwner != clientID { advanceOwnerEpoch() }
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+            return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
         }
 
         private func send(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1136,15 +1224,61 @@
             return requestedOwnerEpoch == ownerEpoch
         }
 
-        private func activeOwnerClientID() -> String? {
-            ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first { $0.mode == .owner }?.clientID
+        /// The session's attachment snapshot, served from `cachedAttachmentSnapshot` and read from disk only on
+        /// a cache miss (via `seedAttachmentSnapshot`, which also replays any `pendingAttachmentMutations`). See
+        /// `cachedAttachmentSnapshot` for the single-writer invariant that makes serving the cache on the hot
+        /// path sound, and for why a failed disk read on a miss is deliberately not cached.
+        private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
+            if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
+            seedAttachmentSnapshot()
+            return cachedAttachmentSnapshot
         }
 
-        private func activeOwnerClient() -> TerminalClient? {
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
-                let ownerID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot)
-            else { return nil }
-            return snapshot.clients.first { $0.id == ownerID }
+        /// Applies an attachment mutation to the authoritative in-memory snapshot. A nil snapshot means the
+        /// cache is empty and the reseeding disk read is currently failing; the caller's durable mirror write
+        /// still goes out regardless, so the transform is held in `pendingAttachmentMutations` instead of being
+        /// dropped — the next successful reseed replays it (see `seedAttachmentSnapshot`).
+        private func mutateAttachmentSnapshot(_ transform: @escaping (TerminalSessionAttachmentSnapshot) -> TerminalSessionAttachmentSnapshot) {
+            guard let snapshot = currentAttachmentSnapshot() else {
+                pendingAttachmentMutations.append(transform)
+                return
+            }
+            cachedAttachmentSnapshot = transform(snapshot)
+        }
+
+        private func activeOwnerClientID() -> String? { TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: currentAttachmentSnapshot()) }
+
+        private func activeOwnerClient() -> TerminalClient? { TerminalRemoteSessionStatePolicy.activeOwnerClient(in: currentAttachmentSnapshot()) }
+
+        /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has any live
+        /// attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments` (active AND lease-fresh for the
+        /// client kinds a lease governs). The daemon's `.whileAttached` reaper calls this instead of reading the
+        /// durable mirror: this core is the single writer of its own attachment rows, so memory is always at
+        /// least as current as the database, and a DB read can observe an attach whose durable mirror is still
+        /// queued behind a contended write lock as "no attachment" and reap a session with a live owner.
+        ///
+        /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
+        /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
+        /// case means an unreadable database never causes the reaper to treat a live session as attachment-free.
+        public func hasLiveAttachments(now: Date = Date()) -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return true }
+            return !snapshot.liveAttachments(now: now).isEmpty
+        }
+
+        /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has a live
+        /// owner-mode attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments`. The close-time ad-hoc
+        /// stop decision calls this through the daemon's prober instead of reading the durable mirror, because
+        /// the closing client's detach is applied to this snapshot before its durable mirror commits: a
+        /// durable read taken right after that detach can still see the just-detached owner and wrongly keep a
+        /// session the user closed.
+        ///
+        /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
+        /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
+        /// case fails closed, the same way `hasLiveAttachments` does: this answer gates a termination, and a
+        /// wrongful stop destroys a terminal the user cannot get back.
+        public func hasLiveOwnerAttachment(now: Date = Date()) -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return true }
+            return snapshot.liveAttachments(now: now).contains { $0.mode == .owner }
         }
 
         private func advanceOwnerEpoch() {
@@ -1469,6 +1603,177 @@
                 foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
         }
 
+        // MARK: - Lifecycle writes (in-memory authority, durable mirror off the engine)
+
+        /// Reads the durable attachment rows into the in-memory authority. Called once per core life at
+        /// `startIfNeeded`/`resumeFromHandoff`, and again only to reconcile after a lifecycle mirror write
+        /// exhausted its retries. The read is inline because SQLite readers never block on a writer, so it
+        /// cannot stall the engine the way the writes moved off it could.
+        ///
+        /// Stores nil on a failed read rather than falling back to an empty snapshot: at `resumeFromHandoff`
+        /// durable attachment rows already exist, and caching an empty snapshot over a transient read failure
+        /// would silently and permanently convert them into "nobody attached," with nothing left to retry it
+        /// (see `cachedAttachmentSnapshot`). `currentAttachmentSnapshot()` retries the read lazily on the next
+        /// access and caches only a successful one.
+        ///
+        /// A successful read replays `pendingAttachmentMutations` on top of the rows it read before caching the
+        /// result: those transforms were already acknowledged to their callers and their durable writes are
+        /// still queued, so the read can predate them, and replaying is what makes the cached result equal the
+        /// acknowledged state rather than a stale one.
+        ///
+        /// Accepted risk: the replay does not distinguish a pending transform whose own durable write later
+        /// exhausted its retries, so a reseed triggered by that write's failure re-applies it anyway. Reaching
+        /// that state needs a database that fails a read (the only way a transform lands in the pending list)
+        /// and then keeps failing the same mutation's write for its full retry span before recovering — and
+        /// even then memory keeps exactly what the caller was acknowledged, the very next reseed converges on
+        /// committed truth (pending is emptied here), and a daemon restart rebuilds attachments from live
+        /// clients. Threading per-write outcome tokens through both cores to exclude that one transform is
+        /// complexity this corner does not justify.
+        private func seedAttachmentSnapshot() {
+            guard var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else {
+                cachedAttachmentSnapshot = nil
+                return
+            }
+            for transform in pendingAttachmentMutations { snapshot = transform(snapshot) }
+            pendingAttachmentMutations.removeAll()
+            cachedAttachmentSnapshot = snapshot
+        }
+
+        /// The label `enqueueLaunchConfigurationWrite` enqueues under. Every other durable write this core
+        /// makes validates against the `terminal_sessions` row that write creates, so a failure of THIS
+        /// specific write is treated differently in `reconcileAfterFailedLifecycleWrite`: there is no row left
+        /// to reconcile against, only one to terminate the core over.
+        private static let launchConfigurationWriteLabel = "launch_configuration"
+
+        /// Enqueues one once-per-lifecycle durable write with bounded in-place retry (see
+        /// `TerminalCorePersistenceQueue.enqueueLifecycleWrite`). The engine has already applied the mutation
+        /// to the authoritative in-memory snapshot, so this only mirrors it; on final failure the core hands
+        /// the label to `reconcileAfterFailedLifecycleWrite`, which reconciles for an attachment write (reseeds
+        /// the in-memory snapshot from committed truth) or terminates the core for the launch-configuration
+        /// write (there is no session row left for later mirror writes to validate against, so reconciling
+        /// would just make every later write fail as `unknownSession`).
+        private func enqueueLifecycleWrite(_ label: String, _ write: @escaping @Sendable (String) throws -> Void) {
+            persistence.enqueueLifecycleWrite(
+                label, write: write, onFailure: { [weak self] in Task { @TerminalEngineActor in self?.reconcileAfterFailedLifecycleWrite(label) } })
+        }
+
+        /// Handles a lifecycle mirror write that exhausted its retries. The launch-configuration write is the
+        /// FIRST entry on this core's persistence queue and every later write validates against the row it
+        /// creates, so its failure leaves nothing to reconcile: the core terminates rather than reseeding a
+        /// snapshot that would just make every later mirror write fail as `unknownSession`. Any other
+        /// lifecycle write (attach, detach, ownership transfer) reseeds the in-memory snapshot from committed
+        /// truth (the queue already reported which write failed on stderr), and re-broadcasts so subscribers
+        /// and owner gating agree with it again. Called only from the persistence queue's engine hop.
+        ///
+        /// The reconcile hop above is itself asynchronous, so the queue can advance to a later write before
+        /// this runs; a reseed can then read the database before that later write commits, leaving memory
+        /// briefly behind the mirror it just reseeded from. Reaching that window needs one write to exhaust
+        /// all retries (roughly 26 seconds of continuous write-lock contention) followed by the database
+        /// recovering immediately with another write already queued behind it. The next lifecycle mutation
+        /// (or an owner re-attach) reseeds again and self-heals it, so ordering the reconcile behind the
+        /// queue, or guarding it with a generation counter, is complexity this corner does not justify.
+        private func reconcileAfterFailedLifecycleWrite(_ label: String) {
+            guard label != Self.launchConfigurationWriteLabel else {
+                // The pending-launch registry entry was already cleared by the launch write's own onFailure
+                // closure, core-independently, before this hop ran (see `enqueueLaunchConfigurationWrite`).
+                terminate()
+                // `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path
+                // (`handleSessionClosed()`) does, so without this call the daemon's session registry keeps
+                // this dead core registered for its lifetime, and a later create for the same session id
+                // would hand back the terminated object instead of building a fresh one.
+                onSessionClosed?(self)
+                return
+            }
+            seedAttachmentSnapshot()
+            TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+        }
+
+        /// The session's `terminal_sessions` row, written as the FIRST entry on this core's persistence queue
+        /// (nothing is enqueued before `startIfNeeded`/`resumeFromHandoff` runs). Every other durable write
+        /// this core makes validates against that row, so serial FIFO ordering — not a blocking wait here — is
+        /// what guarantees they commit after it exists.
+        private func enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: Bool) {
+            let configuration = launchConfiguration
+            let paths = paths
+            // Recorded before the enqueue and cleared only after the row commits: launch-pending probes
+            // (automation polling, tracked-window liveness) read the registry first, so the gap between
+            // this in-memory create and the write-behind row landing is never visible to them. The write's
+            // final failure clears the entry in this write's own onFailure closure below, through the
+            // value-captured session id rather than through the core: the persistence queue holds no
+            // reference to the core, so a fast-exiting core can be deallocated before the failure callback
+            // runs, and clearing inside the weak-self reconcile alone would leak a permanent pending entry
+            // that keeps launch-pending probes and agent-signal requests treating a dead session as launching.
+            // The clear below is generation-scoped: an older still-queued launch write for this same
+            // session id can never erase this launch's entry, only the entry it itself recorded.
+            let generation = TerminalSessionPendingLaunchRegistry.shared.recordPending(configuration)
+            persistence.enqueueLifecycleWrite(
+                Self.launchConfigurationWriteLabel,
+                write: { databasePath in
+                    try TerminalSessionPersistence.writeLaunchConfiguration(
+                        configuration, paths: paths, clearingPreviousRunRuntimeState: clearingPreviousRunRuntimeState, databasePath: databasePath)
+                    TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: configuration.sessionID, generation: generation)
+                },
+                onFailure: { [weak self] in
+                    // Cleared here, outside the weak-self hop, so the registry entry never depends on the
+                    // core still being alive when the failure callback runs.
+                    TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: configuration.sessionID, generation: generation)
+                    Task { @TerminalEngineActor in self?.reconcileAfterFailedLifecycleWrite(Self.launchConfigurationWriteLabel) }
+                })
+        }
+
+        /// Applies an attach to the in-memory snapshot and enqueues its durable mirror. The session id the
+        /// mirror validates against is this core's own — `writeLaunchConfiguration` deletes every other
+        /// session row for this root before inserting it — so no canonical-id lookup is needed on the engine.
+        private func applyAttach(client: TerminalClient, mode: TerminalAttachmentMode, attachedAt: String) {
+            let sessionID = launchConfiguration.sessionID
+            mutateAttachmentSnapshot { $0.applyingAttach(client: client, mode: mode, sessionID: sessionID, attachedAt: attachedAt) }
+            let paths = paths
+            enqueueLifecycleWrite("attach") { databasePath in
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: attachedAt, databasePath: databasePath)
+            }
+        }
+
+        /// Applies a detach to the in-memory snapshot and enqueues its durable mirror.
+        private func applyDetach(clientID: String, detachedAt: String) {
+            mutateAttachmentSnapshot { $0.applyingDetach(clientID: clientID, detachedAt: detachedAt) }
+            let paths = paths
+            enqueueLifecycleWrite("detach") { databasePath in
+                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt, databasePath: databasePath)
+            }
+        }
+
+        /// Applies an ownership transfer to the in-memory snapshot and enqueues its durable mirror.
+        private func applyOwnershipTransfer(to newOwnerClientID: String, transferredAt: String) {
+            let sessionID = launchConfiguration.sessionID
+            mutateAttachmentSnapshot { $0.applyingOwnershipTransfer(to: newOwnerClientID, sessionID: sessionID, transferredAt: transferredAt) }
+            let paths = paths
+            enqueueLifecycleWrite("ownership_transfer") { databasePath in
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: newOwnerClientID, paths: paths, transferredAt: transferredAt, databasePath: databasePath)
+            }
+        }
+
+        /// Enqueues a durable agent-signal-event append on this core's own serial persistence queue, rather than
+        /// through `enqueueLifecycleWrite`'s shared wrapper: that wrapper's failure path reconciles attachment
+        /// state (reseeds the cached snapshot, or terminates the core for the launch-configuration label),
+        /// which is unrelated to a signal row. A signal recorded while this core's launch-configuration write
+        /// is still queued must commit after the `terminal_sessions` row exists; FIFO ordering on the serial
+        /// persistence queue is what guarantees that, exactly as it does for the attach and detach mirrors.
+        ///
+        /// On final failure there is nothing to reconcile (no in-memory state mirrors signal rows), so the loss
+        /// is accepted: signal delivery was already best-effort at the sender (agent hooks append `|| true`).
+        /// The queue itself already reports the failure on stderr, so there is nothing further to log here.
+        public func enqueueAgentSignalAppend(_ event: TerminalServiceAgentSignalEvent) {
+            let paths = paths
+            persistence.enqueueLifecycleWrite(
+                "agent_signal",
+                write: { databasePath in
+                    try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath)
+                }, onFailure: {})
+        }
+
         /// Advances the in-memory authoritative state immediately (so broadcasts show live truth regardless of
         /// when the durable write lands) and enqueues the durable runtime-state write off the engine. Coalesced
         /// latest-wins on the persistence queue, so a burst of persists — or an exited state superseding a
@@ -1532,7 +1837,11 @@
             reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
-            let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+            // A nil read here (cache empty, reseed currently failing) rides straight into the payload below:
+            // `attachmentSnapshot` on the wire is itself optional, and a subscriber merging updates keeps its
+            // last-known attachment state on a nil rather than being told nobody is attached (see
+            // `GhosttyRemoteSessionState.merged(with:)`).
+            let attachmentSnapshot = currentAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
             let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState

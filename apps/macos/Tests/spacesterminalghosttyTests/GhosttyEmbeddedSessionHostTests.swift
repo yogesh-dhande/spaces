@@ -2633,6 +2633,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
                     createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             try sessionDriver.startIfNeeded()
+            // The app service is a process-wide singleton whose config references the theme files of
+            // whichever test started it first; that test's teardown deletes them, so re-anchor the config
+            // to this test's live profile before relying on ghostty_app_update_config re-reading them.
+            try GhosttyEmbeddedAppService.shared.reloadThemeConfigurationForTesting()
             XCTAssertTrue(sessionDriver.resizeCellGrid(columns: 20, rows: 4))
             return Box(sessionDriver)
         }
@@ -3406,10 +3410,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let attachResponse = host.handleControlRequest(.init(command: "attach", client: client, attachmentMode: .viewer))
             XCTAssertEqual(attachResponse, TerminalControlResponse(ok: true, message: "Attached viewer client."))
+            // Attach and detach are applied to the in-memory authority synchronously and mirrored off the
+            // engine; drain the queue before reading the durable mirror they converge to.
+            host.debugDrainPersistenceQueue()
             XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).map(\.clientID), [client.id])
 
             let detachResponse = host.handleControlRequest(.init(command: "detach", clientID: client.id))
             XCTAssertEqual(detachResponse, TerminalControlResponse(ok: true, message: "Detached terminal client."))
+            host.debugDrainPersistenceQueue()
             XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
         }
 
@@ -3442,7 +3450,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let detachResponse = host.handleControlRequest(.init(command: "detach", clientID: remoteClient.id))
             XCTAssertEqual(detachResponse, TerminalControlResponse(ok: true, message: "Detached terminal client."))
+            XCTAssertEqual(host.activeOwnerClientID(), localClient.id)
 
+            // The detach and the transfer back are applied to the in-memory authority synchronously and mirrored
+            // off the engine; drain the queue before reading the durable mirror they converge to.
+            host.debugDrainPersistenceQueue()
             let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
             XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)
             XCTAssertFalse(activeAttachments.contains { $0.clientID == remoteClient.id })
@@ -3731,6 +3743,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let attachResponse = host.handleControlRequest(.init(command: "attach", client: staleTimestampedClient, attachmentMode: .viewer))
             XCTAssertEqual(attachResponse, TerminalControlResponse(ok: true, message: "Attached viewer client."))
+            // The attach is applied to the in-memory authority synchronously and mirrored off the engine;
+            // drain the queue before reading the durable lease the mirror carries.
+            host.debugDrainPersistenceQueue()
             XCTAssertEqual(try TerminalSessionPersistence.liveAttachments(paths: paths, now: Date()).map(\.clientID), [staleTimestampedClient.id])
 
             let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
@@ -3842,6 +3857,172 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)
             XCTAssertFalse(activeAttachments.contains { $0.clientID == remoteClient.id })
 
+        }
+    }
+
+    func testControlAttachRecordsHeartbeatSoStaleSweepDoesNotExpireAFreshlyReattachedClient() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-attach-heartbeat", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let remoteClient = TerminalClient(
+                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: remoteClient, attachmentMode: .viewer)).ok)
+            host.debugDrainPersistenceQueue()
+
+            // Simulate a durable lease that looks stale to a DB read even though the attach that produced it
+            // was just accepted: this is what the committed row looks like if a mirror write from a more
+            // recent reattach of the same client were still sitting in the persistence queue when the sweep
+            // ticks. `touchClient` writes straight to the durable row without touching the host's in-memory
+            // heartbeat map, so it isolates that one signal.
+            try TerminalSessionPersistence.touchClient(id: remoteClient.id, paths: paths, touchedAt: "2000-01-01T00:00:00Z")
+
+            // Fix 1: `controlResponseForAttachRequest` records the attach in `latestRemoteClientHeartbeat`, the
+            // same map a lease touch does, so the sweep below honors it as fresh liveness evidence despite the
+            // stale-looking committed row above.
+            let expiredClientIDs = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertTrue(
+                expiredClientIDs.isEmpty,
+                "a client that just attached must not be expired off a stale committed lease its own mirror write hasn't caught up to yet")
+            host.debugDrainPersistenceQueue()
+
+            XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).map(\.clientID), [remoteClient.id])
+        }
+    }
+
+    func testExpiringStaleRemoteOwnerDoesNotStompAnInMemoryTakeoverWhoseTransferWriteLags() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-owner-race", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            let staleRemoteOwner = TerminalClient(
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"),
+                connectedAt: "2026-05-17T00:00:00Z")
+            let localClient = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            let takingOverClient = TerminalClient(
+                id: "taking-over-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2026-05-17T00:00:00Z")
+
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: takingOverClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+            // Age the owner's durable lease before the host ever seeds its in-memory snapshot from these rows.
+            // `touchClient` writes straight to the committed row without going through the host, so this is
+            // what makes `staleRemoteOwner` look stale to the sweep later, independent of everything else below.
+            try TerminalSessionPersistence.touchClient(id: staleRemoteOwner.id, paths: paths, touchedAt: "2000-01-01T00:00:00Z")
+
+            // Park the persistence queue before the takeover, so the takeover's durable transfer write is
+            // enqueued but held rather than committed. This is the genuine lag: the host's in-memory authority
+            // moves ownership to `takingOverClient` synchronously below, while the DB still says
+            // `staleRemoteOwner` owns the session until the held write is released.
+            let gate = host.debugHoldPersistenceQueue()
+
+            // A real takeover: seeds the host's in-memory authority from the durable rows above (owner =
+            // stale-remote-owner) and applies the transfer to `takingOverClient` synchronously in memory, same
+            // as an accepted client-initiated reclaim. The mirror write for this sits parked behind the gate.
+            XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: takingOverClient.id)).ok)
+
+            // Fix 2: `expireStaleRemoteClientsIfNeeded` derives the owner-transfer decision from the in-memory
+            // authority (`currentActiveAttachments()`), not the DB rows, which still show `staleRemoteOwner` as
+            // owner because its parked transfer write hasn't landed yet. In memory, `staleRemoteOwner` was
+            // already demoted to viewer by the takeover, so expiring its stale lease must not read the lagging
+            // DB as "the owner went stale with nobody else to take it" and hand ownership to `localClient`,
+            // which would stomp the takeover `takingOverClient` already holds in memory.
+            let expiredClientIDs = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(expiredClientIDs, [staleRemoteOwner.id])
+
+            // Release the gate and drain: the parked transfer write runs first (FIFO), landing
+            // `takingOverClient` as durable owner, and only then does the expiry's detach write run against a
+            // database that already agrees with memory. This is what proves the durable mirror converges to
+            // the in-memory answer through normal queue ordering, not through the test rewriting rows itself.
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertEqual(
+                activeAttachments.first(where: { $0.mode == .owner })?.clientID, takingOverClient.id,
+                "a stale remote owner's lease expiring must not reassign ownership away from an in-memory owner whose takeover already committed")
+            XCTAssertFalse(activeAttachments.contains { $0.clientID == staleRemoteOwner.id })
+        }
+    }
+
+    /// Reproduces the ordering hole `pendingAttachmentMutations` closes: a mutation is acknowledged (its
+    /// durable write goes out) while the cache is empty AND the reseeding disk read is also failing, so it has
+    /// nowhere to apply. Before the fix, `mutateAttachmentSnapshot` silently dropped the transform in that
+    /// case; a later reseed that ran ahead of the still-queued write would then cache stale, pre-mutation rows
+    /// forever, since the cache is only ever invalidated by a write-failure reconcile. This test forces that
+    /// exact window with the `forceAttachmentSnapshotReseedFailureForTesting` seam and a held persistence
+    /// queue, then proves the detach still resolves correctly once the seam is lifted and a reseed runs.
+    func testAttachmentMutationAcknowledgedDuringFailedReseedSurvivesALaggingReseed() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-pending-attachment-mutation", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+
+            let owner = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            try host.attach(client: owner, mode: .owner, into: nil)
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(host.activeOwnerClientID(), owner.id)
+
+            // Empty the cache and make the reseed that would normally repopulate it fail, exactly as a real
+            // reseed racing a busy write lock would: there is neither a cache nor a readable disk row to apply
+            // the coming detach to.
+            host.debugInvalidateAttachmentSnapshotCacheForTesting()
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(true)
+
+            // Park the persistence queue so the detach's durable write is enqueued but held. When the seam is
+            // lifted below, the reseed it triggers reads the DB exactly as it stood before this detach — the
+            // pre-commit rows the real ordering hole exposes.
+            let gate = host.debugHoldPersistenceQueue()
+
+            try host.detach(clientID: owner.id)
+
+            // Lift the seam and force a reseed through an owner-gating read. Its disk read still shows the
+            // owner attached (the parked write hasn't committed), so this only proves the fix if the pending
+            // detach transform is replayed on top of that stale read.
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(false)
+            XCTAssertNil(
+                host.activeOwnerClientID(),
+                "a detach acknowledged while the cache and reseed were both unavailable must survive a reseed that reads pre-commit rows")
+
+            // Release the gate and drain: the durable mirror must converge to the same answer once the parked
+            // write actually commits, proving nothing was lost, only delayed.
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertFalse(activeAttachments.contains { $0.clientID == owner.id })
         }
     }
 
@@ -4134,13 +4315,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(cachedClientIDs, [staleClient.id], "the in-memory cache must agree the heartbeated client is still attached")
     }
 
-    /// Lost-update race: a queued stale-owner expiry must not overwrite a takeover that committed synchronously
-    /// after the expiry decision. The tick decides to transfer ownership from the stale remote owner R to the
+    /// Lost-update race: a queued stale-owner expiry must not overwrite a takeover accepted after the expiry
+    /// decision. The tick decides to transfer ownership from the stale remote owner R to the
     /// local window A and optimistically promotes A in its cache, but its atomic `expireClients` write is only
-    /// enqueued (parked here on the held persistence queue). Before it commits, remote viewer B takes over — a
-    /// synchronous transfer that is ack'd ok, making B the durable owner. When the queued expiry finally runs it
-    /// must SKIP the transfer (B is not one of the expired clients) and leave B the durable owner, only detaching
-    /// the genuinely stale R. Pre-fix `expireClients` demoted every active owner but the target and promoted A
+    /// enqueued (parked here on the held persistence queue). Before it commits, remote viewer B takes over: B owns
+    /// the session in memory the moment the takeover is ack'd, and its durable mirror is enqueued behind the
+    /// parked expiry. When the queued expiry finally runs it must SKIP the transfer (B is not one of the expired
+    /// clients), only detaching the genuinely stale R, so the mirror converges on B as owner. Pre-fix
+    /// `expireClients` demoted every active owner but the target and promoted A
     /// unconditionally, durably stomping B's ack'd takeover — a permanent inversion that survived handoff.
     func testQueuedStaleOwnerExpiryDoesNotOverwriteSynchronousTakeover() async throws {
         try await TerminalEngineActor.run {
@@ -4183,9 +4365,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // B takes over synchronously (not via the parked queue); its transfer commits and is ack'd ok.
             let takeover = host.handleControlRequest(.init(command: "takeover", clientID: takeoverClient.id))
             XCTAssertTrue(takeover.ok, "the takeover must be accepted before the queued expiry commits")
-            XCTAssertEqual(
-                (try TerminalSessionPersistence.activeAttachments(paths: paths)).first(where: { $0.mode == .owner })?.clientID, takeoverClient.id,
-                "B's takeover is durably the owner before the expiry runs")
+            XCTAssertEqual(host.activeOwnerClientID(), takeoverClient.id, "B owns the session in memory the moment its takeover is ack'd")
 
             // Release the queue: the parked expiry now commits against a world where B owns the session.
             gate.signal()
@@ -4202,6 +4382,234 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertTrue(host.isOwner(clientID: takeoverClient.id), "B is accepted as owner by enforcement")
             XCTAssertFalse(host.isOwner(clientID: localClient.id), "the local window A must not have been promoted by the superseded transfer")
         }
+    }
+
+    /// A takeover must be visible to the very next broadcast, not only once its durable mirror commits. Every
+    /// client gates its own input on the owner the broadcast advertises, so a payload built from the database
+    /// would keep advertising the previous owner — and the taking-over device would reject its own typing —
+    /// for as long as the durable write is delayed. The parked persistence queue here stands in for that delay.
+    func testTakeoverIsVisibleToTheNextBroadcastWhileItsDurableMirrorIsParked() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-takeover-broadcast", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let localOwner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            let remoteViewer = TerminalClient(
+                id: "remote-iphone", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: localOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: remoteViewer, mode: .viewer, paths: paths,
+                attachedAt: TerminalSessionTimestamp.string(from: Date()))
+
+            let gate = host.debugHoldPersistenceQueue()
+            let takeover = host.handleControlRequest(.init(command: "takeover", clientID: remoteViewer.id))
+            XCTAssertTrue(takeover.ok, "the takeover is decided in memory and must be accepted while its mirror is parked")
+
+            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState))
+            let broadcastOwner = payload.attachmentSnapshot?.attachments.first { $0.detachedAt == nil && $0.mode == .owner }
+            XCTAssertEqual(broadcastOwner?.clientID, remoteViewer.id, "the broadcast must advertise the new owner immediately after the takeover")
+            XCTAssertEqual(
+                try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, localOwner.id,
+                "the durable mirror is still parked, proving the broadcast read memory rather than the database")
+
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(
+                try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, remoteViewer.id,
+                "the mirror converges on the new owner once the queue drains")
+        }
+    }
+
+    /// `hasLiveAttachments()` is what the daemon's `.whileAttached` reaper reads instead of the durable
+    /// mirror (`TerminalSessionPersistence.liveAttachments`), because that mirror write for a just-applied
+    /// attach can still be queued behind a contended write lock. An attach updates the in-memory snapshot
+    /// synchronously before its mirror write is even enqueued to run, so this must answer true right away,
+    /// while the database still shows no attachment at all.
+    func testHasLiveAttachmentsIsTrueImmediatelyAfterAttachWhileItsDurableMirrorIsParked() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-has-live-attachments-parked", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            let owner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+
+            let gate = host.debugHoldPersistenceQueue()
+            let attach = host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner))
+            XCTAssertTrue(attach.ok, "the attach must be accepted while its durable mirror is parked")
+            XCTAssertTrue(
+                host.core.hasLiveAttachments(),
+                "the in-memory attachment authority must report the attach live immediately, before its mirror write commits")
+            XCTAssertTrue(
+                try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+                "the durable mirror is still parked, proving the read above came from memory rather than the database")
+
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+        }
+    }
+
+    /// A remote client's liveness is lease-gated: `hasLiveAttachments` must stop counting it once its lease
+    /// is old enough that `TerminalSessionAttachmentSnapshot.liveAttachments` would treat it as stale, the
+    /// same rule the durable-mirror readers (the garbage collector, the orchestrator) apply.
+    func testHasLiveAttachmentsIsFalseForALeaseStaleRemoteClient() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-has-live-attachments-stale-lease", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            let remoteOwner = TerminalClient(
+                id: "remote-iphone", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            let attach = host.handleControlRequest(.init(command: "attach", client: remoteOwner, attachmentMode: .owner))
+            XCTAssertTrue(attach.ok, "the remote client's attach must be accepted")
+            host.debugDrainPersistenceQueue()
+
+            XCTAssertTrue(host.core.hasLiveAttachments(), "a freshly attached remote client's lease has not lapsed, so it is live")
+
+            let wellPastTheLease = Date().addingTimeInterval(TerminalSessionPersistence.remoteClientLeaseInterval * 100)
+            XCTAssertFalse(
+                host.core.hasLiveAttachments(now: wellPastTheLease),
+                "a remote client whose lease is well past its interval must not count as a live attachment")
+        }
+    }
+
+    /// The base case for the daemon reaper's `.whileAttached` check: a session with no attachments at all
+    /// must not report one.
+    func testHasLiveAttachmentsIsFalseWithNoAttachments() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-has-live-attachments-none", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            XCTAssertFalse(host.core.hasLiveAttachments(), "a session with no attachments must not report a live attachment")
+        }
+    }
+
+    /// The close-time ad-hoc stop's owner check reads `hasLiveOwnerAttachment` through the daemon's prober
+    /// instead of the durable mirror precisely because a detach applied to this in-memory snapshot can
+    /// still have its mirror write parked behind a contended queue. A detach must flip this to false the
+    /// moment it is applied, with the durable mirror still showing the now-stale owner row underneath it.
+    func testDetachIsVisibleToOwnerAttachmentProbeBeforeTheDurableMirrorCommits() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-owner-probe-before-durable-commit", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            let owner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            let attach = host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner))
+            XCTAssertTrue(attach.ok, "the owner attach must be accepted")
+            host.debugDrainPersistenceQueue()
+            XCTAssertTrue(host.core.hasLiveOwnerAttachment(), "the attached owner must read as a live owner attachment")
+
+            // Park the queue so the detach's durable mirror write is enqueued but cannot commit yet.
+            let gate = host.debugHoldPersistenceQueue()
+            try host.detach(clientID: owner.id)
+
+            XCTAssertFalse(
+                host.core.hasLiveOwnerAttachment(),
+                "the in-memory attachment authority must report no live owner immediately, before the detach's mirror write commits")
+            XCTAssertFalse(
+                try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+                "the durable mirror is still parked and must still show the now-stale owner row, proving the read above came from memory")
+
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+        }
+    }
+
+    /// A `SessionStart` hook can fire while a just-spawned session's launch-configuration row is still
+    /// queued behind the persistence queue (`TerminalSessionPendingLaunchRegistry` holds it in the
+    /// meantime). `enqueueAgentSignalAppend` must land the signal only after that row exists, which FIFO
+    /// ordering on the same per-core serial queue guarantees: enqueueing the signal append while the launch
+    /// write is still parked must not throw and must commit only once the queue drains both writes in order.
+    func testAgentSignalEnqueuedDuringPendingLaunchCommitsAfterTheSessionRow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-agent-signal-pending-launch", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
+        }
+
+        // Park the queue before starting, so the launch-configuration write is enqueued but cannot commit.
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        TerminalEngineActor.runSynchronously { try? box.value.startIfNeeded() }
+        XCTAssertNotNil(
+            TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID),
+            "the launch write must still be pending when the signal is enqueued")
+
+        let signal = TerminalServiceAgentSignalEvent(
+            id: "signal-1", sessionID: launchConfiguration.sessionID, workspaceID: "workspace-1", workspacePath: "/tmp/original",
+            type: "SessionStart", createdAt: "2026-05-17T00:00:01Z")
+        TerminalEngineActor.runSynchronously { box.value.core.enqueueAgentSignalAppend(signal) }
+
+        XCTAssertThrowsError(
+            try TerminalSessionPersistence.pendingAgentSignals(sessionID: launchConfiguration.sessionID, paths: paths),
+            "no signal row can be readable yet: the session row it references has not committed either")
+
+        gate.signal()
+        TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
+        await TerminalEngineActor.run {}
+
+        XCTAssertEqual(
+            try TerminalSessionPersistence.pendingAgentSignals(sessionID: launchConfiguration.sessionID, paths: paths), [signal],
+            "the signal must commit once the queue drains the launch write ahead of it")
+
+        TerminalEngineActor.runSynchronously { box.value.core.terminate() }
     }
 
     /// Lost-update race (resurrection): a queued stale-owner expiry that transfers ownership to a local window
@@ -4454,6 +4862,172 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
+    /// Fix 2 dispatch: only a failed launch-configuration write terminates the core (see
+    /// `testFailedLaunchConfigurationWriteTerminatesTheCore`). A detach still has a session row to validate
+    /// against, so its failure reconciles instead: it drops and reseeds the in-memory snapshot rather than
+    /// terminating. No runtime-state row is written anywhere else in this test, so a runtime-state row's
+    /// continued absence afterward is what proves `terminate()` (the only path that would write one) never ran.
+    func testFailedDetachWriteReconcilesWithoutTerminatingTheCore() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-b2-detach-reconciles", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let client = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+        let databasePath = try SpacesProfile.current().databasePath
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
+        }
+
+        // Park the queue so the detach's mirror write is enqueued but cannot run until the database is broken.
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        TerminalEngineActor.runSynchronously { try? box.value.detach(clientID: client.id) }
+        try Self.breakDatabase(at: databasePath)
+        gate.signal()
+        // The detach write now runs against the broken database and exhausts its retries.
+        TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
+        try Self.restoreDatabase(at: databasePath)
+
+        // The failed write's `onFailure` hop into `reconcileAfterFailedLifecycleWrite` is a Task spawned from
+        // inside the drain above, not run inline by it. That Task shares the engine actor's serial executor
+        // with `TerminalEngineActor.run`, so one more turn on it is ordered after the hop has already run.
+        await TerminalEngineActor.run {}
+
+        XCTAssertNil(
+            try? TerminalSessionPersistence.readRuntimeState(paths: paths),
+            "a failed detach write must reconcile, not terminate — terminate() is the only path in this test that would write a runtime-state row")
+        // The detach's durable mirror never committed (its write is what failed), so committed truth still
+        // holds the attached local-window owner; the reconcile's reseed must roll memory BACK to that, not
+        // keep the in-memory detach the failed mirror was supposed to make durable.
+        XCTAssertTrue(
+            TerminalEngineActor.runSynchronously { box.value.core.hasLiveAttachments() },
+            "the reconciled in-memory snapshot must match the committed database, which still holds the attachment whose detach mirror failed")
+        _ = box
+    }
+
+    /// Fix 2: a failed launch-configuration write must terminate the core rather than merely reconciling:
+    /// no `terminal_sessions` row exists for later mirror writes to validate against, so reconciling would
+    /// just make every later write fail as `unknownSession` forever.
+    func testFailedLaunchConfigurationWriteTerminatesTheCore() async throws {
+        // A prior write against a healthy database is what gives `breakDatabase` below a file to break: the
+        // database this test's own session writes to does not exist until something creates it, and
+        // `breakDatabase` needs an existing file to move aside.
+        let placeholderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: placeholderRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: placeholderRoot) }
+        let placeholderPaths = TerminalSessionPaths(rootDirectory: placeholderRoot.path)
+        try placeholderPaths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: "session-b2-placeholder", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            paths: placeholderPaths)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-b2-terminates-on-launch-write-failure", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
+            kind: .shell)
+
+        let databasePath = try SpacesProfile.current().databasePath
+        try Self.breakDatabase(at: databasePath)
+
+        // Fix 4: `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path does,
+        // so a core terminated over a failed launch-configuration write must call it explicitly, or the
+        // daemon's session registry keeps the dead core registered forever. Record whether it fired.
+        let onSessionClosedFired = MutableBox(false)
+
+        // `startIfNeeded()` enqueues the launch-configuration write as its first act; the write then retries
+        // in place against the broken database until its bounded attempts are exhausted. The database must
+        // stay broken until that happens — restoring it any earlier lets a later in-place retry succeed and
+        // the core (correctly) keep running — so the drain below, which blocks until the write has run out
+        // of retries, is what gates the restore.
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            let core = GhosttyEmbeddedSessionCore(
+                launchConfiguration: launchConfiguration, paths: paths, onSessionClosed: { _ in onSessionClosedFired.value = true })
+            let host = GhosttyEmbeddedSessionHost(core: core)
+            try? host.startIfNeeded()
+            return Box(host)
+        }
+        TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
+        try Self.restoreDatabase(at: databasePath)
+
+        // The failed write's `onFailure` hop into `reconcileAfterFailedLifecycleWrite` (which terminates the
+        // core for this label) is a Task spawned from inside the drain above; one more turn on the engine
+        // actor's serial executor is ordered after that hop has run.
+        await TerminalEngineActor.run {}
+
+        // On regression, terminate the still-running core before asserting: releasing a live core trips the
+        // session driver's deinit precondition and kills the whole test process instead of failing this test.
+        let stillStarted = TerminalEngineActor.runSynchronously { () -> Bool in box.value.core.isStarted }
+        if stillStarted { TerminalEngineActor.runSynchronously { box.value.core.terminate() } }
+        XCTAssertFalse(
+            stillStarted,
+            "a launch-configuration write that exhausts its retries must terminate the core rather than leaving it running with no session row")
+        XCTAssertTrue(
+            onSessionClosedFired.value,
+            "a core terminated over a failed launch-configuration write must call onSessionClosed so the daemon's session registry forgets it")
+        XCTAssertNil(
+            TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID),
+            "the final write failure must clear the pending-launch entry along with terminating the core, or a launch-pending probe would keep reporting a launch in flight for a session that no longer exists")
+    }
+
+    /// The launch-configuration row is itself write-behind, so a session whose first write is still queued
+    /// (behind a parked persistence queue, or ordinary write-lock contention) has no durable row at all. The
+    /// pending-launch registry is what keeps such a session discoverable as launch-pending in that window:
+    /// automation polling and tracked-window liveness classify sessions off durable rows, so without the
+    /// registry a live, just-created session reads as vanished and gets torn down mid-launch.
+    func testQueuedLaunchConfigurationWriteKeepsLaunchDiscoverableUntilItCommits() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-pending-launch-registry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
+        }
+
+        // Park the queue before starting, so the launch-configuration write is enqueued but cannot commit.
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        TerminalEngineActor.runSynchronously { try? box.value.startIfNeeded() }
+
+        XCTAssertEqual(
+            TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID), launchConfiguration,
+            "the registry must hold the launch configuration while its durable write is still parked behind the queue")
+        XCTAssertThrowsError(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+            "no row is durably readable yet while the write is parked")
+
+        gate.signal()
+        TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
+        await TerminalEngineActor.run {}
+
+        XCTAssertNil(
+            TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID),
+            "the registry entry must be cleared once the row it stood in for has committed")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration,
+            "the durable row must be readable once the queued write drains")
+
+        TerminalEngineActor.runSynchronously { box.value.core.terminate() }
+    }
+
     /// The create path serves the post-start session summary from the live core's in-memory state, so a
     /// create can report the running session the moment `startIfNeeded()` returns — independent of when the
     /// first runtime-state write commits to SQLite through the per-core persistence queue. With that queue
@@ -4696,28 +5270,49 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(after.contains { $0.clientID == remoteOwner.id }, "R must remain attached")
     }
 
-    /// Makes every open of the SQLite database fail, and `restoreDatabase` makes them succeed again. The
-    /// database file itself is never moved or replaced, so the committed data comes back exactly as it was.
+    /// Makes every open of the SQLite database fail, and `restoreDatabase` makes them succeed again with
+    /// the committed data exactly as it was.
     ///
-    /// Breaking it by moving the file aside and putting a directory in its place — the obvious alternative —
-    /// leaves the path with nothing at it for the width of the restore, which is a real hazard rather than a
-    /// theoretical one: a retrying writer that opens the path in that gap CREATES an empty database there,
-    /// and the restore's move onto an existing path then fails, so the test reports a mangled restore or an
-    /// `unknownSession` read instead of what it was actually asserting. Permissions have no such gap: the
-    /// file exists throughout, and an open either runs before the mode changes or after it.
+    /// The break swaps a garbage file (bytes that fail SQLite's header check) into the database's place
+    /// rather than chmod-ing it to 0o000: the Linux mirror of this helper runs as root inside the Docker
+    /// test lane, where a mode change does not bite, and a garbage file makes every open fail with
+    /// SQLITE_NOTADB for root too. The `-wal`/`-shm` sidecars move aside with the main file: these tests
+    /// run against a per-test fresh database whose entire content sits in the WAL until a checkpoint, so
+    /// leaving the WAL behind loses every row whenever the close-time checkpoint was skipped, because the
+    /// first open after restore then sees an empty main file, re-runs migrations, and resets the stranded
+    /// WAL. Keeping a garbage FILE at the path throughout (instead of a directory, or nothing) matters on
+    /// the restore side; see `restoreDatabase`.
     ///
-    /// The process's own connections are released on both sides, and that is what makes a mode change bite
+    /// The process's own connections are released on both sides, and that is what makes the swap bite
     /// at all. A connection's access is decided when it is opened, so the long-lived read and write
-    /// connections would carry their existing permission straight through the injection and the fault would
+    /// connections would carry their open file straight through the injection and the fault would
     /// never reach the code under test. Releasing is also what a database that genuinely became unusable
     /// would force.
     private static func breakDatabase(at databasePath: String) throws {
         TerminalSessionPersistence.closeDatabaseConnection()
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: databasePath)
+        let garbagePath = databasePath + ".garbage-tmp"
+        try Data("spaces test: deliberately not a SQLite database\n".utf8).write(to: URL(fileURLWithPath: garbagePath))
+        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + suffix) {
+            try FileManager.default.moveItem(atPath: databasePath + suffix, toPath: databasePath + ".unbroken" + suffix)
+        }
+        try FileManager.default.moveItem(atPath: databasePath, toPath: databasePath + ".unbroken")
+        try FileManager.default.moveItem(atPath: garbagePath, toPath: databasePath)
     }
 
+    /// Sidecars return first (the garbage file still guards the path, so a concurrent open keeps failing),
+    /// and then POSIX `rename(2)` replaces the garbage file with the real database in one atomic step:
+    /// there is never an instant where the path is absent (an open would create a fresh empty database
+    /// there) or where a valid main file is visible without its WAL.
     private static func restoreDatabase(at databasePath: String) throws {
-        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: databasePath)
+        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + ".unbroken" + suffix) {
+            if FileManager.default.fileExists(atPath: databasePath + suffix) {
+                try FileManager.default.removeItem(atPath: databasePath + suffix)
+            }
+            try FileManager.default.moveItem(atPath: databasePath + ".unbroken" + suffix, toPath: databasePath + suffix)
+        }
+        guard rename(databasePath + ".unbroken", databasePath) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         TerminalSessionPersistence.closeDatabaseConnection()
     }
 

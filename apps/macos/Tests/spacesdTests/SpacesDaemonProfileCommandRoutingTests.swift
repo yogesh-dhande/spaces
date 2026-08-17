@@ -25,6 +25,9 @@ import XCTest
                 .workspaceStop(workspaceID: "w"), .workspaceRestart(.init(cwd: "/tmp", workspaceID: "w")),
                 .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
                 .agentSignal(TerminalServiceProfileAgentSignalPayload(workspaceID: "w", terminalSessionID: "s", event: "exit")),
+                // Listing merges live cores' in-memory summaries via an engine hop (write-behind lifecycle
+                // rows can lag a fresh session), so it is engine-touching even though it mutates nothing.
+                .terminalList,
             ]
             for command in offMain {
                 XCTAssertTrue(
@@ -37,7 +40,7 @@ import XCTest
         /// the main actor through the `profileCommandOffMain` bridge.
         func testEngineFreeCommandsRunOnMain() {
             let onMain: [TerminalServiceProfileCommand] = [
-                .projectList, .terminalList, .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
+                .projectList, .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
                 .workspaceList(TerminalServiceWorkspaceListPayload()),
                 .workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "b")), .agentList(TerminalServiceAgentListPayload()),
                 .agentAnnotate(TerminalServiceAgentAnnotatePayload(sessionID: "s", note: "n")),
