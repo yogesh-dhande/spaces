@@ -212,8 +212,8 @@ enum SpacesDaemonProfileCommandRouting {
             .automationEndAgents:
             true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
-        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
-            .agentUnsubscribe, .agentConsumePendingEvents:
+        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe, .agentUnsubscribe,
+            .agentConsumePendingEvents:
             false
         }
     }
@@ -229,7 +229,7 @@ enum SpacesDaemonErrorClassification {
             switch workspaceError {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            case .gitCommandFailed, .gitCommandTimedOut, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
             // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
             // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
             // handoff code, not the generic teardown one.
@@ -1637,12 +1637,8 @@ enum SpacesDaemonErrorClassification {
             let knownSessions = try TerminalSessionPersistence.listKnownSessions()
             var sessions = try knownSessions.compactMap { knownSession in try summaryIfLive(for: knownSession) }
             let knownSessionIDs = Set(sessions.map(\.id))
-            let inMemorySummaries = TerminalEngineActor.runSynchronously {
-                self.sessionCores.values.compactMap { $0.inMemorySessionSummary() }
-            }
-            for summary in inMemorySummaries where summary.state.isInteractive && !knownSessionIDs.contains(summary.id) {
-                sessions.append(summary)
-            }
+            let inMemorySummaries = TerminalEngineActor.runSynchronously { self.sessionCores.values.compactMap { $0.inMemorySessionSummary() } }
+            for summary in inMemorySummaries where summary.state.isInteractive && !knownSessionIDs.contains(summary.id) { sessions.append(summary) }
             return TerminalServiceResponse(ok: true, message: "Listed terminal sessions.", sessions: sessions)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
     }

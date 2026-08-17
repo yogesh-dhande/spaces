@@ -126,6 +126,38 @@ private let gitExecutablePath = "/usr/bin/git"
 /// Convenience wrapper that mirrors `runGit` for call sites that read the captured stdout.
 @discardableResult func runGitAndCapture(_ arguments: [String], cwd: String) throws -> String { try runGit(arguments, cwd: cwd) }
 
+/// A `GitClient` whose every invocation run inside `directory` hangs past `metadataCommandTimeout`, with
+/// everything else forwarded to real git. Models a probe that never answers, the metadata timeout budget
+/// expiring under load or a spawn that never returns, which is a different thing from git running to
+/// completion and answering that a path is not a worktree, and the distinction callers are allowed to act
+/// destructively on.
+///
+/// Matches on `-C <path>` resolved through `pwd -P` rather than on the string, so it holds against the
+/// symlinked temporary directories these fixtures run in (`/var` vs `/private/var`). `metadataCommandTimeout`
+/// is short (a fraction of a second) so the test that exercises the timeout does not itself hang.
+func makeGitHangingInsideDirectory(_ directory: String, metadataCommandTimeout: TimeInterval = 0.2) throws -> GitClient {
+    let script = try makeTempDirectory().appendingPathComponent("git")
+    let contents = """
+        #!/bin/sh
+        target=$(cd "\(directory)" 2>/dev/null && pwd -P)
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "-C" ] && [ -n "$target" ]; then
+            resolved=$(cd "$arg" 2>/dev/null && pwd -P)
+            if [ "$resolved" = "$target" ]; then
+              sleep 2
+              exit 1
+            fi
+          fi
+          prev="$arg"
+        done
+        exec \(gitExecutablePath) "$@"
+        """
+    try contents.write(to: script, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    return GitClient(gitExecutable: script.path, metadataCommandTimeout: metadataCommandTimeout)
+}
+
 /// `WorkspaceOrchestrator` with a generous git metadata budget: on a saturated CI runner even local git
 /// forks can exceed the 2s product default (`GitClient.init(metadataCommandTimeout:)`), and these tests
 /// assert orchestrator behavior, not git latency. A genuinely hung git still fails, just slower.

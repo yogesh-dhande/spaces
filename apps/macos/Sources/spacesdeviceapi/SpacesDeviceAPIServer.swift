@@ -1615,7 +1615,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             switch workspaceError {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            case .gitCommandFailed, .gitCommandTimedOut, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
             // Only ever thrown by the handoff-only admission guard, never by a shutdown, so it always
             // carries the handoff code. This mapping predates issue #334's broader gap (this transport's
             // `.ping` and its agent-session killer are not teardown-aware at all); it is corrected here

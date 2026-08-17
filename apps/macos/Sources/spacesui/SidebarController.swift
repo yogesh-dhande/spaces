@@ -1194,10 +1194,32 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // are updated together, under the identity NSOutlineView already tracks.
                 host.outlineView.reloadItem(outlineItemRef(for: item))
             }
-        case .structureChanged:
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
+        case .structureChanged: reloadOutlinePreservingSelection()
         }
+    }
+
+    /// Repaints the whole outline and puts the outline's own selection back on the selected workspace.
+    ///
+    /// `NSOutlineView.reloadData()` drops the selected row and, unlike a collapse or a `deselectAll`,
+    /// posts no selection-change notification for it — so without this the outline is left with nothing
+    /// selected while `selectedWorkspaceID` still names a row that is right there on screen, and the next
+    /// click on that row is the only thing that would ever put them back in agreement. Structural changes
+    /// arrive constantly under a live workspace (every session start or exit adds or removes a
+    /// runtime-target row, and a device section changing load state re-parents every project row under
+    /// device headers), so this is the common case, not an edge one.
+    ///
+    /// Re-asserting is suppressed because it is a repaint, not navigation: the delegate would otherwise
+    /// re-present the detail pane as `.userNavigation`, which closes an open form window — a background
+    /// reload must never do that. A selection whose row the reload did not bring back (its project is
+    /// collapsed, or the workspace is gone) leaves the outline unselected, which is what the state is.
+    private func reloadOutlinePreservingSelection() {
+        let selectedWorkspaceID = host.selectedWorkspaceID
+        host.outlineView.reloadData()
+        applySidebarProjectExpansionState()
+        guard let selectedWorkspaceID, let (_, workspace) = findWorkspace(id: selectedWorkspaceID) else { return }
+        host.suppressOutlineSelectionChanges = true
+        selectWorkspace(workspace)
+        host.suppressOutlineSelectionChanges = false
     }
 
     /// Rebuilds the whole outline and re-applies expansion, for the paths that repaint wholesale for
@@ -1208,8 +1230,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// run against a baseline older than what is painted, and a change that happens to restore that
     /// baseline would be called unchanged, leaving the stale rows on screen.
     func fullReloadSidebarOutline() {
-        host.outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        reloadOutlinePreservingSelection()
         lastOutlineRowSnapshot = outlineRowSnapshot().rows
     }
 
@@ -1500,6 +1521,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
+    /// The out-of-range branches below (and in `rootChildRef`) exist only because a data source cannot
+    /// refuse: AppKit asks for child `i` of a node it was just told has `n` children, and it computes both
+    /// answers from the same main-thread data with nothing able to mutate it in between, so `i < n` always
+    /// holds and none of them is reachable. They matter enough to keep honest because a ref is keyed by its
+    /// item's `cacheKey`: the ones that fall back to an existing sibling would hand two rows the single ref
+    /// AppKit tracks that row's identity by, which is exactly what breaks selection across a reload.
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil { return rootChildRef(index: index) }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item {
@@ -2491,7 +2518,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedWorkspaceID = nil
             host.showingSettings = false
             if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
-                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations) {
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations)
+            {
                 host.showPlaceholder(presentation: .userNavigation)
             }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)

@@ -987,6 +987,66 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(id: workspace.id), "a workspace whose worktree is gone is removed, not flagged")
     }
 
+    /// Discovery retires a workspace only when it can see that the worktree is gone. A git probe that times
+    /// out says nothing about the checkout, and the scan is triggered by writes inside `.git` — so it runs
+    /// exactly while an agent is committing in the workspace the user is watching, when a git spawn is most
+    /// likely to run past the metadata timeout under load. Retiring on that would delete the workspace
+    /// record and, with it, the user's worktree.
+    func testScanKeepsWorkspaceWhenTheWorktreeProbeTimesOut() throws {
+        let repo = try makeTempGitRepo(name: "probe-timeout-keeps-workspace")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-live", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-live")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        // `git worktree list` in the project still answers, so the scan sees the path listed and standing —
+        // only the probe that would classify it never returns within its budget.
+        let scanOrchestrator = WorkspaceOrchestrator(store: store, git: try makeGitHangingInsideDirectory(worktree.path))
+
+        let created = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNotNil(try store.workspace(id: workspace.id), "a timed-out probe is not evidence that the worktree is gone")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path), "the user's checkout is untouched")
+    }
+
+    /// The counterpart to the timeout case above: when the probe runs to completion and git answers, in the
+    /// negative (the linked worktree's `.git` file is gone even though the directory remains, so `git -C
+    /// <path> rev-parse --git-common-dir` exits nonzero), that is a definitive negative the scan is meant to
+    /// act on, so the workspace is retired same as a fully removed worktree.
+    func testScanRetiresWorkspaceWhenTheWorktreeProbeAnswersNegative() throws {
+        let repo = try makeTempGitRepo(name: "probe-negative-retires-workspace")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-orphaned", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-orphaned")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        // Delete only the linked worktree's `.git` file (a pointer back to the main repo's
+        // `.git/worktrees/<name>`), leaving the checkout directory itself in place. `git worktree list` in
+        // the main repo still reports the path (its administrative record is not pruned by this), but a
+        // probe run inside the directory now finds no repository there and exits nonzero.
+        try FileManager.default.removeItem(atPath: worktree.appendingPathComponent(".git").path)
+        let worktreeListOutput = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertTrue(worktreeListOutput.contains(worktree.path), "the main repo still lists the orphaned worktree path")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNil(try store.workspace(id: workspace.id), "a completed nonzero probe is a definitive negative answer")
+    }
+
     // A daemon-side orchestrator built without an explicit handoff predicate — exactly how
     // `WorktreeDiscoveryService.scan` constructs one — must honor the process-wide
     // `daemonHandoffInProgress` override and refuse the removed-worktree archive during an exec-in-place
