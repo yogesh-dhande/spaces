@@ -135,6 +135,22 @@ enum SpacesMobileAutomations {
         return "next \(relativeFormatter().localizedString(for: fireDate, relativeTo: now))"
     }
 
+    /// Human-readable outcome label for a run, used as the row title on the per-automation detail screen
+    /// (`AutomationDetailView`) where the automation name is already the screen's own title, so repeating
+    /// it on every row would be redundant — the outcome is the thing that differs row to row.
+    static func statusTitle(_ run: TerminalServiceAutomationRunSummary) -> String {
+        switch run.status {
+        case "queued": "Queued"
+        case "running": "Running"
+        case "succeeded": "Succeeded"
+        case "failed": "Failed"
+        case "timed_out": "Timed out"
+        case "canceled": "Canceled"
+        case "skipped": "Skipped"
+        default: run.status.capitalized
+        }
+    }
+
     static func runTriggerLabel(_ run: TerminalServiceAutomationRunSummary) -> String {
         switch run.trigger {
         case "manual": "Manual"

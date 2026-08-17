@@ -165,6 +165,19 @@
             XCTAssertEqual(SpacesMobileAutomations.durationDescription(running, relativeTo: now), expectedFormatter.string(from: 90))
         }
 
+        // MARK: - SpacesMobileAutomations.statusTitle
+
+        func testStatusTitleMapsKnownRawValuesWithFallbackForUnknown() {
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "queued")), "Queued")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "running")), "Running")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "succeeded")), "Succeeded")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "failed")), "Failed")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "timed_out")), "Timed out")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "canceled")), "Canceled")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "skipped")), "Skipped")
+            XCTAssertEqual(SpacesMobileAutomations.statusTitle(makeRun(id: "r", automationID: "a", status: "something-else")), "Something-Else")
+        }
+
         func testSkipReasonLabelsAreHumanReadable() {
             XCTAssertEqual(SpacesMobileAutomations.skipReasonLabel("concurrency"), "already running")
             XCTAssertEqual(SpacesMobileAutomations.skipReasonLabel("missed"), "missed occurrence")
