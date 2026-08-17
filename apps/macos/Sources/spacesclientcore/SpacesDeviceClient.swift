@@ -1002,11 +1002,15 @@ public enum SpacesDeviceClient {
     /// link death (a connect that never reaches ready, or a request nothing answers) produces the
     /// identical timeout, so a timeout alone does not prove the link is fine either — it is inconclusive
     /// in both directions. A caller that needs to tell those two apart (see
-    /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which uses this to decide whether a failed
-    /// keystroke send also proves every other queued keystroke should be discarded) calls this in addition
-    /// to `isDeviceAPITransportFailure`, and gets its conclusive answer from the already-confirmed-outage
-    /// branch (a connection-level failure, or a stream disconnect whose next failure cancels the backlog),
-    /// not from the timeout itself.
+    /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which decides from it whether a failed
+    /// keystroke send is grounds to tear the pane's state subscription down, raise the "connection lost"
+    /// notice, and discard every other queued keystroke) calls this in addition to
+    /// `isDeviceAPITransportFailure`. A `true` answer here is a verdict deferred, not a verdict reached:
+    /// that caller resolves it by probing the daemon with a `.ping` — a request the daemon answers without
+    /// touching its database or its terminal-engine queue, so it separates a saturated daemon from a dead
+    /// link — and acts on the probe's outcome instead of on the timeout. That probe dials its own one-shot
+    /// connection rather than sharing the session client above, whose lock the still-draining input backlog
+    /// holds for a full deadline per queued send.
     ///
     /// Only the two shapes a timeout actually arrives as qualify: `SpacesDeviceAPIRequestClientError.timeout`
     /// and `SpacesPinnedTLSConnectionError.timeout` — the latter is what `sendLine`/`readLine` throw

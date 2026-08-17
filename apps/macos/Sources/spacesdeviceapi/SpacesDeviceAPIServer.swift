@@ -65,16 +65,78 @@ extension SpacesDeviceAPICommand {
         }
     }
 
-    /// Commands whose work is measured in seconds rather than in database reads: they stop every process
-    /// and terminal in scope, remove git worktrees, and delete branches. Run inline on the serial state
-    /// queue they hold up every other connection's requests — an overview poll issued while a delete is
-    /// running waits for the whole delete and times out as a connection error. Both transports divert
-    /// them to `workspaceTeardownQueue` instead. The client still gets one synchronous response carrying
-    /// the full outcome (including the branch-deletion notice and the refreshed overview), so the
+    /// Commands whose work is measured in seconds or longer rather than in database reads. Teardown
+    /// (`.archiveWorkspace`, `.deleteProject`) stops every process and terminal in scope, removes git
+    /// worktrees, and deletes branches. Run inline on the serial state queue either of these hold up every
+    /// other connection's requests — an overview poll issued while one is running waits for the whole
+    /// operation and times out as a connection error, and so does the 2-second corroboration `.ping` a
+    /// client sends after an input-send timeout, which then tears down a healthy stream. Both transports
+    /// divert them to `workspaceTeardownQueue` instead. The client still gets one synchronous response
+    /// carrying the full outcome (including the branch-deletion notice and the refreshed overview), so the
     /// request/response contract is unchanged.
+    ///
+    /// `.stopWorkspace` is also seconds-scale but is not part of this family; see `runsOnWorkspaceStopQueue`
+    /// for why it gets its own queue instead. `.runWorkspaceSetup` is likewise seconds-scale and separate;
+    /// see `runsOnWorkspaceSetupQueue`. The remaining seconds-scale inline commands are tracked by issue
+    /// #503.
     fileprivate var runsOnWorkspaceTeardownQueue: Bool {
         switch self {
         case .archiveWorkspace, .deleteProject: true
+        default: false
+        }
+    }
+
+    /// `.stopWorkspace` runs the user's stop script to completion synchronously
+    /// (`Orchestrator.stopWorkspaceUnlocked` calls `runScript`), so a hung stop for one workspace must not
+    /// delay an `.archiveWorkspace`/`.deleteProject` for another workspace queued behind it on
+    /// `workspaceTeardownQueue`: the same false-failure-then-executes race the setup split closes (see
+    /// `runsOnWorkspaceSetupQueue`). Teardown registration happens only at dequeue
+    /// (`withTeardownRegistered`), so a delete stuck behind a busy queue looks like a plain failure to the
+    /// client and then executes anyway once the queue clears.
+    ///
+    /// Not merged into `workspaceTeardownQueue` even though archive itself runs the stop path: archive runs
+    /// its own stop inline within its own dequeued slot, so sharing a queue would buy it no ordering it
+    /// needs, while a hung standalone `.stopWorkspace` for another workspace would only block it. Stop
+    /// touches no git state, so there is no git-index serialization reason to share a queue with teardown,
+    /// and a race against another command on the same workspace is handled by the orchestrator's own
+    /// fail-fast workspace gates.
+    fileprivate var runsOnWorkspaceStopQueue: Bool {
+        switch self {
+        case .stopWorkspace: true
+        default: false
+        }
+    }
+
+    /// `.runWorkspaceSetup` runs the user-authored setup script to completion (`waitUntilExit`, unbounded),
+    /// so like teardown it would stall every other connection's requests if left on the serial state queue.
+    /// It gets its own serial queue, `workspaceSetupQueue`, rather than sharing `workspaceTeardownQueue`:
+    /// the orchestrator deliberately leaves setup ungated so a delete can proceed while setup runs (see
+    /// `WorkspaceOrchestrator+Setup.swift`), and a teardown registers its workspace as tearing down
+    /// (`withTeardownRegistered`) only after `workspaceTeardownQueue` dequeues its request. Parking
+    /// `.archiveWorkspace`/`.deleteProject` behind a running setup on a shared queue would make the delete
+    /// wait unregistered, time out client-side, reconcile as a failed delete (the workspace is still
+    /// present and not reported as tearing down), and then run anyway once the setup finishes: a false
+    /// failure verdict followed by a destructive operation the client believed it had cancelled.
+    fileprivate var runsOnWorkspaceSetupQueue: Bool {
+        switch self {
+        case .runWorkspaceSetup: true
+        default: false
+        }
+    }
+
+    /// Commands that wait on a terminal session's engine. The control commands each make a synchronous
+    /// round trip over that session's control socket and get no answer until the engine drains what it is
+    /// already working on; `.state` waits on the same engine from the other side, since a session this
+    /// daemon hosts live is read straight out of its core (`liveTerminalSessionStateProvider`, a
+    /// `TerminalEngineActor.runSynchronously` export) rather than over the socket. Run inline on the
+    /// serial state queue they hold it for that whole wait, so a session saturated by output stalls every
+    /// other request on the daemon — including the `.ping` a client sends precisely to ask whether the
+    /// link is still alive after an input send timed out. That probe would then time out too and the
+    /// client would tear down a healthy stream. Both transports divert these to `terminalControlQueue`
+    /// instead.
+    fileprivate var runsOnTerminalControlQueue: Bool {
+        switch self {
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
         default: false
         }
     }
@@ -351,10 +413,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         }
                         return
                     }
+                    // Diverting a command to a worker queue lets a later request from another connection
+                    // finish first. That reorders nothing a client can observe: this connection reads one
+                    // response before it sends its next request, so its own commands stay ordered, and
+                    // requests racing in on separate connections have no ordering guarantee to begin with.
                     if request.command.isAgentHookCommand {
                         server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnWorkspaceTeardownQueue {
                         server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnWorkspaceStopQueue {
+                        server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnWorkspaceSetupQueue {
+                        server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnTerminalControlQueue {
+                        server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else {
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
@@ -570,12 +642,26 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
                     let response: SpacesDeviceAPIResponse
                     do {
+                        // Authorization stays on the state queue; only the long or engine-blocking work
+                        // moves off it. A command answered from a worker queue can finish after one that
+                        // arrived later on another connection, which reorders nothing a client observes:
+                        // each connection reads its response before sending its next request, and separate
+                        // connections have no ordering guarantee to begin with.
                         if request.command.isAgentHookCommand {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleAgentHookRequestOnWorkerQueue(request)
                         } else if request.command.runsOnWorkspaceTeardownQueue {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnWorkspaceStopQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleWorkspaceStopRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnWorkspaceSetupQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleWorkspaceSetupRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnTerminalControlQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleTerminalControlRequestOnWorkerQueue(request)
                         } else {
                             response = try server.syncOnQueue {
                                 try server.authorize(request)
@@ -819,11 +905,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Login-shell probing and config writes can take seconds. Serialize them independently so they
     /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
     private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
-    /// Tearing a workspace or project down stops its processes and terminals, removes git worktrees, and
-    /// deletes branches — seconds of work. Serialize that independently of the state queue so a delete
-    /// cannot stall every other client's overview polls behind it. Serial rather than concurrent because
-    /// two teardowns in the same repository would otherwise race on the same git index lock.
+    /// Teardown (see `runsOnWorkspaceTeardownQueue`) runs seconds or longer: tearing a workspace or project
+    /// down stops its processes and terminals, removes git worktrees, and deletes branches. Serialize that
+    /// independently of the state queue so it cannot stall every other client's overview polls or
+    /// corroboration pings behind it. Serial rather than concurrent because two teardowns in the same
+    /// repository would otherwise race on the same git index lock.
     private let workspaceTeardownQueue = DispatchQueue(label: "spaces.device.api.workspace-teardown", qos: .userInitiated)
+    /// `.stopWorkspace` (see `runsOnWorkspaceStopQueue`) waits on the user's stop script to completion. It
+    /// gets a queue of its own rather than sharing `workspaceTeardownQueue`: a hung or long-running stop
+    /// script for one workspace must never hold up an `.archiveWorkspace`/`.deleteProject` request for
+    /// another workspace queued behind it. Serial, like the teardown queue, so explicit stops still
+    /// serialize among themselves instead of racing the same workspace's stop state.
+    private let workspaceStopQueue = DispatchQueue(label: "spaces.device.api.workspace-stop", qos: .userInitiated)
+    /// `.runWorkspaceSetup` (see `runsOnWorkspaceSetupQueue`) waits on the user's setup script to
+    /// completion. It gets a queue of its own rather than sharing `workspaceTeardownQueue`: a hung or
+    /// long-running setup script must never hold up an `.archiveWorkspace`/`.deleteProject` request queued
+    /// behind it. Serial, like the teardown queue, so two explicit setup re-runs still serialize among
+    /// themselves instead of racing the same workspace's setup state.
+    private let workspaceSetupQueue = DispatchQueue(label: "spaces.device.api.workspace-setup", qos: .userInitiated)
+    /// Terminal input and control round trips block on the target session's engine (see
+    /// `runsOnTerminalControlQueue`). Serialize them here so a stalled engine holds up only other
+    /// terminal controls and never the state queue that answers pings, overviews, and state reads.
+    private let terminalControlQueue = DispatchQueue(label: "spaces.device.api.terminal-control", qos: .userInitiated)
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1178,9 +1281,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// and the conditional non-file `resolveTerminalLink` path) pay no open.
     ///
     /// Confinement: a context is created inside `handleRequest` (serial `spaces.device.api`
-    /// queue) or inside `handleWorkspaceTeardownRequest` (serial `workspaceTeardownQueue`),
-    /// and it never escapes that request's stack frame. It must not be stored on the server or
-    /// captured into an escaping closure — the off-request paths (overview-stream
+    /// queue), `handleWorkspaceTeardownRequest` (serial `workspaceTeardownQueue`),
+    /// `handleWorkspaceStopRequest` (serial `workspaceStopQueue`), or `handleWorkspaceSetupRequest`
+    /// (serial `workspaceSetupQueue`), and it never escapes that request's stack frame. It must not be
+    /// stored on the server or captured into an escaping closure — the off-request paths (overview-stream
     /// `lineProvider`, `loadDaemonStatus`, and the two background launch/setup paths) each open
     /// their own store on their own queue.
     private final class RequestContext {
@@ -1239,8 +1343,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
         case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
         // Both transports divert workspace-teardown commands to `workspaceTeardownQueue` before they reach
-        // here (see `runsOnWorkspaceTeardownQueue`), so these cases only keep the switch exhaustive.
+        // here (see `runsOnWorkspaceTeardownQueue`), so this case only keeps the switch exhaustive.
         case .deleteProject, .archiveWorkspace: return try handleWorkspaceTeardownRequest(request)
+        // Both transports divert `.stopWorkspace` to `workspaceStopQueue` before they reach here (see
+        // `runsOnWorkspaceStopQueue`), so this case only keeps the switch exhaustive.
+        case .stopWorkspace: return try handleWorkspaceStopRequest(request)
+        // Both transports divert `.runWorkspaceSetup` to `workspaceSetupQueue` before they reach here (see
+        // `runsOnWorkspaceSetupQueue`), so this case only keeps the switch exhaustive.
+        case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
@@ -1248,9 +1358,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload, context: context)
         case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload, context: context)
         case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload, context: context)
-        case .stopWorkspace(let payload): return try handleStopWorkspaceRequest(payload, context: context)
         case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload, context: context)
-        case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
         case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload, context: context)
         case .updateProjectMetadata(let payload): return try handleUpdateProjectMetadataRequest(payload, context: context)
         case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload, context: context)
@@ -1264,10 +1372,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
-        case .state(let payload): return try handleStateRequest(payload)
-        case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
-        case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
-        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        // Both transports divert engine-blocking terminal commands to `terminalControlQueue` before they
+        // reach here (see `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: return try handleTerminalControlQueueRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
@@ -1327,13 +1434,36 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// The `RequestContext` is created here rather than passed in from `handleRequest` so its store and
     /// orchestrator are opened and used only on `workspaceTeardownQueue`, per the confinement rule: a
     /// `SQLiteStore` belongs to the queue that opened it. The workspace lifecycle lock inside the
-    /// orchestrator still serializes this teardown against any other action on the same workspace.
+    /// orchestrator still serializes this command against any other action on the same workspace.
     private func handleWorkspaceTeardownRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
         let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
         switch request.command {
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload, context: context)
         case .archiveWorkspace(let payload): return try handleArchiveWorkspaceRequest(payload, context: context)
-        default: preconditionFailure("Only workspace-teardown commands run on the workspace-teardown queue.")
+        default: preconditionFailure("Only workspace-teardown commands (archive, delete) run on the workspace-teardown queue.")
+        }
+    }
+
+    /// Runs `.stopWorkspace` (see `runsOnWorkspaceStopQueue`) on its own serial queue, confined the same
+    /// way `handleWorkspaceTeardownRequest` and `handleWorkspaceSetupRequest` confine their stores: a
+    /// request handled on one queue must not touch a `SQLiteStore` opened on another.
+    private func handleWorkspaceStopRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .stopWorkspace(let payload): return try handleStopWorkspaceRequest(payload, context: context)
+        default: preconditionFailure("Only `.stopWorkspace` runs on the workspace-stop queue.")
+        }
+    }
+
+    /// Runs `.runWorkspaceSetup` (see `runsOnWorkspaceSetupQueue`) on its own serial queue, confined the
+    /// same way `handleWorkspaceTeardownRequest` confines its store and orchestrator, and for the same
+    /// reason: setup and teardown never share a `RequestContext`, since a request handled on one queue
+    /// must not touch a `SQLiteStore` opened on the other.
+    private func handleWorkspaceSetupRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
+        default: preconditionFailure("Only `.runWorkspaceSetup` runs on the workspace-setup queue.")
         }
     }
 
@@ -1364,11 +1494,72 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 self.queue.async { completion(result) }
             }
         }
+
+        private func handleWorkspaceStopRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            workspaceStopQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleWorkspaceStopRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+
+        private func handleWorkspaceSetupRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            workspaceSetupQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleWorkspaceSetupRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
     #endif
 
     #if os(Linux) && canImport(OpenSSL)
         private func handleWorkspaceTeardownRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try workspaceTeardownQueue.sync { try handleWorkspaceTeardownRequest(request) }
+        }
+
+        private func handleWorkspaceStopRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try workspaceStopQueue.sync { try handleWorkspaceStopRequest(request) }
+        }
+
+        private func handleWorkspaceSetupRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try workspaceSetupQueue.sync { try handleWorkspaceSetupRequest(request) }
+        }
+    #endif
+
+    /// Runs one engine-blocking terminal command (see `runsOnTerminalControlQueue`).
+    ///
+    /// These handlers read session files and talk to the session's control socket, and `.state` reads the
+    /// live core through the immutable provider closure and emits a metric; they touch none of the server
+    /// state the Device API queue confines, so they need nothing hoisted out before the hop.
+    private func handleTerminalControlQueueRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        switch request.command {
+        case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
+        case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
+        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        case .state(let payload): return try handleStateRequest(payload)
+        default: preconditionFailure("Only engine-blocking terminal commands run on the terminal-control queue.")
+        }
+    }
+
+    #if canImport(Network) && canImport(Security)
+        private func handleTerminalControlRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            terminalControlQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleTerminalControlQueueRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
+        private func handleTerminalControlRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try terminalControlQueue.sync { try handleTerminalControlQueueRequest(request) }
         }
     #endif
 

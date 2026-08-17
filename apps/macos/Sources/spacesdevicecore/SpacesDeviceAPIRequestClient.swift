@@ -38,23 +38,56 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    public func request(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-        try SpacesDeviceAPICodec.decodeResponse(requestData(SpacesDeviceAPICodec.encodeRequest(request)))
+    /// Sends one request, racing the device's candidate addresses — unless `pinnedHost` names one, in
+    /// which case the request goes to exactly that address and nowhere else. Pinning exists for a caller
+    /// asking about one specific address rather than about the device: a client holding a long-lived
+    /// stream on one candidate cannot learn anything about that candidate from a request the race happily
+    /// answers on a different one.
+    public func request(_ request: SpacesDeviceAPIRequest, pinnedHost: String? = nil) throws -> SpacesDeviceAPIResponse {
+        try SpacesDeviceAPICodec.decodeResponse(requestData(SpacesDeviceAPICodec.encodeRequest(request), pinnedHost: pinnedHost))
     }
 
     public func requestData(_ requestData: Data) throws -> Data {
-        let resolved = try resolver.connect(timeout: timeoutSeconds)
-        defer { resolved.connection.cancel() }
+        try self.requestData(requestData, pinnedHost: nil)
+    }
+
+    private func requestData(_ requestData: Data, pinnedHost: String?) throws -> Data {
+        let host: String
+        let connection: any SpacesPinnedTLSLineConnection
+        if let pinnedHost {
+            host = pinnedHost
+            do { connection = try resolver.connect(host: pinnedHost, timeout: timeoutSeconds) } catch {
+                noteFailure(host: pinnedHost, isPinned: true)
+                throw error
+            }
+        } else {
+            let resolved = try resolver.connect(timeout: timeoutSeconds)
+            host = resolved.host
+            connection = resolved.connection
+        }
+        defer { connection.cancel() }
         do {
-            try resolved.connection.sendLine(requestData, timeout: timeoutSeconds)
-            do { return try resolved.connection.readLine(timeout: timeoutSeconds) } catch SpacesPinnedTLSConnectionError.connectionClosed {
+            try connection.sendLine(requestData, timeout: timeoutSeconds)
+            do {
+                return try connection.readLine(timeout: timeoutSeconds)
+            } catch SpacesPinnedTLSConnectionError.connectionClosed {
                 throw SpacesDeviceAPIRequestClientError.emptyResponse
             }
         } catch {
-            // The address answered the handshake and then broke mid-exchange, so it may no longer be
-            // the right one to go straight back to; the next connect re-walks every candidate.
-            resolver.noteConnectionFailed(host: resolved.host)
+            noteFailure(host: host, isPinned: pinnedHost != nil)
             throw error
+        }
+    }
+
+    /// A raced request that broke tells the resolver only that its winner is no longer the right address
+    /// to go straight back to; the next connect re-walks every candidate. A pinned request that broke is
+    /// evidence about that one address specifically, which is what a stream needs: reporting it as a
+    /// stream failure moves `nextStreamHost()` off the address instead of redialing it first.
+    private func noteFailure(host: String, isPinned: Bool) {
+        if isPinned {
+            resolver.noteStreamFailed(host: host)
+        } else {
+            resolver.noteConnectionFailed(host: host)
         }
     }
 }
@@ -241,6 +274,17 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
     private let onDisconnect: @Sendable ((any Error)?) -> Void
     private let connectionLock = NSLock()
     private var connection: (any SpacesPinnedTLSLineConnection)?
+    private var connectedHostStorage: String?
+
+    /// The candidate address this stream is pinned to, once `start()` has connected; nil before that and
+    /// after `stop()`. A stream picks its host once and keeps it for the life of the connection, so an
+    /// owner comparing it against the address a fresh request just landed on can tell that the device
+    /// failed over to a different candidate while this stream sat on a dead one.
+    public var connectedHost: String? {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        return connectedHostStorage
+    }
 
     public init(
         request: SpacesDeviceAPIRequest, resolver: SpacesDeviceEndpointResolver,
@@ -267,6 +311,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         }
         connectionLock.lock()
         connection = createdConnection
+        connectedHostStorage = host
         connectionLock.unlock()
         let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
         do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
@@ -287,6 +332,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         connectionLock.lock()
         let activeConnection = connection
         connection = nil
+        connectedHostStorage = nil
         connectionLock.unlock()
         activeConnection?.cancel()
     }

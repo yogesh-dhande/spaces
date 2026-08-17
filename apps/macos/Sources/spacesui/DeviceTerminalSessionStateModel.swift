@@ -82,6 +82,12 @@
         // delays instead of waiting out real seconds.
         let reconnectBackoff = TerminalStateStreamReconnectBackoff()
         private var streamClient: (any TerminalRemoteStateStreamClient)?
+        // The candidate address the installed stream connected on, mirrored here because the stream picks
+        // it internally and the protocol the model holds does not carry it. Read only by the corroboration
+        // probe, which pins its ping to this address so the answer is about the stream's own path rather
+        // than about whichever candidate a race happens to win. Nil whenever no stream is installed, and
+        // whenever the installed one is a test double with no host of its own.
+        private var streamConnectedHost: String?
         // Bumped every time a stream client is installed. `onEvent`/`onDisconnect` callbacks carry the
         // generation they were created under, so a superseded client's late callback (an immediate
         // post-connect rejection, or a straggling disconnect after replacement) is ignored instead of
@@ -149,6 +155,7 @@
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
                 reconnectTask?.cancel()
+                linkCorroborationProbe?.task.cancel()
                 requestClientBox.current.client.cancel()
             }
         }
@@ -475,7 +482,10 @@
             guard started else {
                 // Only clear the installed client if it is still this one; a racing disconnect (or a newer
                 // connect) may already have replaced it, and clearing then would drop a healthy stream.
-                if streamClient === client { streamClient = nil }
+                if streamClient === client {
+                    streamClient = nil
+                    streamConnectedHost = nil
+                }
                 client.stop()
                 return false
             }
@@ -483,6 +493,10 @@
             // only a client that is still installed declares the link healthy. Clearing the flag from a
             // client a racing disconnect already tore down would hide an outage that is still on.
             if streamClient === client {
+                // Record which candidate address this stream pinned itself to (the concrete client picks
+                // one host and keeps it for the life of the connection). The corroboration probe compares
+                // its own answering address against this one; see `startLinkCorroborationProbe`.
+                streamConnectedHost = client.connectedHost
                 reconnectBackoff.reset()
                 setStateStreamDisconnected(false)
             }
@@ -584,6 +598,7 @@
             // dispatch queue for the life of the process while the reconnect mints a fresh one.
             let disconnectedClient = streamClient
             streamClient = nil
+            streamConnectedHost = nil
             disconnectedClient?.stop()
             // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
             // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
@@ -612,67 +627,232 @@
         /// the earliest proof the device is unreachable, and dropping that evidence leaves the pane
         /// looking live for a minute while every keystroke goes nowhere.
         ///
-        /// Only a transport failure qualifies (`isTransportFailureEvidenceOfLostLink`). The reaction is
-        /// the ordinary disconnect one — drop the subscription and arm the paced reconnect — rather than
-        /// only raising the flag, so the claim stays falsifiable: the reconnect either succeeds and clears
-        /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
-        /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
+        /// Only a transport failure qualifies (`isTransportFailureEvidenceOfLostLink`); a reachable
+        /// daemon's coded rejection says nothing about the link and does nothing here.
         ///
         /// Returns whether this failure is CONCLUSIVE proof the link is gone — which is also this method's
         /// own `RemoteGhosttyInputFailureHandler` wiring contract: the render host discards its queued
         /// input backlog exactly when this is `true`, and leaves it queued (to keep draining once the link
         /// proves itself live again) when it is `false`.
         ///
-        /// The failure-surfacing side effects below (tear down the subscription, arm the paced reconnect,
-        /// flip the disconnected notice) fire for ANY transport failure, timeout included — a 5s stall is
-        /// worth telling the user about and worth retrying regardless of which kind it turns out to be.
-        /// Only the return value, and so only whether the queued backlog survives, depends on the finer
-        /// classification:
-        ///  - a non-transport error (the daemon answered) returns `false` and does nothing else — the link
-        ///    is fine and its input must still be delivered;
-        ///  - a bare request timeout (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) returns `false` after
-        ///    doing the side effects above — the deadline elapsed, but on the hot per-keystroke path
-        ///    (`interactiveControlRequestTimeoutSeconds`, 5s) a live link can miss it too: interactive
-        ///    sends and the `.state` resync fetch share one per-session request client, which acquires its
-        ///    request lock before starting the per-operation deadline, so a keystroke queued behind a
-        ///    grid-sized resync fetch is not charged for that wait — it gets a fresh 5s window once its
-        ///    turn comes. What actually burns that window is the daemon's own answer running late: under
-        ///    heavy streaming the daemon's serial terminal-engine queue is saturated, so a keystroke's
-        ///    response can genuinely miss the deadline with nothing wrong with the link. A silently dead
-        ///    link (nothing ever answers) produces the identical timeout, so a timeout alone is not proof
-        ///    either way — conclusive discard comes only from the branches below, never from a bare
-        ///    timeout; discarding on the timeout alone would drop keystrokes the link stalled but never
-        ///    lost;
-        ///  - a connection-level failure (refused, closed, every candidate unreachable) returns `true` —
-        ///    conclusive that the transport itself gave up, not merely that one round trip missed its clock;
+        /// A transport failure is not one kind of evidence, and the two kinds get different reactions:
+        ///  - a CONNECTION-LEVEL failure (refused, closed, every candidate unreachable) is conclusive that
+        ///    the transport itself gave up. It takes the ordinary disconnect reaction immediately — drop
+        ///    the subscription and arm the paced reconnect, which flips the disconnected notice — so the
+        ///    claim stays falsifiable: the reconnect either succeeds and clears the notice, or keeps
+        ///    failing and the notice is right. It returns `true`, so the queued backlog is discarded;
+        ///  - a BARE REQUEST TIMEOUT (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) proves only that one
+        ///    round trip missed its deadline. On the hot per-keystroke path
+        ///    (`interactiveControlRequestTimeoutSeconds`, 5s) a live link misses it routinely: under heavy
+        ///    streaming the daemon's serial terminal-engine queue is saturated, so a keystroke's answer can
+        ///    genuinely run late with nothing wrong with the link. A silently dead link produces the
+        ///    identical timeout, so the timeout alone is inconclusive in both directions. Rather than
+        ///    guess, it is CORROBORATED: the subscription is left installed and a single `.ping` probe goes
+        ///    out on its own connection, clear of the input path (`startLinkCorroborationProbe`). The daemon answers
+        ///    `.ping` unconditionally, without touching the database or the terminal-engine queue, so a
+        ///    `pong` means the link is up and the pane keeps its stream with no notice, while a probe that
+        ///    brings back no answer from the daemon is the conclusive evidence the timeout was not, and
+        ///    takes the same teardown a connection-level failure takes. The timeout itself returns `false`, so the
+        ///    keystrokes queued behind it survive a stall the link never actually lost;
         ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)
-        ///    still returns `true` regardless of which shape this repeat failure is — the outage was
-        ///    already confirmed by an earlier conclusive failure or by the stream's own disconnect, so
-        ///    every keystroke of an ongoing outage, not only the first, must keep dropping its queued input
-        ///    rather than buffering behind a link that is not coming back on its own.
+        ///    returns `true` regardless of which shape this repeat failure is — the outage was already
+        ///    confirmed by an earlier conclusive failure, a corroborated timeout, or the stream's own
+        ///    disconnect, so every keystroke of an ongoing outage, not only the first, must keep dropping
+        ///    its queued input rather than buffering behind a link that is not coming back on its own.
         @discardableResult func reportFailedInputSend(_ error: any Error) -> Bool {
             guard Self.isTransportFailureEvidenceOfLostLink(error) else { return false }
-            let isConclusiveLinkDown = !SpacesDeviceClient.isDeviceAPIRequestTimeout(error)
             // Typing produces one of these per keystroke for as long as the outage lasts. A link already
             // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
             guard !isStateStreamDisconnected else { return true }
+            guard !SpacesDeviceClient.isDeviceAPIRequestTimeout(error) else {
+                startLinkCorroborationProbe()
+                return false
+            }
+            tearDownStreamAndScheduleReconnect()
+            return true
+        }
+
+        /// The disconnect reaction a conclusive lost link takes: drop the subscription and arm the paced
+        /// reconnect (which raises the disconnected notice). Shared by the connection-level failure branch
+        /// of `reportFailedInputSend` and the corroboration probe's failed verdict, so both surface an
+        /// outage identically.
+        private func tearDownStreamAndScheduleReconnect() {
             // Retire this client's generation before stopping it: `stop()` cancels the connection, whose
             // receive loop then delivers one final disconnect callback, and that callback must not arm a
             // second reconnect on top of the one below.
             streamClientGeneration &+= 1
             let deadClient = streamClient
             streamClient = nil
+            streamConnectedHost = nil
             deadClient?.stop()
             scheduleReconnect()
-            return isConclusiveLinkDown
+        }
+
+        /// Deadline for the corroboration `.ping`, deliberately shorter than both the Device API's 10s
+        /// default and the 5s interactive deadline that produced the timeout being corroborated. The probe
+        /// only has to learn whether the daemon's listener still answers a request that does no work, so a
+        /// long deadline would only stretch how long a genuinely dead link keeps looking live.
+        ///
+        /// A pong is a valid liveness signal because everything seconds-scale is diverted off the serial
+        /// state queue that answers it: engine waits (`.terminalControl`, `.terminalPasteImage`,
+        /// `.sendTerminalInput`, `.state`), workspace teardown, workspace stop, and workspace setup, each on
+        /// its own serial queue, so a hung stop or setup script cannot also delay a teardown or the state
+        /// queue. The commands still inline are database-read scale, with the residual long inline
+        /// offenders (the git and network work inside workspace creation and git preview) tracked by issue
+        /// #503, so a pong can in principle still be delayed past this deadline while one of those runs.
+        /// Accepted until #503 closes that class.
+        private nonisolated static let linkCorroborationProbeTimeoutSeconds: TimeInterval = 2
+
+        /// The in-flight corroboration probe and the stream generation it was started for. Typing produces
+        /// one timeout per keystroke, so without a single-flight rule a stalled daemon would be probed once
+        /// per keystroke; the first probe's verdict answers for all of them.
+        ///
+        /// Keyed by generation rather than by mere presence: a probe is only an answer about the stream it
+        /// was started under, and its verdict is discarded when that stream is gone. A timeout on a stream
+        /// installed after the probe went out therefore has to be corroborated on its own, so it starts a
+        /// probe of its own instead of being silently answered by one whose verdict can no longer apply.
+        /// The superseded probe is left to run itself out; nothing acts on it.
+        private var linkCorroborationProbe: (generation: UInt64, task: Task<Void, Never>)?
+
+        /// Sends `.ping` to decide whether a bare input-send timeout was a saturated daemon or a dead link,
+        /// and applies the verdict:
+        ///  - the pinned daemon decoded the request and answered it (a `pong`, or a coded rejection — the
+        ///    link carried a request there and an answer back): the link is up, so the stream is left
+        ///    exactly as it is and no notice is raised;
+        ///  - anything else, whether or not it classifies as a transport failure: the link did not deliver
+        ///    an answer, so it takes the same teardown a connection-level failure takes.
+        ///
+        /// The question the probe has to answer is not "is this device reachable" but "is the address this
+        /// pane's stream depends on still answering". On a device with several candidate addresses those
+        /// differ: the ping is therefore pinned to `streamConnectedHost`, the address the stream connected
+        /// on, and races nothing. A raced ping would prove nothing about the stream in either direction —
+        /// with both the LAN and the tailnet path up it can be answered on the address the stream is NOT
+        /// on, and a stream sitting on a path that just died would be torn down (or spared) on the strength
+        /// of an answer from somewhere else entirely.
+        ///
+        /// The verdict is scoped to the stream generation the probe was started under: if the stream was
+        /// replaced or torn down meanwhile, a late verdict says nothing about the stream now installed and
+        /// is dropped rather than tearing down a healthy replacement.
+        ///
+        /// Treating a missed probe as conclusive leans on the daemon answering `.ping` off its
+        /// engine-blocked queues (`SpacesDeviceAPIServer.runsOnTerminalControlQueue`). Against a daemon
+        /// predating that divert, saturation stalls the ping too and the verdict reproduces the
+        /// bare-timeout teardown this probe replaces — the same banner the old client raised, two seconds
+        /// later. Accepted rather than gated on a daemon-reported capability: clients and daemons ship in
+        /// lockstep with no compatibility guarantees yet, and the mixed pairing merely degrades to the
+        /// pre-probe behavior instead of anything worse.
+        ///
+        /// A pong is proof about the link, not about the stream's own established socket. In the narrow
+        /// window where the path drops and recovers between the input timeout and the probe (an interface
+        /// switch that blackholes both sockets, healed within the timeout-plus-probe horizon), the probe's
+        /// fresh connection pongs while the stream's socket stays dead, and the pane keeps a stream whose
+        /// render is frozen until TCP keepalive errors the socket (60–90s; the disconnect callback then
+        /// reconnects and catches up via `.state`). Typing is not gated on that: the request client drops
+        /// its connection on any send failure, so the next keystroke dials fresh and lands as soon as the
+        /// path is back. Accepted: tearing the stream down on a pong that follows a timeout is
+        /// indistinguishable from the false teardown this probe exists to remove, and the residual cost is
+        /// a stale passive render with a bounded self-heal, not lost input or a false banner.
+        private func startLinkCorroborationProbe() {
+            let generation = streamClientGeneration
+            guard linkCorroborationProbe?.generation != generation else { return }
+            let probe = linkCorroborationProbeForTesting ?? makeLinkCorroborationPingProbe()
+            let pinnedHost = streamConnectedHost
+            let task = Task { @MainActor [weak self] in
+                let probeError = await probe(pinnedHost)
+                guard let self else { return }
+                // Release the slot only if it still holds THIS probe: a newer generation's probe may have
+                // taken it while this one was out, and clearing that would let the next timeout start a
+                // duplicate probe for a generation already being corroborated.
+                if self.linkCorroborationProbe?.generation == generation { self.linkCorroborationProbe = nil }
+                guard generation == self.streamClientGeneration else { return }
+                guard !Self.isAnswerFromTheDaemon(probeError) else { return }
+                self.tearDownStreamAndScheduleReconnect()
+            }
+            linkCorroborationProbe = (generation, task)
+        }
+
+        /// The real probe: a `.ping` on its own one-shot pinned-TLS connection, run off the main actor
+        /// because both the connect and the send block. Returns the thrown error, or nil when the daemon
+        /// answered at all. `pinnedHost` is the address the stream is connected on: the ping is aimed at
+        /// exactly that candidate, so a failure is evidence about the stream's own address rather than
+        /// about the device. It is also reported to the resolver as a stream failure, which steers the
+        /// teardown's redial past the dead address instead of retrying it first. Only a stream whose
+        /// address is unknown falls back to racing the candidates.
+        ///
+        /// It deliberately does NOT go through this session's shared `SpacesDeviceAPIRequestSessionClient`.
+        /// That client serializes every request behind one lock and takes the lock BEFORE starting the
+        /// per-operation deadline, so waiting for the lock is unbounded. The timeout that triggers this
+        /// probe leaves the pane's input backlog queued and draining (the report answered `false`), and on
+        /// a blackholed link every queued keystroke holds that lock for its full 5s interactive deadline in
+        /// turn — with no fairness guarantee about who gets it next. A probe behind that backlog could wait
+        /// out the entire outage, leaving the dead pane looking live: precisely the case the probe exists
+        /// to catch. A one-shot client dials its own connection through the same shared endpoint resolver
+        /// (so it reports failures back to the same place), and its timeout covers connect, send, and read
+        /// with nothing queued ahead of it.
+        ///
+        /// The auth token still comes from the shared box, read here on the main actor: the box's own lock
+        /// guards nothing but the client/token pair, so reading it never waits on a request.
+        private func makeLinkCorroborationPingProbe() -> @MainActor (String?) async -> (any Error)? {
+            let clientApp = self.clientApp
+            let device = self.device
+            let certificateFingerprint = self.certificateFingerprint
+            let authToken = requestClientBox.current.authToken
+            return { pinnedHost in
+                await Task.detached(priority: .userInitiated) { () -> (any Error)? in
+                    do {
+                        let probeClient = try SpacesDeviceAPIRequestClient(
+                            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
+                            timeoutSeconds: Self.linkCorroborationProbeTimeoutSeconds)
+                        _ = try probeClient.request(
+                            SpacesDeviceAPIRequest(command: .ping, authToken: authToken, clientApp: clientApp), pinnedHost: pinnedHost)
+                        return nil
+                    } catch { return error }
+                }.value
+            }
+        }
+
+        /// Overrides the `.ping` corroboration probe, so `spacesuiTests` can resolve it as a success, a
+        /// transport failure, or a coded rejection on demand instead of standing up a daemon that stalls
+        /// and then dies. It receives the address the real probe would pin to, so a test can also assert
+        /// the probe is aimed at the stream's own address. Nil in production, where the real probe always
+        /// runs. Mirrors `stateStreamConnectOverrideForTesting`.
+        var linkCorroborationProbeForTesting: (@MainActor (String?) async -> (any Error)?)?
+
+        /// Awaits the in-flight corroboration probe and its verdict, so a test can observe the outcome
+        /// deterministically instead of polling. A no-op when no probe is running.
+        func drainPendingLinkCorroborationProbeForTesting() async { await linkCorroborationProbe?.task.value }
+
+        /// Whether a corroboration probe is in flight; `spacesuiTests` uses it to prove a second timeout
+        /// arriving during one does not spawn a competing probe.
+        var hasInFlightLinkCorroborationProbeForTesting: Bool { linkCorroborationProbe != nil }
+
+        /// Whether the corroboration probe's outcome is an answer from the daemon this session is pinned
+        /// to. The verdict is a whitelist, not the transport-failure classification below, because the
+        /// question the probe asks is narrow: did the trusted daemon decode this request and answer it?
+        /// Only two outcomes say yes — no error at all, and a coded rejection, which is a decoded response
+        /// the daemon composed. Everything else is a failed probe: a certificate pin mismatch (rotation, or
+        /// the only reachable candidate presenting a different identity) means nothing authenticated as
+        /// this daemon answered, and an unclassified or malformed-response error means nothing legible came
+        /// back. Read through the blacklist below instead, those would count as a live link and leave a
+        /// dead pane looking healthy until the stream's own socket timeout eventually notices.
+        ///
+        /// The `.requestRejected` branch carries the semantics rather than the production path: the
+        /// one-shot client returns an `ok: false` response without throwing, so in production a rejection
+        /// arrives as a successful `request()` call. The branch is what makes "a rejection is an answer"
+        /// explicit, and `spacesuiTests` resolves the probe with one to hold that contract.
+        nonisolated static func isAnswerFromTheDaemon(_ probeError: (any Error)?) -> Bool {
+            guard let probeError else { return true }
+            if case SpacesDeviceAPIRequestClientError.requestRejected = probeError { return true }
+            return false
         }
 
         /// Whether a failed request is evidence about this session's link at all — true for any transport
         /// failure, timeout included: the request never demonstrably reached and was answered by the
-        /// daemon. This is the broad classification that gates `reportFailedInputSend`'s failure-surfacing
-        /// side effects (disconnect notice, paced reconnect); it does NOT by itself say the link is
-        /// conclusively down — see `reportFailedInputSend`'s own doc for the finer distinction its return
-        /// value makes between a bare timeout and a connection-level failure.
+        /// daemon. This is the broad classification that gates `reportFailedInputSend` doing anything at
+        /// all; it does NOT by itself say the link is conclusively down — see `reportFailedInputSend`'s own
+        /// doc for the finer distinction between a bare timeout (corroborated by a `.ping` before anything
+        /// is torn down) and a connection-level failure (conclusive on its own). The probe's own verdict is
+        /// read through `isAnswerFromTheDaemon` instead, which is stricter on purpose.
         ///
         /// A reachable daemon that answers with a coded rejection — the session is not running, another
         /// client owns it, the token was revoked — says nothing about the link, and reporting one as a
@@ -703,9 +883,14 @@
         // Test seams mirroring `openStateStream`'s install semantics. The concrete stream client offers no
         // protocol seam to force callback orderings, so `spacesuiTests` drives the generation guard through
         // these instead of racing a real connect.
-        @discardableResult func installStreamClientForTesting(_ client: any TerminalRemoteStateStreamClient) -> UInt64 {
+        /// `connectedHost` stands in for the address the concrete client would have pinned itself to, so a
+        /// test can drive the probe's host correlation without a multi-address daemon.
+        @discardableResult func installStreamClientForTesting(
+            _ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil
+        ) -> UInt64 {
             streamClientGeneration &+= 1
             streamClient = client
+            streamConnectedHost = connectedHost
             return streamClientGeneration
         }
 
@@ -865,16 +1050,15 @@
         /// sends over the tailnet relay run 0.7-1.5s, so 5s keeps well over 3x headroom while halving the
         /// worst-case stall a keystroke would otherwise wait out on a dead link.
         ///
-        /// This deadline also gates how fast `reportFailedInputSend` reports a send as failed and surfaces
-        /// the disconnect notice (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed
-        /// into a dead pane sits behind this timeout before that surfacing lands. It does NOT by itself gate
-        /// dropping the pane's queued input backlog: `reportFailedInputSend` only discards the backlog for a
-        /// connection-level failure, never for a bare timeout, precisely because tightening this deadline
-        /// toward the healthy-latency range would otherwise make a merely slow (not dead) link misreport
-        /// itself as gone and drop input a user is still waiting to land. Still worth re-measuring actual
-        /// send latency before tightening further: a timeout this frequent would surface the disconnect
-        /// notice — and retry the subscription — on ordinary jitter, even though it can no longer discard a
-        /// keystroke over it.
+        /// This deadline gates how fast a keystroke typed into a dead pane reports as failed (see
+        /// `RemoteGhosttySessionHost.reportInputFailure`). It does not by itself decide anything about the
+        /// pane's link or its queued input backlog: a bare timeout at this deadline neither discards the
+        /// backlog nor surfaces the disconnect notice, because a saturated daemon misses it on a perfectly
+        /// live link. `reportFailedInputSend` corroborates the timeout with a `.ping` first, and only a
+        /// probe that also fails at the transport tears the subscription down and raises the notice. That
+        /// is what makes this deadline safe to keep tight: a false alarm at it costs one extra `.ping`
+        /// round trip, not dropped keystrokes and a false banner. Re-measure actual send latency before
+        /// tightening it further all the same, since every miss still costs that probe.
         nonisolated static let interactiveControlRequestTimeoutSeconds: TimeInterval = 5
 
         /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke
