@@ -1,6 +1,8 @@
 #if canImport(Network) && canImport(Security)
+    import Darwin
     import Foundation
     import XCTest
+    import workspacecore
 
     @testable import spacesdeviceapi
     @testable import spacesdevicecore
@@ -132,6 +134,67 @@
             }
         }
 
+        /// A third, non-engine shape that also runs seconds or longer: `.runWorkspaceSetup` executes the
+        /// user's setup script to completion in the foreground (`WorkspaceOrchestrator+Setup.swift`,
+        /// `waitUntilExit`). It is part of the workspace-lifecycle family alongside teardown and
+        /// `.stopWorkspace`, diverted to `workspaceLifecycleQueue` for the same reason: left inline it would
+        /// hold up every other connection's requests, including the corroboration `.ping` a client sends
+        /// after an input-send timeout.
+        func testARunningWorkspaceSetupDoesNotDelayAPingOnAnotherConnection() throws {
+            try withTemporaryProfile {
+                let workspaceID = "workspace-lifecycle-setup-\(UUID().uuidString)"
+                let fifoPath = try seedBlockingWorkspaceSetup(workspaceID: workspaceID)
+                // Guards the fifo release against a double write: a write that lands after the setup
+                // script already read its one line and exited would block forever waiting for a reader
+                // that will never come back, hanging the test instead of failing it.
+                var fifoReleased = false
+                func releaseFIFOOnce() {
+                    guard !fifoReleased else { return }
+                    fifoReleased = true
+                    releaseFIFO(fifoPath)
+                }
+                // Safety net: if an assertion below throws or fails before the deliberate release runs,
+                // this still unblocks the setup script so the background request (and the server) can tear
+                // down instead of hanging the test run.
+                defer { releaseFIFOOnce() }
+
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+                try server.start()
+                defer { server.stop() }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "workspace-lifecycle-queue-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                    deviceName: "Mac", appVersion: "1.0")
+
+                let setupClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { setupClient.cancel() }
+                let setupFinished = expectation(description: "The blocked workspace setup eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? setupClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .runWorkspaceSetup(SpacesDeviceWorkspaceReference(workspaceID: workspaceID)), authToken: pairingStore.authToken,
+                            clientApp: clientApp))
+                    setupFinished.fulfill()
+                }
+                try waitUntilWorkspaceSetupIsRunning(workspaceID: workspaceID)
+
+                let probeClient = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 2)
+                let startedAt = Date()
+                let pong = try probeClient.request(SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp))
+                let elapsed = Date().timeIntervalSince(startedAt)
+
+                XCTAssertTrue(pong.ok, pong.message)
+                XCTAssertEqual(pong.message, "pong")
+                XCTAssertLessThan(elapsed, 1.5, "A ping must not wait behind a workspace setup script stalled in the workspace-lifecycle queue.")
+
+                releaseFIFOOnce()
+                wait(for: [setupFinished], timeout: 10)
+            }
+        }
+
         /// The smallest payload a live core could export: the test only needs the read to be blocking and
         /// to answer eventually, not to carry a particular frame.
         private func liveStatePayload(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
@@ -157,6 +220,53 @@
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 123,
                     state: .running, updatedAt: "2026-08-16T00:00:01Z"), paths: paths)
             return paths
+        }
+
+        /// Seeds a project and workspace whose setup script blocks reading one line from a fresh named
+        /// pipe, and returns that pipe's path. `resolveWorkspace` only reads the database, so a plain
+        /// directory on disk (no git repo) is enough for the workspace's worktree — `runWorkspaceSetup`
+        /// only needs it to exist as the script's working directory.
+        private func seedBlockingWorkspaceSetup(workspaceID: String) throws -> String {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let projectDir = root.appendingPathComponent("project", isDirectory: true)
+            let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+            let fifoPath = root.appendingPathComponent("setup.fifo").path
+            guard mkfifo(fifoPath, 0o600) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-\(workspaceID)", name: "Lifecycle Setup", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
+                    setupScript: "read line < '\(fifoPath)'", stopScript: nil, ports: [], processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature",
+                    isDefault: true, isRunning: false, lastLaunchedAt: nil))
+            return fifoPath
+        }
+
+        /// Polls the store rather than the fifo: the goal is to know the setup request has actually reached
+        /// the workspace-lifecycle queue and started running the script, not merely that the background send
+        /// has been issued, so the corroboration ping that follows is timed against a genuine stall.
+        private func waitUntilWorkspaceSetupIsRunning(workspaceID: String, timeout: TimeInterval = 5) throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            while Date() < deadline {
+                if try store.workspaceSetupState(workspaceID: workspaceID)?.status == .running { return }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            XCTFail("Workspace setup never reached the running state.")
+        }
+
+        /// Unblocks a setup script parked on `read line < <fifoPath>` by writing one line to the pipe.
+        /// Opening a fifo for writing blocks until a reader is attached; that pairs naturally with the
+        /// script's blocking read whichever of the two happens first, so callers do not have to sequence
+        /// this against the script's own progress.
+        private func releaseFIFO(_ path: String) {
+            guard let handle = FileHandle(forWritingAtPath: path) else { return }
+            defer { try? handle.close() }
+            handle.write(Data("go\n".utf8))
         }
 
         private func withTemporaryProfile(_ body: () throws -> Void) throws {

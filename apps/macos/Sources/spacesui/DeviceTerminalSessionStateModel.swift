@@ -692,6 +692,14 @@
         /// default and the 5s interactive deadline that produced the timeout being corroborated. The probe
         /// only has to learn whether the daemon's listener still answers a request that does no work, so a
         /// long deadline would only stretch how long a genuinely dead link keeps looking live.
+        ///
+        /// A pong is a valid liveness signal because everything seconds-scale is diverted off the serial
+        /// state queue that answers it: engine waits (`.terminalControl`, `.terminalPasteImage`,
+        /// `.sendTerminalInput`, `.state`), and workspace teardown, stop, and setup (the workspace-lifecycle
+        /// family). The commands still inline are database-read scale, with the residual long inline
+        /// offenders (the git and network work inside workspace creation and git preview) tracked by issue
+        /// #503, so a pong can in principle still be delayed past this deadline while one of those runs.
+        /// Accepted until #503 closes that class.
         private nonisolated static let linkCorroborationProbeTimeoutSeconds: TimeInterval = 2
 
         /// The in-flight corroboration probe and the stream generation it was started for. Typing produces
