@@ -41,7 +41,8 @@
 - The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate. You can skip the date if making only documentation or website changes.
 
 - When running `git commit`, allow at least a 15-minute timeout so pre-commit checks can finish.
-- After committing changes, use codex cli with gpt-5.6-sol model (high effort) to run a review against base branch (e.g. main if branched off from main). 
+- Before each commit, use codex cli with gpt-5.6-sol model (high effort) to run a review of the uncommitted changes.
+- Before finalizing a PR, run the affected e2e tests, commit, then use codex cli with gpt-5.6-sol model (high effort) to run a review against the target branch (e.g. main if branched off from main). This against-target review is needed only when finalizing a PR, not after every commit.
 - When presented with review findings, create a table with estimates for probability of each bug occurring (1:10, 1:1000 etc), impact (scale of 1 to 10, 10 be worst), effort to write a failing test (high, medium, low) with reason (architecture vs narrow/rare edge case hard to codify), and recommendation for whether it is worth addressing the review based on the probability, impact, and complexity of the fix. 
     - Automatically fix any issues that are expected at reasonably frequency and have medium/high impact or anything that is a trivial correctness fix. 
     - Any issues that do not need to be fixed as they are irrelevant for the product UX (if unclear, ask me questions and wait for my input) can be documented as accepted behavior/risk to avoid surfacing the issue again. Once fixed and committed, rerun the review cycle and loop until no high impact issues remain.
