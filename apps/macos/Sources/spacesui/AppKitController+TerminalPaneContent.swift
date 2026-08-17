@@ -302,9 +302,21 @@ extension AppKitController {
         let scopedWorkspaces: [SessionPickerWorkspaceContext]
         switch scope {
         case .workspace(_, let workspaceID):
+            // Deliberately no hidden-visibility check here: this scope is the picker inside an open
+            // panel of exactly this workspace, and hiding suppresses rows on listing surfaces without
+            // tearing down open panels — a panel that stays open keeps its own picker (and its "New
+            // terminal session" row) working even if the workspace was hidden from another client.
             scopedWorkspaces =
                 overview(forWorkspaceID: workspaceID).map { [SessionPickerWorkspaceContext(workspaceID: workspaceID, overview: $0)] } ?? []
-        case .globalWindow: scopedWorkspaces = orderedSessionPickerWorkspaceContexts()
+        case .globalWindow:
+            // The invoking workspace's overview is passed along only while its device section is
+            // loaded: the visible walk lists loaded sections only, and a section that is not loaded
+            // (its device offline, say) retains its last overview, so an unguarded lookup would
+            // mistake that omission for hiding and resurrect rows the device cannot serve.
+            let invokingSectionIsLoaded = deviceID(forWorkspaceID: newTerminalWorkspaceID).flatMap { deviceSection(id: $0) }?.loadState == .loaded
+            scopedWorkspaces = Self.globalSessionPickerScopedWorkspaces(
+                ordered: orderedSessionPickerWorkspaceContexts(), newTerminalWorkspaceID: newTerminalWorkspaceID,
+                newTerminalOverview: invokingSectionIsLoaded ? overview(forWorkspaceID: newTerminalWorkspaceID) : nil)
         }
         return Self.sessionPickerPresentation(
             newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID),
@@ -313,18 +325,41 @@ extension AppKitController {
 
     /// Every loaded device's workspaces in sidebar order (the command palette's device →
     /// project → workspace walk), each paired with its owning overview for row building.
+    /// Hidden projects and hidden workspaces are excluded exactly as the sidebar excludes
+    /// them, through the same `SidebarVisibility` rules.
     private func orderedSessionPickerWorkspaceContexts() -> [SessionPickerWorkspaceContext] {
         var contexts: [SessionPickerWorkspaceContext] = []
         for section in deviceSections where section.loadState == .loaded {
             guard let overview = section.overview else { continue }
             let mapped = Self.deviceSidebarData(from: overview, deviceID: section.deviceID)
-            for project in mapped.projects {
-                for workspace in mapped.workspacesByProject[project.id] ?? [] {
+            for project in SidebarVisibility.deviceProjects(
+                mapped.projects, deviceID: section.deviceID, workspacesByProject: mapped.workspacesByProject)
+            {
+                for workspace in mapped.workspacesByProject[project.id] ?? []
+                where SidebarVisibility.isVisibleWorkspace(workspace, inProject: project) {
                     contexts.append(SessionPickerWorkspaceContext(workspaceID: workspace.id, overview: overview))
                 }
             }
         }
         return contexts
+    }
+
+    /// The global picker's workspace contexts: the sidebar-visible walk, with the invoking pane's own
+    /// workspace prepended when hiding removed it from that walk. The workspace scope keeps a hidden
+    /// workspace's picker working because the open pane is that workspace's own surface; a pane moved
+    /// to a global window is the same open pane, so its workspace keeps its session rows here too
+    /// (right after "New terminal session"), while every other hidden workspace stays excluded. The
+    /// caller passes `newTerminalOverview` only when the invoking workspace's device section is
+    /// loaded, so a workspace omitted for any other reason (its device offline, its overview never
+    /// loaded) stays omitted.
+    /// `nonisolated static` so it's testable without a live `AppKitController`.
+    nonisolated static func globalSessionPickerScopedWorkspaces(
+        ordered: [SessionPickerWorkspaceContext], newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?
+    ) -> [SessionPickerWorkspaceContext] {
+        guard !ordered.contains(where: { $0.workspaceID == newTerminalWorkspaceID }), let newTerminalOverview,
+            newTerminalOverview.workspaces.contains(where: { $0.id == newTerminalWorkspaceID })
+        else { return ordered }
+        return [SessionPickerWorkspaceContext(workspaceID: newTerminalWorkspaceID, overview: newTerminalOverview)] + ordered
     }
 
     /// Pure picker-row builder: "New terminal session" first, then each workspace's
@@ -359,6 +394,10 @@ extension AppKitController {
             choices[id] = choice
         }
 
+        // Deliberately no hidden-visibility check on this row: `newTerminalWorkspaceID` is the invoking
+        // pane's own workspace (workspace-scoped or moved to a global window alike), and hiding
+        // suppresses listing surfaces without tearing down open panels — a pane that stays open keeps
+        // its primary new-session action even if its workspace was hidden meanwhile.
         appendItem(
             id: "picker:new", workspaceID: newTerminalWorkspaceID,
             workspace: newTerminalOverview?.workspaces.first { $0.id == newTerminalWorkspaceID }, kind: .window, label: "New terminal session",

@@ -135,9 +135,11 @@ import workspacecore
             workspaceRuntimeStatusByID: ["ws-deleting": runtimeStatus(workspaceID: "ws-deleting"), "ws-keep": runtimeStatus(workspaceID: "ws-keep")],
             alertsGroups: [
                 AppKitController.AlertsGroup(
-                    projectName: "Project", workspaceID: "ws-deleting", workspaceName: "doomed", workspaceBranch: "doomed", items: []),
+                    projectName: "Project", workspaceID: "ws-deleting", workspaceName: "doomed", workspaceBranch: "doomed",
+                    isFromHiddenWorkspace: false, items: []),
                 AppKitController.AlertsGroup(
-                    projectName: "Project", workspaceID: "ws-keep", workspaceName: "keep", workspaceBranch: "keep", items: []),
+                    projectName: "Project", workspaceID: "ws-keep", workspaceName: "keep", workspaceBranch: "keep", isFromHiddenWorkspace: false,
+                    items: []),
             ])
     }
 

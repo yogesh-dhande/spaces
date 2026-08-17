@@ -5,9 +5,11 @@ import workspacecore
 ///
 /// Every surface that renders the sidebar's model — the outline itself, arrow navigation, the
 /// window cycle order, the automation editor's workspace picker — reads through
-/// `SidebarController.deviceProjects` / `visibleWorkspaces`, which are the only callers of these
-/// rules. Keeping the rules here (pure, host-free) is what stops "is this row shown?" from being
-/// re-answered slightly differently at each of those sites.
+/// `SidebarController.deviceProjects` / `visibleWorkspaces`. The command palette's workspace walk
+/// (`AppKitController.deviceCommandPaletteWorkspaceItems`) and the terminal pane's session picker
+/// (`orderedSessionPickerWorkspaceContexts`) list the same rows in the same order and call these
+/// rules directly. Keeping the rules here (pure, host-free) is what stops "is this row shown?" from
+/// being re-answered slightly differently at each of those sites.
 ///
 /// The Workspaces visibility dialog deliberately does not use these: it lists everything, because it
 /// is the only surface that can bring a hidden row back.

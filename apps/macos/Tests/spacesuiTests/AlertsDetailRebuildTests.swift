@@ -56,6 +56,7 @@ extension ProcessProfileEnvironmentSuites {
         private func bellGroup(liveTitle: String?) -> AppKitController.AlertsGroup {
             AppKitController.AlertsGroup(
                 projectName: "Project", workspaceID: "workspace-1", workspaceName: "feature", workspaceBranch: "feature",
+                isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: Self.bellAttentionID, icon: "terminal", iconTint: .terminal, label: "build box", detail: liveTitle, shortcut: "",
@@ -69,6 +70,7 @@ extension ProcessProfileEnvironmentSuites {
             let bell = bellGroup(liveTitle: liveTitle).items[0]
             return AppKitController.AlertsGroup(
                 projectName: "Project", workspaceID: "workspace-1", workspaceName: "feature", workspaceBranch: "feature",
+                isFromHiddenWorkspace: false,
                 items: [
                     bell,
                     AppKitController.AlertsAttentionEntry(

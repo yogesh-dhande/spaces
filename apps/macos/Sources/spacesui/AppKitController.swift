@@ -134,6 +134,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let workspaceID: String
         let workspaceName: String
         let workspaceBranch: String?
+        /// Whether the workspace this group was derived from is hidden, or belongs to a hidden project.
+        ///
+        /// Hidden workspaces still get their groups built, because the persisted dismissal set is pruned
+        /// against the derived identities (`AlertsController.retainedDismissedAttentionItemIDs`) — dropping
+        /// the group would forget the dismissals and resurrect cleared alerts on unhide. The display
+        /// surfaces (the alerts pane, its badge, the command palette) filter on this flag instead.
+        let isFromHiddenWorkspace: Bool
         let items: [AlertsAttentionEntry]
         var latestDate: Date? { items.compactMap(\.eventDate).max() }
     }
@@ -3232,7 +3239,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             groups.append(
                 AlertsGroup(
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                    workspaceBranch: workspace.branch, items: items))
+                    workspaceBranch: workspace.branch, isFromHiddenWorkspace: !overview.isWorkspaceVisible(workspace), items: items))
         }
         // Failed/timed-out automation runs form their own synthetic group ("Automations / <device>") whose
         // cards deep-link to the Runs tab instead of focusing a live workspace target that may be detached.
@@ -3247,7 +3254,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             groups.append(
                 AlertsGroup(
                     projectName: "Automations", workspaceID: "automations:\(deviceID)",
-                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, items: items))
+                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, isFromHiddenWorkspace: false, items: items))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -5273,11 +5280,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
             deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
             deviceSections[index].overview = overview
-            if deviceSections[index].isLocal {
-                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(
-                    from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName)
-            }
+            // Rebuild for every section, not just local: this overview is authoritative for `deviceID`
+            // regardless of origin, and alerts groups carry visibility (`isFromHiddenWorkspace`), so a
+            // remote mutation response must refresh them too or the alerts pane/badge/palette show stale
+            // visibility until the next remote push (which already rebuilds via `applyRemoteDeviceSection`).
+            deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(
+                from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName)
         }
+        // A mutation can change what the palette may list (a hide/unhide changes row visibility), and a
+        // remote mutation never touches the local database, so no snapshot reload arrives to invalidate
+        // the palette's cached items (`applySidebarDataSnapshot` covers only local changes). Invalidate
+        // here so the next palette open rebuilds from this overview.
+        commandPalette.invalidateCommandPaletteCache()
         // This is an authoritative overview for `deviceID`: close any open pane whose session it no
         // longer retains (its product row was removed, possibly from another device), so the pane cannot
         // outlive the daemon's transcript garbage-collection. The keep-set is the daemon's own published
@@ -12544,7 +12558,7 @@ extension AppKitController {
     }
 
     nonisolated private static func buildCommandPaletteAlertsItems(alertsGroups: [AlertsGroup]) -> [CommandPaletteItem] {
-        alertsGroups.flatMap { group in
+        alertsGroups.filter { !$0.isFromHiddenWorkspace }.flatMap { group in
             group.items.compactMap { entry in
                 guard let focusRequest = entry.focusRequest else { return nil }
                 let kind = commandPaletteKind(
@@ -12577,8 +12591,10 @@ extension AppKitController {
         let mapped = deviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
 
-        for project in mapped.projects {
-            for workspace in mapped.workspacesByProject[project.id] ?? [] {
+        // The palette lists what the sidebar lists, so it walks through the same visibility rules rather
+        // than the raw overview: hidden workspaces and hidden projects leave both surfaces together.
+        for project in SidebarVisibility.deviceProjects(mapped.projects, deviceID: deviceID, workspacesByProject: mapped.workspacesByProject) {
+            for workspace in mapped.workspacesByProject[project.id] ?? [] where SidebarVisibility.isVisibleWorkspace(workspace, inProject: project) {
                 guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == workspace.id }) else { continue }
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
                 let windows = deviceTerminalWindows(from: detail.terminalRows)

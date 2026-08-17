@@ -63,6 +63,24 @@ import workspacecore
             isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundCommand: foregroundCommand)
     }
 
+    /// Hiding suppresses listing surfaces without tearing down open panels, so the global picker
+    /// keeps the invoking pane's own workspace even when the sidebar-visible walk dropped it, and
+    /// never duplicates it when the walk still lists it.
+    @Test func globalScopeKeepsTheInvokingWorkspaceWhenHiddenFromTheVisibleWalk() {
+        let invoking = richWorkspace(id: "workspace-invoking")
+        let other = richWorkspace(id: "workspace-other")
+        let invokingContext = context(for: invoking)
+        let otherContext = context(for: other)
+
+        let withHiddenInvoker = AppKitController.globalSessionPickerScopedWorkspaces(
+            ordered: [otherContext], newTerminalWorkspaceID: "workspace-invoking", newTerminalOverview: invokingContext.overview)
+        #expect(withHiddenInvoker.map(\.workspaceID) == ["workspace-invoking", "workspace-other"])
+
+        let withListedInvoker = AppKitController.globalSessionPickerScopedWorkspaces(
+            ordered: [otherContext, invokingContext], newTerminalWorkspaceID: "workspace-invoking", newTerminalOverview: invokingContext.overview)
+        #expect(withListedInvoker.map(\.workspaceID) == ["workspace-other", "workspace-invoking"])
+    }
+
     @Test func listsSidebarTargetsInOrderExcludingBrowsers() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(

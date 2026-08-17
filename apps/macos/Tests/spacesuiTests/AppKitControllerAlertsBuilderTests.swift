@@ -12,13 +12,17 @@ import workspacecore
 /// identically to remote alerts.
 struct AppKitControllerAlertsBuilderTests {
     private func workspace(
-        id: String, isRunning: Bool = true, processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
+        id: String, projectID: String = "project-1", isRunning: Bool = true, isHidden: Bool = false,
+        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
-            id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
-            isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil, config: SpacesDeviceWorkspaceConfig(),
-            processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
+            id: id, projectID: projectID, projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
+            isHidden: isHidden, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
+            config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
+    }
+
+    private func project(id: String, isHidden: Bool = false) -> SpacesDeviceProjectSummary {
+        SpacesDeviceProjectSummary(id: id, name: "Project", dir: "/device/\(id)", isGitRepo: true, defaultBranch: "main", isHidden: isHidden)
     }
 
     private func exitedProcess(id: String, processID: String, exitedAt: String?) -> SpacesDeviceWorkspaceProcessRow {
@@ -41,9 +45,9 @@ struct AppKitControllerAlertsBuilderTests {
             activityState: activityState, updatedAt: updatedAt, canStop: true)
     }
 
-    private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [])
-        -> SpacesDeviceOverviewPayload
-    { SpacesDeviceOverviewPayload(projects: [], workspaces: workspaces, sessions: sessions) }
+    private func overview(
+        _ workspaces: [SpacesDeviceWorkspaceSummary], projects: [SpacesDeviceProjectSummary] = [], sessions: [SpacesDeviceTerminalSessionSummary] = []
+    ) -> SpacesDeviceOverviewPayload { SpacesDeviceOverviewPayload(projects: projects, workspaces: workspaces, sessions: sessions) }
 
     /// A focus boundary dated the same way the daemon dates a bell, so tests can place a bell either side
     /// of the moment the session took focus.
@@ -332,5 +336,60 @@ struct AppKitControllerAlertsBuilderTests {
         let groups = AppKitController.buildOverviewAlertsGroups(
             from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: nil)]), deviceID: "local")
         #expect(groups.isEmpty)
+    }
+
+    /// Hiding a workspace, or hiding its project, tags the group rather than dropping it: the group has to
+    /// stay derived for its dismissal identities to survive the hide (see
+    /// `dismissedAlertsFromAHiddenWorkspaceAreRetained`), and the display surfaces read the tag.
+    @Test func groupsCarryWhetherTheirWorkspaceIsHidden() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(
+                [
+                    workspace(id: "ws-visible", isRunning: false), workspace(id: "ws-hidden", isRunning: false, isHidden: true),
+                    workspace(id: "ws-hidden-project", projectID: "project-hidden", isRunning: false),
+                ], projects: [project(id: "project-1"), project(id: "project-hidden", isHidden: true)],
+                sessions: [
+                    session(id: "s1", workspaceID: "ws-visible", bellAt: "2026-06-28T09:00:00Z"),
+                    session(id: "s2", workspaceID: "ws-hidden", bellAt: "2026-06-28T09:00:00Z"),
+                    session(id: "s3", workspaceID: "ws-hidden-project", bellAt: "2026-06-28T09:00:00Z"),
+                ]), deviceID: "local")
+
+        #expect(groups.count == 3)
+        #expect(groups.first { $0.workspaceID == "ws-visible" }?.isFromHiddenWorkspace == false)
+        #expect(groups.first { $0.workspaceID == "ws-hidden" }?.isFromHiddenWorkspace == true)
+        #expect(groups.first { $0.workspaceID == "ws-hidden-project" }?.isFromHiddenWorkspace == true)
+    }
+
+    /// The pane and the badge both derive from `visibleAlertsGroups`, so tagging is what keeps a hidden
+    /// workspace's alerts off screen and out of the count.
+    @Test func hiddenWorkspaceGroupsAreNeitherShownNorCounted() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws-visible", isRunning: false), workspace(id: "ws-hidden", isRunning: false, isHidden: true)],
+                projects: [project(id: "project-1")],
+                sessions: [
+                    session(id: "s1", workspaceID: "ws-visible", bellAt: "2026-06-28T09:00:00Z"),
+                    session(id: "s2", workspaceID: "ws-hidden", bellAt: "2026-06-28T09:00:00Z"),
+                ]), deviceID: "local")
+
+        let visible = AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: [])
+        #expect(visible.count == 1)
+        #expect(visible.first?.workspaceID == "ws-visible")
+        // The badge is this reduction over the same groups (`alertsAttentionCount`).
+        #expect(visible.reduce(0) { $0 + $1.items.filter(\.countsTowardBadge).count } == 1)
+    }
+
+    /// Dismissals of a hidden workspace's alerts are retained, so unhiding the workspace does not bring
+    /// back alerts the user already cleared.
+    @Test func dismissedAlertsFromAHiddenWorkspaceAreRetained() {
+        let payload = overview(
+            [workspace(id: "ws-hidden", isRunning: false, isHidden: true)], projects: [project(id: "project-1")],
+            sessions: [session(id: "s1", workspaceID: "ws-hidden", bellAt: "2026-06-28T09:00:00Z")])
+        let groups = AppKitController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+        let dismissed = Set(groups.flatMap { $0.items.map(\.attentionID) })
+        #expect(dismissed.count == 1)
+
+        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: groups) == dismissed)
+        #expect(AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: dismissed).isEmpty)
     }
 }
