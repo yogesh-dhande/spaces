@@ -27,10 +27,19 @@ public enum GhosttyTerminalSnapshotViewport {
         return crop(snapshot, window: window)
     }
 
+    /// Whether `window` shows `snapshot` whole, which is exactly the condition under which ``crop(_:window:)``
+    /// hands the snapshot back untouched.
+    ///
+    /// Callers use this to tell a displayed frame that still is the host's grid from one that is a slice of
+    /// it. That distinction matters beyond rendering: soft-wrap metadata is carried per cell, so a cropped
+    /// frame keeps each row's "wraps into the next row" bit while the columns the crop dropped are gone, and
+    /// anything that reassembles a logical line from such a frame reads a line that was never on screen.
+    public static func covers(_ snapshot: GhosttyTerminalSnapshot, window: Window) -> Bool {
+        window.columnOffset == 0 && window.rowOffset == 0 && window.columns == snapshot.columns && window.rows == snapshot.rows
+    }
+
     public static func crop(_ snapshot: GhosttyTerminalSnapshot, window: Window) -> GhosttyTerminalSnapshot {
-        guard window.columns != snapshot.columns || window.rows != snapshot.rows || window.columnOffset != 0 || window.rowOffset != 0 else {
-            return snapshot
-        }
+        guard !covers(snapshot, window: window) else { return snapshot }
 
         let columnOffset = min(max(window.columnOffset, 0), max(snapshot.columns - 1, 0))
         let rowOffset = min(max(window.rowOffset, 0), max(snapshot.rows - 1, 0))

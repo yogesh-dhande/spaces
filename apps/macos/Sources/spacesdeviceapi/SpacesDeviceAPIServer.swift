@@ -2848,6 +2848,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let sessionID = request.sessionID
         pruneTerminalLinkTransferAuthorizations(now: Date())
+        do { return try resolveTerminalLink(request, context: context, sessionID: sessionID) } catch {
+            // The raw link is the only evidence of what a client actually asked to open. A client that
+            // reconstructs a link from a partial view of the terminal sends a value the user never saw,
+            // and without this line the failure is indistinguishable from a genuinely missing file (#492).
+            FileHandle.standardError.write(
+                Data("spacesd: terminal link resolve failed session=\(sessionID) error=\(error) link=\(request.terminalLink)\n".utf8))
+            throw error
+        }
+    }
+
+    private func resolveTerminalLink(_ request: SpacesDeviceTerminalLinkResolveRequest, context: RequestContext, sessionID: String) throws
+        -> SpacesDeviceAPIResponse
+    {
         let metadata: SpacesDeviceTerminalLinkMetadata
         if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
             // Non-file links resolve without workspace roots, so this path opens no store.

@@ -206,14 +206,30 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
-        try takeOverSessionFromList(
-            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview")
         let linkText = configuration.terminalLinkText
         XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
+
+        // Tapping the path while the phone still shows the owner's wider grid cropped to phone width must
+        // not open anything: the frame on screen carries each wrapped row's soft-wrap metadata without the
+        // columns the crop dropped, so a link resolved from it is a path the user never saw (#492).
+        var croppedTaps = 0
+        try takeOverSessionFromList(
+            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview",
+            whileViewingSession: {
+                croppedTaps = tapTerminalTextWhileHostGridIsCropped(String(linkText.prefix(24)), in: app, configuration: configuration, timeout: 20)
+            })
+        XCTAssertGreaterThan(
+            croppedTaps, 0,
+            "The terminal link fixture never wrapped beyond the phone's viewport, so the cropped-frame tap was never exercised. "
+                + "\(latestRenderDump(configuration: configuration).map { "\($0)" } ?? "No render dump was available.")")
+
         XCTAssertTrue(tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20), "Unable to tap terminal text \(linkText)")
         XCTAssertTrue(
             waitForE2EEvent(configuration: configuration, kind: "open_link", detailContains: linkText, timeout: 10),
             "The terminal did not report opening \(linkText)")
+        for opened in e2eEventDetails(configuration: configuration, kind: "open_link") {
+            XCTAssertEqual(opened, linkText, "The terminal opened a link that was never on screen whole")
+        }
         XCTAssertTrue(
             waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
             "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))")
@@ -714,6 +730,11 @@ final class SpacesMobileUITests: XCTestCase {
                     isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
                 })
         else { return false }
+        return tapTerminalText(target, in: app, configuration: configuration, dump: dump)
+    }
+
+    /// Taps the text where the given dump says it is, reporting whether a tap was delivered.
+    private func tapTerminalText(_ target: String, in app: XCUIApplication, configuration: UITestConfiguration, dump: UITestRenderDump) -> Bool {
         let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let columns = dump.viewportColumns, columns > 0 else { return false }
         let configuredRows = dump.viewportRows ?? lines.count
@@ -726,6 +747,36 @@ final class SpacesMobileUITests: XCTestCase {
             return true
         }
         return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
+    }
+
+    /// Taps the text repeatedly for as long as the phone is showing a slice of a wider host grid, and
+    /// reports how many taps landed while that held.
+    ///
+    /// A cropped frame keeps each row's soft-wrap metadata while dropping the columns past the phone's
+    /// width, so resolving a link from it assembles a value out of each row's visible slice: a file path
+    /// with its middle missing that the daemon then rejects (#492). Tapping here is how the test reaches
+    /// that state; what it asserts is what the taps produced, not how many landed.
+    private func tapTerminalTextWhileHostGridIsCropped(
+        _ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval
+    ) -> Int {
+        let tapBudget = 3
+        var tapCount = 0
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, tapCount < tapBudget {
+            guard let dump = latestRenderDump(configuration: configuration), dump.sessionID == configuration.sessionID, dump.showsTerminalSurface
+            else {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                continue
+            }
+            guard dump.showsCroppedHostGrid else {
+                if tapCount > 0 { return tapCount }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                continue
+            }
+            if tapTerminalText(target, in: app, configuration: configuration, dump: dump) { tapCount += 1 }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return tapCount
     }
 
     private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
@@ -919,8 +970,12 @@ final class SpacesMobileUITests: XCTestCase {
         return row.exists && row.isEnabled && row.isHittable
     }
 
+    /// - Parameter whileViewingSession: Runs once the session's terminal is on screen and before this
+    ///   device asks to own it, which is where the phone is still showing the owner's grid cropped to the
+    ///   phone's width.
     private func takeOverSessionFromList(
-        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String
+        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String,
+        whileViewingSession: () -> Void = {}
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
@@ -935,6 +990,7 @@ final class SpacesMobileUITests: XCTestCase {
             XCTFail("Terminal detail \(sessionID) did not appear during \(context)")
             return
         }
+        whileViewingSession()
         if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4) {
             XCTAssertTrue(
                 tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8),
@@ -1154,6 +1210,19 @@ final class SpacesMobileUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return e2eEventExists(at: url, kind: kind, detailContains: detailContains)
+    }
+
+    /// Every detail the app recorded for the given event kind, in the order it recorded them.
+    private func e2eEventDetails(configuration: UITestConfiguration, kind: String) -> [String] {
+        guard let eventLogPath = configuration.eventLogPath, let data = try? Data(contentsOf: URL(fileURLWithPath: eventLogPath)),
+            let text = String(data: data, encoding: .utf8)
+        else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let lineData = String(line).data(using: .utf8), let event = try? JSONDecoder().decode(UITestE2EEvent.self, from: lineData),
+                event.kind == kind
+            else { return nil }
+            return event.detail ?? ""
+        }
     }
 
     private func e2eEventExists(at url: URL, kind: String, detailContains: String) -> Bool {
@@ -1397,6 +1466,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let isInputSurfaceReady: Bool
     let viewportColumns: Int?
     let viewportRows: Int?
+    let snapshotColumns: Int?
+    let snapshotRows: Int?
     let snapshotText: String?
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
@@ -1417,6 +1488,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case isInputSurfaceReady
         case viewportColumns
         case viewportRows
+        case snapshotColumns
+        case snapshotRows
         case snapshotText
         case errorMessage
         case isPreparingLinkPreview
@@ -1439,6 +1512,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         isInputSurfaceReady = try container.decode(Bool.self, forKey: .isInputSurfaceReady)
         viewportColumns = try container.decodeIfPresent(Int.self, forKey: .viewportColumns)
         viewportRows = try container.decodeIfPresent(Int.self, forKey: .viewportRows)
+        snapshotColumns = try container.decodeIfPresent(Int.self, forKey: .snapshotColumns)
+        snapshotRows = try container.decodeIfPresent(Int.self, forKey: .snapshotRows)
         snapshotText = try container.decodeIfPresent(String.self, forKey: .snapshotText)
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         isPreparingLinkPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreparingLinkPreview) ?? false
@@ -1451,6 +1526,14 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     }
 
     var combinedText: String { [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n") }
+
+    /// Whether the phone is showing a slice of a wider host grid. The render path crops the host's
+    /// snapshot to the viewport, so while this holds every row on screen is missing the columns past the
+    /// viewport's width.
+    var showsCroppedHostGrid: Bool {
+        guard let snapshotColumns, let viewportColumns, viewportColumns > 0 else { return false }
+        return snapshotColumns > viewportColumns
+    }
 
     var hasError: Bool {
         guard let errorMessage else { return false }
@@ -1473,7 +1556,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         [
             "sessionID=\(sessionID)", "renderMode=\(renderMode)", "isOwner=\(isOwner)", "showsTerminalSurface=\(showsTerminalSurface)",
             "isBusy=\(isBusy)", "isPreparingInput=\(isPreparingInput)", "isInputSurfaceReady=\(isInputSurfaceReady)",
-            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
+            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")",
+            "snapshot=\(snapshotColumns.map(String.init) ?? "?")x\(snapshotRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
             "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
             "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")", "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)", "snapshotTextLength=\(snapshotText?.count ?? 0)", "renderedTextLength=\(renderedText.count)",
