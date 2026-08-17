@@ -51,6 +51,21 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         XCTAssertFalse(GhosttyTerminalSnapshotViewport.covers(snapshot, window: .init(columnOffset: 0, rowOffset: 1, columns: 6, rows: 3)))
     }
 
+    /// Column coverage answers a narrower question than ``covers``: whether the rows the window shows keep
+    /// their full width. A wrapped logical line can be read back out of such a window, because a row window
+    /// drops whole rows while a column window leaves each row's soft-wrap bit pointing at columns that are
+    /// gone.
+    func testColumnCoverageIgnoresRowsAndTracksOnlyWhetherRowsKeepTheirFullWidth() {
+        let snapshot = makeSnapshot(columns: 6, rows: 3, cursorColumn: 0, cursorRow: 0, glyphs: ["ABCDEF", "GHIJKL", "MNOPQR"])
+
+        XCTAssertTrue(GhosttyTerminalSnapshotViewport.coversColumns(snapshot, window: .init(columnOffset: 0, rowOffset: 0, columns: 6, rows: 3)))
+        XCTAssertTrue(
+            GhosttyTerminalSnapshotViewport.coversColumns(snapshot, window: .init(columnOffset: 0, rowOffset: 1, columns: 6, rows: 1)),
+            "a window showing one full-width row still shows that row whole")
+        XCTAssertFalse(GhosttyTerminalSnapshotViewport.coversColumns(snapshot, window: .init(columnOffset: 0, rowOffset: 0, columns: 4, rows: 3)))
+        XCTAssertFalse(GhosttyTerminalSnapshotViewport.coversColumns(snapshot, window: .init(columnOffset: 1, rowOffset: 0, columns: 5, rows: 3)))
+    }
+
     /// Coverage is exactly the condition under which cropping is a no-op, which is what lets a caller use
     /// it to tell "this frame is the grid" from "this frame is a slice of the grid".
     func testCoverageMatchesWhetherCroppingLeavesTheSnapshotUnchanged() {

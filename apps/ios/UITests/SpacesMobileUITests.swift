@@ -209,18 +209,22 @@ final class SpacesMobileUITests: XCTestCase {
         let linkText = configuration.terminalLinkText
         XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
 
-        // Tapping the path while the phone still shows the owner's wider grid cropped to phone width must
-        // not open anything: the frame on screen carries each wrapped row's soft-wrap metadata without the
-        // columns the crop dropped, so a link resolved from it is a path the user never saw (#492).
-        var croppedTaps = 0
+        // Opening the session starts the owner's render epoch on the daemon's bootstrap snapshot, which is
+        // still at the previous owner's width, so the phone shows that frame cropped to phone width until
+        // its own resize round-trips. A tap in that window must not open anything: the frame on screen
+        // carries each wrapped row's soft-wrap metadata without the columns the crop dropped, so a link
+        // resolved from it is a path the user never saw (#492).
+        var croppedTapReport = CroppedFrameTapReport()
         try takeOverSessionFromList(
             in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview",
-            whileViewingSession: {
-                croppedTaps = tapTerminalTextWhileHostGridIsCropped(String(linkText.prefix(24)), in: app, configuration: configuration, timeout: 20)
+            afterOpeningSession: {
+                croppedTapReport = tapTerminalTextWhileHostGridIsCropped(
+                    String(linkText.prefix(24)), in: app, configuration: configuration, timeout: 20)
             })
+        print("terminal-link-preview cropped-frame window: \(croppedTapReport)")
         XCTAssertGreaterThan(
-            croppedTaps, 0,
-            "The terminal link fixture never wrapped beyond the phone's viewport, so the cropped-frame tap was never exercised. "
+            croppedTapReport.tapCount, 0,
+            "No tap reached the phone while it was showing the host grid cropped. \(croppedTapReport) "
                 + "\(latestRenderDump(configuration: configuration).map { "\($0)" } ?? "No render dump was available.")")
 
         XCTAssertTrue(tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20), "Unable to tap terminal text \(linkText)")
@@ -749,34 +753,72 @@ final class SpacesMobileUITests: XCTestCase {
         return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
     }
 
-    /// Taps the text repeatedly for as long as the phone is showing a slice of a wider host grid, and
-    /// reports how many taps landed while that held.
+    /// What a run of `tapTerminalTextWhileHostGridIsCropped` observed, in seconds from the moment it
+    /// started watching, so a failure says whether the window was missed or never opened at all.
+    private struct CroppedFrameTapReport: CustomStringConvertible {
+        var tapCount = 0
+        var croppedObservations = 0
+        var openedAt: TimeInterval?
+        var closedAt: TimeInterval?
+        var tapRequestedAt: TimeInterval?
+        var tapDeliveredAt: TimeInterval?
+        var stillCroppedAfterTap = false
+
+        var description: String {
+            let format: (TimeInterval?) -> String = { $0.map { String(format: "%.3f", $0) } ?? "never" }
+            return "croppedTaps=\(tapCount) croppedObservations=\(croppedObservations) openedAt=\(format(openedAt)) "
+                + "closedAt=\(format(closedAt)) tapRequestedAt=\(format(tapRequestedAt)) tapDeliveredAt=\(format(tapDeliveredAt)) "
+                + "stillCroppedAfterTap=\(stillCroppedAfterTap)"
+        }
+    }
+
+    /// Watches for the window in which the phone is showing a slice of a wider host grid and taps the text
+    /// as soon as it opens.
+    ///
+    /// That window opens when this device claims the session: the owner's render epoch starts on the
+    /// daemon's bootstrap snapshot, which is still the previous owner's grid, and closes as soon as this
+    /// device's own resize round-trips and the daemon sends a frame at phone width. It is short and it is
+    /// the only place the phone applies a cropped frame at all (a viewer renders no live frames), so the
+    /// dump is polled tightly rather than at the leisurely cadence the settled-state waits use.
     ///
     /// A cropped frame keeps each row's soft-wrap metadata while dropping the columns past the phone's
     /// width, so resolving a link from it assembles a value out of each row's visible slice: a file path
     /// with its middle missing that the daemon then rejects (#492). Tapping here is how the test reaches
-    /// that state; what it asserts is what the taps produced, not how many landed.
+    /// that state; what it asserts is what the tap produced, not how many landed.
     private func tapTerminalTextWhileHostGridIsCropped(
         _ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval
-    ) -> Int {
-        let tapBudget = 3
-        var tapCount = 0
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline, tapCount < tapBudget {
+    ) -> CroppedFrameTapReport {
+        var report = CroppedFrameTapReport()
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeout)
+        while Date() < deadline {
             guard let dump = latestRenderDump(configuration: configuration), dump.sessionID == configuration.sessionID, dump.showsTerminalSurface
             else {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 continue
             }
             guard dump.showsCroppedHostGrid else {
-                if tapCount > 0 { return tapCount }
-                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                // The phone reflows to its own width exactly once, so once the window has closed waiting
+                // out the rest of the timeout would only delay the result.
+                if report.openedAt != nil {
+                    report.closedAt = Date().timeIntervalSince(start)
+                    return report
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 continue
             }
-            if tapTerminalText(target, in: app, configuration: configuration, dump: dump) { tapCount += 1 }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            report.croppedObservations += 1
+            if report.openedAt == nil { report.openedAt = Date().timeIntervalSince(start) }
+            guard report.tapCount == 0 else {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                continue
+            }
+            report.tapRequestedAt = Date().timeIntervalSince(start)
+            if tapTerminalText(target, in: app, configuration: configuration, dump: dump) { report.tapCount += 1 }
+            report.tapDeliveredAt = Date().timeIntervalSince(start)
+            report.stillCroppedAfterTap = latestRenderDump(configuration: configuration)?.showsCroppedHostGrid == true
         }
-        return tapCount
+        return report
     }
 
     private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
@@ -970,17 +1012,18 @@ final class SpacesMobileUITests: XCTestCase {
         return row.exists && row.isEnabled && row.isHittable
     }
 
-    /// - Parameter whileViewingSession: Runs once the session's terminal is on screen and before this
-    ///   device asks to own it, which is where the phone is still showing the owner's grid cropped to the
-    ///   phone's width.
+    /// - Parameter afterOpeningSession: Runs as soon as the session row has been tapped, before any wait
+    ///   for the detail view or for ownership. Opening a session claims it, so this is the earliest a
+    ///   caller can observe the render epoch that starts on the previous owner's wider grid.
     private func takeOverSessionFromList(
         in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String,
-        whileViewingSession: () -> Void = {}
+        afterOpeningSession: () -> Void = {}
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
         XCTAssertTrue(revealTerminalRow(sessionRow, in: app, timeout: 8), "Terminal row \(sessionID) was not ready for interaction during \(context)")
         sessionRow.tap()
+        afterOpeningSession()
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
         if !sessionDetail.waitForExistence(timeout: 8) {
@@ -990,7 +1033,6 @@ final class SpacesMobileUITests: XCTestCase {
             XCTFail("Terminal detail \(sessionID) did not appear during \(context)")
             return
         }
-        whileViewingSession()
         if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4) {
             XCTAssertTrue(
                 tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8),

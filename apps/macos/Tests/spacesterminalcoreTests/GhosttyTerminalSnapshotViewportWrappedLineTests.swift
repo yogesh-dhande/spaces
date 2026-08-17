@@ -22,7 +22,7 @@ import ghosttyvtshim
 
         let window = GhosttyTerminalSnapshotViewport.window(
             for: hostSnapshot, columns: Self.viewportColumns, rows: hostSnapshot.rows, horizontalAlignment: .leading)
-        #expect(!GhosttyTerminalSnapshotViewport.covers(hostSnapshot, window: window))
+        #expect(!GhosttyTerminalSnapshotViewport.coversColumns(hostSnapshot, window: window))
         let cropped = GhosttyTerminalSnapshotViewport.crop(hostSnapshot, window: window)
         #expect(cropped.columns == Self.viewportColumns)
 
@@ -43,7 +43,7 @@ import ghosttyvtshim
         let window = GhosttyTerminalSnapshotViewport.window(
             for: snapshot, columns: Self.viewportColumns, rows: snapshot.rows, horizontalAlignment: .leading)
 
-        #expect(GhosttyTerminalSnapshotViewport.covers(snapshot, window: window))
+        #expect(GhosttyTerminalSnapshotViewport.coversColumns(snapshot, window: window))
         #expect(joinedLogicalLine(from: GhosttyTerminalSnapshotViewport.crop(snapshot, window: window)) == Self.path)
     }
 
