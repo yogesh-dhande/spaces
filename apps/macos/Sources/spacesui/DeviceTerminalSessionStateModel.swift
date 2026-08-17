@@ -695,8 +695,9 @@
         ///
         /// A pong is a valid liveness signal because everything seconds-scale is diverted off the serial
         /// state queue that answers it: engine waits (`.terminalControl`, `.terminalPasteImage`,
-        /// `.sendTerminalInput`, `.state`), and workspace teardown, stop, and setup (the workspace-lifecycle
-        /// family). The commands still inline are database-read scale, with the residual long inline
+        /// `.sendTerminalInput`, `.state`), workspace teardown, workspace stop, and workspace setup, each on
+        /// its own serial queue, so a hung stop or setup script cannot also delay a teardown or the state
+        /// queue. The commands still inline are database-read scale, with the residual long inline
         /// offenders (the git and network work inside workspace creation and git preview) tracked by issue
         /// #503, so a pong can in principle still be delayed past this deadline while one of those runs.
         /// Accepted until #503 closes that class.
@@ -740,6 +741,17 @@
         /// later. Accepted rather than gated on a daemon-reported capability: clients and daemons ship in
         /// lockstep with no compatibility guarantees yet, and the mixed pairing merely degrades to the
         /// pre-probe behavior instead of anything worse.
+        ///
+        /// A pong is proof about the link, not about the stream's own established socket. In the narrow
+        /// window where the path drops and recovers between the input timeout and the probe (an interface
+        /// switch that blackholes both sockets, healed within the timeout-plus-probe horizon), the probe's
+        /// fresh connection pongs while the stream's socket stays dead, and the pane keeps a stream whose
+        /// render is frozen until TCP keepalive errors the socket (60–90s; the disconnect callback then
+        /// reconnects and catches up via `.state`). Typing is not gated on that: the request client drops
+        /// its connection on any send failure, so the next keystroke dials fresh and lands as soon as the
+        /// path is back. Accepted: tearing the stream down on a pong that follows a timeout is
+        /// indistinguishable from the false teardown this probe exists to remove, and the residual cost is
+        /// a stale passive render with a bounded self-heal, not lost input or a false banner.
         private func startLinkCorroborationProbe() {
             let generation = streamClientGeneration
             guard linkCorroborationProbe?.generation != generation else { return }

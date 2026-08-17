@@ -551,7 +551,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// This exists for a false-failure race, not wire safety — `deleteChannel` already isolates each
     /// delete's own connection. The daemon runs every `archiveWorkspace`/`deleteProject` request off one
     /// serial per-daemon queue and only marks a workspace as tearing down once that request is dequeued
-    /// (`workspaceLifecycleQueue` / `withTeardownRegistered` on the daemon side). Two such requests issued
+    /// (`workspaceTeardownQueue` / `withTeardownRegistered` on the daemon side). Two such requests issued
     /// back to back from this client can therefore both be waiting on that one queue at once; if the
     /// first is still occupying it past this client's 30s request timeout, the second — still queued,
     /// still unregistered — times out too, and `reconcileWorkspaceDeletionOutcome` sees its workspace
