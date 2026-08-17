@@ -887,10 +887,17 @@ public final class WorkspaceOrchestrator {
         for project in projects where project.isGitRepo {
             let worktrees = try git.listWorktrees(path: project.dir)
             var discoverableWorktreeByPath: [String: WorktreeInfo] = [:]
+            // Paths the probe could not classify at all. Retiring a workspace destroys its worktree along
+            // with its record, so the scan acts on these only in the safe direction: it imports nothing for
+            // them and retires nothing at them.
+            var undeterminedWorktreePaths: Set<String> = []
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
-                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else { continue }
-                discoverableWorktreeByPath[normalizedPath] = worktree
+                switch worktreeDiscoverability(project: project, path: normalizedPath) {
+                case .projectWorktree: discoverableWorktreeByPath[normalizedPath] = worktree
+                case .notProjectWorktree: continue
+                case .undetermined: undeterminedWorktreePaths.insert(normalizedPath)
+                }
             }
 
             let existingWorkspaces = try store.workspaces(projectID: project.id)
@@ -906,12 +913,19 @@ public final class WorkspaceOrchestrator {
 
                 guard !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
+                // The scan may retire a workspace only when its worktree is gone; a workspace whose worktree
+                // is still valid is never removed by cleanup. A probe that failed rather than answered is not
+                // evidence of anything, and this scan is triggered by writes inside `.git` — so it runs
+                // precisely when a git spawn is most likely to fail or time out under the load of whatever is
+                // committing. Leaving the workspace alone costs one delayed retire; retiring on a failed
+                // probe deletes the record and, through `archiveWorkspace`, the user's checkout with it.
+                guard !undeterminedWorktreePaths.contains(normalizedWorkspacePath) else { continue }
                 _ = try archiveWorkspace(workspaceID: workspace.id)
             }
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
 
-                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else { continue }
+                guard discoverableWorktreeByPath[normalizedPath] != nil else { continue }
 
                 if (try store.workspace(dir: normalizedPath)) != nil { continue }
                 guard let branchName = worktree.branchName else { continue }
@@ -938,17 +952,44 @@ public final class WorkspaceOrchestrator {
         return try git.remoteBranchLookupStatus(path: project.dir, branch: branch) == .exists
     }
 
-    private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {
+    /// What discovery knows about a listed worktree path, including "nothing", which the retire decision
+    /// has to be able to tell apart from a real answer.
+    private enum WorktreeDiscoverability {
+        /// The path is a live worktree of this project.
+        case projectWorktree
+        /// Answered, in the negative: the directory is gone, or a completed git probe says what is there
+        /// does not belong to this project (a missing repository, or a `git-common-dir` outside it).
+        case notProjectWorktree
+        /// The git probe never answered (it timed out or the spawn itself failed), so the path was not
+        /// classified either way.
+        case undetermined
+    }
+
+    /// Classifies a path `git worktree list` reported for `project`.
+    ///
+    /// The directory check is what makes a negative answer trustworthy: a missing directory is a fact the
+    /// filesystem settles outright, so a retired worktree is still recognized as gone without git having to
+    /// run at all. Past that, the probe is bounded by `git.metadataCommandTimeout` and its outcome is read
+    /// for what it actually is: a completed run that exits nonzero (the checkout's `.git` link is gone, or
+    /// what remains belongs to another repository) has answered, in the negative, so it is `.notProjectWorktree`
+    /// same as a missing directory. Only a probe that never answered, a timeout or a spawn failure, reports
+    /// `.undetermined` rather than a negative a caller could act on destructively.
+    private func worktreeDiscoverability(project: ProjectRecord, path: String) -> WorktreeDiscoverability {
         var isDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
-        guard git.isRepo(path: path) else { return false }
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return .notProjectWorktree }
         do {
-            let gitCommonDirOutput = try git.runGitAndCapture(["-C", path, "rev-parse", "--git-common-dir"])
+            let gitCommonDirOutput = try git.runGitAndCapture(["-C", path, "rev-parse", "--git-common-dir"], timeout: git.metadataCommandTimeout)
             let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: path)).standardized
             let gitRoot = normalizePath(gitCommonDirURL.deletingLastPathComponent().path)
-            return gitRoot == project.dir
-        } catch { return false }
+            return gitRoot == project.dir ? .projectWorktree : .notProjectWorktree
+        } catch WorkspaceError.gitCommandFailed {
+            // The process ran to completion and exited nonzero: a definitive negative answer.
+            return .notProjectWorktree
+        } catch {
+            // `gitCommandTimedOut`, or a spawn failure: the probe never answered.
+            return .undetermined
+        }
     }
 
     /// Start is convergent: it launches whatever configured runtime (processes) is not already running and

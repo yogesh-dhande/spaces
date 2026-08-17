@@ -30,6 +30,11 @@ public enum WorkspaceError: LocalizedError {
     case workspaceAlreadyExists(project: String, workspace: String)
     case invalidWorkspace(path: String)
     case gitCommandFailed(message: String)
+    /// Distinct from `gitCommandFailed`: this is a spawn that never answered (the metadata timeout budget
+    /// expired) rather than one that ran to completion and exited nonzero. Callers that need to tell
+    /// "git answered in the negative" apart from "git answered nothing" (the worktree-discovery classifier
+    /// in `Orchestrator.worktreeDiscoverability` is the reason this case exists) switch on it separately.
+    case gitCommandTimedOut(message: String)
     case invalidArgument(message: String)
     case dependencyMissing(message: String)
     case configError(message: String)
@@ -48,6 +53,7 @@ public enum WorkspaceError: LocalizedError {
         case .workspaceAlreadyExists(let project, let workspace): return "Workspace already exists for project \(project): \(workspace)"
         case .invalidWorkspace(let path): return "Workspace path does not exist: \(path)"
         case .gitCommandFailed(let message): return "Git command failed: \(message)"
+        case .gitCommandTimedOut(let message): return "Git command timed out: \(message)"
         case .invalidArgument(let message): return "Invalid argument: \(message)"
         case .dependencyMissing(let message): return "Missing dependency: \(message)"
         case .configError(let message): return "Configuration error: \(message)"

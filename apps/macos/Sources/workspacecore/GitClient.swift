@@ -19,7 +19,10 @@ public final class GitClient {
 
     private let gitExecutable: String
     private let environmentOverrides: [String: String]
-    private let metadataCommandTimeout: TimeInterval
+    /// Budget for short metadata probes (`isRepo`, `branchExists`, `hasRemote`, and friends below). Public so
+    /// a caller that runs its own probe through `runGitAndCapture` (the worktree-discovery classifier in
+    /// `Orchestrator.worktreeDiscoverability`) can bound it with the same timeout this client uses internally.
+    public let metadataCommandTimeout: TimeInterval
 
     public init(gitExecutable: String? = nil, environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2) {
         self.gitExecutable = gitExecutable ?? ExecutableLocator.resolve(.git) ?? "git"
@@ -512,7 +515,10 @@ public final class GitClient {
             process.terminate()
             process.waitUntilExit()
             let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
-            throw WorkspaceError.gitCommandFailed(message: "Git command timed out after \(timeout)s: \(commandDescription)")
+            // A distinct error case from `gitCommandFailed`: the process never answered, so callers that
+            // need to tell a timeout apart from a completed nonzero exit (the worktree-discovery classifier
+            // in `Orchestrator.worktreeDiscoverability`) can do so.
+            throw WorkspaceError.gitCommandTimedOut(message: "after \(timeout)s: \(commandDescription)")
         }
         process.waitUntilExit()
     }
