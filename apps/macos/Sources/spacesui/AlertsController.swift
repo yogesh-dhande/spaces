@@ -57,14 +57,16 @@ import workspacecore
     }
 
     /// The groups the user sees: everything derived from the overviews minus what has been dismissed —
-    /// by a click, or by the user having watched the session a bell rang in.
+    /// by a click, or by the user having watched the session a bell rang in — and minus everything a
+    /// hidden workspace or hidden project owns, which the sidebar does not list either.
     nonisolated static func visibleAlertsGroups(in groups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>) -> [AlertsGroup] {
         groups.compactMap { group -> AlertsGroup? in
+            guard !group.isFromHiddenWorkspace else { return nil }
             let items = group.items.filter { !dismissedAttentionItemIDs.contains($0.attentionID) }
             guard !items.isEmpty else { return nil }
             return AlertsGroup(
                 projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
-                workspaceBranch: group.workspaceBranch, items: items)
+                workspaceBranch: group.workspaceBranch, isFromHiddenWorkspace: group.isFromHiddenWorkspace, items: items)
         }
     }
 
@@ -203,7 +205,10 @@ import workspacecore
     /// Dismissals worth keeping: a dismissal is only meaningful while its alert is still derived, so the
     /// set is trimmed to the identities the current groups carry. A bell consumed because its session was
     /// focused survives this the same way a clicked-away one does — the entry stays derived for as long as
-    /// the session reports that `bellAt`.
+    /// the session reports that `bellAt`. `groups` is deliberately the complete derivation, hidden
+    /// workspaces included, so dismissals made before a workspace or its project was hidden are retained
+    /// and unhiding it does not resurrect them (iOS keeps them the same way, via
+    /// `includingHiddenWorkspaces` in its attention-event derivation).
     nonisolated static func retainedDismissedAttentionItemIDs(_ dismissed: Set<String>, in groups: [AlertsGroup]) -> Set<String> {
         dismissed.intersection(Set(groups.flatMap { $0.items.map(\.attentionID) }))
     }

@@ -333,6 +333,64 @@ import workspacecore
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
     }
 
+    /// The palette lists what the sidebar lists: a hidden workspace, and every workspace of a hidden
+    /// project, leave it exactly as they leave the outline.
+    @Test func commandPaletteWorkspaceWalkExcludesHiddenWorkspacesAndHiddenProjects() {
+        func workspace(id: String, projectID: String, isHidden: Bool) -> SpacesDeviceWorkspaceSummary {
+            SpacesDeviceWorkspaceSummary(
+                id: id, projectID: projectID, projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: true,
+                isHidden: isHidden, isDefault: false, notes: nil, sessionCount: 1, assignedPorts: [],
+                setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                terminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-\(id)", workspaceID: id, title: "shell-\(id)", workingDirectory: "/device/\(id)", sessionID: "session-\(id)",
+                        runState: .running, canOpenTerminal: true, canStop: true)
+                ])
+        }
+
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [
+                SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main"),
+                SpacesDeviceProjectSummary(
+                    id: "project-hidden", name: "Hidden Project", dir: "/device/hidden", isGitRepo: true, defaultBranch: "main", isHidden: true),
+            ],
+            workspaces: [
+                workspace(id: "ws-visible", projectID: "project-1", isHidden: false),
+                workspace(id: "ws-hidden", projectID: "project-1", isHidden: true),
+                workspace(id: "ws-of-hidden-project", projectID: "project-hidden", isHidden: false),
+            ], sessions: [])
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        #expect(items.contains { $0.workspaceID == "ws-visible" })
+        #expect(!items.contains { $0.workspaceID == "ws-hidden" })
+        #expect(!items.contains { $0.workspaceID == "ws-of-hidden-project" })
+    }
+
+    /// Alerts rows reach the palette through the same tag the alerts pane filters on.
+    @Test func commandPaletteAlertsItemsExcludeHiddenFlaggedGroups() {
+        func group(workspaceID: String, isFromHiddenWorkspace: Bool) -> AppKitController.AlertsGroup {
+            AppKitController.AlertsGroup(
+                projectName: "Project", workspaceID: workspaceID, workspaceName: workspaceID, workspaceBranch: "feature",
+                isFromHiddenWorkspace: isFromHiddenWorkspace,
+                items: [
+                    AppKitController.AlertsAttentionEntry(
+                        attentionID: "alert:\(workspaceID)", icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil, shortcut: "",
+                        processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        focusRequest: .terminalSession(workspaceID: workspaceID, sessionID: "session-1"))
+                ])
+        }
+
+        let items = AppKitController.buildCommandPaletteItems(
+            overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []),
+            alertsGroups: [
+                group(workspaceID: "ws-visible", isFromHiddenWorkspace: false), group(workspaceID: "ws-hidden", isFromHiddenWorkspace: true),
+            ])
+
+        #expect(items.contains { $0.source == .alertsAttention && $0.workspaceID == "ws-visible" })
+        #expect(!items.contains { $0.source == .alertsAttention && $0.workspaceID == "ws-hidden" })
+    }
+
     /// Palette rows for ad hoc shells prefer the live title and otherwise describe the name with the
     /// generic foreground command already carried by the session overview.
     @Test func commandPaletteTerminalRowsPreferLiveTitleThenForegroundCommand() throws {
@@ -469,6 +527,7 @@ import workspacecore
         let alerts = [
             AppKitController.AlertsGroup(
                 projectName: "Remote Project", workspaceID: "remote-workspace", workspaceName: "Remote Workspace", workspaceBranch: "feature",
+                isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: "remote-agent-alert", icon: "cpu.fill", iconTint: .warning, label: "Remote Codex",
@@ -489,6 +548,7 @@ import workspacecore
         let alerts = [
             AppKitController.AlertsGroup(
                 projectName: "Remote Project", workspaceID: "remote-workspace", workspaceName: "Remote Workspace", workspaceBranch: "feature",
+                isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: "remote-bell-alert", icon: "terminal", iconTint: .terminal, label: "shell-1", detail: "  vim remote.swift  ",
@@ -701,7 +761,8 @@ import workspacecore
             ],
             alertsGroups: [
                 AppKitController.AlertsGroup(
-                    projectName: deviceID, workspaceID: workspaceID, workspaceName: "feature", workspaceBranch: "feature", items: [])
+                    projectName: deviceID, workspaceID: workspaceID, workspaceName: "feature", workspaceBranch: "feature",
+                    isFromHiddenWorkspace: false, items: [])
             ])
     }
 

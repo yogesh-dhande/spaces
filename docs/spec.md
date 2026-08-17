@@ -74,6 +74,8 @@ A workspace has:
 
 Workspaces can be visible or hidden in the sidebar, and can be running or stopped independently of that sidebar state.
 A project can be hidden too, which suppresses the project and everything under it without changing its workspaces' own visibility, so unhiding the project brings back exactly the workspaces that were shown before.
+Hiding takes a project or workspace out of every surface that lists work, not just the sidebar: the command palette, the alerts pane and its badge count, and the terminal pane's session picker all skip it, while dismissed alerts stay dismissed across a hide and unhide.
+Hiding suppresses listings only: it does not tear down open panels, and a panel that stays open keeps working normally, including its session picker's rows for that panel's own workspace (the workspace-scoped listing and the new-session row alike, whether the panel sits in the workspace window or a global window).
 Hidden rows are recovered from the Mac's Workspaces dialog, which lists everything, and from the iOS Spaces tab's collapsed `Hidden` section.
 A hidden project is not offered when creating a workspace — a workspace created under it would be invisible the moment it exists — and becomes available again once unhidden.
 Running and stopped should be easy to explain:

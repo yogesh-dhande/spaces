@@ -1065,6 +1065,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
                 from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
             host.deviceSections[index].overview = overview.overview
+            // A pushed remote overview can change what the palette may list (another client hiding a
+            // workspace changes row visibility) without any local database write, so no snapshot reload
+            // arrives to invalidate the palette's cached items. The unchanged-overview branch above
+            // returns early, so this only fires when the remote section actually changed.
+            host.commandPalette.invalidateCommandPaletteCache()
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
@@ -2491,7 +2496,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedWorkspaceID = nil
             host.showingSettings = false
             if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
-                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations) {
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations)
+            {
                 host.showPlaceholder(presentation: .userNavigation)
             }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
