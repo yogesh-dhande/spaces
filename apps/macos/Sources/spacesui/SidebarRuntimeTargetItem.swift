@@ -39,10 +39,21 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// actively working, blocked on input, or finished. Non-agent rows leave this nil.
     let agentActivityState: SpacesDeviceCodingAgentActivityState?
 
+    /// This row's undismissed alert entries (a process exit, an agent waiting/done, a session bell), by
+    /// attention id — empty when the row carries no live alert. Computed once at build time from
+    /// `AppKitController.rowAlertsAttentionEntries` so the sidebar menu's Dismiss Alert visibility/action
+    /// and the color downgrade below share one derivation instead of two.
+    let undismissedAttentionIDs: [String]
+    /// True once a process row's currently derived exit alert has been dismissed, which is what drops
+    /// its attention color from failed back to inactive (see `SidebarAttentionStatus.resolve`).
+    /// Meaningless for every other kind.
+    let isExitAcknowledged: Bool
+
     init(
         key: String, title: String, detail: String?, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
         shortcutIndex: Int?, sessionID: String?, canRun: Bool, canStop: Bool, canRestart: Bool, processID: String?, processKey: String?,
-        processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil
+        processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil,
+        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false
     ) {
         self.key = key
         self.title = title
@@ -60,6 +71,8 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
         self.agentID = agentID
         self.browserTargetURL = browserTargetURL
         self.agentActivityState = agentActivityState
+        self.undismissedAttentionIDs = undismissedAttentionIDs
+        self.isExitAcknowledged = isExitAcknowledged
     }
 }
 
@@ -76,7 +89,7 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
 
     static func resolve(
         kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
-        agentActivityState: SpacesDeviceCodingAgentActivityState?
+        agentActivityState: SpacesDeviceCodingAgentActivityState?, isExitAcknowledged: Bool = false
     ) -> Self? {
         if kind == .agent {
             switch agentActivityState {
@@ -90,7 +103,11 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
         case .process, .missingConfiguredProcess:
             switch runState {
             case .running: return .working
-            case .exited: return .failed
+            // Dismissing the exit's alert is a per-client acknowledgment of that failure, not a change
+            // to what happened, so it drops the row to the same color an unstarted process shows rather
+            // than a distinct "acknowledged failure" color. A later exit carries a new alert identity
+            // (see `isProcessExitAcknowledged`), so it is unacknowledged, and red, again.
+            case .exited: return isExitAcknowledged ? .inactive : .failed
             case .notStarted, nil: return .inactive
             }
         // Ad hoc terminals and browser sessions are not managed process/agent rows, so their
@@ -109,7 +126,8 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
 
 extension SidebarRuntimeTargetItem {
     var attentionStatus: SidebarAttentionStatus? {
-        SidebarAttentionStatus.resolve(kind: kind, runState: runState, agentActivityState: agentActivityState)
+        SidebarAttentionStatus.resolve(
+            kind: kind, runState: runState, agentActivityState: agentActivityState, isExitAcknowledged: isExitAcknowledged)
     }
 }
 
@@ -126,22 +144,34 @@ enum SidebarRuntimeTargetRenameDestination: Equatable, Sendable {
 }
 
 extension AppKitController {
-    /// Builds the sidebar's runtime-target rows for a workspace from its overview detail.
-    nonisolated static func sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession])
-        -> [SidebarRuntimeTargetItem]
-    {
+    /// Builds the sidebar's runtime-target rows for a workspace from its overview detail. `alertsGroups`
+    /// and `dismissedAttentionItemIDs` default to empty for callers that don't need alert-aware rows
+    /// (e.g. building the numbered-shortcut target order); the sidebar's own build threads its live
+    /// alerts groups and the persisted dismissal set through (see `sidebarRuntimeTargetItems(workspaceID:)`).
+    nonisolated static func sidebarRuntimeTargetItems(
+        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], alertsGroups: [AppKitController.AlertsGroup] = [],
+        dismissedAttentionItemIDs: Set<String> = []
+    ) -> [SidebarRuntimeTargetItem] {
         let targets = workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
         return targets.enumerated().compactMap { offset, target in
             sidebarRuntimeTargetItem(
-                target: target, shortcutIndex: offset + 1 <= 10 ? offset + 1 : nil, detail: detail, browserSessions: browserSessions)
+                target: target, shortcutIndex: offset + 1 <= 10 ? offset + 1 : nil, detail: detail, browserSessions: browserSessions,
+                alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs)
         }
     }
 
     nonisolated private static func sidebarRuntimeTargetItem(
-        target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession]
+        target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession],
+        alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>
     ) -> SidebarRuntimeTargetItem? {
         let key = cycleCursorKey(for: target, detail: detail)
         let title = focusableWindowName(for: target, detail: detail, browserSessions: browserSessions)
+        // Undismissed attention ids this row owns, from the one alert-identity derivation
+        // (`rowAlertsAttentionEntries`) the sidebar menu and the color downgrade below both read.
+        func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
+            rowAlertsAttentionEntries(in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID)
+                .filter { !dismissedAttentionItemIDs.contains($0.attentionID) }.map(\.attentionID)
+        }
         switch target.kind {
         case .browser:
             guard let targetURL = target.targetURL, !targetURL.isEmpty else { return nil }
@@ -153,24 +183,33 @@ extension AppKitController {
             guard let processID = target.processID, let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }) else {
                 return nil
             }
+            let isExitAcknowledged =
+                row.runState == .exited
+                && isProcessExitAcknowledged(
+                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups,
+                    dismissedAttentionItemIDs: dismissedAttentionItemIDs)
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
-                processKey: row.name, processTemplateID: row.templateID, agentID: nil, browserTargetURL: nil)
+                processKey: row.name, processTemplateID: row.templateID, agentID: nil, browserTargetURL: nil,
+                undismissedAttentionIDs: undismissedAttentionIDs(processID: processID, sessionID: row.sessionID),
+                isExitAcknowledged: isExitAcknowledged)
         case .window:
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             let row = detail.terminalRows[index]
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.title, detail: row.liveTitle, kind: .window, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: nil, browserTargetURL: nil)
+                processTemplateID: nil, agentID: nil, browserTargetURL: nil,
+                undismissedAttentionIDs: undismissedAttentionIDs(sessionID: row.sessionID))
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState)
+                processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState,
+                undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
@@ -186,7 +225,9 @@ extension AppKitController {
     /// The sidebar's runtime-target rows for a workspace, from the owning device's overview.
     func sidebarRuntimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
-        return Self.sidebarRuntimeTargetItems(detail: context.detail, browserSessions: context.browserSessions)
+        return Self.sidebarRuntimeTargetItems(
+            detail: context.detail, browserSessions: context.browserSessions, alertsGroups: alertsGroups,
+            dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 
     /// The runtime targets' names (what the sidebar rows show) for a workspace's terminal sessions, so
@@ -263,6 +304,13 @@ extension AppKitController {
             }
         case .agent, .browser, .window, .missingConfiguredProcess: return
         }
+    }
+
+    /// Dismisses every undismissed alert the row currently owns, one call per id through the same
+    /// entry point the Alerts pane uses, so a sidebar-menu dismissal has exactly the same persisted
+    /// effect (dismissed set, badge, alerts pane refresh) as dismissing from the pane.
+    func dismissSidebarRuntimeTargetAlerts(item: SidebarRuntimeTargetItem) {
+        for attentionID in item.undismissedAttentionIDs { alerts.dismissAlertsAttentionItem(attentionID) }
     }
 
     private func runSidebarDeviceMutation(

@@ -3266,6 +3266,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return groups
     }
 
+    /// Alert entries `groups` carries for one runtime-target row, matched by focus-request identity: a
+    /// process row's exit alert via `.workspaceProcess`, an agent row's waiting/done alert via
+    /// `.agentWindow`, and a bell alert via `.terminalSession` for any row carrying a live session (a
+    /// process or agent row's own session, or an ad hoc terminal's). This is the single derivation for
+    /// "which alerts does this row own": the sidebar's Dismiss Alert menu and the exited-process color
+    /// downgrade (`isProcessExitAcknowledged`) both consume it instead of re-deriving alert identity —
+    /// the `alert:...` id format built in `buildOverviewAlertsGroups` — at a second site.
+    nonisolated static func rowAlertsAttentionEntries(
+        in groups: [AlertsGroup], workspaceID: String, processID: String? = nil, agentID: String? = nil, sessionID: String? = nil
+    ) -> [AlertsAttentionEntry] {
+        guard processID != nil || agentID != nil || sessionID != nil, let group = groups.first(where: { $0.workspaceID == workspaceID })
+        else { return [] }
+        return group.items.filter { entry in
+            switch entry.focusRequest {
+            case .workspaceProcess(_, let entryProcessID): return entryProcessID == processID
+            case .agentWindow(let record): return record.id == agentID
+            case .terminalSession(_, let entrySessionID): return entrySessionID == sessionID
+            default: return false
+            }
+        }
+    }
+
+    /// Whether a process's currently derived exit alert — if it has one — is in the dismissed set. This
+    /// is the one fact that downgrades a row's color from failed (red) back to inactive everywhere it
+    /// renders (sidebar row, workspace roll-up, command palette, workspace-detail Processes row); agent
+    /// and bell dismissals never touch color. A later exit carries a new `exitedAt`, hence a new alert
+    /// identity, so the process reads as failed again until its new alert is dismissed too.
+    nonisolated static func isProcessExitAcknowledged(
+        processID: String, workspaceID: String, alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>
+    ) -> Bool {
+        guard let entry = rowAlertsAttentionEntries(in: alertsGroups, workspaceID: workspaceID, processID: processID).first else { return false }
+        return dismissedAttentionItemIDs.contains(entry.attentionID)
+    }
+
     nonisolated static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -12578,15 +12612,22 @@ extension AppKitController {
         }
     }
 
-    nonisolated static func buildCommandPaletteItems(overview: SpacesDeviceOverviewPayload, alertsGroups: [AlertsGroup] = []) -> [CommandPaletteItem]
-    {
+    nonisolated static func buildCommandPaletteItems(
+        overview: SpacesDeviceOverviewPayload, alertsGroups: [AlertsGroup] = [], dismissedAttentionItemIDs: Set<String> = []
+    ) -> [CommandPaletteItem] {
         var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
-        items.append(contentsOf: deviceCommandPaletteWorkspaceItems(from: overview))
+        items.append(
+            contentsOf: deviceCommandPaletteWorkspaceItems(
+                from: overview, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs))
         return items
     }
 
+    /// `alertsGroups`/`dismissedAttentionItemIDs` default to empty for callers (tests, session-picker
+    /// item construction) that don't need alert-aware status; production palette loads always pass the
+    /// live values so an acknowledged process exit reads as idle here the same way it does in the sidebar.
     nonisolated static func deviceCommandPaletteWorkspaceItems(
-        from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID
+        from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID, alertsGroups: [AlertsGroup] = [],
+        dismissedAttentionItemIDs: Set<String> = []
     ) -> [CommandPaletteItem] {
         let mapped = deviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
@@ -12623,11 +12664,17 @@ extension AppKitController {
                                     for: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL), detail: targetURL)))
                     case .process:
                         guard let processID = target.processID, let process = processesByID[processID] else { continue }
+                        // Same downgrade the sidebar row applies: an acknowledged exit reads as idle here
+                        // rather than exited, until the process exits again with a new alert identity.
+                        let isAcknowledged = isProcessExitAcknowledged(
+                            processID: processID, workspaceID: workspace.id, alertsGroups: alertsGroups,
+                            dismissedAttentionItemIDs: dismissedAttentionItemIDs)
+                        let status: CommandPaletteItem.Status = isAcknowledged ? .idle : .process(process.status)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: process.templateName, detail: process.command, status: .process(process.status),
+                                kind: target.kind, label: process.templateName, detail: process.command, status: status,
                                 focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: processID),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
@@ -12680,15 +12727,19 @@ extension AppKitController {
     }
 
     func loadCommandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
-        await Self.commandPaletteItemsSnapshot(alertsGroups: alertsGroups)
+        await Self.commandPaletteItemsSnapshot(alertsGroups: alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 
-    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AlertsGroup]) async -> Result<[CommandPaletteItem], Error> {
+    nonisolated private static func commandPaletteItemsSnapshot(
+        alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>
+    ) async -> Result<[CommandPaletteItem], Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                return .success(buildCommandPaletteItems(overview: localOverview.overview, alertsGroups: alertsGroups))
+                return .success(
+                    buildCommandPaletteItems(
+                        overview: localOverview.overview, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs))
             } catch { return .failure(error) }
         }.value
     }

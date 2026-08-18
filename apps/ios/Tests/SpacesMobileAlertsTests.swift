@@ -205,6 +205,236 @@
             XCTAssertEqual(model.undismissedAlertCount, 1)
         }
 
+        // MARK: - Row acknowledgment (dismissed-exit-alert-inactive)
+
+        /// An exited process row reads failed red until its exited event is dismissed, then reads the
+        /// unstarted stroke; a later exit mints a new event identity, so a fresh failure reddens it again.
+        func testIsExitAcknowledgedFollowsDismissalAndResetsOnNewExit() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")])
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
+
+            XCTAssertFalse(model.isExitAcknowledged(row))
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .exited)
+
+            guard let exitEvent = model.undismissedAlerts(for: row).first(where: { $0.kind == .exited }) else {
+                XCTFail("Expected an exited event for the process row.")
+                return
+            }
+            model.dismissAlert(exitEvent)
+
+            XCTAssertTrue(model.isExitAcknowledged(row))
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .idle)
+
+            // A later exit mints a new event identity (a later `exitedAt`), so the row reddens again even
+            // though the earlier exit's dismissal is still on file.
+            model.overview = makeOverview(
+                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:10:00Z")])
+            let reExitedRow = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
+
+            XCTAssertFalse(model.isExitAcknowledged(reExitedRow))
+            XCTAssertEqual(reExitedRow.statusDotKind(exitAcknowledged: model.isExitAcknowledged(reExitedRow)), .exited)
+        }
+
+        /// A configured process row's id comes from its project template, not its workspace
+        /// (`SpacesDeviceOverviewBuilder` mints it as `template.id`), so two sibling workspaces of the same
+        /// project can carry rows with the identical id. `isExitAcknowledged` must key off the row's own
+        /// workspace, not just that shared id, or dismissing one workspace's exit would silently
+        /// acknowledge the sibling's still-undismissed one.
+        func testIsExitAcknowledgedDoesNotBleedAcrossWorkspacesSharingATemplateRowID() {
+            let model = makeModel()
+            let processA = SpacesDeviceWorkspaceProcessRow(
+                id: "process-web", workspaceID: "workspace-a", name: "web", command: "npm run web", processID: "runtime-a", sessionID: nil,
+                runState: .exited, exitedAt: "2026-01-01T00:05:00Z", canRun: true, canStop: false, canRestart: false)
+            let processB = SpacesDeviceWorkspaceProcessRow(
+                id: "process-web", workspaceID: "workspace-b", name: "web", command: "npm run web", processID: "runtime-b", sessionID: nil,
+                runState: .exited, exitedAt: "2026-01-01T00:06:00Z", canRun: true, canStop: false, canRestart: false)
+            model.overview = makeOverview(workspaces: [
+                makeWorkspace(id: "workspace-a", branch: "a", processRows: [processA]),
+                makeWorkspace(id: "workspace-b", branch: "b", processRows: [processB]),
+            ])
+            let rowA = SpacesMobileWorkspaceRuntimeRow(source: .process(processA))
+            let rowB = SpacesMobileWorkspaceRuntimeRow(source: .process(processB))
+            XCTAssertEqual(rowA.id, rowB.id, "both rows share the project template's id")
+
+            guard let exitEventA = model.undismissedAlerts(for: rowA).first(where: { $0.kind == .exited }) else {
+                XCTFail("Expected an exited event for workspace A's row.")
+                return
+            }
+            model.dismissAlert(exitEventA)
+
+            XCTAssertTrue(model.isExitAcknowledged(rowA))
+            XCTAssertFalse(model.isExitAcknowledged(rowB), "dismissing A's exit must not acknowledge B's identically-id'd row")
+
+            guard let exitEventB = model.undismissedAlerts(for: rowB).first(where: { $0.kind == .exited }) else {
+                XCTFail("Expected an exited event for workspace B's row.")
+                return
+            }
+            model.dismissAlert(exitEventB)
+
+            XCTAssertTrue(model.isExitAcknowledged(rowB))
+        }
+
+        /// Dismissing a process's exit turns its own dot from failed red to the unstarted stroke, but
+        /// leaves a separate, still-undismissed bell on the same row's session alone: acknowledgment and
+        /// menu visibility answer different questions about the same row.
+        func testDismissingExitDoesNotClearASeparateBellOnTheSameRow() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                processRows: [
+                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+                ],
+                sessions: [
+                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
+                ])
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
+            guard let exitEvent = model.undismissedAlerts(for: row).first(where: { $0.kind == .exited }) else {
+                XCTFail("Expected an exited event for the process row.")
+                return
+            }
+
+            model.dismissAlert(exitEvent)
+
+            XCTAssertTrue(model.isExitAcknowledged(row))
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .idle)
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row), "the bell on the same session is still undismissed")
+        }
+
+        /// Agent activity and terminal exits never read `exitAcknowledged`: only a `.process` row's dot
+        /// changes with dismissal (an agent keeps tracking live activity; a terminal exit stays red).
+        func testOnlyProcessRowDotsReadAcknowledgement() {
+            let agentRow = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")))
+            let terminalRow = SpacesMobileWorkspaceRuntimeRow(
+                source: .terminal(makeTerminalRow(id: "terminal-a", title: "zsh", sessionID: nil, runState: .exited)))
+
+            XCTAssertEqual(agentRow.statusDotKind(exitAcknowledged: false), agentRow.statusDotKind(exitAcknowledged: true))
+            XCTAssertEqual(agentRow.statusDotKind(exitAcknowledged: true), .waiting)
+            XCTAssertEqual(terminalRow.statusDotKind(exitAcknowledged: false), terminalRow.statusDotKind(exitAcknowledged: true))
+            XCTAssertEqual(terminalRow.statusDotKind(exitAcknowledged: true), .exited, "a terminal exit stays red regardless of dismissal")
+        }
+
+        /// A row's own events are matched by the exact `sourceID`/`workspaceID` the row and
+        /// `SpacesMobileAttention.events` both derive from the same underlying record, plus a bell keyed by
+        /// session id — never another row's events, another workspace's same-shaped id, or a bell on
+        /// another session.
+        func testRowMatchesOnlyItsOwnEventsAndBellOnItsSession() {
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")))
+            let now = Date()
+            let ownExit = SpacesMobileAttentionEvent(
+                sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                workspaceID: "workspace-feature")
+            let ownBell = SpacesMobileAttentionEvent(
+                sourceID: "session:session-a", kind: .bell, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                workspaceID: "workspace-feature")
+            let otherProcessSameWorkspace = SpacesMobileAttentionEvent(
+                sourceID: "process:process-other", kind: .exited, date: now, title: "other", rowType: .processes, sessionID: "session-b",
+                workspaceID: "workspace-feature")
+            let sameSourceIDOtherWorkspace = SpacesMobileAttentionEvent(
+                sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                workspaceID: "workspace-other")
+            let bellOnAnotherSession = SpacesMobileAttentionEvent(
+                sourceID: "session:session-b", kind: .bell, date: now, title: "other", rowType: .processes, sessionID: "session-b",
+                workspaceID: "workspace-feature")
+
+            XCTAssertTrue(row.matches(ownExit))
+            XCTAssertTrue(row.matches(ownBell))
+            XCTAssertFalse(row.matches(otherProcessSameWorkspace))
+            XCTAssertFalse(row.matches(sameSourceIDOtherWorkspace))
+            XCTAssertFalse(row.matches(bellOnAnotherSession))
+        }
+
+        /// Each row family's undismissed events are its own: a process picks up its exit and any bell on
+        /// its session, an agent picks up only its own activity event, a terminal only its own exit — never
+        /// a sibling row's events in the same workspace.
+        func testUndismissedAlertsIsolatedPerRow() {
+            let model = makeModel()
+            let processRow = makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+            let agentRow = makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:06:00Z")
+            let terminalRow = makeTerminalRow(id: "terminal-a", title: "zsh", sessionID: "session-b", runState: .exited)
+            model.overview = makeOverview(
+                codingAgentRows: [agentRow], processRows: [processRow], terminalRows: [terminalRow],
+                sessions: [
+                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z"),
+                    makeSession(id: "session-b", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:07:30Z"),
+                ])
+            let workspace = model.overview!.workspaces[0]
+            let processRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .process(workspace.processRows[0]))
+            let agentRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(workspace.codingAgentRows[0]))
+            let terminalRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .terminal(workspace.terminalRows[0]))
+
+            XCTAssertEqual(Set(model.undismissedAlerts(for: processRuntimeRow).map(\.sourceID)), ["process:process-web", "session:session-a"])
+            XCTAssertEqual(model.undismissedAlerts(for: agentRuntimeRow).map(\.sourceID), ["agent:agent-a"])
+            XCTAssertEqual(model.undismissedAlerts(for: terminalRuntimeRow).map(\.sourceID), ["terminal:terminal-a"])
+            XCTAssertTrue(model.hasUndismissedAlerts(for: processRuntimeRow))
+            XCTAssertTrue(model.hasUndismissedAlerts(for: agentRuntimeRow))
+            XCTAssertTrue(model.hasUndismissedAlerts(for: terminalRuntimeRow))
+        }
+
+        /// `undismissedAlerts` must apply the same focus/watch-window bell suppression the Alerts tab
+        /// does: a bell rung while the row's session was being watched offers nothing to dismiss, but the
+        /// identical bell rung outside any watch window does.
+        func testUndismissedAlertsSuppressesABellRungInsideAWatchWindowButNotOutsideIt() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            let processRow = makeProcessRow(id: "process-web", name: "web", sessionID: "session-bell", runState: .running, exitedAt: nil)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(processRow))
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = makeOverview(
+                processRows: [processRow],
+                sessions: [
+                    makeSession(
+                        id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z",
+                        bellAt: iso8601(bellRungWhileWatching))
+                ])
+
+            XCTAssertTrue(model.undismissedAlerts(for: row).isEmpty)
+            XCTAssertFalse(model.hasUndismissedAlerts(for: row))
+
+            // The same bell, rung outside any watch window, is one the user has not seen yet.
+            let bellOutsideAnyWatch = clock.advance(60)
+            model.overview = makeOverview(
+                processRows: [processRow],
+                sessions: [
+                    makeSession(
+                        id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: iso8601(bellOutsideAnyWatch))
+                ])
+
+            XCTAssertFalse(model.undismissedAlerts(for: row).isEmpty)
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row))
+        }
+
+        /// The row-level "Dismiss Alert" action dismisses every one of the row's own undismissed events at
+        /// once (its exit plus a bell on the same session here), identical in effect to dismissing each
+        /// individually from the Alerts tab: same dismissed set, badge follows.
+        func testDismissAlertsForRowDismissesAllOfItsEventsAndUpdatesTheBadge() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                processRows: [
+                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+                ],
+                sessions: [
+                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
+                ])
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
+
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row))
+            XCTAssertEqual(model.undismissedAlertCount, 2)
+
+            model.dismissAlerts(for: row)
+
+            XCTAssertFalse(model.hasUndismissedAlerts(for: row))
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+            XCTAssertTrue(model.isExitAcknowledged(row))
+        }
+
         func testDismissedAlertIDsRoundTripThroughStorage() {
             let defaults = UserDefaults(suiteName: "spaces.mobile.tests.dismissed-alerts")!
             defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts")
@@ -863,12 +1093,17 @@
 
         /// An overview whose one session rang its bell at `date`, stamped the way a daemon stamps it.
         private func bellOverview(at date: Date) -> SpacesDeviceOverviewPayload {
+            makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: iso8601(date))
+            ])
+        }
+
+        /// Formats `date` the way the daemon stamps `bellAt`, for tests that need a session fixture beyond
+        /// `bellOverview`'s fixed shape (e.g. one paired with a process row on the same session).
+        private func iso8601(_ date: Date) -> String {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
-            return makeOverview(sessions: [
-                makeSession(
-                    id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: formatter.string(from: date))
-            ])
+            return formatter.string(from: date)
         }
 
         /// Wall clock the watch-window tests step by hand. Watch windows are compared against bell

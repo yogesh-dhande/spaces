@@ -100,11 +100,39 @@ extension SpacesMobileWorkspaceRuntimeRow {
     /// The row's leading dot carries its state: coding agents reflect activity (waiting/done/
     /// spinning), everything else reflects run state. Browser sessions have no run state of their
     /// own, so they get no dot.
-    var statusDotKind: StatusDot.Kind? {
+    ///
+    /// `exitAcknowledged` — see `SpacesMobileAppModel.isExitAcknowledged(_:)` — is read only by a
+    /// `.process` row: dismissing the alert for a dead process turns its dot from failed red to the
+    /// unstarted stroke, but an agent's or a terminal's dot keeps tracking live state regardless of any
+    /// dismissal, so they ignore the parameter.
+    func statusDotKind(exitAcknowledged: Bool) -> StatusDot.Kind? {
         switch source {
-        case .codingAgent(let agent): StatusDot.Kind(runState: agent.runState, activityState: agent.activityState)
-        case .browserSession: nil
-        case .process, .terminal: StatusDot.Kind(runState: runState)
+        case .codingAgent(let agent): return StatusDot.Kind(runState: agent.runState, activityState: agent.activityState)
+        case .browserSession: return nil
+        case .terminal: return StatusDot.Kind(runState: runState)
+        case .process:
+            let kind = StatusDot.Kind(runState: runState)
+            return kind == .exited && exitAcknowledged ? .idle : kind
+        }
+    }
+}
+
+// MARK: - Alert dismissal
+
+/// The long-press "Dismiss Alert" menu item shared by every row family that can carry undismissed
+/// attention events. Dismisses all of the row's undismissed events at once through
+/// `SpacesMobileAppModel.dismissAlerts(for:)` — the same persisted `dismissedAlertIDs` path individual
+/// dismissal from the Alerts tab uses — so the badge and every other surface showing the same source
+/// follow.
+struct DismissAlertMenuButton: View {
+    let model: SpacesMobileAppModel
+    let row: SpacesMobileWorkspaceRuntimeRow
+
+    var body: some View {
+        Button {
+            model.dismissAlerts(for: row)
+        } label: {
+            Label("Dismiss Alert", systemImage: "bell.slash")
         }
     }
 }

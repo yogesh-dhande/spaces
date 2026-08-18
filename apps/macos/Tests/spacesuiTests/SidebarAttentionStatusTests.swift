@@ -18,6 +18,16 @@ struct SidebarAttentionStatusTests {
         #expect(SidebarAttentionStatus.resolve(kind: .missingConfiguredProcess, runState: .notStarted, agentActivityState: nil) == .inactive)
     }
 
+    /// Dismissing an exited process's alert is the one dismissal that changes a row's color: it drops
+    /// straight to inactive (the unstarted-process color, hollow like failed) rather than to some
+    /// intermediate "acknowledged failure" shade.
+    @Test func acknowledgedProcessExitDowngradesToInactive() {
+        #expect(SidebarAttentionStatus.resolve(kind: .process, runState: .exited, agentActivityState: nil, isExitAcknowledged: true) == .inactive)
+        #expect(SidebarAttentionStatus.resolve(kind: .process, runState: .exited, agentActivityState: nil, isExitAcknowledged: false) == .failed)
+        // Acknowledgment is meaningless off the exited state: a running process ignores the flag.
+        #expect(SidebarAttentionStatus.resolve(kind: .process, runState: .running, agentActivityState: nil, isExitAcknowledged: true) == .working)
+    }
+
     @Test func terminalAndBrowserRowsDoNotParticipateInOperationalStatusColors() {
         #expect(SidebarAttentionStatus.resolve(kind: .window, runState: .running, agentActivityState: nil) == nil)
         #expect(SidebarAttentionStatus.resolve(kind: .window, runState: .exited, agentActivityState: nil) == nil)

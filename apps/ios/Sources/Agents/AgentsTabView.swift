@@ -38,15 +38,24 @@ struct AgentsTabView: View {
         ForEach(group.entries) { entry in agentRow(entry).bandListRow() }
     }
 
-    private func agentRow(_ entry: SpacesMobileAgentEntry) -> some View {
+    @ViewBuilder private func agentRow(_ entry: SpacesMobileAgentEntry) -> some View {
         let row = entry.runtimeRow
-        return Button {
+        // Agent dots never read dismissal (see `statusDotKind(exitAcknowledged:)`), so this row's own
+        // acknowledgment state is inert; passing `false` says so rather than reaching into the model for
+        // an answer this row family never uses.
+        let button = Button {
             activateAgentRow(row)
         } label: {
-            BandRow(dotKind: row.statusDotKind, tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail) {
+            BandRow(dotKind: row.statusDotKind(exitAcknowledged: false), tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail)
+            {
                 if row.sessionID != nil { RowChevron() }
             }
         }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).accessibilityIdentifier("agents.row.\(entry.id)")
+        if model.hasUndismissedAlerts(for: row) {
+            button.contextMenu { DismissAlertMenuButton(model: model, row: row) }
+        } else {
+            button
+        }
     }
 
     private func activateAgentRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
