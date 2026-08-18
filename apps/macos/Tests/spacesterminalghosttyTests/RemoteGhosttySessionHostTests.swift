@@ -615,6 +615,49 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(forwardedCount, 1, "a terminal that asks for shift capture must receive the shift-click")
     }
 
+    /// Cmd+click is the local link-activation gesture; forwarding it would reach the session as a plain
+    /// click that a Ghostty-aware TUI reads as "open this link", double-opening it (issue #465).
+    @MainActor func testRemoteMirrorSuppressesCommandClickFromForwarding() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-command-click")
+        var forwarded: [(button: UInt8, pressed: Bool, pointer: TerminalScrollPointerPosition?)] = []
+        mirrorView.view.onSendMouseButton = { button, pressed, pointer in forwarded.append((button, pressed, pointer)) }
+        mirrorView.view.debugMouseCapturedForTesting = true
+
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.command]))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber, modifierFlags: [.command]))
+
+        XCTAssertTrue(forwarded.isEmpty, "a cmd+click must stay local so it cannot double-open a link the mirror already activated")
+    }
+
+    /// A press that did not carry command forwards as today even if command is held down by the time the
+    /// matching release arrives: suppression is decided once, at the press.
+    @MainActor func testRemoteMirrorForwardsReleaseThatGainsCommandAfterAnUnmodifiedPress() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-command-after-press")
+        var forwarded: [(button: UInt8, pressed: Bool, pointer: TerminalScrollPointerPosition?)] = []
+        mirrorView.view.onSendMouseButton = { button, pressed, pointer in forwarded.append((button, pressed, pointer)) }
+        mirrorView.view.debugMouseCapturedForTesting = true
+
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber, modifierFlags: [.command]))
+
+        XCTAssertEqual(
+            forwarded.map(\.pressed), [true, false], "an unmodified press must still forward its release even if command is held at release")
+    }
+
+    /// The release of a cmd+click press stays suppressed even if command has been released by then: the
+    /// press and release are withheld as a pair so the session never sees a dangling release.
+    @MainActor func testRemoteMirrorSuppressesReleaseThatLosesCommandAfterACommandPress() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-command-before-press")
+        var forwarded: [(button: UInt8, pressed: Bool, pointer: TerminalScrollPointerPosition?)] = []
+        mirrorView.view.onSendMouseButton = { button, pressed, pointer in forwarded.append((button, pressed, pointer)) }
+        mirrorView.view.debugMouseCapturedForTesting = true
+
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.command]))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+
+        XCTAssertTrue(forwarded.isEmpty, "a cmd+click press must suppress its release even after command is no longer held")
+    }
+
     /// Builds a mirror view in a key window with its mouse events shunted away from a real surface, which
     /// is what the focus-only-press suppression and the forwarding decision both need.
     @MainActor private func makeKeyWindowMirrorView(sessionID: String) throws -> (view: GhosttyMirrorTerminalView, windowNumber: Int) {
@@ -3128,8 +3171,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // Only the first control request fails; every later one would succeed — proving a later send was
         // never attempted, not merely that it also failed.
         let sender = ScriptedControlRequestSender(
-            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true,
-            holdFirstControlRequest: true)
+            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true, holdFirstControlRequest: true)
         let host = RemoteGhosttySessionHost(
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
             inputFailureHandler: { _ in true })

@@ -97,6 +97,10 @@
         private var searchSelected: Int?
         private var submittedSearchQuery: String?
         private var suppressedFocusOnlyMouseButtonNumbers = Set<Int>()
+        /// Buttons whose press was a cmd+click, keyed by `button.rawValue`. See the suppression
+        /// comment in `sendMouseButton` for why the whole cmd+click gesture, not just the press,
+        /// is withheld from the session.
+        private var forwardSuppressedButtons: Set<UInt32> = []
         private var hoveredLink: String? {
             didSet {
                 guard hoveredLink != oldValue else { return }
@@ -776,7 +780,30 @@
             // and resetting the click gesture while an application tracks the mouse) before the same
             // click is forwarded to the session that can actually deliver it.
             let consumed = deliverMouseButtonToMirror(state: state, button: button, event: event)
-            forwardMouseButtonIfReported(state: state, button: button, event: event)
+            if state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue {
+                // Cmd+click is the local link-activation gesture, and Ghostty core requires the
+                // super modifier to activate a link and swallows a successful link click before it
+                // ever reaches the mouse-report path (processLinks in vendor/ghostty/src/Surface.zig).
+                // The terminal mouse protocol has no bit for super, so a forwarded cmd+click would
+                // reach the session as a plain click, and a mouse-aware, Ghostty-aware TUI (claude
+                // code under TERM=xterm-ghostty) reads a plain click on a link as "open this link"
+                // and shells out on the host, reopening the same link the mirror just opened locally
+                // (issue #465). Whether the press actually landed on a link is only known later,
+                // asynchronously, via the .openURL action, too late to gate this synchronous send, and
+                // a cmd+click that missed a link has no meaningful plain-click reading for the session
+                // either, so every cmd+click press is withheld here rather than only ones over links.
+                if event.modifierFlags.contains(.command) {
+                    forwardSuppressedButtons.insert(button.rawValue)
+                } else {
+                    forwardSuppressedButtons.remove(button.rawValue)
+                    forwardMouseButtonIfReported(state: state, button: button, event: event)
+                }
+            } else if forwardSuppressedButtons.remove(button.rawValue) != nil {
+                // The matching release is withheld too, as a pair keyed off the press, so the
+                // session never sees a dangling release for a press it never received.
+            } else {
+                forwardMouseButtonIfReported(state: state, button: button, event: event)
+            }
             return consumed
         }
 
