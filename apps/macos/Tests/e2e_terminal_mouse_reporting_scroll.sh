@@ -163,9 +163,9 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" fo
 wait_for_tail_contains "MOUSE_SCROLL_READY"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-  scroll-application-window --executable-name SpacesApp --normalized-x 0.75 --normalized-y 0.5 --delta-y 120 --repetitions 2 >/dev/null
+  scroll-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.75 --normalized-y 0.5 --delta-y 120 --repetitions 2 >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-  click-application-window --executable-name SpacesApp --normalized-x 0.75 --normalized-y 0.5 >/dev/null
+  click-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.75 --normalized-y 0.5 >/dev/null
 wait_for_probe_output
 
 python3 - "$PROBE_OUTPUT" <<'PY'
