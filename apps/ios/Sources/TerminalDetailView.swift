@@ -87,9 +87,6 @@ struct TerminalDetailView: View {
                             onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
                                 sendTerminalScroll(
                                     horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-                            },
-                            onSendMouseButton: { button, pressed, pointerPosition in
-                                sendTerminalMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
                             }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
                             // A clipboard image pasted at the terminal lands in the composer pre-attached
                             // rather than in the session: sending an image stays a deliberate composer action.
@@ -133,7 +130,9 @@ struct TerminalDetailView: View {
             }
         }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
             item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
-        ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
+        ) { preview in TerminalLinkPreviewSheet(preview: preview) }.fullScreenCover(
+            item: Binding(get: { model.safariLink }, set: { link in if link == nil { model.dismissSafariLink() } })
+        ) { safariLink in TerminalSafariView(url: safariLink.url) }.sheet(isPresented: $isShowingComposer) {
             TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
         }.confirmationDialog(
             pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
@@ -170,12 +169,6 @@ struct TerminalDetailView: View {
     private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
         Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
-    }
-
-    private func sendTerminalMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
-        writeE2EEventIfNeeded(kind: "send_mouse_button", detail: "\(button),\(pressed)")
-        // Direct call, not a Task: press and release arrive back-to-back and must enqueue in order.
-        model.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
     }
 
     private func openTerminalLink(_ link: String) {
@@ -463,31 +456,25 @@ private struct TerminalLinkPreviewSheet: View {
     }
 
     /// Each content kind renders through its dedicated viewer: image/video/PDF keep QuickLook, plain text
-    /// gets the selectable monospaced text view, Markdown gets the rendered/raw viewer, a local HTML
-    /// artifact and an external web page both use the isolated web view (file mode vs. request mode).
+    /// gets the selectable monospaced text view, Markdown gets the rendered/raw viewer, and a local HTML
+    /// artifact uses the isolated web view. A plain web page has no case here; it opens through
+    /// `TerminalSafariView` instead (see `TerminalViewerModel.safariLink`).
     @ViewBuilder private var content: some View {
         switch preview.content {
         case .quickLook(let url): TerminalQuickLookPreview(url: url)
         case .text(let url): TerminalTextArtifactView(url: url)
         case .markdown(let url): TerminalMarkdownArtifactView(url: url)
         case .htmlFile(let url): TerminalWebArtifactView(load: .fileURL(url))
-        case .webPage(let url): TerminalWebArtifactView(load: .request(url))
         }
     }
 
-    /// File-backed content (all except `.webPage`) offers Share to hand the on-device file to another app;
-    /// an external web page has no local file, so its equivalent affordance is opening the URL in Safari.
+    /// Every content kind here is file-backed, so the toolbar offers Share to hand the on-device file
+    /// to another app.
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             switch preview.content {
             case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url):
                 ShareLink(item: url) { Label("Open In", systemImage: "square.and.arrow.up") }
-            case .webPage(let url):
-                Button {
-                    UIApplication.shared.open(url)
-                } label: {
-                    Label("Open in Safari", systemImage: "safari")
-                }.accessibilityIdentifier("terminal.linkPreview.openInSafari")
             }
         }
     }

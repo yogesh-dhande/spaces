@@ -39,19 +39,18 @@ enum TerminalViewerPhase: Equatable {
 
 private enum TerminalLinkPreviewRequestError: Error { case stale }
 
-/// What a resolved terminal link previews as. Every case carries the on-device URL the sheet renders:
-/// a local cache file for `quickLook`/`text`/`markdown`/`htmlFile`, or the original remote URL for
-/// `webPage`. `TerminalLinkPreviewSheet` switches on this to pick the viewer.
+/// What a resolved terminal link previews as. Every case carries the on-device local cache file the
+/// sheet renders. A plain web page has no device-previewable artifact kind and is not represented
+/// here; it opens through `TerminalSafariLink` instead (see `TerminalViewerModel.safariLink`).
 enum TerminalLinkPreviewContent: Equatable {
     case quickLook(URL)
     case text(URL)
     case markdown(URL)
     case htmlFile(URL)
-    case webPage(URL)
 
     var url: URL {
         switch self {
-        case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url), .webPage(let url): return url
+        case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url): return url
         }
     }
 
@@ -62,7 +61,6 @@ enum TerminalLinkPreviewContent: Equatable {
         case .text: return "text"
         case .markdown: return "markdown"
         case .htmlFile: return "htmlFile"
-        case .webPage: return "webPage"
         }
     }
 }
@@ -70,9 +68,17 @@ enum TerminalLinkPreviewContent: Equatable {
 struct TerminalLinkPreview: Identifiable, Equatable {
     let id: String
     let title: String
-    /// `nil` only for `.webPage`: a plain web URL has no device-previewable artifact kind.
     let kind: SpacesDeviceTerminalLinkArtifactKind?
     let content: TerminalLinkPreviewContent
+}
+
+/// A resolved plain web page link, presented in an in-app Safari sheet (`SFSafariViewController`)
+/// rather than the isolated preview viewer: Safari's per-app persistent website data gives
+/// authenticated links (e.g. claude.ai artifacts) working cookies and autofill, which the isolated
+/// web view cannot offer.
+struct TerminalSafariLink: Identifiable, Equatable {
+    let id: String
+    let url: URL
 }
 
 extension SpacesDeviceTerminalLinkArtifactKind {
@@ -160,6 +166,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var isPreparingLinkPreview = false
     var linkPreviewErrorMessage: String?
     var linkPreview: TerminalLinkPreview?
+    /// Drives the in-app Safari sheet for a resolved plain web page link (see `TerminalSafariLink`).
+    var safariLink: TerminalSafariLink?
     /// Set when a tapped terminal link resolves to a loopback host (e.g. `http://localhost:3000`):
     /// that address only makes sense on the session's host Mac, so this shows an explanatory banner
     /// instead of attempting a resolve round trip or a preview. Cleared at the start of the next link
@@ -632,6 +640,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
+        safariLink = nil
         linkNotice = nil
         ownerRecoveryGraceDeadline = nil
         reportedOwnerReadyEpochID = nil
@@ -1040,28 +1049,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func flushPendingScroll() { scrollCoalescer.flush() }
 
-    /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
-    /// discrete event whose press/release ordering the application depends on, so it flushes any
-    /// pending scroll batch first and rides the same input queue as a key send.
-    // Synchronous (no async hop) so a tap's press and release enqueue in call order: the serial
-    // input queue preserves enqueue order, but two Tasks racing to enqueue would not.
-    func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
-        guard isOwner else { return }
-        guard keepsTerminalInputSurfaceActive else { return }
-        flushPendingScroll()
-        flushBufferedInputText()
-        enqueueInputSend(kind: "send_mouse_button", detail: "\(button),\(pressed)") { [weak self, button, pressed, pointerPosition] in
-            guard let self else { return }
-            try await self.performSendMouseButtonRequest(button: button, pressed: pressed, pointerPosition: pointerPosition)
-        }
-    }
-
     func dismissLinkPreview() {
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
     }
+
+    func dismissSafariLink() { safariLink = nil }
 
     func openTerminalLink(_ link: String) async {
         let normalizedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1197,15 +1192,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    private func performSendMouseButtonRequest(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) async throws {
-        let ownerEpoch = currentOwnerEpoch
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
-            try await bridgeClient.mouseButton(
-                sessionID: sessionID, clientID: clientID, button: button, pressed: pressed, ownerEpoch: ownerEpoch, pointerPosition: pointerPosition,
-                timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
-        }
-    }
-
     private func enqueueCoalescedScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
         let detail = "\(batch.horizontal),\(batch.vertical)"
         enqueueInputSend(kind: "send_scroll", detail: detail) { [weak self, batch] in
@@ -1296,11 +1282,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 throw SpacesDeviceAPIClientError.requestFailed("The terminal link URL is invalid.")
             }
             guard let artifactKind = metadata.artifactKind else {
-                // No previewable artifact kind: this is a plain web page, so it renders in-app rather
-                // than handing off to Safari.
+                // No previewable artifact kind: this is a plain web page, so it opens in an in-app
+                // Safari sheet, which carries persistent cookies and autofill unlike the isolated
+                // preview web view used for the artifact kinds below.
                 try ensureCurrentLinkPreviewRequest(requestGeneration)
                 linkPreviewErrorMessage = nil
-                linkPreview = TerminalLinkPreview(id: metadata.id, title: metadata.displayName, kind: nil, content: .webPage(url))
+                linkPreview = nil
+                safariLink = TerminalSafariLink(id: metadata.id, url: url)
                 return
             }
             guard !exceedsTextPreviewSizeCap(artifactKind: artifactKind, metadata: metadata) else {
@@ -1461,6 +1449,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
+        safariLink = nil
     }
 
     private func cancelLinkPreviewDownloads() {
@@ -2224,6 +2213,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
+        safariLink = nil
         linkNotice = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false

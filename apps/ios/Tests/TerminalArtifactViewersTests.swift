@@ -60,16 +60,20 @@
 
         // MARK: - Artifact web isolation
 
-        func testArtifactNetworkPolicyBlocksNetworkOnlyForArtifactLoads() {
-            let networkURL = URL(string: "https://example.com/beacon")!
-            let webSocketURL = URL(string: "wss://example.com/events")!
+        func testArtifactNetworkPolicyBlocksNetworkSchemesOnly() {
+            let httpURL = URL(string: "http://example.com/beacon")!
+            let httpsURL = URL(string: "https://example.com/beacon")!
+            let webSocketURL = URL(string: "ws://example.com/events")!
+            let secureWebSocketURL = URL(string: "wss://example.com/events")!
             let fileURL = URL(fileURLWithPath: "/tmp/artifact.html")
-            let dataURL = URL(string: "data:text/plain,ok")!
+            let aboutURL = URL(string: "about:blank")!
 
-            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .fileURL(fileURL), url: networkURL))
-            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .htmlString("<html></html>"), url: webSocketURL))
-            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .htmlString("<html></html>"), url: dataURL))
-            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .request(networkURL), url: networkURL))
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: httpURL))
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: httpsURL))
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: webSocketURL))
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: secureWebSocketURL))
+            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: fileURL))
+            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: aboutURL))
         }
 
         @MainActor func testArtifactNetworkPolicyContentRuleCompiles() async throws {

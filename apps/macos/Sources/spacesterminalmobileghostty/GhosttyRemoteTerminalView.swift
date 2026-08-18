@@ -92,7 +92,6 @@ import Foundation
         public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void
-        public let onSendMouseButton: @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
@@ -104,7 +103,6 @@ import Foundation
             onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
-            onSendMouseButton: @escaping @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void = { _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
             onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
@@ -122,7 +120,6 @@ import Foundation
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
-            self.onSendMouseButton = onSendMouseButton
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
             self.onPasteClipboardImage = onPasteClipboardImage
@@ -141,13 +138,6 @@ import Foundation
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
-            }
-            // Synchronous on purpose, unlike the Task-hopping callbacks around it: a tap sends a
-            // press immediately followed by a release, and two independent unstructured Tasks have
-            // no ordering guarantee — a reordered pair would deliver a release-before-press to the
-            // application. UIKit fires the gesture on the main thread, so assuming isolation holds.
-            hostView.onSendMouseButton = { button, pressed, pointerPosition in
-                MainActor.assumeIsolated { onSendMouseButton(button, pressed, pointerPosition) }
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
@@ -209,7 +199,6 @@ import Foundation
             case ignored
             case openedLink
             case focused
-            case sentClick
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -328,7 +317,6 @@ import Foundation
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
-        public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
         /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
@@ -706,20 +694,15 @@ import Foundation
             _ = handleTapToActivateInput(at: recognizer.location(in: self))
         }
 
-        /// A link under the tap wins over the application tracking the mouse. The probe runs entirely
-        /// against this device's mirror surface and never reaches the session, so the only cost is that
-        /// an application tracking the mouse loses the taps that land on a URL while keeping every
-        /// other one. That is the right trade on a phone: coding agents track the mouse for their whole
-        /// session, and a URL tap there means the user wants to read the link on the device in their
-        /// hand rather than click that cell on the machine running the session.
+        /// An iOS tap never drives the remote application's mouse: the phone cannot know what the
+        /// remote TUI considers a link, so a forwarded plain click that lands on a URL is
+        /// indistinguishable, to a Ghostty-aware TUI, from a link-open gesture, and that gesture
+        /// executes on the session host Mac (#465). A link under the tap opens locally instead; every
+        /// other tap only focuses the keyboard. Click-driven TUI interaction (vim cursor placement,
+        /// tmux pane taps) is intentionally dropped: every such TUI has a keyboard equivalent, and
+        /// scrolling stays a separate path that keeps working.
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
             if openTerminalLink(at: location) { return .openedLink }
-            if sendMouseButtonClickIfCaptured(at: location) {
-                // A tap that drives the application still needs the keyboard: without this, tapping
-                // vim's mouse=a on a phone would move the cursor while leaving nothing to type with.
-                if acceptsTerminalInput, !isFirstResponder { becomeFirstResponder() }
-                return .sentClick
-            }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
             return .focused
@@ -1037,20 +1020,6 @@ import Foundation
             (Double(max(location.x, 0)), Double(max(location.y, 0)))
         }
 
-        /// Forwards a tap as a left-button press followed by a release when the session's own terminal
-        /// is tracking the mouse (`ghostty_surface_mouse_captured`), so a mouse-aware application there
-        /// receives the tap as a click instead of Spaces treating it as a link probe or a focus request.
-        private func sendMouseButtonClickIfCaptured(at location: CGPoint) -> Bool {
-            // Only an owner of a live session can deliver a click; an ended or read-only session's
-            // final frame can still carry tracking flags (a crash never disables them), and
-            // intercepting those taps would swallow them with no application left to click.
-            guard acceptsTerminalInput, mirrorCapturesMouse else { return false }
-            let pointerPosition = scrollPointerPosition(for: location)
-            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), true, pointerPosition)
-            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), false, pointerPosition)
-            return true
-        }
-
         /// The modifiers the tap's link probe synthesizes. Super is what Ghostty's URL link requires to
         /// match. Shift rides along while the mirror carries the session's mouse tracking, because a
         /// tracking terminal refreshes link hover state only for a shift-held mouse position and then
@@ -1061,10 +1030,11 @@ import Foundation
         ///
         /// Accepted limitation: an application that asks to capture shift itself (XTSHIFTESCAPE, a
         /// state the snapshot transports onto the mirror) takes this shift-click too, so its link taps
-        /// forward as clicks instead of opening. That matches a directly attached Ghostty terminal,
-        /// where cmd+shift+click cannot follow a link under such an application either; working around
-        /// it would mean mutating the mirror's shift-capture state around the probe. If link taps ever
-        /// need to win there too, the client-side linkURLs hit-testing design (#373) is the seam.
+        /// find nothing and the tap just focuses the keyboard instead of opening. That matches a
+        /// directly attached Ghostty terminal, where cmd+shift+click cannot follow a link under such an
+        /// application either; working around it would mean mutating the mirror's shift-capture state
+        /// around the probe. If link taps ever need to win there too, the client-side linkURLs
+        /// hit-testing design (#373) is the seam.
         private func linkActivationMouseModifiers() -> ghostty_input_mods_e {
             guard mirrorCapturesMouse else { return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
             return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
