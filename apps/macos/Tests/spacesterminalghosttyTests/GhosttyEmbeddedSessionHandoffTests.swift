@@ -395,9 +395,15 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
         // A line wider than the grid so its wrapping depends on the replay width.
+        // The shell holds its output until the PTY winsize reports the resized width:
+        // resizeCellGrid enqueues the terminal's `.resize` IO message before it sets
+        // the winsize, and host-fed output parses through the same FIFO mailbox, so
+        // output gated on the winsize is guaranteed to wrap at the resized grid. An
+        // ungated printf races session startup against the resize under load.
         let wideLine = String(repeating: "A", count: 150) + "DONE"
         let configuration = Self.makeConfiguration(
-            sessionID: "handoff-reflow-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(wideLine)'; cat")
+            sessionID: "handoff-reflow-\(UUID().uuidString)",
+            command: "stty -echo; until [ \"$(stty size | cut -d' ' -f2)\" = 100 ]; do sleep 0.02; done; printf '%s\\n' '\(wideLine)'; cat")
         let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
             let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
             try sourceCore.startIfNeeded()
