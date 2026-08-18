@@ -2262,6 +2262,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 isEnabled: AppKitController.canOpenOrFocusTerminalPane(
                     hasExistingPane: sessionIsOpenInAPane, deviceAcceptsDaemonActions: daemonActionsEnabled))
         }
+        // Only offered while the row carries at least one undismissed alert (an exit, an agent
+        // waiting/done, or a bell); dismissing it has exactly the effect dismissing it from the Alerts
+        // pane does; it is not gated on daemon reachability because dismissal is a client-local
+        // acknowledgment, not a mutation the owning daemon has to apply.
+        if !item.undismissedAttentionIDs.isEmpty {
+            menu.addItem(.separator())
+            addItem("Dismiss Alert", symbol: "checkmark.circle", action: #selector(dismissRuntimeTargetAlertMenuItem(_:)))
+        }
         return menu
     }
 
@@ -2289,6 +2297,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
         renamingRuntimeTarget = (context.workspaceID, context.item)
         reloadRuntimeTargetRow(workspaceID: context.workspaceID, key: context.item.key)
+    }
+
+    @objc private func dismissRuntimeTargetAlertMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.dismissSidebarRuntimeTargetAlerts(item: context.item)
     }
 
     func cancelRuntimeTargetRename() {

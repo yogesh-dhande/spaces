@@ -217,6 +217,15 @@ enum SpacesMobileAttention {
         }
     }
 
+    /// The permissive event derivation every caller that needs a source's *true* event identity — not the
+    /// Alerts tab's filtered view of it — shares: no focused session, no watch windows, hidden workspaces
+    /// included. A row's exited-process dot and its "Dismiss Alert" menu item both key off this, so
+    /// neither depends on what the Alerts tab happens to be suppressing right now (a watched bell, a
+    /// hidden workspace) — only on whether the source is still in the state that produced the event.
+    static func allEvents(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAttentionEvent] {
+        events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true)
+    }
+
     /// The dismissals worth keeping: a dismissal only means anything while its event is still derivable,
     /// so the stored set is trimmed to the identities `overview` still produces. Without this, dismissals
     /// accumulate forever across launches.
@@ -229,8 +238,7 @@ enum SpacesMobileAttention {
     /// already dismissed while it was hidden. A workspace the overview has stopped describing altogether
     /// is not suppressed but deleted, so its dismissals do prune — there is nothing left to resurface them.
     static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
-        dismissed.intersection(
-            Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true).map(\.id)))
+        dismissed.intersection(Set(allEvents(in: overview).map(\.id)))
     }
 
     /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux
@@ -257,5 +265,18 @@ enum SpacesMobileAttention {
         case .failed: .failed
         case .starting, .running: nil
         }
+    }
+}
+
+extension SpacesMobileWorkspaceRuntimeRow {
+    /// Whether `event` is this row's own attention event. A process/agent/terminal-kind event and its row
+    /// are built from the same underlying record, so their ids share the same `"kind:recordID"` string —
+    /// matching on `id` alone lines them up. A bell is different: it is a fact about the session, keyed by
+    /// session id (`"session:…"`), which never equals a terminal row's own id (`"terminal:…"`), so it
+    /// matches by `sessionID` instead.
+    func matches(_ event: SpacesMobileAttentionEvent) -> Bool {
+        guard event.workspaceID == workspaceID else { return false }
+        if event.sourceID == id { return true }
+        return event.kind == .bell && sessionID != nil && event.sessionID == sessionID
     }
 }

@@ -942,6 +942,44 @@ private enum SpacesMobileMutationTimeoutRecovery {
         saveDismissedAlertIDs()
     }
 
+    /// `row`'s own currently undismissed attention events — its exited/waiting/finished event (if any)
+    /// plus any bell on its session — derived via the same focus/watch-window bell suppression the Alerts
+    /// tab uses (`SpacesMobileAttention.events`), so a bell rung while its terminal viewer was open or
+    /// inside a watch window never offers "Dismiss Alert" for something the user already saw live. Hidden
+    /// workspaces stay included: that filter only serves the Alerts tab's band grouping, not row-level
+    /// dismissal. Backs both the row's "Dismiss Alert" menu item's visibility and what it dismisses.
+    func undismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow) -> [SpacesMobileAttentionEvent] {
+        guard let overview else { return [] }
+        return SpacesMobileAttention.events(
+            in: overview, focusedSessionID: watchedTerminalSessionID,
+            watchWindowsBySessionID: terminalWatchWindowsBySessionID, includingHiddenWorkspaces: true
+        ).filter { row.matches($0) && !dismissedAlertIDs.contains($0.id) }
+    }
+
+    /// Whether `row` has anything its long-press "Dismiss Alert" menu item could dismiss.
+    func hasUndismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool { !undismissedAlerts(for: row).isEmpty }
+
+    /// Dismisses every one of `row`'s currently undismissed attention events in one action — identical in
+    /// effect to dismissing each individually from the Alerts tab: same `dismissedAlertIDs`, same badge.
+    func dismissAlerts(for row: SpacesMobileWorkspaceRuntimeRow) {
+        let events = undismissedAlerts(for: row)
+        guard !events.isEmpty else { return }
+        dismissedAlertIDs.formUnion(events.map(\.id))
+        saveDismissedAlertIDs()
+    }
+
+    /// Whether `row`'s own exited-process event, if it has one right now, is already dismissed — the
+    /// signal that turns its dot from failed red to the unstarted stroke (see
+    /// `SpacesMobileWorkspaceRuntimeRow.statusDotKind(exitAcknowledged:)`). Only a `.process` row can have
+    /// one: every other row family's dot keeps tracking live state regardless of dismissal.
+    func isExitAcknowledged(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard case .process = row.source, let overview else { return false }
+        guard let event = SpacesMobileAttention.allEvents(in: overview).first(where: { row.matches($0) && $0.kind == .exited }) else {
+            return false
+        }
+        return dismissedAlertIDs.contains(event.id)
+    }
+
     /// Dismisses one failed/timed-out automation run, leaving the rest of the Automations band in place.
     func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) {
         dismissedAlertIDs.insert(entry.id)

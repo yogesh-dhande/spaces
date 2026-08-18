@@ -129,14 +129,14 @@
 
             let agentRow = SpacesMobileWorkspaceRuntimeRow(
                 source: .codingAgent(makeAgentRow(id: "agent-a", runState: .running, activityState: .done)))
-            XCTAssertEqual(agentRow.statusDotKind, .done)
+            XCTAssertEqual(agentRow.statusDotKind(exitAcknowledged: false), .done)
 
             let processRow = SpacesMobileWorkspaceRuntimeRow(
                 source: .process(
                     SpacesDeviceWorkspaceProcessRow(
                         id: "process-a", workspaceID: "workspace-feature", name: "web", command: "npm run dev", processID: nil, sessionID: nil,
                         runState: .exited, canRun: true, canStop: false, canRestart: false)))
-            XCTAssertEqual(processRow.statusDotKind, .exited)
+            XCTAssertEqual(processRow.statusDotKind(exitAcknowledged: false), .exited)
         }
 
         func testWorkspaceCollapseToggle() {
