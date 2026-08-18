@@ -920,22 +920,56 @@ public final class WorkspaceOrchestrator {
                 // committing. Leaving the workspace alone costs one delayed retire; retiring on a failed
                 // probe deletes the record and, through `archiveWorkspace`, the user's checkout with it.
                 guard !undeterminedWorktreePaths.contains(normalizedWorkspacePath) else { continue }
-                _ = try archiveWorkspace(workspaceID: workspace.id)
+                do {
+                    _ = try archiveWorkspace(workspaceID: workspace.id)
+                } catch {
+                    // `archiveWorkspace` claims both the project and the workspace key, so it loses this
+                    // race whenever some other lifecycle operation already holds either one. The retire
+                    // self-heals on a later scan once the worktree removal is still visible and nothing
+                    // else holds the key; aborting the whole scan here would also skip every remaining
+                    // workspace and project in this pass, which costs far more than one delayed retire.
+                    guard Self.isProjectLifecycleBusyError(error) || Self.isWorkspaceLifecycleBusyError(error) else { throw error }
+                    continue
+                }
             }
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
 
                 guard discoverableWorktreeByPath[normalizedPath] != nil else { continue }
-
-                if (try store.workspace(dir: normalizedPath)) != nil { continue }
                 guard let branchName = worktree.branchName else { continue }
-                let workspace = WorkspaceRecord(
-                    id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
-                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isRunning: false,
-                    lastLaunchedAt: nil)
-                try store.upsert(workspace: workspace)
-                try seedWorkspaceSettings(project: project, workspace: workspace)
-                try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
+
+                let imported: WorkspaceRecord?
+                do {
+                    imported = try withProjectLifecycleLock(projectID: project.id) {
+                        if (try store.workspace(dir: normalizedPath)) != nil { return nil }
+                        let workspace = WorkspaceRecord(
+                            id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
+                            dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false,
+                            isRunning: false, lastLaunchedAt: nil)
+                        try store.upsert(workspace: workspace)
+                        try seedWorkspaceSettings(project: project, workspace: workspace)
+                        // Setup is deferred here exactly like `createWorkspaceUnlocked`: it runs after the
+                        // gate is released, below.
+                        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: false)
+                        return workspace
+                    }
+                } catch {
+                    // The key holder is a project lifecycle operation, typically the very `createWorkspace`
+                    // that is provisioning this worktree: `git worktree add` lands it on disk before that
+                    // call's own `store.upsert` runs, and it will insert its own row once it finishes.
+                    // Importing here is exactly what causes the UNIQUE(project_id, branch) failure that
+                    // insert then hits, so skipping loses nothing for such worktrees. Accepted edge: a
+                    // worktree made by hand while someone else's lifecycle operation happens to be running
+                    // against the same project stays unimported until the next `.git/worktrees` write or
+                    // daemon-startup scan re-triggers discovery.
+                    guard Self.isProjectLifecycleBusyError(error) else { throw error }
+                    continue
+                }
+                guard let workspace = imported else { continue }
+                // Setup deliberately runs outside the gate, same shape `createWorkspace` uses: it is
+                // user-authored and can take minutes, and holding the project key across it would make a
+                // concurrent teardown of this or a sibling workspace fail as busy for as long as setup runs.
+                try runWorkspaceSetup(workspaceID: workspace.id)
                 createdWorkspaces.append(workspace)
             }
         }
@@ -1434,9 +1468,20 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    /// The message a contended project lifecycle gate reports. Named rather than written twice, mirroring
+    /// `workspaceLifecycleBusyMessage`: callers that need to tell "someone else owns this project right
+    /// now" from a real failure match on this constant rather than a copy of the string.
+    static let projectLifecycleBusyMessage = "Project action is already in progress."
+
+    /// Whether `error` is the busy rejection from `withProjectLifecycleLock` rather than a real failure.
+    static func isProjectLifecycleBusyError(_ error: any Error) -> Bool {
+        guard case .invalidArgument(let message)? = error as? WorkspaceError else { return false }
+        return message == projectLifecycleBusyMessage
+    }
+
     func withProjectLifecycleLock<T>(projectID: String, operation: () throws -> T) throws -> T {
         try Self.projectLifecycleGate.withKey(
-            projectID, busyError: { WorkspaceError.invalidArgument(message: "Project action is already in progress.") }, operation: operation)
+            projectID, busyError: { WorkspaceError.invalidArgument(message: Self.projectLifecycleBusyMessage) }, operation: operation)
     }
 
     /// Claims the workspace's project key and then its own, in the documented project-then-workspace
