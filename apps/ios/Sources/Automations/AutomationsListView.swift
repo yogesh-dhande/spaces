@@ -5,8 +5,8 @@ import spacesterminalcore
 /// Root content of the Automations tab (see `AutomationsTabView` for the tab shell). Automations are a
 /// headline feature, so they get their own bottom tab rather than living under Settings or joining the
 /// workspace-scoped Alerts/Spaces/Agents tabs — an automation is device-scoped, not tied to any one
-/// workspace. iOS view scope is deliberately narrow: view automations and runs, trigger a run, and
-/// cancel a running run — no create/edit/delete, which stay Mac-only.
+/// workspace. iOS view scope is deliberately narrow: view automations and runs, trigger a run, cancel a
+/// running run, and open a run's terminal — no create/edit/delete, which stay Mac-only.
 ///
 /// Tapping a row opens that automation's detail screen (`AutomationDetailView`), where its schedule,
 /// command, and run history live and "Run Now" is the explicit manual trigger — unlike the Agents/Spaces
@@ -16,6 +16,11 @@ struct AutomationsListView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedAutomationID: String?
     @State private var isShowingRecentRuns = false
+    @State private var selectedSession: SelectedTerminalSessionRoute?
+    /// Required by `terminalSessionNavigation`'s shared modifier, which installs both a session route and
+    /// a pending-launch route; the Automations tab never launches a session (it only opens one that
+    /// already exists), so this stays nil.
+    @State private var pendingTerminalLaunch: PendingTerminalLaunch?
 
     private var rows: [SpacesMobileAutomationRow] { model.automationRows }
 
@@ -27,12 +32,16 @@ struct AutomationsListView: View {
                 ).accessibilityIdentifier("automations.recentRuns")
             }
         }.navigationDestination(item: $selectedAutomationID) { automationID in
-            AutomationDetailView(model: model, automationID: automationID)
-        }.navigationDestination(isPresented: $isShowingRecentRuns) { AutomationRunsView(model: model, title: "Recent Runs") }
-            .overviewPolling(model: model, tab: .automations, activeDetailRouteID: activeDetailRouteID)
+            AutomationDetailView(model: model, automationID: automationID, selectedSession: $selectedSession)
+        }.navigationDestination(isPresented: $isShowingRecentRuns) {
+            AutomationRunsView(model: model, title: "Recent Runs", selectedSession: $selectedSession)
+        }.overviewPolling(model: model, tab: .automations, activeDetailRouteID: activeDetailRouteID).terminalSessionNavigation(
+            model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
     }
 
-    private var activeDetailRouteID: String? { selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) }
+    private var activeDetailRouteID: String? {
+        selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) ?? selectedSession?.id
+    }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
@@ -84,16 +93,21 @@ struct AutomationsListView: View {
 /// Runs list across every automation ("Recent Runs", from the toolbar) — newest first, with a Cancel
 /// action on running rows and an End Agents action on finished runs that still have a live attributed
 /// coding agent. Purely overview-derived: unlike the per-automation detail screen, this is genuinely the
-/// live recent-runs window, so there is no retained-history fetch to reconcile. Read-only beyond that: no
-/// terminal or replay viewing on iOS, matching the view/trigger/cancel scope of this feature —
-/// attributed agents are display-only, not tappable.
+/// live recent-runs window, so there is no retained-history fetch to reconcile. Tapping a navigable run
+/// row opens its terminal session (live while running, its read-only ended transcript once finished);
+/// tapping an attributed-agent chip opens that agent's own session — see
+/// `SpacesMobileAutomations.runSession`/`agentSession`.
 struct AutomationRunsView: View {
     @Bindable var model: SpacesMobileAppModel
     let title: String
+    @Binding var selectedSession: SelectedTerminalSessionRoute?
 
     private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
 
-    var body: some View { content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: nil) }
+    var body: some View {
+        content.navigationTitle(title).tint(Theme.accent).overviewPolling(
+            model: model, tab: .automations, activeDetailRouteID: selectedSession?.id)
+    }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
@@ -105,7 +119,9 @@ struct AutomationRunsView: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    AutomationRunRowsList(model: model, rows: rows, title: { $0.automationName ?? "Automation" }, onMutated: {})
+                    AutomationRunRowsList(
+                        model: model, rows: rows, title: { $0.automationName ?? "Automation" }, onMutated: {},
+                        onOpenSession: { selectedSession = SelectedTerminalSessionRoute(session: $0) })
                 }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
         }

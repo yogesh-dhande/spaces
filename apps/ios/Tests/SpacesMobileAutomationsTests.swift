@@ -243,6 +243,85 @@
             XCTAssertFalse(SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "failed", attributedAgents: [])))
         }
 
+        // MARK: - SpacesMobileAutomations.runIsNavigable / runSession
+
+        func testRunIsNavigableRequiresASessionAndExcludesSkippedAndQueued() {
+            XCTAssertFalse(SpacesMobileAutomations.runIsNavigable(makeRun(id: "r", automationID: "a", status: "succeeded", terminalSessionID: nil)))
+            XCTAssertFalse(SpacesMobileAutomations.runIsNavigable(makeRun(id: "r", automationID: "a", status: "skipped", terminalSessionID: "s")))
+            XCTAssertFalse(SpacesMobileAutomations.runIsNavigable(makeRun(id: "r", automationID: "a", status: "queued", terminalSessionID: "s")))
+            for status in ["failed", "succeeded", "running", "timed_out", "canceled"] {
+                XCTAssertTrue(
+                    SpacesMobileAutomations.runIsNavigable(makeRun(id: "r", automationID: "a", status: status, terminalSessionID: "s")),
+                    "expected \(status) with a session to be navigable")
+            }
+        }
+
+        func testRunSessionReturnsNilWhenNotNavigable() {
+            let run = makeRun(id: "r", automationID: "a", status: "queued", terminalSessionID: "s")
+            XCTAssertNil(SpacesMobileAutomations.runSession(for: run, overview: nil))
+        }
+
+        func testRunSessionPrefersTheOverviewSessionOverSynthesizing() {
+            let overviewSession = makeSession(id: "session-1", title: "Live Title")
+            let overview = makeOverview(sessions: [overviewSession])
+            let run = makeRun(id: "r", automationID: "a", automationName: "Nightly", status: "succeeded", terminalSessionID: "session-1")
+
+            let resolved = SpacesMobileAutomations.runSession(for: run, overview: overview)
+
+            // The overview's own instance wins (its title), not a synthesized "Nightly" title.
+            XCTAssertEqual(resolved?.title, "Live Title")
+        }
+
+        func testRunSessionSynthesizesRunningVersusEndedState() {
+            let runningRun = makeRun(
+                id: "r-running", automationID: "a", automationName: "Deploy", status: "running", terminalSessionID: "session-running",
+                workspaceID: "workspace-1")
+            let succeededRun = makeRun(
+                id: "r-done", automationID: "a", automationName: "Deploy", status: "succeeded", terminalSessionID: "session-done",
+                workspaceID: "workspace-1")
+
+            let runningSession = SpacesMobileAutomations.runSession(for: runningRun, overview: nil)
+            let doneSession = SpacesMobileAutomations.runSession(for: succeededRun, overview: nil)
+
+            XCTAssertEqual(runningSession?.state, .running)
+            XCTAssertEqual(runningSession?.isControlAvailable, true)
+            XCTAssertEqual(runningSession?.isSubscriptionAvailable, true)
+            XCTAssertEqual(runningSession?.title, "Deploy")
+            XCTAssertEqual(runningSession?.workspaceID, "workspace-1")
+
+            XCTAssertEqual(doneSession?.state, .exited)
+            XCTAssertEqual(doneSession?.isControlAvailable, false)
+            XCTAssertEqual(doneSession?.isSubscriptionAvailable, false)
+        }
+
+        // MARK: - SpacesMobileAutomations.agentSession
+
+        func testAgentSessionPrefersOverviewSessionOverSynthesizing() {
+            let overviewSession = makeSession(id: "agent-session-1", title: "Live Agent Title")
+            let overview = makeOverview(sessions: [overviewSession])
+            let agent = makeAgentSummary(terminalSessionID: "agent-session-1", live: true, title: "Synthesized Title")
+
+            let resolved = SpacesMobileAutomations.agentSession(for: agent, overview: overview)
+
+            XCTAssertEqual(resolved?.title, "Live Agent Title")
+        }
+
+        func testAgentSessionSynthesizesLiveVersusNotLiveState() {
+            let liveAgent = makeAgentSummary(terminalSessionID: "agent-1", live: true, title: "Agent One", workspaceID: "workspace-1")
+            let settledAgent = makeAgentSummary(terminalSessionID: "agent-2", live: false, title: "Agent Two", workspaceID: "workspace-1")
+
+            let liveSession = SpacesMobileAutomations.agentSession(for: liveAgent, overview: nil)
+            let settledSession = SpacesMobileAutomations.agentSession(for: settledAgent, overview: nil)
+
+            XCTAssertEqual(liveSession?.state, .running)
+            XCTAssertEqual(liveSession?.isControlAvailable, true)
+            XCTAssertEqual(liveSession?.title, "Agent One")
+            XCTAssertEqual(liveSession?.workspaceID, "workspace-1")
+
+            XCTAssertEqual(settledSession?.state, .exited)
+            XCTAssertEqual(settledSession?.isControlAvailable, false)
+        }
+
         // MARK: - StatusDot.Kind(agentStatus:live:)
 
         func testAgentStatusDotKindMapsAgentWindowStatusToDotSignal() {
@@ -532,11 +611,12 @@
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
         }
 
-        private func makeOverview(automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [])
-            -> SpacesDeviceOverviewPayload
-        {
+        private func makeOverview(
+            sessions: [SpacesDeviceTerminalSessionSummary] = [], automations: [TerminalServiceAutomationSummary] = [],
+            automationRuns: [TerminalServiceAutomationRunSummary] = []
+        ) -> SpacesDeviceOverviewPayload {
             SpacesDeviceOverviewPayload(
-                workspaces: [], sessions: [],
+                workspaces: [], sessions: sessions,
                 daemonStatus: TerminalServiceDaemonStatus(
                     version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
                     protocolVersion: SpacesWireProtocol.version), automations: automations, automationRuns: automationRuns)
@@ -568,13 +648,24 @@
 
         private func makeRun(
             id: String, automationID: String, automationName: String? = nil, kind: String = "script", status: String = "queued",
-            trigger: String = "manual", exitCode: Int? = nil, startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil,
-            createdAt: String = "2026-01-01T00:00:00Z", attributedAgents: [TerminalServiceAutomationAgentSummary] = []
+            trigger: String = "manual", exitCode: Int? = nil, terminalSessionID: String? = nil, workspaceID: String? = nil,
+            startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil, createdAt: String = "2026-01-01T00:00:00Z",
+            attributedAgents: [TerminalServiceAutomationAgentSummary] = []
         ) -> TerminalServiceAutomationRunSummary {
             TerminalServiceAutomationRunSummary(
                 id: id, automationID: automationID, automationName: automationName, kind: kind, status: status, trigger: trigger, skipReason: nil,
-                exitCode: exitCode, terminalSessionID: nil, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
-                attributedAgents: attributedAgents)
+                exitCode: exitCode, terminalSessionID: terminalSessionID, workspaceID: workspaceID, startedAt: startedAt, endedAt: endedAt,
+                createdAt: createdAt, attributedAgents: attributedAgents)
+        }
+
+        private func makeSession(
+            id: String, title: String = "Session", state: TerminalSessionState = .running, workspaceID: String = "workspace-1"
+        ) -> SpacesDeviceTerminalSessionSummary {
+            SpacesDeviceTerminalSessionSummary(
+                id: id, title: title, workingDirectory: "/tmp", shell: "zsh", command: nil, state: state, backend: .ghosttyEmbedded,
+                lifetimePolicy: .persistent, servicePID: 0, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil, projectID: nil,
+                projectName: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", isControlAvailable: state == .running,
+                isSubscriptionAvailable: state == .running, attachmentSnapshot: TerminalSessionAttachmentSnapshot())
         }
     }
 #endif

@@ -12,6 +12,7 @@ import spacesterminalcore
 struct AutomationDetailView: View {
     @Bindable var model: SpacesMobileAppModel
     let automationID: String
+    @Binding var selectedSession: SelectedTerminalSessionRoute?
     /// Retained run history fetched directly from the daemon (nil until first fetched), reconciled with
     /// the live overview window via `SpacesMobileAutomations.mergedRunRows` — see that function's doc
     /// comment for why the overview wins on conflict. Mirrors the machinery the per-automation
@@ -29,7 +30,7 @@ struct AutomationDetailView: View {
 
     var body: some View {
         content.navigationTitle(automation?.name ?? "Automation").tint(Theme.accent).overviewPolling(
-            model: model, tab: .automations, activeDetailRouteID: nil
+            model: model, tab: .automations, activeDetailRouteID: selectedSession?.id
         ).task { await loadRuns() }
     }
 
@@ -122,8 +123,10 @@ struct AutomationDetailView: View {
                     maxWidth: .infinity, alignment: .leading
                 ).padding(.horizontal, 20).padding(.top, 8)
             } else {
-                AutomationRunRowsList(model: model, rows: runs, title: { SpacesMobileAutomations.statusTitle($0) }, onMutated: { await loadRuns() })
-                    .padding(.top, 4)
+                AutomationRunRowsList(
+                    model: model, rows: runs, title: { SpacesMobileAutomations.statusTitle($0) }, onMutated: { await loadRuns() },
+                    onOpenSession: { selectedSession = SelectedTerminalSessionRoute(session: $0) }
+                ).padding(.top, 4)
             }
         }
     }

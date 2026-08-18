@@ -1,4 +1,5 @@
 import SwiftUI
+import spacesdevicecore
 import spacesterminalcore
 
 /// Shared run-row rendering for the two run-history surfaces (`AutomationRunsView`'s global "Recent
@@ -16,6 +17,9 @@ struct AutomationRunRowsList: View {
     /// history it separately retains (the per-automation retained fetch on the detail screen; a no-op for
     /// the overview-only global screen).
     let onMutated: () async -> Void
+    /// Called when a run row or an attributed-agent chip resolves a session to open (see
+    /// `SpacesMobileAutomations.runSession`/`agentSession`).
+    let onOpenSession: (SpacesDeviceTerminalSessionSummary) -> Void
     @State private var pendingCancelRunID: String?
     @State private var pendingEndAgentsRunID: String?
 
@@ -61,35 +65,51 @@ struct AutomationRunRowsList: View {
         if let exitCode = run.exitCode { detailParts.append("exit \(exitCode)") }
         if run.status == "skipped", let reason = run.skipReason { detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))") }
 
+        let isNavigable = SpacesMobileAutomations.runIsNavigable(run)
+        let band = BandRow(
+            dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
+            title: title(run), detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
+        ) {
+            if row.isRunning {
+                Button {
+                    pendingCancelRunID = run.id
+                } label: {
+                    Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.red)
+                }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.cancel.\(run.id)")
+            } else if SpacesMobileAutomations.endAgentsAvailable(run) {
+                // A text label, not an icon: ending someone's agent is not an obvious action (see
+                // AGENTS.md GUI rules), matching the Mac's own "End agents" button.
+                Button {
+                    pendingEndAgentsRunID = run.id
+                } label: {
+                    Text("End agents").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.red)
+                }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.endAgents.\(run.id)")
+            }
+            if isNavigable { RowChevron() }
+        }
+
         return VStack(alignment: .leading, spacing: 0) {
-            BandRow(
-                dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
-                title: title(run), detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
-            ) {
-                if row.isRunning {
-                    Button {
-                        pendingCancelRunID = run.id
-                    } label: {
-                        Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.red)
-                    }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.cancel.\(run.id)")
-                } else if SpacesMobileAutomations.endAgentsAvailable(run) {
-                    // A text label, not an icon: ending someone's agent is not an obvious action (see
-                    // AGENTS.md GUI rules), matching the Mac's own "End agents" button.
-                    Button {
-                        pendingEndAgentsRunID = run.id
-                    } label: {
-                        Text("End agents").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.red)
-                    }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.endAgents.\(run.id)")
-                }
+            // Navigation is not a mutation, so the row stays tappable while model.isMutating is true (that
+            // flag only gates the Cancel/End Agents buttons above, which are separate Button views nested
+            // inside this one — SwiftUI hit-tests to the innermost matching button, so each keeps its own
+            // tap independent of this row's).
+            if isNavigable {
+                Button {
+                    guard let session = SpacesMobileAutomations.runSession(for: run, overview: model.overview) else { return }
+                    onOpenSession(session)
+                } label: { band }.buttonStyle(.plain)
+            } else {
+                band
             }
             if !run.attributedAgents.isEmpty { attributedAgentsRow(run.attributedAgents) }
         }.accessibilityIdentifier("automations.run.\(row.id)")
     }
 
     /// The run's attributed coding agents (its own spawned agent, plus any a script's command spawned),
-    /// each as a compact dot-plus-title element — display-only, no tap-to-open, since iOS shows no
-    /// terminal. Indented to align under the row's title column and independently horizontally
-    /// scrollable so several agents never wrap or clip the row.
+    /// each as a compact dot-plus-title element. Indented to align under the row's title column and
+    /// independently horizontally scrollable so several agents never wrap or clip the row. A chip opens
+    /// that agent's own terminal session on tap; a chip whose session cannot be resolved (see
+    /// `SpacesMobileAutomations.agentSession`) stays inert.
     private func attributedAgentsRow(_ agents: [TerminalServiceAutomationAgentSummary]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) { ForEach(agents, id: \.terminalSessionID) { agent in attributedAgentChip(agent) } }
@@ -97,9 +117,13 @@ struct AutomationRunRowsList: View {
     }
 
     private func attributedAgentChip(_ agent: TerminalServiceAutomationAgentSummary) -> some View {
-        HStack(spacing: 5) {
+        let chip = HStack(spacing: 5) {
             StatusDot(kind: StatusDot.Kind(agentStatus: agent.status, live: agent.live))
             Text(agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1)
         }
+        return Button {
+            guard let session = SpacesMobileAutomations.agentSession(for: agent, overview: model.overview) else { return }
+            onOpenSession(session)
+        } label: { chip }.buttonStyle(.plain)
     }
 }

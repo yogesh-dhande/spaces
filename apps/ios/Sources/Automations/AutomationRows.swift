@@ -184,6 +184,51 @@ enum SpacesMobileAutomations {
         }
     }
 
+    /// Whether a run row opens a terminal on tap, mirroring the Mac's `AutomationsController.makeRunCard`
+    /// rule: a run with no terminal session was never observable (still queued, or skipped before it
+    /// ever ran), so it stays inert. Every other status opens something, live while running or its
+    /// read-only ended transcript once finished.
+    static func runIsNavigable(_ run: TerminalServiceAutomationRunSummary) -> Bool {
+        run.terminalSessionID != nil && run.status != "skipped" && run.status != "queued"
+    }
+
+    /// The terminal session a run row opens on tap, or nil when the row is not navigable (see
+    /// `runIsNavigable`). The overview's own session wins when present, since it carries the daemon's
+    /// live, polled state; otherwise a summary is synthesized from the run itself — mirroring
+    /// `SpacesMobileAppModel.terminalSession(from:in:)` — so a retained historical run still opens its
+    /// (by-then read-only) transcript after its session has aged out of the overview window.
+    static func runSession(for run: TerminalServiceAutomationRunSummary, overview: SpacesDeviceOverviewPayload?) -> SpacesDeviceTerminalSessionSummary? {
+        guard runIsNavigable(run), let sessionID = run.terminalSessionID else { return nil }
+        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        let workspace = run.workspaceID.flatMap { id in overview?.workspaces.first { $0.id == id } }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let isRunning = run.status == "running"
+        return SpacesDeviceTerminalSessionSummary(
+            id: sessionID, title: run.automationName ?? "Automation", liveTitle: nil, workingDirectory: "", shell: "", command: nil,
+            state: isRunning ? .running : .exited, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
+            workspaceID: run.workspaceID ?? "", workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
+            projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: isRunning,
+            isSubscriptionAvailable: isRunning, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            rowKind: run.kind == "agent" ? .agent : .liveSession, rowSourceID: run.id, hasFinalRender: false)
+    }
+
+    /// The terminal session an attributed-agent chip opens on tap: overview-first, else synthesized, the
+    /// same shape as `runSession(for:overview:)`.
+    static func agentSession(for agent: TerminalServiceAutomationAgentSummary, overview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
+        if let session = overview?.sessions.first(where: { $0.id == agent.terminalSessionID }) { return session }
+        let workspace = agent.workspaceID.flatMap { id in overview?.workspaces.first { $0.id == id } }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        return SpacesDeviceTerminalSessionSummary(
+            id: agent.terminalSessionID, title: agent.title ?? "Agent", liveTitle: nil, workingDirectory: "", shell: "", command: nil,
+            state: agent.live ? .running : .exited, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
+            workspaceID: agent.workspaceID ?? "", workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
+            projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: agent.live,
+            isSubscriptionAvailable: agent.live, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .agent, rowSourceID: nil,
+            hasFinalRender: false)
+    }
+
     /// Parses the ISO8601 timestamps the wire summaries carry. `TerminalSessionTimestamp` is the same
     /// plain (non-fractional) formatter the daemon uses to produce them (see `AutomationWireSummary`).
     private static func date(_ iso: String?) -> Date? { iso.flatMap(TerminalSessionTimestamp.date(from:)) }
