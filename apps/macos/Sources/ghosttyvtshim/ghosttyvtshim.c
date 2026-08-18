@@ -328,6 +328,19 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
     if (handle == NULL) return false;
 
+    // ABI-generation probe: the upstream sync that introduced the current
+    // ghostty_terminal_new signature (columns/rows arguments, scrollback via
+    // ghostty_terminal_set) also removed ghostty_terminal_mode_get and
+    // ghostty_render_state_colors_get. Any library that still exports either
+    // symbol predates that sync and implements the old constructor ABI
+    // (by-value GhosttyTerminalOptions), so calling through the same-named
+    // symbol would be undefined behavior. Reject it before any call is made.
+    if (dlsym(handle, "ghostty_terminal_mode_get") != NULL ||
+        dlsym(handle, "ghostty_render_state_colors_get") != NULL) {
+        dlclose(handle);
+        return false;
+    }
+
     symbols->handle = handle;
     symbols->terminal_new = (GhosttyTerminalNewFn)dlsym(handle, "ghostty_terminal_new");
     symbols->terminal_free = (GhosttyTerminalFreeFn)dlsym(handle, "ghostty_terminal_free");
@@ -335,8 +348,6 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
     symbols->terminal_resize = (GhosttyTerminalResizeFn)dlsym(handle, "ghostty_terminal_resize");
     symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
-    // Optional: present in libghostty-vt builds that expose default-color configuration. Kept out
-    // of the required-symbol check below so an older library still loads (theming is skipped).
     symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
     symbols->paste_encode = (GhosttyPasteEncodeFn)dlsym(handle, "ghostty_paste_encode");
     symbols->key_encoder_new = (GhosttyKeyEncoderNewFn)dlsym(handle, "ghostty_key_encoder_new");
@@ -390,6 +401,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_scroll_viewport == NULL ||
         symbols->terminal_resize == NULL ||
         symbols->terminal_get == NULL ||
+        symbols->terminal_set == NULL ||
         symbols->paste_encode == NULL ||
         symbols->key_encoder_new == NULL ||
         symbols->key_encoder_free == NULL ||
@@ -492,11 +504,9 @@ static GhosttyResult spaces_ghostty_vt_terminal_mode_get(
 }
 
 // Applies the Spaces theme to a freshly created terminal's default colors via ghostty_terminal_set.
-// A no-op when the library predates the color-configuration API (terminal_set unresolved).
 static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
     if (session == NULL || theme == NULL) return;
     session->color_scheme = theme->is_dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT;
-    if (session->symbols.terminal_set == NULL) return;
     GhosttyColorRgb foreground = spaces_ghostty_vt_unpack_rgb(theme->foreground_rgb);
     GhosttyColorRgb background = spaces_ghostty_vt_unpack_rgb(theme->background_rgb);
     GhosttyColorRgb cursor = spaces_ghostty_vt_unpack_rgb(theme->cursor_rgb);
@@ -627,8 +637,7 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
     // requested byte limit must be applied explicitly (zero disables
     // scrollback entirely, matching the previous creation-options field).
     size_t scrollback_bytes = max_scrollback;
-    if (session->symbols.terminal_set == NULL ||
-        session->symbols.terminal_set(
+    if (session->symbols.terminal_set(
             session->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes
         ) != GHOSTTY_SUCCESS) {
         spaces_ghostty_vt_session_free(session);
@@ -659,7 +668,7 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
 }
 
 bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
-    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return false;
+    if (session == NULL || theme == NULL) return false;
     spaces_ghostty_vt_apply_theme(session, theme);
     return true;
 }
@@ -807,7 +816,7 @@ static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
 }
 
 bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
-    if (session == NULL || session->terminal == NULL || session->symbols.terminal_set == NULL) return false;
+    if (session == NULL || session->terminal == NULL) return false;
     GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
     // One userdata serves every callback, and callback options take the function pointer itself rather
     // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
@@ -2268,8 +2277,7 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         return false;
     }
     size_t reference_scrollback = 0;
-    if (session->symbols.terminal_set == NULL ||
-        session->symbols.terminal_set(
+    if (session->symbols.terminal_set(
             reference, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &reference_scrollback
         ) != GHOSTTY_SUCCESS) {
         session->symbols.terminal_free(reference);
