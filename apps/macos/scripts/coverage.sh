@@ -158,7 +158,8 @@ echo "Building SwiftPM tests with coverage..."
 
 echo "Running SwiftPM coverage tests..."
 # The mirror-surface suites (GhosttyMirrorGraphemeClusterTests, GhosttyMirrorLinkActivationTests,
-# GhosttyMirrorSurfaceMRUTests, GhosttyMirrorSurfacePresentationTests) drive a REAL mirror-owned
+# GhosttyMirrorSelectionAcrossFramesTests, GhosttyMirrorSurfaceMRUTests,
+# GhosttyMirrorSurfacePresentationTests) drive a REAL mirror-owned
 # ghostty app, and only one embedded ghostty app may be live per process
 # (GhosttyProcessAppRuntime.initializeOnce). Every test class in the package shares one
 # spacesPackageTests bundle, so a parallel worker process that ran any daemon-core suite first
@@ -166,7 +167,8 @@ echo "Running SwiftPM coverage tests..."
 # crash their worker only in full runs and take innocent tests down with the redistribution. They
 # are skipped here and run together in their own process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
-    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests --skip GhosttyMirrorSurfaceMRUTests \
+    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests \
+    --skip GhosttyMirrorSelectionAcrossFramesTests --skip GhosttyMirrorSurfaceMRUTests \
     --skip GhosttyMirrorSurfacePresentationTests \
     --skip AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut \
     --skip AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled \
@@ -261,7 +263,7 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
 else
     echo "Running mirror-surface coverage tests in their own process..."
     run_filtered_coverage_pass mirror-surface \
-        "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests"
+        "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSelectionAcrossFramesTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests"
     stage_profiles mirror-surface
 fi
 
