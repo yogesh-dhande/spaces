@@ -268,7 +268,12 @@ import ghosttyvtshim
 
         let replayed = try replay(bytes, columns: 80, rows: 24)
         defer { spaces_ghostty_vt_session_free(replayed) }
-        #expect(plainText(replayed).contains("Z"), "the base codepoint of a degenerate cluster must survive preamble replay")
+        // Match on unicode scalars: when the library caps the cluster below the shim's uint16_t limit,
+        // the replayed cell is the base plus the retained combining marks, which as a Swift grapheme
+        // cluster is not equal to "Z" even though the base codepoint survived.
+        #expect(
+            plainText(replayed).unicodeScalars.contains { $0 == "Z" },
+            "the base codepoint of a degenerate cluster must survive preamble replay")
         #expect(plainText(replayed).contains("ordinary trailing row"), "content after a degenerate cluster must survive")
     }
 
