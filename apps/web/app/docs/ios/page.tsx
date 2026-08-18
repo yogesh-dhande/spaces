@@ -93,7 +93,7 @@ export default function IOSDocsPage() {
           <li>• Pairing your phone to a Linux box works the same way, from the same Mac screen. The Mac only hands over the credential — once paired, your phone talks to that Linux daemon directly and the Mac is no longer involved.</li>
           <li>• If you&apos;d rather not go through a Mac at all, <code>spaces device pair</code> on any device prints a <code>spaces://pair</code> link you can open on your phone.</li>
           <li>• Once paired, your phone reconnects from the local network or over Tailscale — if you&apos;re away from home, keep Tailscale connected on your phone and the paired device and Spaces finds it automatically.</li>
-          <li>• The iOS app is $29/year, with a 7-day free trial. Spaces on Mac and Linux is free.</li>
+          <li>• The iOS app is $29.99/year, with a 7-day free trial. Spaces on Mac and Linux is free.</li>
         </ul>
       </article>
     </DocsShell>

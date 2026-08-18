@@ -224,7 +224,7 @@ const faqItems: FaqItem[] = [
     question: "How much does it cost?",
     answer: (
       <>
-        Spaces is free on Mac and Linux. The iOS companion app is $29/year,
+        Spaces is free on Mac and Linux. The iOS companion app is $29.99/year,
         with a 7-day free trial.
       </>
     ),
@@ -491,7 +491,7 @@ export default function HomePage() {
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
               <SpecItem label="Client" lines={["macOS", "iOS"]} />
               <SpecItem label="Daemon" lines={["macOS", "Linux"]} />
-              <SpecItem label="Price" lines={["Mac: Free", "iOS: $29/year"]} />
+              <SpecItem label="Price" lines={["Mac: Free", "iOS: $29.99/year"]} />
             </dl>
           </div>
 
