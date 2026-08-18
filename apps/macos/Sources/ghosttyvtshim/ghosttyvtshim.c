@@ -13,13 +13,12 @@
 #include <string.h>
 #include <unistd.h>
 
-typedef GhosttyResult (*GhosttyTerminalNewFn)(const GhosttyAllocator *, GhosttyTerminal *, GhosttyTerminalOptions);
+typedef GhosttyResult (*GhosttyTerminalNewFn)(const GhosttyAllocator *, GhosttyTerminal *, uint16_t, uint16_t);
 typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
 typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
 typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
 typedef GhosttyResult (*GhosttyTerminalResizeFn)(GhosttyTerminal, uint16_t, uint16_t, uint32_t, uint32_t);
 typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
-typedef GhosttyResult (*GhosttyTerminalModeGetFn)(GhosttyTerminal, GhosttyMode, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
 typedef GhosttyResult (*GhosttyPasteEncodeFn)(char *, size_t, bool, char *, size_t, size_t *);
 typedef GhosttyResult (*GhosttyKeyEncoderNewFn)(const GhosttyAllocator *, GhosttyKeyEncoder *);
@@ -57,7 +56,6 @@ typedef GhosttyResult (*GhosttyRenderStateNewFn)(const GhosttyAllocator *, Ghost
 typedef void (*GhosttyRenderStateFreeFn)(GhosttyRenderState);
 typedef GhosttyResult (*GhosttyRenderStateUpdateFn)(GhosttyRenderState, GhosttyTerminal);
 typedef GhosttyResult (*GhosttyRenderStateGetFn)(GhosttyRenderState, GhosttyRenderStateData, void *);
-typedef GhosttyResult (*GhosttyRenderStateColorsGetFn)(GhosttyRenderState, GhosttyRenderStateColors *);
 typedef GhosttyResult (*GhosttyRenderStateRowIteratorNewFn)(const GhosttyAllocator *, GhosttyRenderStateRowIterator *);
 typedef void (*GhosttyRenderStateRowIteratorFreeFn)(GhosttyRenderStateRowIterator);
 typedef bool (*GhosttyRenderStateRowIteratorNextFn)(GhosttyRenderStateRowIterator);
@@ -77,7 +75,6 @@ typedef struct {
     GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
     GhosttyTerminalResizeFn terminal_resize;
     GhosttyTerminalGetFn terminal_get;
-    GhosttyTerminalModeGetFn terminal_mode_get;
     GhosttyTerminalSetFn terminal_set;
     GhosttyPasteEncodeFn paste_encode;
     GhosttyKeyEncoderNewFn key_encoder_new;
@@ -110,7 +107,6 @@ typedef struct {
     GhosttyRenderStateFreeFn render_state_free;
     GhosttyRenderStateUpdateFn render_state_update;
     GhosttyRenderStateGetFn render_state_get;
-    GhosttyRenderStateColorsGetFn render_state_colors_get;
     GhosttyRenderStateRowIteratorNewFn row_iterator_new;
     GhosttyRenderStateRowIteratorFreeFn row_iterator_free;
     GhosttyRenderStateRowIteratorNextFn row_iterator_next;
@@ -332,6 +328,19 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
     if (handle == NULL) return false;
 
+    // ABI-generation probe: the upstream sync that introduced the current
+    // ghostty_terminal_new signature (columns/rows arguments, scrollback via
+    // ghostty_terminal_set) also removed ghostty_terminal_mode_get and
+    // ghostty_render_state_colors_get. Any library that still exports either
+    // symbol predates that sync and implements the old constructor ABI
+    // (by-value GhosttyTerminalOptions), so calling through the same-named
+    // symbol would be undefined behavior. Reject it before any call is made.
+    if (dlsym(handle, "ghostty_terminal_mode_get") != NULL ||
+        dlsym(handle, "ghostty_render_state_colors_get") != NULL) {
+        dlclose(handle);
+        return false;
+    }
+
     symbols->handle = handle;
     symbols->terminal_new = (GhosttyTerminalNewFn)dlsym(handle, "ghostty_terminal_new");
     symbols->terminal_free = (GhosttyTerminalFreeFn)dlsym(handle, "ghostty_terminal_free");
@@ -339,9 +348,6 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
     symbols->terminal_resize = (GhosttyTerminalResizeFn)dlsym(handle, "ghostty_terminal_resize");
     symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
-    symbols->terminal_mode_get = (GhosttyTerminalModeGetFn)dlsym(handle, "ghostty_terminal_mode_get");
-    // Optional: present in libghostty-vt builds that expose default-color configuration. Kept out
-    // of the required-symbol check below so an older library still loads (theming is skipped).
     symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
     symbols->paste_encode = (GhosttyPasteEncodeFn)dlsym(handle, "ghostty_paste_encode");
     symbols->key_encoder_new = (GhosttyKeyEncoderNewFn)dlsym(handle, "ghostty_key_encoder_new");
@@ -377,7 +383,6 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->render_state_free = (GhosttyRenderStateFreeFn)dlsym(handle, "ghostty_render_state_free");
     symbols->render_state_update = (GhosttyRenderStateUpdateFn)dlsym(handle, "ghostty_render_state_update");
     symbols->render_state_get = (GhosttyRenderStateGetFn)dlsym(handle, "ghostty_render_state_get");
-    symbols->render_state_colors_get = (GhosttyRenderStateColorsGetFn)dlsym(handle, "ghostty_render_state_colors_get");
     symbols->row_iterator_new = (GhosttyRenderStateRowIteratorNewFn)dlsym(handle, "ghostty_render_state_row_iterator_new");
     symbols->row_iterator_free = (GhosttyRenderStateRowIteratorFreeFn)dlsym(handle, "ghostty_render_state_row_iterator_free");
     symbols->row_iterator_next = (GhosttyRenderStateRowIteratorNextFn)dlsym(handle, "ghostty_render_state_row_iterator_next");
@@ -396,7 +401,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_scroll_viewport == NULL ||
         symbols->terminal_resize == NULL ||
         symbols->terminal_get == NULL ||
-        symbols->terminal_mode_get == NULL ||
+        symbols->terminal_set == NULL ||
         symbols->paste_encode == NULL ||
         symbols->key_encoder_new == NULL ||
         symbols->key_encoder_free == NULL ||
@@ -428,7 +433,6 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->render_state_free == NULL ||
         symbols->render_state_update == NULL ||
         symbols->render_state_get == NULL ||
-        symbols->render_state_colors_get == NULL ||
         symbols->row_iterator_new == NULL ||
         symbols->row_iterator_free == NULL ||
         symbols->row_iterator_next == NULL ||
@@ -488,12 +492,21 @@ static void spaces_ghostty_vt_build_palette_256(GhosttyColorRgb out[256], const 
     }
 }
 
+// Reads a terminal mode through ghostty_terminal_get, replacing the removed
+// ghostty_terminal_mode_get entry point.
+static GhosttyResult spaces_ghostty_vt_terminal_mode_get(
+    const SpacesGhosttyVtSymbols *symbols, GhosttyTerminal terminal, GhosttyMode mode, bool *value
+) {
+    GhosttyTerminalModeConfig config = {.mode = mode, .value = false};
+    GhosttyResult result = symbols->terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config);
+    if (result == GHOSTTY_SUCCESS) *value = config.value;
+    return result;
+}
+
 // Applies the Spaces theme to a freshly created terminal's default colors via ghostty_terminal_set.
-// A no-op when the library predates the color-configuration API (terminal_set unresolved).
 static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
     if (session == NULL || theme == NULL) return;
     session->color_scheme = theme->is_dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT;
-    if (session->symbols.terminal_set == NULL) return;
     GhosttyColorRgb foreground = spaces_ghostty_vt_unpack_rgb(theme->foreground_rgb);
     GhosttyColorRgb background = spaces_ghostty_vt_unpack_rgb(theme->background_rgb);
     GhosttyColorRgb cursor = spaces_ghostty_vt_unpack_rgb(theme->cursor_rgb);
@@ -615,12 +628,18 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
         return NULL;
     }
 
-    GhosttyTerminalOptions terminal_options = {
-        .cols = columns,
-        .rows = rows,
-        .max_scrollback = max_scrollback,
-    };
-    if (session->symbols.terminal_new(NULL, &session->terminal, terminal_options) != GHOSTTY_SUCCESS) {
+    if (session->symbols.terminal_new(NULL, &session->terminal, columns, rows) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
+    // ghostty_terminal_new defaults to a small scrollback cap, so the
+    // requested byte limit must be applied explicitly (zero disables
+    // scrollback entirely, matching the previous creation-options field).
+    size_t scrollback_bytes = max_scrollback;
+    if (session->symbols.terminal_set(
+            session->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes
+        ) != GHOSTTY_SUCCESS) {
         spaces_ghostty_vt_session_free(session);
         return NULL;
     }
@@ -649,7 +668,7 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
 }
 
 bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
-    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return false;
+    if (session == NULL || theme == NULL) return false;
     spaces_ghostty_vt_apply_theme(session, theme);
     return true;
 }
@@ -797,7 +816,7 @@ static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
 }
 
 bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
-    if (session == NULL || session->terminal == NULL || session->symbols.terminal_set == NULL) return false;
+    if (session == NULL || session->terminal == NULL) return false;
     GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
     // One userdata serves every callback, and callback options take the function pointer itself rather
     // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
@@ -871,8 +890,8 @@ bool spaces_ghostty_vt_session_write(SpacesGhosttyVtSession *session, const uint
 
 bool spaces_ghostty_vt_session_resize(SpacesGhosttyVtSession *session, uint16_t columns, uint16_t rows) {
     if (session == NULL || session->terminal == NULL || columns == 0 || rows == 0) return false;
-    // Session creation leaves the pixel cell metrics unset (GhosttyTerminalOptions carries only
-    // cols/rows/max_scrollback), so the in-place resize keeps that same convention and passes zero
+    // Session creation leaves the pixel cell metrics unset (ghostty_terminal_new takes only
+    // cols/rows), so the in-place resize keeps that same convention and passes zero
     // pixel metrics. Only the cell grid is reflowed; image-protocol pixel geometry stays unset.
     if (session->symbols.terminal_resize(session->terminal, columns, rows, 0, 0) != GHOSTTY_SUCCESS) return false;
     session->columns = columns;
@@ -895,7 +914,7 @@ bool spaces_ghostty_vt_session_encode_paste(
     if (input == NULL) return false;
 
     bool bracketed = false;
-    if (session->symbols.terminal_mode_get(session->terminal, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed) != GHOSTTY_SUCCESS) {
+    if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed) != GHOSTTY_SUCCESS) {
         return false;
     }
 
@@ -1196,7 +1215,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     }
 
     GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
-    if (session->symbols.render_state_colors_get(session->render_state, &colors) != GHOSTTY_SUCCESS) {
+    if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors) != GHOSTTY_SUCCESS) {
         return false;
     }
 
@@ -2254,12 +2273,14 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
 
     // Fresh reference terminal at the same size: the diff baseline for every mode below.
     GhosttyTerminal reference = NULL;
-    GhosttyTerminalOptions reference_options = {
-        .cols = columns,
-        .rows = rows,
-        .max_scrollback = 0,
-    };
-    if (session->symbols.terminal_new(NULL, &reference, reference_options) != GHOSTTY_SUCCESS) {
+    if (session->symbols.terminal_new(NULL, &reference, columns, rows) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    size_t reference_scrollback = 0;
+    if (session->symbols.terminal_set(
+            reference, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &reference_scrollback
+        ) != GHOSTTY_SUCCESS) {
+        session->symbols.terminal_free(reference);
         return false;
     }
 
@@ -2272,8 +2293,8 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         GhosttyMode mode = ghostty_mode_new(entry.value, entry.ansi);
         bool live_set = false;
         bool ref_set = false;
-        if (session->symbols.terminal_mode_get(session->terminal, mode, &live_set) != GHOSTTY_SUCCESS) continue;
-        if (session->symbols.terminal_mode_get(reference, mode, &ref_set) != GHOSTTY_SUCCESS) continue;
+        if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, mode, &live_set) != GHOSTTY_SUCCESS) continue;
+        if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, reference, mode, &ref_set) != GHOSTTY_SUCCESS) continue;
         if (live_set == ref_set) continue;
         spaces_ghostty_vt_preamble_append(
             &buf, "\x1b[%s%u%c", entry.ansi ? "" : "?", (unsigned)entry.value, live_set ? 'h' : 'l');
@@ -2329,7 +2350,7 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
     bool origin_mode = false;
     uint16_t origin_row = 0;
     uint16_t origin_column = 0;
-    if (session->symbols.terminal_mode_get(session->terminal, ghostty_mode_new(6, false), &origin_mode) != GHOSTTY_SUCCESS) {
+    if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, ghostty_mode_new(6, false), &origin_mode) != GHOSTTY_SUCCESS) {
         buf.ok = false;
     } else if (origin_mode && !spaces_ghostty_vt_measure_cursor_origin(
                    session, reference, replay_root_state, replay_root_state_len, &origin_row, &origin_column)) {
@@ -2371,7 +2392,7 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
 bool spaces_ghostty_vt_session_mode_is_set(SpacesGhosttyVtSession *session, uint16_t mode_value, bool ansi, bool *out_set) {
     if (session == NULL || session->terminal == NULL || out_set == NULL) return false;
     bool value = false;
-    if (session->symbols.terminal_mode_get(session->terminal, ghostty_mode_new(mode_value, ansi), &value) != GHOSTTY_SUCCESS) {
+    if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, ghostty_mode_new(mode_value, ansi), &value) != GHOSTTY_SUCCESS) {
         return false;
     }
     *out_set = value;

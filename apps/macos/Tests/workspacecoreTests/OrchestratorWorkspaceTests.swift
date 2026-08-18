@@ -1155,6 +1155,65 @@ extension OrchestratorTests {
         XCTAssertEqual(project2Workspaces.count, 2)
     }
 
+    /// `git worktree add` (inside `createWorkspaceUnlocked`) lands the worktree on disk before the create's
+    /// own `store.upsert` runs, and `WorktreeDiscoveryService` scans on writes under `.git/worktrees/`, so a
+    /// scan can observe the worktree while the create that is provisioning it still holds the project gate.
+    /// Claiming the same gate inside the scan's import loop means that race rejects the scan's import
+    /// instead of racing it, so the in-flight create is the one that inserts the row.
+    func testScanSkipsImportWhileProjectLifecycleLockIsHeldAndImportsAfterRelease() throws {
+        let repo = try makeTempGitRepo(name: "scan-import-busy-gate")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        // Mirrors the transient orchestrator `WorktreeDiscoveryService.scan` builds per invocation: a
+        // separate instance sharing the same store and the same process-wide lifecycle gates.
+        let scanOrchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-race", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-race")
+
+        let createdWhileHeld = try orchestrator.withProjectLifecycleLock(projectID: project.id) {
+            try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        }
+        XCTAssertTrue(createdWhileHeld.isEmpty, "the busy gate is treated as the in-flight create owning this worktree, not a failure")
+        XCTAssertNil(try store.workspace(dir: worktree.path), "nothing is imported while the create that owns this worktree is still in flight")
+
+        let createdAfterRelease = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertEqual(createdAfterRelease.count, 1)
+        XCTAssertNotNil(try store.workspace(dir: worktree.path), "a rerun once the gate is free imports the worktree normally")
+    }
+
+    /// The scan's retire call claims the project gate through `archiveWorkspace`, so it can lose the same
+    /// race the import loop can: a scan observing a worktree removal while some other lifecycle operation
+    /// holds the project key must skip that retire rather than aborting the whole scan (which would also
+    /// skip every remaining workspace and project in the same pass).
+    func testScanSkipsRetireWhileProjectLifecycleLockIsHeldAndRetiresAfterRelease() throws {
+        let repo = try makeTempGitRepo(name: "scan-retire-busy-gate")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let scanOrchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let removedWorktree = root.appendingPathComponent("feature-removed-busy", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: removedWorktree.path, branch: "feature-removed-busy")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: removedWorktree.path)
+        try client.removeWorktree(path: repo.path, worktreePath: removedWorktree.path)
+
+        let createdWhileHeld = try orchestrator.withProjectLifecycleLock(projectID: project.id) {
+            try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        }
+        XCTAssertTrue(createdWhileHeld.isEmpty)
+        XCTAssertNotNil(try store.workspace(id: workspace.id), "the retire is skipped, not run, while the project gate is held")
+
+        let createdAfterRelease = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(createdAfterRelease.isEmpty)
+        XCTAssertNil(try store.workspace(id: workspace.id), "a rerun once the gate is free retires the workspace normally")
+    }
+
     // Tests createWorkspace seeds per-workspace process IDs so multiple workspaces can inherit the same project template without collisions.
     func testCreateWorkspaceSeedsUniqueProcessIDsPerWorkspace() throws {
         let repo = try makeTempGitRepo(name: "unique-process-ids")

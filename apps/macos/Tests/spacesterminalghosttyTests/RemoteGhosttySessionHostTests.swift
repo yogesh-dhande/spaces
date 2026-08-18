@@ -640,7 +640,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
         mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber, modifierFlags: [.command]))
 
-        XCTAssertEqual(forwarded.map(\.pressed), [true, false], "an unmodified press must still forward its release even if command is held at release")
+        XCTAssertEqual(
+            forwarded.map(\.pressed), [true, false], "an unmodified press must still forward its release even if command is held at release")
     }
 
     /// The release of a cmd+click press stays suppressed even if command has been released by then: the
@@ -3170,8 +3171,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // Only the first control request fails; every later one would succeed — proving a later send was
         // never attempted, not merely that it also failed.
         let sender = ScriptedControlRequestSender(
-            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true,
-            holdFirstControlRequest: true)
+            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true, holdFirstControlRequest: true)
         let host = RemoteGhosttySessionHost(
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
             inputFailureHandler: { _ in true })

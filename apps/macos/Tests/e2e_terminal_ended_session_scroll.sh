@@ -287,7 +287,7 @@ early_line_reached=0
 last_text=""
 for _ in $(seq 1 40); do
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-    scroll-application-window --executable-name SpacesApp --normalized-x 0.5 --normalized-y 0.5 --delta-y 120 --repetitions 8 >/dev/null
+    scroll-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.5 --normalized-y 0.5 --delta-y 120 --repetitions 8 >/dev/null
   dump_terminal_state
   last_text="$(dump_visible_text)"
   [[ -n "$last_text" ]] || continue

@@ -28,6 +28,18 @@ import Foundation
     /// regardless of how many sessions the user opens. Nothing releases the final mirror before
     /// process exit, and nothing should: releasing it is the blocking call this design exists to
     /// avoid, and one parked mirror is the bound.
+    ///
+    /// The shared surface also keeps Ghostty's surface-local mouse-gesture state (multi-click
+    /// count and click pin) across handovers, because nothing resets it on a rebind. Taps are
+    /// forwarded into the surface as link probes, so two in-terminal taps at nearly the same spot
+    /// within the multi-click window register as a double click and leave a word highlight that
+    /// persists until the next tap. That is also the one way a selection crosses sessions: a
+    /// handover after a double tap restores the word highlight over the next session's frames at
+    /// the same coordinates, and a handover between the two taps hands the first tap's click
+    /// state to the second session. No drag path exists on iOS, so no other selection shape can
+    /// arise or carry. Accepted risk: reaching it takes double-tap timing, the highlight is
+    /// cosmetic, and the next tap clears it, while clearing the gesture would need a dedicated
+    /// fork entry point run on every handover.
     @MainActor final class GhosttySharedTerminalMirror {
         static let shared = GhosttySharedTerminalMirror()
 

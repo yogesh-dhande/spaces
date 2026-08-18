@@ -63,6 +63,7 @@ private struct ScrollApplicationWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "scroll-application-window")
 
     @Option(name: .long) var executableName: String
+    @Option(name: .long) var applicationPid: Int32?
     @Option(name: .long) var windowTitleContains: String?
     @Option(name: .long) var normalizedX = 0.5
     @Option(name: .long) var normalizedY = 0.5
@@ -74,7 +75,8 @@ private struct ScrollApplicationWindowCommand: ParsableCommand {
             throw ValidationError("Normalized coordinates must be between 0 and 1.")
         }
         guard repetitions > 0 else { throw ValidationError("Repetitions must be greater than zero.") }
-        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+        let target = try targetApplicationWindow(
+            executableName: executableName, applicationPID: applicationPid, windowTitleContains: windowTitleContains)
 
         target.application.activate(options: [])
         axPerformAction(target.window, action: kAXRaiseAction as String)
@@ -94,6 +96,7 @@ private struct ClickApplicationWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "click-application-window")
 
     @Option(name: .long) var executableName: String
+    @Option(name: .long) var applicationPid: Int32?
     @Option(name: .long) var windowTitleContains: String?
     @Option(name: .long) var normalizedX = 0.5
     @Option(name: .long) var normalizedY = 0.5
@@ -102,7 +105,8 @@ private struct ClickApplicationWindowCommand: ParsableCommand {
         guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
             throw ValidationError("Normalized coordinates must be between 0 and 1.")
         }
-        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+        let target = try targetApplicationWindow(
+            executableName: executableName, applicationPID: applicationPid, windowTitleContains: windowTitleContains)
 
         target.application.activate(options: [])
         axPerformAction(target.window, action: kAXRaiseAction as String)
@@ -122,6 +126,7 @@ private struct TypeApplicationWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "type-application-window")
 
     @Option(name: .long) var executableName: String
+    @Option(name: .long) var applicationPid: Int32?
     @Option(name: .long) var windowTitleContains: String?
     @Option(name: .long) var normalizedX = 0.5
     @Option(name: .long) var normalizedY = 0.5
@@ -135,7 +140,8 @@ private struct TypeApplicationWindowCommand: ParsableCommand {
         }
         let inputText = appendNewline ? "\(text)\n" : text
         guard !inputText.isEmpty else { throw ValidationError("Missing text.") }
-        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+        let target = try targetApplicationWindow(
+            executableName: executableName, applicationPID: applicationPid, windowTitleContains: windowTitleContains)
 
         target.application.activate(options: [])
         axPerformAction(target.window, action: kAXRaiseAction as String)
@@ -157,6 +163,7 @@ private struct DragApplicationWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "drag-application-window")
 
     @Option(name: .long) var executableName: String
+    @Option(name: .long) var applicationPid: Int32?
     @Option(name: .long) var windowTitleContains: String?
     @Option(name: .long) var startNormalizedX = 0.1
     @Option(name: .long) var startNormalizedY = 0.2
@@ -171,7 +178,8 @@ private struct DragApplicationWindowCommand: ParsableCommand {
         else { throw ValidationError("Normalized coordinates must be between 0 and 1.") }
         guard durationMS >= 0 else { throw ValidationError("Duration must be non-negative.") }
         guard steps > 0 else { throw ValidationError("Steps must be greater than zero.") }
-        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+        let target = try targetApplicationWindow(
+            executableName: executableName, applicationPID: applicationPid, windowTitleContains: windowTitleContains)
 
         target.application.activate(options: [])
         axPerformAction(target.window, action: kAXRaiseAction as String)
@@ -3495,11 +3503,27 @@ private func axCGSizeAttribute(_ element: AXUIElement, attribute: String) -> CGS
     return size
 }
 
-private func targetApplicationWindow(executableName: String, windowTitleContains: String?) throws -> TargetApplicationWindow {
+// When applicationPID is provided, target that exact running instance instead of matching by executable
+// name: multiple Spaces profiles (the installed app plus dev worktrees) can all run executables named
+// SpacesApp, and synthetic events must land on the instance the harness itself launched.
+private func targetApplicationWindow(executableName: String, applicationPID: Int32?, windowTitleContains: String?) throws
+    -> TargetApplicationWindow
+{
     let executableName = executableName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !executableName.isEmpty else { throw ValidationError("Missing executable name.") }
     let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let applications = NSWorkspace.shared.runningApplications.filter { $0.executableURL?.lastPathComponent == executableName }
+    let applications: [NSRunningApplication]
+    if let applicationPID {
+        guard let application = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == applicationPID }) else {
+            throw ValidationError("Application not running: pid \(applicationPID)")
+        }
+        guard application.executableURL?.lastPathComponent == executableName else {
+            throw ValidationError("Application with pid \(applicationPID) is not \(executableName)")
+        }
+        applications = [application]
+    } else {
+        applications = NSWorkspace.shared.runningApplications.filter { $0.executableURL?.lastPathComponent == executableName }
+    }
     guard !applications.isEmpty else { throw ValidationError("Application not running: executable-name \(executableName)") }
     for application in applications {
         let appElement = AXUIElementCreateApplication(application.processIdentifier)

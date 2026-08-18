@@ -1273,6 +1273,17 @@
         /// outlive it, so a test can tell a pane that kept its surface from one whose surface was
         /// freed and rebuilt underneath it.
         var debugHasSurfaceSelection: Bool { mirrorSurface().map { ghostty_surface_has_selection($0) } ?? false }
+        /// Text of the live surface's selection, so a test can assert a selection survived a frame
+        /// apply at the same cells rather than merely existing. Nil with no mirror or no selection.
+        var debugSurfaceSelectionText: String? {
+            guard let surface = mirrorSurface(), ghostty_surface_has_selection(surface) else { return nil }
+            var text = ghostty_text_s()
+            guard ghostty_surface_read_selection(surface, &text) else { return nil }
+            defer { ghostty_surface_free_text(surface, &text) }
+            guard let pointer = text.text, text.text_len > 0 else { return nil }
+            let buffer = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self), count: Int(text.text_len))
+            return String(bytes: buffer, encoding: .utf8)
+        }
         var debugSearchFieldHasFocus: Bool { searchFieldHasFocus }
         var debugSearchStatusVisible: Bool { !searchStatusLabel.isHidden }
         var debugSearchUpBindingAction: String { Self.searchUpBindingAction }
