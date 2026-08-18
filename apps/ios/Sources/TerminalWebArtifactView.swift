@@ -2,27 +2,13 @@ import SwiftUI
 import UIKit
 import WebKit
 
-/// What a `TerminalWebArtifactView` should load. The three modes share one isolated web view: a local
-/// HTML artifact file, an external web page, or a rendered HTML string (used by the Markdown viewer).
+/// What a `TerminalWebArtifactView` should load. The two modes share one isolated web view: a local HTML
+/// artifact file, or a rendered HTML string (used by the Markdown viewer).
 enum TerminalWebArtifactLoad: Equatable {
     /// A local HTML artifact file. Read access is scoped to the single file (see `load(on:)`).
     case fileURL(URL)
-    /// An external web page (a resolved `.webPage` link that has no previewable artifact).
-    case request(URL)
     /// A self-contained rendered HTML document string with no external references.
     case htmlString(String)
-
-    /// Back/forward swipe navigation only makes sense for a real multi-page web session, not a single
-    /// artifact file or a one-shot rendered document.
-    var allowsBackForwardNavigation: Bool {
-        if case .request = self { return true }
-        return false
-    }
-
-    var allowsNetworkLoads: Bool {
-        if case .request = self { return true }
-        return false
-    }
 }
 
 enum TerminalWebArtifactNetworkPolicy {
@@ -64,12 +50,7 @@ enum TerminalWebArtifactNetworkPolicy {
         ]
         """
 
-    static func shouldBlockNetworkLoad(for load: TerminalWebArtifactLoad, url: URL) -> Bool {
-        shouldBlockNetworkLoad(networkLoadsAllowed: load.allowsNetworkLoads, url: url)
-    }
-
-    static func shouldBlockNetworkLoad(networkLoadsAllowed: Bool, url: URL) -> Bool {
-        guard !networkLoadsAllowed else { return false }
+    static func shouldBlockNetworkLoad(url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https" || scheme == "ws" || scheme == "wss"
     }
@@ -86,10 +67,10 @@ enum TerminalWebArtifactNetworkPolicy {
     }
 }
 
-/// Isolated `WKWebView` host for HTML artifacts and external web pages. Unlike the browser-sessions
-/// feature (which deliberately persists cookies/storage), this view must never leak or reuse browsing
-/// state, so it uses a fresh non-persistent data store per presentation. Adds a thin progress bar while
-/// loading and a compact failure state with Retry on navigation error.
+/// Isolated `WKWebView` host for HTML artifacts. Unlike the browser-sessions feature (which deliberately
+/// persists cookies/storage), this view must never leak or reuse browsing state, so it uses a fresh
+/// non-persistent data store per presentation. Adds a thin progress bar while loading and a compact
+/// failure state with Retry on navigation error.
 struct TerminalWebArtifactView: View {
     let load: TerminalWebArtifactLoad
 
@@ -148,7 +129,6 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         // browser-sessions feature or leak state between one preview and the next.
         configuration.websiteDataStore = .nonPersistent()
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.allowsBackForwardNavigationGestures = load.allowsBackForwardNavigation
         webView.navigationDelegate = context.coordinator
         context.coordinator.attach(to: webView, load: load)
         return webView
@@ -159,7 +139,6 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         private let model: TerminalWebArtifactViewModel
         private var loadedDescription: String?
-        private var activeLoadAllowsNetwork = false
         private var loadTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
@@ -188,12 +167,11 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
 
         private func perform(_ load: TerminalWebArtifactLoad, on webView: WKWebView) {
             let description = Self.identity(for: load)
-            activeLoadAllowsNetwork = load.allowsNetworkLoads
             loadTask?.cancel()
             loadTask = Task { @MainActor [weak self, weak webView] in
                 guard let self, let webView else { return }
                 do {
-                    try await self.configureNetworkPolicy(for: load, on: webView)
+                    try await self.configureNetworkPolicy(on: webView)
                     try Task.checkCancellation()
                     guard self.loadedDescription == description else { return }
                     self.performConfiguredLoad(load, on: webView)
@@ -201,12 +179,10 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
             }
         }
 
-        private func configureNetworkPolicy(for load: TerminalWebArtifactLoad, on webView: WKWebView) async throws {
+        /// Every load mode is a local artifact file or a self-contained rendered HTML string, so the
+        /// network-block rule list is installed unconditionally rather than gated per load.
+        private func configureNetworkPolicy(on webView: WKWebView) async throws {
             let userContentController = webView.configuration.userContentController
-            guard !load.allowsNetworkLoads else {
-                userContentController.removeAllContentRuleLists()
-                return
-            }
             let ruleList = try await TerminalWebArtifactNetworkPolicy.makeNetworkBlockContentRuleList()
             try Task.checkCancellation()
             userContentController.removeAllContentRuleLists()
@@ -220,7 +196,6 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
                 // the HTML is intentionally unreachable. Terminal HTML artifacts are treated as standalone
                 // documents; loading a whole directory to satisfy relative asset refs is out of scope.
                 webView.loadFileURL(url, allowingReadAccessTo: url)
-            case .request(let url): webView.load(URLRequest(url: url))
             case .htmlString(let html): webView.loadHTMLString(html, baseURL: nil)
             }
         }
@@ -228,7 +203,6 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         private static func identity(for load: TerminalWebArtifactLoad) -> String {
             switch load {
             case .fileURL(let url): return "file:\(url.absoluteString)"
-            case .request(let url): return "request:\(url.absoluteString)"
             case .htmlString(let html): return "html:\(html.hashValue)"
             }
         }
@@ -254,9 +228,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
             _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
         ) {
-            if let url = navigationAction.request.url,
-                TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(networkLoadsAllowed: activeLoadAllowsNetwork, url: url)
-            {
+            if let url = navigationAction.request.url, TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(url: url) {
                 decisionHandler(.cancel)
                 return
             }

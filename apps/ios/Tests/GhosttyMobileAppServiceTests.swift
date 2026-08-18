@@ -1410,7 +1410,7 @@
             XCTAssertTrue(didAttachAfterAuthentication, "Expected restarting after an authentication failure to open a fresh stream.")
         }
 
-        func testOpenTerminalLinkShowsWebPagePreviewForNonMediaExternalURL() async throws {
+        func testOpenTerminalLinkShowsSafariLinkForNonMediaExternalURL() async throws {
             let settings = settings()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 XCTAssertEqual(request.commandName, "resolveTerminalLink")
@@ -1426,9 +1426,9 @@
 
             await model.openTerminalLink("https://example.com/docs")
 
-            let preview = try XCTUnwrap(model.linkPreview)
-            XCTAssertEqual(preview.content, .webPage(URL(string: "https://example.com/docs")!))
-            XCTAssertNil(preview.kind)
+            let safariLink = try XCTUnwrap(model.safariLink)
+            XCTAssertEqual(safariLink.url, URL(string: "https://example.com/docs")!)
+            XCTAssertNil(model.linkPreview, "a plain web page must not also set the isolated-preview state")
             XCTAssertNil(model.linkPreviewErrorMessage)
         }
 
@@ -1454,7 +1454,7 @@
             await model.openTerminalLink(spacedPath)
 
             XCTAssertEqual(resolvedLinks, [spacedPath])
-            XCTAssertEqual(model.linkPreview?.content, .webPage(URL(string: "https://example.com/docs")!))
+            XCTAssertEqual(model.safariLink?.url, URL(string: "https://example.com/docs")!)
         }
 
         func testOpenTerminalLinkDownloadsExternalMediaPreview() async throws {
@@ -3147,30 +3147,26 @@
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
         }
 
-        func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
+        /// An iOS tap never drives the remote application's mouse (#465): a tap that misses a link only
+        /// focuses the keyboard, whether or not the session's own terminal is tracking the mouse.
+        func testRemoteTerminalHostViewTapNeverSendsMouseClickEvenWhenMouseCaptured() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugTapLinkHandlerForTesting = { _ in false }
             hostView.debugMouseCapturedForTesting = true
-            var sentButtons: [(button: UInt8, pressed: Bool)] = []
-            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
 
-            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .sentClick)
-
-            XCTAssertEqual(sentButtons.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
-            XCTAssertEqual(sentButtons.map(\.pressed), [true, false])
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
 
             hostView.debugMouseCapturedForTesting = false
-            sentButtons.removeAll()
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
-            XCTAssertTrue(sentButtons.isEmpty)
         }
 
         /// A tap on a URL opens the link on the phone even while the session's application is tracking
-        /// the mouse, and that tap never reaches the application: on a phone a URL tap means "read this
-        /// link here", and the application keeps every tap that does not land on a link.
-        func testRemoteTerminalHostViewTapOnLinkOpensLocallyInsteadOfClickingTheTrackingApplication() {
+        /// the mouse, and that tap never reaches the application: iOS taps never drive the remote
+        /// application's mouse (#465), so every tap either opens a link locally or only focuses the
+        /// keyboard.
+        func testRemoteTerminalHostViewTapOnLinkOpensLocallyWhileOtherTapsOnlyFocus() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
@@ -3180,15 +3176,12 @@
                 probedPoints.append(point)
                 return point.y < 100
             }
-            var sentButtons: [(button: UInt8, pressed: Bool)] = []
-            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
 
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink)
             XCTAssertEqual(probedPoints, [CGPoint(x: 12, y: 18)])
-            XCTAssertTrue(sentButtons.isEmpty, "a tap that opened a link must not also click the application")
 
-            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .sentClick)
-            XCTAssertEqual(sentButtons.map(\.pressed), [true, false], "a tap off a link still drives the application")
+            XCTAssertEqual(
+                hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .focused, "a tap off a link only focuses the keyboard")
         }
 
         /// While the phone shows a frame narrower than the host's grid (every frame between taking
