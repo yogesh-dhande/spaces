@@ -729,6 +729,46 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugRenderFrameApplyCount, 2)
     }
 
+    /// `clearSharedSelectionIfNeeded` runs before any window/surface setup, so it is reachable on a bare
+    /// view with no window at all: `suppressesFocusOnlyMousePress` only suppresses when there is a window
+    /// that is not yet key, and `focusWindow()` safely no-ops on a nil `window`.
+    @MainActor func testMirrorClearsSharedSelectionOnPlainLeftClickAfterAppliedSelection() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
+        var clearCount = 0
+        mirrorView.onClearSelection = { clearCount += 1 }
+        let selection = GhosttyTerminalSelectionRange(
+            startColumn: 0, startRow: 0, endColumn: 3, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", selection: selection))
+        mirrorView.update(frame: frame, renderStateKey: "snapshot=5x1")
+
+        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: 0))
+
+        XCTAssertEqual(clearCount, 1)
+    }
+
+    /// Shift is the local escape hatch for extending a selection, so a shift-click must never clear it.
+    @MainActor func testMirrorDoesNotClearSharedSelectionOnShiftClick() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "mirror-shift-click-preserves-shared-selection", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
+        var clearCount = 0
+        mirrorView.onClearSelection = { clearCount += 1 }
+        let selection = GhosttyTerminalSelectionRange(
+            startColumn: 0, startRow: 0, endColumn: 3, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", selection: selection))
+        mirrorView.update(frame: frame, renderStateKey: "snapshot=5x1")
+
+        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: 0, modifierFlags: [.shift]))
+
+        XCTAssertEqual(clearCount, 0)
+    }
+
     @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-actions", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
@@ -3328,9 +3368,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
     }
 
-    private func snapshot(text: String, mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset)
-        -> GhosttyTerminalSnapshot
-    {
+    private func snapshot(
+        text: String, mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset,
+        selection: GhosttyTerminalSelectionRange? = nil
+    ) -> GhosttyTerminalSnapshot {
         let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let columns = rows.map(\.count).max() ?? 0
         let paddedRows = rows.map { row in row.padding(toLength: columns, withPad: " ", startingAt: 0) }
@@ -3341,7 +3382,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
+            defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+            selection: selection)
     }
 
     private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {

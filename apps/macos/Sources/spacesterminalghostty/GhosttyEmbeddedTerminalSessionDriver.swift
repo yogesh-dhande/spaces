@@ -585,6 +585,36 @@
             return true
         }
 
+        /// Sets the surface's selection from screen-space coordinates (row 0 is the oldest retained
+        /// scrollback row). Ghostty clamps out-of-range coordinates to the terminal's current extent
+        /// rather than rejecting them, so this only fails when the terminal has no rows at all.
+        @discardableResult func setSelectionAbsolute(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, rectangle: Bool)
+            -> Bool
+        {
+            guard let surface else { return false }
+            let didSet = ghostty_surface_set_selection_absolute(surface, startColumn, startRow, endColumn, endRow, rectangle)
+            requestSurfaceRefresh()
+            return didSet
+        }
+
+        /// Clears the surface's selection. Never triggers a clipboard write.
+        func clearSelection() {
+            guard let surface else { return }
+            ghostty_surface_clear_selection(surface)
+            requestSurfaceRefresh()
+        }
+
+        /// The text of the surface's current selection, or nil when there is none.
+        func readSelectionText() -> String? {
+            guard let surface, ghostty_surface_has_selection(surface) else { return nil }
+            var text = ghostty_text_s()
+            guard ghostty_surface_read_selection(surface, &text) else { return nil }
+            defer { ghostty_surface_free_text(surface, &text) }
+            guard let pointer = text.text, text.text_len > 0 else { return "" }
+            let buffer = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self), count: Int(text.text_len))
+            return String(bytes: buffer, encoding: .utf8)
+        }
+
         @discardableResult func performBindingAction(_ action: String) -> Bool {
             guard let surface else { return false }
             let performed = action.withCString { pointer in ghostty_surface_binding_action(surface, pointer, UInt(action.lengthOfBytes(using: .utf8)))

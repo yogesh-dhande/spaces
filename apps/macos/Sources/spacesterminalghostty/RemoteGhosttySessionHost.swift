@@ -241,6 +241,10 @@
             terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
                 self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
+            terminalView.onClearSelection = { [weak self] in self?.sendRemoteClearSelection() }
+            terminalView.onSetSelection = { [weak self] startColumn, startRow, endColumn, endRow, isRectangle in
+                self?.sendRemoteSetSelection(startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
+            }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
             if let container, terminalView.superview !== container {
@@ -366,6 +370,41 @@
 
         public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
+        /// Reads the terminal's current shared selection via `readSelectionText` and writes it to the
+        /// pasteboard on success. Not owner-gated, matching the daemon's command. Distinct from
+        /// `copySelectionToPasteboard` (this pane's own painted mirror surface), which shows nothing
+        /// once the shared selection scrolls out of this viewport: the daemon always has the full text
+        /// regardless of what any one viewer can currently see.
+        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
+            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else {
+                completion(false)
+                return
+            }
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            // `self` is only captured where this closure is already main-actor isolated (the outer
+            // `Task`'s own capture list), never carried through the nested detached closure: passing a
+            // main-actor class reference through a nonisolated closure into a later main-actor closure is
+            // what the compiler flags as a potential data race, even though nothing here is actually
+            // concurrent.
+            Task { @MainActor [weak self] in
+                let selectionText = await Task.detached(priority: .userInitiated) {
+                    let response = try? Self.sendControlRequest(
+                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
+                    return response?.selectionText
+                }.value
+                guard let self, let selectionText, !selectionText.isEmpty else {
+                    completion(false)
+                    return
+                }
+                self.terminalView.writeSelectionTextToPasteboard(selectionText)
+                completion(true)
+            }
+        }
+
         public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
         @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
@@ -402,6 +441,10 @@
             if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
             return terminalView.snapshotText()
         }
+
+        /// Delegates to the mirror view's own selection readback: the mirror surface is what paints the
+        /// daemon-projected shared selection from streamed frames, so it is the source of truth here too.
+        public func debugSurfaceSelectionText() -> String? { terminalView.debugSurfaceSelectionText }
 
         func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
         var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
@@ -938,6 +981,63 @@
                         requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "mouse_button") } }
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Clears the terminal's shared selection. Not owner-gated (matches the daemon's
+        /// `clearSelection` command): any attached client's plain click can clear a selection any
+        /// other client set.
+        private func sendRemoteClearSelection() {
+            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(command: .clearSelection(.init(clientID: clientID))), sessionID: sessionID, socketPath: socketPath,
+                        requestSender: requestSender)
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Reports a completed local drag as the terminal's new shared selection, in absolute
+        /// screen-space coordinates. Not owner-gated, matching the daemon's `setSelection` command.
+        /// The response's `selectionText` is the single writer for this pasteboard write: see
+        /// `GhosttyMirrorAppService`'s suppressed `GHOSTTY_CLIPBOARD_SELECTION` write for why the
+        /// mirror's own local copy-on-select must not also write here.
+        private func sendRemoteSetSelection(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, isRectangle: Bool) {
+            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: { [weak self] in
+                    let response = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .setSelection(
+                                .init(
+                                    clientID: clientID, startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow,
+                                    rectangle: isRectangle))), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                    // A direct cross-actor call (`await self?.method(...)`), not a nested `Task` closure:
+                    // wrapping this in another closure would carry `self` through the same
+                    // nonisolated-into-main-actor capture the compiler flags as a data-race risk.
+                    if let selectionText = response.selectionText {
+                        await self?.writeSelectionTextToPasteboard(selectionText)
+                    }
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Writes `setSelection`'s confirmed selection text to the pasteboard. Called from
+        /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call.
+        private func writeSelectionTextToPasteboard(_ text: String) {
+            terminalView.writeSelectionTextToPasteboard(text)
         }
 
         private func sendRemoteClearScreenAndScrollback() {
