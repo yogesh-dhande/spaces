@@ -2652,7 +2652,8 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
 
 /// Sends a profile automation command to the adjacent daemon and emits its response section as JSON,
 /// exactly like the app/CLI would over the same profile socket, so the shell harness drives real
-/// scheduler state. The harness binds to this worktree's profile via `profile-show --shell` before use.
+/// scheduler state. The harness is bound to this worktree's profile by construction: this binary
+/// resolves its own profile from where it sits in the checkout.
 private func sendAutomationProfileCommand(_ command: TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse {
     try TerminalService.sendProfileCommand(command)
 }

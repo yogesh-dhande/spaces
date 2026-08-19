@@ -163,6 +163,132 @@ import workspacecore
         #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(process), newTitle: " ") == .discard)
     }
 
+    /// A workspace with an exited process, a waiting agent, and a bell on the ad hoc terminal — one row
+    /// of each kind that can carry an alert — used to test undismissed-id derivation and the
+    /// exit-acknowledgment color downgrade in isolation from the rest of the row-building logic.
+    private func fixtureDetailWithExitedProcess(exitedAt: String) -> SpacesDeviceWorkspaceDetailViewModel {
+        let config = SpacesDeviceWorkspaceConfig(processes: [SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev")])
+        let summary = SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
+            isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            processRows: [
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "proc-web",
+                    sessionID: "sess-web", runState: .exited, exitedAt: exitedAt, canRun: true, canStop: false, canRestart: true)
+            ],
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
+                    runState: .running, activityState: .waiting, canStop: true)
+            ],
+            terminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "term-1", workspaceID: "workspace", title: "zsh", workingDirectory: "/tmp/workspace", sessionID: "sess-term",
+                    runState: .running, canOpenTerminal: true, canStop: true)
+            ])
+        return SpacesDeviceWorkspaceDetailViewModel(workspace: summary)
+    }
+
+    /// One alert entry of each kind a row can own: the exited process, the waiting agent, and a bell on
+    /// the ad hoc terminal's session — mirroring the identities `buildOverviewAlertsGroups` derives.
+    private func alertsGroup(processExitedAt: String, bellSessionID: String = "sess-term") -> AppKitController.AlertsGroup {
+        AppKitController.AlertsGroup(
+            projectName: "project", workspaceID: "workspace", workspaceName: "workspace", workspaceBranch: "main", isFromHiddenWorkspace: false,
+            items: [
+                AppKitController.AlertsAttentionEntry(
+                    attentionID: "alert:local:process:proc-web:\(processExitedAt)", icon: "terminal", iconTint: .terminal, label: "web",
+                    detail: "npm run dev", shortcut: "", processStatus: .exited, countsTowardBadge: true, eventDate: nil,
+                    focusRequest: .workspaceProcess(workspaceID: "workspace", processID: "proc-web")),
+                AppKitController.AlertsAttentionEntry(
+                    attentionID: "alert:local:agent:agent-1:waiting:t1", icon: "cpu.fill", iconTint: .warning, label: "claude", detail: nil,
+                    shortcut: "", agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
+                    focusRequest: .agentWindow(
+                        AgentWindowRecord(
+                            id: "agent-1", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "sess-agent",
+                            sessionKey: nil, status: .waiting, createdAt: "t1", updatedAt: "t1"))),
+                AppKitController.AlertsAttentionEntry(
+                    attentionID: "alert:local:session:\(bellSessionID):bell:t1", icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil,
+                    shortcut: "", countsTowardBadge: true, eventDate: nil,
+                    focusRequest: .terminalSession(workspaceID: "workspace", sessionID: bellSessionID)),
+            ])
+    }
+
+    /// Each row's `undismissedAttentionIDs` carries exactly the alert entries that match its own focus
+    /// identity: the process row gets its exit (and would get a bell on its own session, which this
+    /// fixture has none of), the agent row gets its waiting alert and its own session's bell (none
+    /// here), and the ad hoc terminal row gets only the bell on its session — never another row's.
+    @Test func rowsCarryOnlyTheirOwnUndismissedAttentionIDs() {
+        let items = AppKitController.sidebarRuntimeTargetItems(
+            detail: fixtureDetailWithExitedProcess(exitedAt: "2026-08-18T10:00:00Z"), browserSessions: [],
+            alertsGroups: [alertsGroup(processExitedAt: "2026-08-18T10:00:00Z")])
+        let byKey = Dictionary(uniqueKeysWithValues: items.map { ($0.key, $0) })
+
+        #expect(byKey["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:proc-web:2026-08-18T10:00:00Z"])
+        #expect(byKey["agent:agent-1"]?.undismissedAttentionIDs == ["alert:local:agent:agent-1:waiting:t1"])
+        #expect(byKey["terminal:sess-term"]?.undismissedAttentionIDs == ["alert:local:session:sess-term:bell:t1"])
+    }
+
+    /// An undismissed exit alert keeps the process row failed (red); dismissing it — the exact id the
+    /// row reported as undismissed — drops the row to inactive without touching the agent or terminal
+    /// rows' colors, which dismissal never affects.
+    @Test func dismissingAnExitedProcessAlertDowngradesOnlyThatRowToInactive() {
+        let exitedAt = "2026-08-18T10:00:00Z"
+        let detail = fixtureDetailWithExitedProcess(exitedAt: exitedAt)
+        let groups = [alertsGroup(processExitedAt: exitedAt)]
+
+        let undismissed = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(detail: detail, browserSessions: [], alertsGroups: groups).map {
+                ($0.key, $0)
+            })
+        #expect(undismissed["process:proc-web"]?.attentionStatus == .failed)
+        #expect(undismissed["agent:agent-1"]?.attentionStatus == .blocked)
+
+        let dismissedIDs: Set<String> = ["alert:local:process:proc-web:\(exitedAt)"]
+        let dismissed = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: detail, browserSessions: [], alertsGroups: groups, dismissedAttentionItemIDs: dismissedIDs
+            ).map { ($0.key, $0) })
+        #expect(dismissed["process:proc-web"]?.attentionStatus == .inactive)
+        #expect(dismissed["process:proc-web"]?.undismissedAttentionIDs == [])
+        // Dismissing the process's alert leaves the agent's own alert, and its color, untouched.
+        #expect(dismissed["agent:agent-1"]?.attentionStatus == .blocked)
+        #expect(dismissed["agent:agent-1"]?.undismissedAttentionIDs == ["alert:local:agent:agent-1:waiting:t1"])
+    }
+
+    /// A later exit of the same process carries a new `exitedAt`, hence a new alert identity: dismissing
+    /// the earlier exit's alert does not carry forward to it, so the row reads as failed again.
+    @Test func aNewExitCarriesANewAlertIdentityAndReadsFailedAgain() {
+        let firstExitedAt = "2026-08-18T10:00:00Z"
+        let secondExitedAt = "2026-08-18T11:00:00Z"
+        let dismissedIDs: Set<String> = ["alert:local:process:proc-web:\(firstExitedAt)"]
+
+        let afterSecondExit = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: fixtureDetailWithExitedProcess(exitedAt: secondExitedAt), browserSessions: [],
+                alertsGroups: [alertsGroup(processExitedAt: secondExitedAt)], dismissedAttentionItemIDs: dismissedIDs
+            ).map { ($0.key, $0) })
+        #expect(afterSecondExit["process:proc-web"]?.attentionStatus == .failed)
+        #expect(afterSecondExit["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:proc-web:\(secondExitedAt)"])
+    }
+
+    /// The workspace header rolls up the highest of its rows' colors (`SidebarAttentionStatus.highest`).
+    /// Acknowledging the only failure drops the roll-up straight to the next-highest row's color rather
+    /// than staying pinned on the acknowledged failure.
+    @Test func workspaceRollUpDropsToNextHighestOnceTheOnlyFailureIsAcknowledged() {
+        let exitedAt = "2026-08-18T10:00:00Z"
+        let detail = fixtureDetailWithExitedProcess(exitedAt: exitedAt)
+        let groups = [alertsGroup(processExitedAt: exitedAt)]
+
+        let beforeDismissal = AppKitController.sidebarRuntimeTargetItems(detail: detail, browserSessions: [], alertsGroups: groups)
+        #expect(SidebarAttentionStatus.highest(beforeDismissal.compactMap(\.attentionStatus)) == .failed)
+
+        let afterDismissal = AppKitController.sidebarRuntimeTargetItems(
+            detail: detail, browserSessions: [], alertsGroups: groups, dismissedAttentionItemIDs: ["alert:local:process:proc-web:\(exitedAt)"])
+        // The agent's waiting alert (blocked) is the next-highest remaining row once the exit is
+        // acknowledged; nothing else in the fixture outranks it.
+        #expect(SidebarAttentionStatus.highest(afterDismissal.compactMap(\.attentionStatus)) == .blocked)
+    }
+
     @Test func shortcutIndexStopsAfterTen() {
         let terminalRows = (0..<12).map { index in
             SpacesDeviceWorkspaceTerminalRow(

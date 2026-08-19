@@ -420,7 +420,10 @@ struct SpacesTabView: View {
             let button = Button {
                 activateRuntimeRow(row)
             } label: {
-                BandRow(dotKind: row.statusDotKind, tile: .tile(for: row.type), title: row.title, detail: row.detail) {
+                BandRow(
+                    dotKind: row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), tile: .tile(for: row.type), title: row.title,
+                    detail: row.detail
+                ) {
                     runtimeTrailingIndicator(for: row)
                 }
             }.buttonStyle(.plain).disabled(isRuntimeRowDisabled(row)).accessibilityIdentifier(rowIdentifier)
@@ -437,7 +440,7 @@ struct SpacesTabView: View {
     /// half-typed name never reaches the daemon.
     private func renameRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
         BandRow(
-            dotKind: row.statusDotKind, tile: .tile(for: row.type),
+            dotKind: row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), tile: .tile(for: row.type),
             title: {
                 TextField("Name", text: $renameText).textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.done).focused(
                     $isRenameFieldFocused
@@ -449,7 +452,7 @@ struct SpacesTabView: View {
     }
 
     private func hasContextMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        row.canRun || row.canStop || row.canRestart || model.canRename(row: row)
+        row.canRun || row.canStop || row.canRestart || model.canRename(row: row) || model.hasUndismissedAlerts(for: row)
     }
 
     private func beginRename(for row: SpacesMobileWorkspaceRuntimeRow) {
@@ -547,6 +550,7 @@ struct SpacesTabView: View {
                 Label("Rename", systemImage: "pencil")
             }.disabled(model.isMutating)
         }
+        if model.hasUndismissedAlerts(for: row) { DismissAlertMenuButton(model: model, row: row) }
     }
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {

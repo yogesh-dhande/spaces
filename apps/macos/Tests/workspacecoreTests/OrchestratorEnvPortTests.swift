@@ -288,7 +288,6 @@ extension OrchestratorTests {
         let api = ServiceDefinition(id: "port-api", name: "api")
         let project = try orchestrator.addProject(dir: projectDir.path) { config in config.ports = [api] }
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
-        defer { PortReserver.shared.releasePorts(workspaceID: workspace.id) }
         let previousAPIAssignment = try XCTUnwrap(try store.workspacePortsAssigned(workspaceID: workspace.id).first)
 
         let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
@@ -343,16 +342,11 @@ extension OrchestratorTests {
         }
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let conflictWorkspace = try orchestrator.createWorkspace(projectID: project.id)
-        defer {
-            PortReserver.shared.releasePorts(workspaceID: defaultWorkspace.id)
-            PortReserver.shared.releasePorts(workspaceID: conflictWorkspace.id)
-        }
         let defaultSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id))
         let conflictSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         let defaultPortsBefore = try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id)
         let conflictPortsBefore = try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id)
         try store.updateWorkspaceRunning(id: defaultWorkspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id))
         _ = try orchestrator.registerAgentWindow(workspaceID: conflictWorkspace.id, provider: .spaces, label: "api")
         try spacesYAMLFixture(stopScript: "echo imported-stop").write(
             to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
@@ -374,9 +368,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.name }, defaultPortsBefore.map { $0.name })
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.port }, defaultPortsBefore.map { $0.port })
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: defaultWorkspace.id)).isRunning)
-        XCTAssertFalse(
-            PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id),
-            "Rollback must not restore placeholder reservations for a running workspace.")
 
         let conflictSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         XCTAssertEqual(conflictSettingsAfter.stopScript, conflictSettingsBefore.stopScript)

@@ -1397,9 +1397,9 @@
             let processRow = rows.first { $0.title == "api" }
 
             XCTAssertEqual(browserRow?.isBrowserSession, true)
-            XCTAssertNil(browserRow?.statusDotKind)
+            XCTAssertNil(browserRow?.statusDotKind(exitAcknowledged: false))
             XCTAssertEqual(processRow?.isBrowserSession, false)
-            XCTAssertNotNil(processRow?.statusDotKind)
+            XCTAssertNotNil(processRow?.statusDotKind(exitAcknowledged: false))
         }
 
         func testBrowserSessionRowsSurviveRunStateFilter() {

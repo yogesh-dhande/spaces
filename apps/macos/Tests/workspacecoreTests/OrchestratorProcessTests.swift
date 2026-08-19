@@ -16,19 +16,20 @@ extension OrchestratorTests {
             settings.ports = [ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
         }
-        // The workspace is stopped, so saving settings reserved its assigned port via PortReserver.
+        // The workspace is stopped, so the daemon's reservation pass holds its assigned port.
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        let assignedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        addTeardownBlock { clearPortReservationsForTest(assignedPorts) }
+        try PortReservationReconciler(store: store).reconcile()
+        XCTAssertTrue(PortReserver.shared.reservedPorts().isSuperset(of: assignedPorts))
 
         try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web")
 
-        XCTAssertFalse(
-            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+        XCTAssertTrue(
+            PortReserver.shared.reservedPorts().isDisjoint(with: assignedPorts),
             "Running a configured process must release the reservation so the server can bind its port.")
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     // If a single-process launch fails after its placeholder reservation was released, the reservation
@@ -48,19 +49,20 @@ extension OrchestratorTests {
             settings.ports = [ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
         }
-        // Saving settings for a stopped workspace reserves its assigned port via PortReserver.
+        // The workspace is stopped, so the daemon's reservation pass holds its assigned port.
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        let assignedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        addTeardownBlock { clearPortReservationsForTest(assignedPorts) }
+        try PortReservationReconciler(store: store).reconcile()
+        XCTAssertTrue(PortReserver.shared.reservedPorts().isSuperset(of: assignedPorts))
 
         XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
 
         XCTAssertFalse(
             try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning, "A failed single-process launch must leave the workspace stopped.")
         XCTAssertTrue(
-            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            PortReserver.shared.reservedPorts().isSuperset(of: assignedPorts),
             "A failed single-process launch must restore the placeholder port reservation it released.")
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     // If a workspace is already running because of an ad-hoc terminal, a failed configured-process
@@ -80,17 +82,30 @@ extension OrchestratorTests {
             settings.ports = [ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
         }
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        let assignedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        addTeardownBlock { clearPortReservationsForTest(assignedPorts) }
+        // Placeholders held from when the workspace was stopped: an ad-hoc terminal marked it running
+        // without a reservation pass having run since.
+        try PortReservationReconciler(store: store).reconcile()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
 
         XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
 
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
-        XCTAssertFalse(
-            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+        XCTAssertTrue(
+            PortReserver.shared.reservedPorts().isDisjoint(with: assignedPorts),
             "A failed launch from an already-running workspace must leave service ports unreserved.")
 
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+        // The failed launch must not leave a runtime-start hold behind: once the workspace stops, the
+        // first reconcile pass that sees it stopped has to be able to hold its pinned ports again. A
+        // lingering hold makes `sync` skip the bind, and nothing clears it until the workspace runs
+        // again or the daemon restarts.
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: nil)
+        try PortReservationReconciler(store: store).reconcile()
+
+        XCTAssertTrue(
+            PortReserver.shared.reservedPorts().isSuperset(of: assignedPorts),
+            "Once the workspace stops, its pinned ports must be held again rather than blocked by the failed launch's hold.")
     }
 
     /// Codex round 4 (P2b) on issue #438: `launchMissingConfiguredProcesses` launches every missing
@@ -128,17 +143,20 @@ extension OrchestratorTests {
             settings.ports = [ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "A", command: "echo a"), ProcessTemplate(name: "B", command: "npm run dev")]
         }
-        // The workspace is stopped, so saving settings reserved its assigned port via PortReserver.
+        // The workspace is stopped, so the daemon's reservation pass holds its assigned port.
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        let assignedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        addTeardownBlock { clearPortReservationsForTest(assignedPorts) }
+        try PortReservationReconciler(store: store).reconcile()
+        XCTAssertTrue(PortReserver.shared.reservedPorts().isSuperset(of: assignedPorts))
 
         XCTAssertThrowsError(try orchestrator.launchMissingConfiguredProcesses(workspaceID: workspace.id, background: false))
 
         XCTAssertEqual(
             try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["A"],
             "the first process launches before the second one fails")
-        XCTAssertFalse(
-            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+        XCTAssertTrue(
+            PortReserver.shared.reservedPorts().isDisjoint(with: assignedPorts),
             "a later failure in the same batch must not restore the placeholder reservation over an earlier live launch's port")
 
         // Retry: B is still the only missing template (A already matches a live row), and B's launcher
@@ -148,11 +166,9 @@ extension OrchestratorTests {
         XCTAssertEqual(
             try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["A"],
             "the retry must not disturb the already-live process")
-        XCTAssertFalse(
-            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+        XCTAssertTrue(
+            PortReserver.shared.reservedPorts().isDisjoint(with: assignedPorts),
             "a retry's failure must not restore the placeholder reservation over the still-live process's port either")
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     func testValidateProcessTemplateAcceptsShellVariableSyntax() throws {
@@ -1261,10 +1277,6 @@ extension OrchestratorTests {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
         XCTAssertEqual(namedPorts.map(\.name), ["api", "web"])
-        // A settings sync persists port assignments but must not re-bind the reservation sockets while
-        // the workspace runs: its server processes already own those ports, and re-grabbing one would
-        // race the real server for it (EADDRINUSE).
-        XCTAssertFalse(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)

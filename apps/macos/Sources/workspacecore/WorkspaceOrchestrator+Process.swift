@@ -306,12 +306,23 @@ extension WorkspaceOrchestrator {
         }
         defer { if let held = replacedSessionID { builtInTerminalWindowCloser(held, .teardown) } }
         let command = try spacesTerminalCommand(template: template, env: env)
-        releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
+        let workspaceWasRunning = workspace.isRunning
+        let runtimeStartPorts = assignedPorts.map(\.port)
+        releaseReservedPortsForRuntimeStart(ports: runtimeStartPorts)
+        // A restart of a running workspace's process that throws must not leave the hold behind: the
+        // ports stay unreserved while the workspace runs, but the hold would outlive the workspace
+        // stopping and block the pass that holds its pinned ports again. When the workspace was not
+        // running the restart came from `restartExitedProcesses` inside `upWorkspace`, where sibling
+        // launches may still be starting on these ports, so the hold deliberately stays until the
+        // workspace is marked running.
+        var launchSucceeded = false
+        defer { if !launchSucceeded && workspaceWasRunning { PortReserver.shared.clearRuntimeStartHold(ports: runtimeStartPorts) } }
         session = try launchSpacesTerminalSession(
             title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner,
             openIntent: Self.configuredProcessOpenIntent(replacing: replacedSessionID), backend: .ghosttyEmbedded, readinessPolicy: .sessionReady,
             workspaceID: workspace.id, kind: .process)
         replacedSessionID = nil
+        launchSucceeded = true
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             Self.writeStandardError(
                 "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n"
@@ -764,10 +775,16 @@ extension WorkspaceOrchestrator {
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
     }
 
-    /// Releases placeholder port reservations before a workspace runtime starts. Placeholder sockets
-    /// exist only while the workspace is stopped; once runtime is active, assigned ports are best-effort
-    /// environment contracts and users resolve conflicts manually.
-    func releaseReservedPortsForRuntimeStart(workspaceID: String) { PortReserver.shared.releasePorts(workspaceID: workspaceID) }
+    /// Frees placeholder port reservations before a workspace runtime starts, and holds those ports
+    /// against the daemon's reconciler rebinding them mid-launch. Placeholder sockets exist only while
+    /// the workspace is stopped; once runtime is active, assigned ports are best-effort environment
+    /// contracts and users resolve conflicts manually.
+    ///
+    /// Frees by port rather than by workspace so the port is freed whatever reservation is holding it:
+    /// reservations are derived from the store by the daemon's reconciler, so one can still be held on
+    /// behalf of a workspace record that was deleted or re-assigned since it was bound, and the server
+    /// about to start would otherwise get EADDRINUSE on its own assigned port.
+    func releaseReservedPortsForRuntimeStart(ports: [Int]) { PortReserver.shared.beginRuntimeStartHold(ports: ports) }
 
     /// - Parameter restoreReservedPortsOnFailure: Overrides the default "restore only when the workspace
     ///   was stopped" rule. `launchMissingConfiguredProcesses` passes `false` for every template after the
@@ -776,7 +793,11 @@ extension WorkspaceOrchestrator {
     ///   started a real server on, which can make that live server lose its bind (or fail one still coming
     ///   up) to the placeholder socket. Once the batch has a live process, the workspace is no longer
     ///   meaningfully "stopped" for reservation purposes even though `workspace.isRunning` (captured once,
-    ///   before the batch) has not been updated to say so yet.
+    ///   before the batch) has not been updated to say so yet. With `false` the runtime-start hold is
+    ///   deliberately left in place, so it keeps covering the live sibling's port for the rest of the
+    ///   batch; the reconciler clears it once the workspace is marked running. Passing `false` is
+    ///   therefore the one case where a failed launch neither rebinds nor clears the hold: clearing it
+    ///   would let a reconcile pass rebind a placeholder over the sibling's still-starting server.
     @discardableResult func launchConfiguredProcess(
         template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false,
         restoreReservedPortsOnFailure: Bool? = nil
@@ -785,15 +806,30 @@ extension WorkspaceOrchestrator {
         _ = background
         let name = processKey(for: template)
         let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-        let shouldRestoreReservedPortsOnFailure = restoreReservedPortsOnFailure ?? !workspace.isRunning
-        releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
-        // If the launch started from a stopped workspace and throws after releasing placeholders,
-        // restore them so the stopped workspace keeps its pinned ports held. A workspace that was
-        // already running (for example from an ad-hoc terminal) intentionally remains unreserved.
+        let workspaceWasRunning = workspace.isRunning
+        let shouldRestoreReservedPortsOnFailure = restoreReservedPortsOnFailure ?? !workspaceWasRunning
+        let assignedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        releaseReservedPortsForRuntimeStart(ports: assignedPorts)
+        // A launch that throws after releasing placeholders resolves the runtime-start hold three ways:
+        //
+        // - The workspace was already running (for example from an ad-hoc terminal): clear the hold
+        //   without rebinding. A running workspace's ports are outside the reconciler's desired set, so
+        //   they intentionally stay unreserved, but the hold itself must go or it survives the workspace
+        //   stopping again and blocks the pass that would hold those ports once more.
+        // - The workspace was stopped: end the hold and rebind, so it keeps its pinned ports held.
+        //   Rebinding here rather than leaving it to the daemon's reservation reconciler keeps the
+        //   failure outcome deterministic: the store is unchanged by a failed launch, so the reconciler
+        //   would reach the same set, and this way the ports are never briefly unheld.
+        // - The batch launcher explicitly passed `restoreReservedPortsOnFailure: false`: leave the hold
+        //   in place. See that parameter's documentation.
         var launchSucceeded = false
         defer {
-            if !launchSucceeded && shouldRestoreReservedPortsOnFailure {
-                try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
+            if !launchSucceeded {
+                if workspaceWasRunning {
+                    PortReserver.shared.clearRuntimeStartHold(ports: assignedPorts)
+                } else if shouldRestoreReservedPortsOnFailure {
+                    PortReserver.shared.endRuntimeStartHold(ports: assignedPorts)
+                }
             }
         }
         let session = try launchSpacesTerminalSession(

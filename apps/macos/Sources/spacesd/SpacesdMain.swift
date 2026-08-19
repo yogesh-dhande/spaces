@@ -340,6 +340,7 @@ enum SpacesDaemonErrorClassification {
     #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+    private var portReservationService: PortReservationService?
     private var remoteAgentWatchService: RemoteAgentWatchService?
     private var automationService: AutomationService?
     /// The same live `AutomationService` as `automationService`, held in a lock-guarded box so the off-main
@@ -511,6 +512,11 @@ enum SpacesDaemonErrorClassification {
         }
         foregroundAgentReconciler.start()
         terminalForegroundAgentReconciler = foregroundAgentReconciler
+        let portReservations = PortReservationService(databasePath: databasePath) { error in
+            writeStandardError("spacesd port_reservation_error error=\(error)\n")
+        }
+        portReservations.start()
+        portReservationService = portReservations
         let remoteAgentWatch = RemoteAgentWatchService(
             databasePath: databasePath, transport: .live(clientApp: Self.daemonDeviceClientApp()),
             deliver: { [weak self] sessionID, line in
@@ -660,6 +666,7 @@ enum SpacesDaemonErrorClassification {
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()
         remoteAgentWatchService?.reconcile()
+        portReservationService?.reconcile()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
             caddyRouterService?.reconcile()
@@ -895,6 +902,7 @@ enum SpacesDaemonErrorClassification {
         remoteAgentWatchService?.stop()
         remoteAgentWatchService = nil
         terminalForegroundAgentReconciler?.beginStop()
+        portReservationService?.beginStop()
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
@@ -904,11 +912,13 @@ enum SpacesDaemonErrorClassification {
 
     /// Phase 2: wait for each reconcile loop's database connection to be released and take its final WAL
     /// checkpoint. Safe to suspend in here precisely because phase 1 has already run: nothing left alive
-    /// can submit work, and neither reconcile pass depends on a service phase 1 tore down — each builds
-    /// its own orchestrator over the store confined to its own queue.
+    /// can submit work, and no reconcile pass depends on a service phase 1 tore down — each works over a
+    /// store confined to its own queue.
     private func releaseReconcileStores() async {
         await terminalForegroundAgentReconciler?.releaseStore()
         terminalForegroundAgentReconciler = nil
+        await portReservationService?.releaseStore()
+        portReservationService = nil
         #if os(macOS)
             await caddyRouterService?.releaseStore()
             caddyRouterService = nil

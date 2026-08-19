@@ -489,6 +489,40 @@ import workspacecore
         #expect(quiet.detail == "codex --model gpt-5.6-sol")
     }
 
+    /// A workspace-target process row (not the alerts-list row built from the same exit) applies the same
+    /// exit-acknowledgment downgrade the sidebar row does: once the exit's alert is dismissed, the
+    /// palette status reads idle instead of exited, until a new exit creates a new alert identity.
+    @Test func commandPaletteWorkspaceProcessRowDowngradesOnAcknowledgedExit() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    config: SpacesDeviceWorkspaceConfig(processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")]),
+                    processRows: [
+                        SpacesDeviceWorkspaceProcessRow(
+                            id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
+                            processID: "exited-web", sessionID: nil, runState: .exited, exitedAt: "2026-08-18T10:00:00Z", canRun: true,
+                            canStop: false, canRestart: true)
+                    ])
+            ], sessions: [])
+        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let exitAlertID = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.attentionID)
+
+        let undismissedRow = try #require(
+            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first { $0.source == .workspaceTarget && $0.kind == .process }
+        )
+        guard case .process(.exited) = undismissedRow.status else { Issue.record("expected an undismissed exit to read as exited"); return }
+
+        let dismissedRow = try #require(
+            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID]).first {
+                $0.source == .workspaceTarget && $0.kind == .process
+            })
+        guard case .idle = dismissedRow.status else { Issue.record("expected an acknowledged exit to read as idle"); return }
+    }
+
     @Test func commandPaletteBellAlertFallsBackToSessionForegroundCommand() throws {
         let overview = SpacesDeviceOverviewPayload(
             projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],

@@ -1141,8 +1141,6 @@ public final class WorkspaceOrchestrator {
         if ports.count != portDefinitions.count {
             let portRange = try store.appConfig().portRange
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: portRange)
-        } else {
-            try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
         }
 
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
@@ -1150,15 +1148,17 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
         )
-        let shouldReleaseReservedPortsForLaunch = !assignedPorts.isEmpty
-        if shouldReleaseReservedPortsForLaunch {
-            // Workspace port assignments remain pinned in the store until archive, but placeholder
-            // reservation sockets exist only while the workspace is stopped. Once any runtime starts,
-            // users resolve conflicts manually if another process claims an assigned port.
-            releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
-        }
-        var shouldRestoreReservedPorts = shouldReleaseReservedPortsForLaunch
-        defer { if shouldRestoreReservedPorts { try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) } }
+        let launchPorts = assignedPorts.map(\.port)
+        releaseReservedPortsForRuntimeStart(ports: launchPorts)
+        // Ending the runtime-start hold and rebinding synchronously on the failure path keeps the
+        // outcome deterministic: the store still says this workspace is stopped with these ports
+        // assigned, so the daemon's reservation reconciler would rebind them anyway, and doing it here
+        // means the ports are never briefly unheld after a launch that never started anything. The
+        // success path leaves the hold in place on purpose: it is what keeps a reconcile pass firing on
+        // this launch's own writes from rebinding a placeholder under a server that is still coming up,
+        // and the reconciler drops it once `markWorkspaceRunning`'s write lands.
+        var shouldRestoreReservedPorts = !launchPorts.isEmpty
+        defer { if shouldRestoreReservedPorts { PortReserver.shared.endRuntimeStartHold(ports: launchPorts) } }
 
         var newWindows: [WindowRecord] = []
 
@@ -1707,6 +1707,29 @@ public final class WorkspaceOrchestrator {
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind, automationRunID: automationRunID
         )
 
+        // The same pre-spawn release a configured process gets, for the same reason: this environment
+        // carries the workspace's `$SPACES_<NAME>_PORT` values, and the command behind it can bind one the
+        // moment it starts. The workspace is only marked running after the spawn, so leaving the release to
+        // the reconciler's asynchronous pass would let the child meet the placeholder with EADDRINUSE.
+        let workspaceWasRunning = workspace.isRunning
+        let runtimeStartPorts = assignedPorts.map(\.port)
+        releaseReservedPortsForRuntimeStart(ports: runtimeStartPorts)
+        // Failure resolves the hold on `launchConfiguredProcess`'s rule: a workspace that was stopped gets
+        // its placeholders back immediately (nothing took the ports and the store still wants them held); a
+        // workspace that was already running only drops the hold, because its ports are outside the
+        // reconciler's desired set and its own servers may already own them. Success leaves the hold in
+        // place: `markWorkspaceRunningIfNeeded` below is the write that lets the reconciler drop it, and
+        // `markWorkspaceStopped` clears whatever a coalesced running state left behind.
+        var launchSucceeded = false
+        defer {
+            if !launchSucceeded {
+                if workspaceWasRunning {
+                    PortReserver.shared.clearRuntimeStartHold(ports: runtimeStartPorts)
+                } else {
+                    PortReserver.shared.endRuntimeStartHold(ports: runtimeStartPorts)
+                }
+            }
+        }
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
         let windowRecordID = UUID().uuidString
         do {
@@ -1722,6 +1745,7 @@ public final class WorkspaceOrchestrator {
             try? store.deleteWindow(id: windowRecordID)
             throw error
         }
+        launchSucceeded = true
         return session
     }
 
@@ -1793,7 +1817,28 @@ public final class WorkspaceOrchestrator {
             window: WindowRecord(
                 id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil,
                 terminalTrackingID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        try markWorkspaceRunningIfNeeded(workspace)
+        // The reserved launch configuration carries the workspace's `$SPACES_<NAME>_PORT` values into a
+        // shell the user is about to type in, so the placeholders come off synchronously here rather than
+        // when the reconciler's next pass notices the workspace running. `finishReservedWorkspaceTerminalLaunch`
+        // spawns the child off this reservation, so the hold belongs in this half of the launch.
+        //
+        // A reservation that fails or is cancelled after this point resolves the hold through
+        // `markWorkspaceStopped`: the failure path deletes this window row and clears the workspace's
+        // running state, and that stop both drops the hold and raises the pass that binds the placeholders
+        // again. A workspace kept running by other runtime keeps its ports unheld, which is the state the
+        // reconciler wants for it anyway, until its own stop clears the hold. Only a throw from the running
+        // write below needs handling here, since it leaves neither a hold owner nor a stop behind.
+        let workspaceWasRunning = workspace.isRunning
+        let runtimeStartPorts = assignedPorts.map(\.port)
+        releaseReservedPortsForRuntimeStart(ports: runtimeStartPorts)
+        do { try markWorkspaceRunningIfNeeded(workspace) } catch {
+            if workspaceWasRunning {
+                PortReserver.shared.clearRuntimeStartHold(ports: runtimeStartPorts)
+            } else {
+                PortReserver.shared.endRuntimeStartHold(ports: runtimeStartPorts)
+            }
+            throw error
+        }
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
             title: generatedTitle, launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
@@ -2236,7 +2281,6 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
             definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
-        try PortAllocator(store: store).reserveExistingPorts(workspaceID: snapshot.workspace.id)
     }
 
     func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
@@ -2805,15 +2849,11 @@ public final class WorkspaceOrchestrator {
     }
 
     func markWorkspaceRunning(_ workspace: WorkspaceRecord, launchedAt: String) throws {
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
     }
 
     func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord, launchedAtFallback: String? = nil) throws {
-        guard !workspace.isRunning else {
-            PortReserver.shared.releasePorts(workspaceID: workspace.id)
-            return
-        }
+        guard !workspace.isRunning else { return }
         try markWorkspaceRunning(workspace, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback ?? nowISO8601())
     }
 
@@ -2828,8 +2868,18 @@ public final class WorkspaceOrchestrator {
     }
 
     func markWorkspaceStopped(_ workspace: WorkspaceRecord) throws {
+        // A stop is the definitive end of any launch in progress for this workspace — stops and launches
+        // serialize on the workspace lifecycle lock — so a runtime-start hold still sitting on its ports is
+        // stale. Clearing it is what covers the flip no reconcile pass observes: a launch marks the
+        // workspace running and it stops again before a pass runs, so the port never leaves the desired set,
+        // `sync`'s intersection keeps the hold alive, and the stopped workspace's pinned ports stay unheld
+        // until some later observed running transition or a daemon restart.
+        //
+        // Cleared before the write, not after: the write raises the very pass that rebinds the
+        // placeholders, and a pass that read the stopped record while the hold was still set would skip the
+        // bind with nothing left to trigger another one. Binding is that pass's job, never this method's.
+        PortReserver.shared.clearRuntimeStartHold(ports: try store.workspacePorts(workspaceID: workspace.id))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
     }
 
     func safeFilename(_ raw: String) -> String {

@@ -288,6 +288,18 @@ import workspacecore
             try host.storeDismissedAlertsAttentionItemIDs(dismissedAlertsAttentionItemIDs)
             host.updateAlertsSidebarBadge()
             if host.showingAlerts { showAlertsDetail() }
+            // A dismissal can flip an exited process's row color (failed → inactive) and always
+            // changes which rows still carry an undismissed alert, so the sidebar re-derives through
+            // its normal signature-diff reload rather than an unconditional or per-frame rebuild.
+            host.sidebar.applySidebarDataChange()
+            // The palette otherwise only re-derives on its next presentation (`commandPaletteNeedsReload`);
+            // while it is already open, reload it now so a dismissal from underneath it (e.g. the sidebar's
+            // Dismiss Alert menu) is reflected without waiting for the palette to be reopened.
+            if host.commandPalette.commandPalettePanel?.isVisible == true {
+                host.commandPalette.reloadCommandPaletteItems()
+            } else {
+                host.commandPalette.invalidateCommandPaletteCache()
+            }
         } catch {
             dismissedAlertsAttentionItemIDs.remove(attentionID)
             host.showError(error)

@@ -44,6 +44,14 @@ extension XCTestCase {
     }
 }
 
+/// Drops this process's placeholder reservations and runtime-start holds on `ports`, so a test's ports
+/// never outlive it in the shared `PortReserver`. `sync` is the only mutator that both closes a
+/// placeholder and clears a hold, and it clears holds process-wide, which is exact here because tests
+/// run one at a time and no other component in the test process takes holds.
+func clearPortReservationsForTest(_ ports: some Sequence<Int>) {
+    PortReserver.shared.sync(desiredPorts: PortReserver.shared.reservedPorts().subtracting(ports))
+}
+
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
     ProjectRecord(
         id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
