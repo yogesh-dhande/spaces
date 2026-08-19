@@ -52,7 +52,6 @@ public final class PortAllocator {
         }
 
         try store.setWorkspacePorts(workspaceID: workspaceID, ports: resolved, names: definitions.map(\.name), definitionIDs: definitions.map(\.id))
-        syncReservationState(workspaceID: workspaceID, ports: resolved)
         return resolved
     }
 
@@ -74,38 +73,13 @@ public final class PortAllocator {
         }
         let names = definitions.map(\.name)
         try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: names, definitionIDs: definitions.map(\.id))
-        syncReservationState(workspaceID: workspaceID, ports: allocated)
         return allocated
     }
 
-    public func releasePorts(workspaceID: String) throws {
-        try store.releaseWorkspacePorts(workspaceID: workspaceID)
-        PortReserver.shared.releasePorts(workspaceID: workspaceID)
-    }
-
-    public func reserveExistingPorts(workspaceID: String) throws {
-        let ports = try store.workspacePorts(workspaceID: workspaceID)
-        syncReservationState(workspaceID: workspaceID, ports: ports)
-    }
-
-    /// Keeps placeholder reservation sockets aligned with the workspace lifecycle.
-    ///
-    /// Stopped workspaces hold their assigned service ports so unrelated processes do not claim them
-    /// before the next launch. Running workspaces never hold placeholder sockets: Spaces cannot know
-    /// which configured or ad-hoc process will bind which port, and re-reserving a briefly-free port can
-    /// make the intended server fail with EADDRINUSE.
-    private func syncReservationState(workspaceID: String, ports: [Int]) {
-        guard !ports.isEmpty, !isWorkspaceRunning(workspaceID) else {
-            PortReserver.shared.releasePorts(workspaceID: workspaceID)
-            return
-        }
-        PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: ports)
-    }
-
-    private func isWorkspaceRunning(_ workspaceID: String) -> Bool {
-        guard let workspace = try? store.workspace(id: workspaceID) else { return false }
-        return workspace.isRunning
-    }
+    /// Drops the workspace's port assignments. The placeholder reservation sockets those assignments
+    /// justified are held by the daemon and derived from the store, so they are not touched here: the
+    /// daemon's `PortReservationReconciler` sees the rows are gone and closes them.
+    public func releasePorts(workspaceID: String) throws { try store.releaseWorkspacePorts(workspaceID: workspaceID) }
 
     private func allReservedPorts(excludingWorkspaceID: String? = nil) throws -> Set<Int> {
         let projects = try store.projects()

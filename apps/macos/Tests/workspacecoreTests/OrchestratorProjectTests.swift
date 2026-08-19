@@ -416,20 +416,12 @@ extension OrchestratorTests {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
-        let reservedBefore = PortReserver.shared.reservedWorkspaceIDs()
-        defer {
-            for workspaceID in PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore) {
-                PortReserver.shared.releasePorts(workspaceID: workspaceID)
-            }
-        }
-
         XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [ServiceDefinition(name: "api")] }) {
             error in XCTAssertTrue(error.localizedDescription.contains("Unsupported spaces.yaml version 999"))
         }
 
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-yaml-git-import")
         XCTAssertTrue(try store.projects().isEmpty)
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
         XCTAssertFalse(
             FileManager.default.fileExists(

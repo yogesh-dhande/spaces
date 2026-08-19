@@ -3,10 +3,12 @@
 # it drives the worktree-scoped profile daemon purely through `spacese2e automation-*` subcommands (the
 # test seam for GUI-only automation authoring), which send the same profile-socket commands the app uses.
 #
-# The script binds to the current worktree profile (SPACES_DB_PATH / SPACES_RUNTIME_DIR from
-# `spacese2e profile-show --shell`) so it only ever talks to this checkout's daemon and never another
-# worktree's. The daemon is autolaunched on the first profile command; the script never stops another
-# profile's daemon or app.
+# The script binds to the current worktree profile by construction: spacese2e resolves its own
+# profile from where it sits in the checkout, so every subcommand already talks to this checkout's
+# daemon and never another worktree's. The database path the sqlite assertions need is read from
+# `spacese2e profile-show` output (never exported — a binding is refused inside a live profile root).
+# The daemon is autolaunched on the first profile command; the script never stops another profile's
+# daemon or app.
 #
 # Scenarios (all fast fake commands, no real coding agents):
 #   a. manual automation: command writes a marker + exit 0 -> trigger -> run succeeds; exit code 0,
@@ -68,15 +70,15 @@ require_binaries() {
 }
 
 bind_worktree_profile() {
-  eval "$("$SPACES_E2E" profile-show --shell)"
+  PROFILE_DB_PATH="$("$SPACES_E2E" profile-show | awk -F'\t' '$1 == "database-path" { print $2 }')"
   export SPACESD_EXECUTABLE="$SPACESD_BIN"
-  [[ -n "${SPACES_DB_PATH:-}" ]] || fail "profile-show did not export SPACES_DB_PATH"
-  printf '[automation-e2e] profile db=%s\n' "$SPACES_DB_PATH"
+  [[ -n "$PROFILE_DB_PATH" ]] || fail "profile-show did not report database-path"
+  printf '[automation-e2e] profile db=%s\n' "$PROFILE_DB_PATH"
 }
 
 provision_fixture() {
   local profile_root workspace
-  profile_root="$(dirname "$SPACES_DB_PATH")"
+  profile_root="$(dirname "$PROFILE_DB_PATH")"
   FIXTURE_DIR="$profile_root/automation-e2e-fixture"
   mkdir -p "$FIXTURE_DIR"
   workspace="$("$SPACES_E2E" register-project --project-dir "$FIXTURE_DIR")"
@@ -155,9 +157,9 @@ part_a() {
 
   # The run's workspace-bound command session must be stamped kind=automation + this run id.
   local db_kind db_run db_workspace
-  db_kind="$(sqlite3 "$SPACES_DB_PATH" "SELECT kind FROM terminal_sessions WHERE session_id='$session_id';")"
-  db_run="$(sqlite3 "$SPACES_DB_PATH" "SELECT automation_run_id FROM terminal_sessions WHERE session_id='$session_id';")"
-  db_workspace="$(sqlite3 "$SPACES_DB_PATH" "SELECT workspace_id FROM terminal_sessions WHERE session_id='$session_id';")"
+  db_kind="$(sqlite3 "$PROFILE_DB_PATH" "SELECT kind FROM terminal_sessions WHERE session_id='$session_id';")"
+  db_run="$(sqlite3 "$PROFILE_DB_PATH" "SELECT automation_run_id FROM terminal_sessions WHERE session_id='$session_id';")"
+  db_workspace="$(sqlite3 "$PROFILE_DB_PATH" "SELECT workspace_id FROM terminal_sessions WHERE session_id='$session_id';")"
   [[ "$db_kind" == "automation" ]] || fail "session kind was '$db_kind', expected automation"
   [[ "$db_run" == "$RUN_ID" ]] || fail "session automation_run_id was '$db_run', expected $RUN_ID"
   [[ "$db_workspace" == "$WORKSPACE_ID" ]] || fail "session workspace_id was '$db_workspace', expected $WORKSPACE_ID"
@@ -233,7 +235,7 @@ part_e() {
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "succeeded" || fail "attribution run did not succeed"
   local session_id count
   session_id="$(run_field "$AUTOMATION_ID" "$RUN_ID" '"terminalSessionID"')"
-  count="$(sqlite3 "$SPACES_DB_PATH" "SELECT COUNT(*) FROM terminal_sessions WHERE automation_run_id='$RUN_ID' AND session_id='$session_id';")"
+  count="$(sqlite3 "$PROFILE_DB_PATH" "SELECT COUNT(*) FROM terminal_sessions WHERE automation_run_id='$RUN_ID' AND session_id='$session_id';")"
   [[ "$count" == "1" ]] || fail "run's own session was not stamped with automation_run_id=$RUN_ID"
   pass "scenario e: run's own .automation session is stamped with the run id (spawned-agent sweep covered by unit test)"
 }

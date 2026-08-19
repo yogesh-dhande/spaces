@@ -72,30 +72,6 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests reserveExistingPorts with stored ports calls PortReserver (covers the non-empty ports path at line 38).
-    func testReserveExistingPortsWithStoredPortsCallsPortReserver() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        try store.upsert(project: project)
-
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(workspace: workspace)
-
-        // Store ports directly so reserveExistingPorts finds a non-empty list.
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002], names: ["api", "web"])
-
-        let allocator = PortAllocator(store: store)
-        // Should not throw and should call PortReserver.shared.reservePorts (non-empty ports path).
-        XCTAssertNoThrow(try allocator.reserveExistingPorts(workspaceID: workspace.id))
-
-        // Verify PortReserver tracks the workspace as reserved.
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
-
-        // Cleanup: release so other tests are not affected.
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
-    }
-
     func testSyncPortsPreservesExistingAssignmentsAndAllocatesAddedPort() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
@@ -115,9 +91,6 @@ final class PortAllocatorTests: XCTestCase {
         let named = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(named.map(\.port), [20010, 20011])
         XCTAssertEqual(named.map(\.name), ["api", "web"])
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     func testSyncPortsKeepsInsertedDefinitionsAlignedWithAssignments() throws {
@@ -142,8 +115,6 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(assigned.map(\.name), [web.name, api.name])
         XCTAssertEqual(assigned.map(\.port), [20011, 20010])
         XCTAssertEqual(assigned.map(\.definitionID), [web.id, api.id])
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     func testSyncPortsPreservesAssignmentsByDefinitionIDAcrossReorderAndRename() throws {
@@ -169,7 +140,5 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(named.map(\.port), [20001])
         XCTAssertEqual(named.map(\.name), ["frontend"])
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: workspace.id).map(\.definitionID), [web.id])
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 }
