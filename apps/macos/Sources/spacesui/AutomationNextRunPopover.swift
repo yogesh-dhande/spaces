@@ -141,11 +141,12 @@ import workspacecore
     // MARK: - Fields
 
     /// Opens on the instant the automation is already set to fire at, so nudging an existing schedule means
-    /// editing one field; with nothing scheduled it opens on the device's current date and time.
+    /// editing one field. With nothing scheduled it opens an hour out, same as the iOS sheet: seeding "now"
+    /// truncates to the start of the current minute, which the future-time validation would always refuse.
     private func seedPickerFields() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
-        let seed = automation.nextFireTime.flatMap(TerminalSessionTimestamp.date(from:)) ?? Date()
+        let seed = automation.nextFireTime.flatMap(TerminalSessionTimestamp.date(from:)) ?? Date().addingTimeInterval(3600)
         let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: seed)
         dateField.stringValue = String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 1, parts.day ?? 1)
         hourField.stringValue = "\(parts.hour ?? 0)"

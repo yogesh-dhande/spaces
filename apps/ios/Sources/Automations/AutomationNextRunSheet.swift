@@ -24,10 +24,15 @@ struct AutomationNextRunSheet: View {
         self.model = model
         self.automation = automation
         self.onMutated = onMutated
-        // Opens on the instant the automation is already set to fire at — same as the Mac popover — so
+        // Opens on the instant the automation is already set to fire at, same as the Mac popover, so
         // nudging an existing schedule means editing one component. With nothing scheduled it opens an
-        // hour out rather than on "now", which the future-time validation would immediately refuse.
-        _nextRun = State(initialValue: automation.nextFireTime.flatMap(TerminalSessionTimestamp.date(from:)) ?? Date().addingTimeInterval(3600))
+        // hour out rather than on "now", which the future-time validation would immediately refuse. The
+        // fallback is floored to the minute: the picker shows only hour and minute, and it edits only
+        // those components, so seconds carried in the seed would silently persist and make the run fire
+        // after the instant the picker displayed.
+        let hourOut = Date().addingTimeInterval(3600)
+        let flooredHourOut = Date(timeIntervalSince1970: (hourOut.timeIntervalSince1970 / 60).rounded(.down) * 60)
+        _nextRun = State(initialValue: automation.nextFireTime.flatMap(TerminalSessionTimestamp.date(from:)) ?? flooredHourOut)
     }
 
     var body: some View {
