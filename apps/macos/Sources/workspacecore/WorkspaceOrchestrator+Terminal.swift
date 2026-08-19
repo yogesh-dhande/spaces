@@ -284,15 +284,22 @@ extension WorkspaceOrchestrator {
 
     /// Names a full-workspace uniqueness check must reserve for each ad-hoc terminal. An unrenamed
     /// terminal contributes its one name once; a renamed terminal contributes its visible user title and
-    /// its distinct launch title, which remains the destination of a later clear.
-    func adHocTerminalFocusNames(workspaceID: String) throws -> [String] {
-        try adHocTerminalNamePairs(workspaceID: workspaceID, excludingWindowIDs: []).flatMap { pair in
-            normalizedFocusName(pair.effectiveName) == normalizedFocusName(pair.launchName)
+    /// its distinct launch title, which remains the destination of a later clear. A terminal claimed by
+    /// a coding agent shows no row of its own: the agent row is that window's one visible row, so a
+    /// terminal name equal to the claiming agent's label is that single row's name, not a second holder,
+    /// and is dropped here. The claimed terminal's names stay reserved against every other row.
+    func adHocTerminalFocusNames(workspaceID: String, claimingAgentNormalizedLabelBySessionID: [String: String]) throws -> [String] {
+        try adHocTerminalNamePairs(workspaceID: workspaceID, excludingWindowIDs: []).flatMap { pair -> [String] in
+            let names =
+                normalizedFocusName(pair.effectiveName) == normalizedFocusName(pair.launchName)
                 ? [pair.effectiveName] : [pair.effectiveName, pair.launchName]
+            guard let claimingLabel = claimingAgentNormalizedLabelBySessionID[pair.sessionID] else { return names }
+            return names.filter { normalizedFocusName($0) != claimingLabel }
         }
     }
 
-    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws -> [(effectiveName: String, launchName: String)]
+    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws
+        -> [(sessionID: String, effectiveName: String, launchName: String)]
     {
         var seenSessionIDs = Set<String>()
         return try store.windows(workspaceID: workspaceID).compactMap { window in
@@ -305,7 +312,7 @@ extension WorkspaceOrchestrator {
             let effectiveName =
                 sanitizedFocusName(TerminalSessionTitle.name(userTitle: launchConfiguration.userTitle, launchTitle: launchConfiguration.title))
                 ?? launchName
-            return (effectiveName, launchName)
+            return (sessionID, effectiveName, launchName)
         }
     }
 

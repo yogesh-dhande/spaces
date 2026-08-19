@@ -2037,7 +2037,17 @@ public final class WorkspaceOrchestrator {
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
-        let terminalEntries = try adHocTerminalFocusNames(workspaceID: workspaceID).map { (name: $0, kind: "terminal") }
+        // An agent that claims a terminal replaces that window's row, so the claimed terminal's names
+        // are matched against the claiming agent's (rename-applied) label and suppressed when equal:
+        // renaming an agent to its own backing terminal's title renames one row to a name only it holds.
+        let claimingAgentNormalizedLabelBySessionID = Dictionary(
+            workspaceAgentWindows.compactMap { record -> (String, String)? in
+                guard let sessionID = terminalTargetID(record: record), let label = sanitizedFocusName(record.effectiveLabel) else { return nil }
+                return (sessionID, normalizedFocusName(label))
+            }, uniquingKeysWith: { first, _ in first })
+        let terminalEntries = try adHocTerminalFocusNames(
+            workspaceID: workspaceID, claimingAgentNormalizedLabelBySessionID: claimingAgentNormalizedLabelBySessionID
+        ).map { (name: $0, kind: "terminal") }
         let entries =
             processEntries
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {

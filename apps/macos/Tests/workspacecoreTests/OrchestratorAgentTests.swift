@@ -2039,6 +2039,48 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
     }
 
+    /// A claimed shell terminal shows no row of its own: the agent row is that window's one visible
+    /// row. Renaming the agent to the terminal's launch title is therefore renaming one row to a name
+    /// only it holds, and must not be refused as a duplicate of the invisible terminal name. The launch
+    /// title stays reserved against every other row, which cannot merge with it on the agent's exit.
+    func testRenamingAnAgentToItsClaimedTerminalsLaunchTitleSucceeds() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-shell-claimed-by-agent"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Fix checkout 500", workingDirectory: workspace.dir))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Fix checkout 500", detail: nil,
+                    targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Coding Agent",
+                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), sessionKey: "thread-1", status: .idle, createdAt: "now",
+                    updatedAt: "now"))
+            try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-2", workspaceID: workspace.id, label: "Opencode", session: "other-session"))
+
+            XCTAssertThrowsError(
+                try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-2", title: "Fix checkout 500"),
+                "a claimed terminal's launch name stays reserved against rows that do not claim it")
+
+            try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Fix checkout 500")
+        }
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Fix checkout 500")
+        XCTAssertNil(try store.agentWindow(id: "agent-2")?.userLabel)
+    }
+
     /// Clearing is never refused, and with the reported label free it is a plain revert: the stored rename
     /// goes away and the row falls back to the name the agent reports for itself.
     func testClearingAnAgentRenameRevertsToTheReportedLabelWhenItIsFree() throws {
