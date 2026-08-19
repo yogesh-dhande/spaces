@@ -81,9 +81,18 @@ import workspacecore
     }
 
     private func reloadWorkspaceVisibilityRows() {
+        // The tree is shared with the iOS Workspaces sheet, so it reads its own project/workspace inputs
+        // rather than `workspacecore` summaries (which no client-neutral module can import); the mapping
+        // from this host's model onto them lives here.
+        let projectsByDevice = Dictionary(grouping: host.projects, by: \.deviceID).mapValues { projects in
+            projects.map { WorkspaceVisibilityTree.Project(id: $0.id, name: $0.name, isGitRepo: $0.isGitRepo, isHidden: $0.isHidden) }
+        }
+        let workspacesByProject = host.workspacesByProject.mapValues { workspaces in
+            workspaces.map { WorkspaceVisibilityTree.Workspace(id: $0.id, name: $0.displayName, isDefault: $0.isDefault, isHidden: $0.isHidden) }
+        }
         workspaceVisibilityOutline.devices = WorkspaceVisibilityTree.build(
-            devices: host.deviceSections.map { .init(deviceID: $0.deviceID, name: $0.displayName) }, projects: host.projects,
-            workspacesByProject: host.workspacesByProject, query: workspaceVisibilityQuery)
+            devices: host.deviceSections.map { .init(deviceID: $0.deviceID, name: $0.displayName) }, projectsByDevice: projectsByDevice,
+            workspacesByProject: workspacesByProject, query: workspaceVisibilityQuery)
         guard let outlineView = workspaceVisibilityOutlineView else { return }
         outlineView.reloadData()
         workspaceVisibilityOutline.expandAll(outlineView)

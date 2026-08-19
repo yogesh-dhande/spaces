@@ -1,40 +1,52 @@
 import Foundation
 
-enum CommandPaletteFuzzySearch {
-    struct Field: Sendable, Equatable {
-        let text: String
-        let weight: Double
+/// Token-based fuzzy matcher shared by every Spaces client surface that searches text: the Mac's
+/// command palette, the Mac's Workspaces dialog, the iOS Workspaces sheet, and the iOS Spaces tab's
+/// live search. It lives here rather than in a client target so all of them rank and match identically.
+///
+/// `match` answers whether one candidate's fields match (and how well); `rank` orders a set of
+/// candidates by that score. A surface the user reads structurally uses `match` as a predicate and
+/// keeps its own order — see `WorkspaceVisibilityTree`.
+public enum FuzzyTextSearch {
+    public struct Field: Sendable, Equatable {
+        public let text: String
+        public let weight: Double
 
-        init(text: String, weight: Double = 1.0) {
+        public init(text: String, weight: Double = 1.0) {
             self.text = text
             self.weight = weight
         }
     }
 
-    struct Candidate<ID: Hashable & Sendable>: Sendable, Equatable {
-        let id: ID
-        let fields: [Field]
+    public struct Candidate<ID: Hashable & Sendable>: Sendable, Equatable {
+        public let id: ID
+        public let fields: [Field]
+
+        public init(id: ID, fields: [Field]) {
+            self.id = id
+            self.fields = fields
+        }
     }
 
-    struct Match: Sendable, Equatable {
-        let score: Double
-        let tokenMatches: [TokenMatch]
+    public struct Match: Sendable, Equatable {
+        public let score: Double
+        public let tokenMatches: [TokenMatch]
     }
 
-    struct TokenMatch: Sendable, Equatable {
-        let token: String
-        let fieldIndex: Int
-        let score: Double
-        let matchedIndices: [Int]
+    public struct TokenMatch: Sendable, Equatable {
+        public let token: String
+        public let fieldIndex: Int
+        public let score: Double
+        public let matchedIndices: [Int]
     }
 
-    struct RankedCandidate<ID: Hashable & Sendable>: Sendable, Equatable {
-        let id: ID
-        let score: Double
-        let match: Match
+    public struct RankedCandidate<ID: Hashable & Sendable>: Sendable, Equatable {
+        public let id: ID
+        public let score: Double
+        public let match: Match
     }
 
-    static func match(query: String, fields: [Field]) -> Match? {
+    public static func match(query: String, fields: [Field]) -> Match? {
         let tokens = tokenize(query)
         guard !tokens.isEmpty else { return Match(score: 0, tokenMatches: []) }
 
@@ -75,7 +87,7 @@ enum CommandPaletteFuzzySearch {
         return Match(score: finalScore, tokenMatches: tokenMatches)
     }
 
-    static func rank<ID: Hashable & Sendable>(query: String, candidates: [Candidate<ID>], limit: Int? = nil) -> [RankedCandidate<ID>] {
+    public static func rank<ID: Hashable & Sendable>(query: String, candidates: [Candidate<ID>], limit: Int? = nil) -> [RankedCandidate<ID>] {
         let ranked = candidates.enumerated().compactMap { offset, candidate -> (offset: Int, ranked: RankedCandidate<ID>)? in
             guard let match = match(query: query, fields: candidate.fields) else { return nil }
             return (offset, RankedCandidate(id: candidate.id, score: match.score, match: match))

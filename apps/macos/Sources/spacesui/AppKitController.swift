@@ -3276,8 +3276,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func rowAlertsAttentionEntries(
         in groups: [AlertsGroup], workspaceID: String, processID: String? = nil, agentID: String? = nil, sessionID: String? = nil
     ) -> [AlertsAttentionEntry] {
-        guard processID != nil || agentID != nil || sessionID != nil, let group = groups.first(where: { $0.workspaceID == workspaceID })
-        else { return [] }
+        guard processID != nil || agentID != nil || sessionID != nil, let group = groups.first(where: { $0.workspaceID == workspaceID }) else {
+            return []
+        }
         return group.items.filter { entry in
             switch entry.focusRequest {
             case .workspaceProcess(_, let entryProcessID): return entryProcessID == processID
@@ -12188,9 +12189,9 @@ struct CommandPaletteItem: Sendable {
         return "\(workspaceContextText)  ·  \(detail)"
     }
 
-    var searchCandidate: CommandPaletteFuzzySearch.Candidate<String> {
+    var searchCandidate: FuzzyTextSearch.Candidate<String> {
         let combinedText = "\(projectTitle) \(workspaceTitle) \(workspaceBranch ?? "") \(label) \(detail ?? "")"
-        return CommandPaletteFuzzySearch.Candidate(
+        return FuzzyTextSearch.Candidate(
             id: id,
             fields: [
                 .init(text: projectTitle, weight: 0.92), .init(text: workspaceTitle, weight: 0.92), .init(text: workspaceBranch ?? "", weight: 0.9),
@@ -12543,7 +12544,7 @@ extension AppKitController {
             return items
         }
 
-        let rankedIDs = CommandPaletteFuzzySearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
+        let rankedIDs = FuzzyTextSearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
         let itemsByID = Dictionary(uniqueKeysWithValues: allItems.map { ($0.id, $0) })
         return rankedIDs.compactMap { itemsByID[$0] }
     }
@@ -12558,7 +12559,7 @@ extension AppKitController {
     {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedQuery.isEmpty { return Array(allItems.prefix(maxEmptyQueryItems)) }
-        let rankedIDs = CommandPaletteFuzzySearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
+        let rankedIDs = FuzzyTextSearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
         let itemsByID = Dictionary(uniqueKeysWithValues: allItems.map { ($0.id, $0) })
         return rankedIDs.compactMap { itemsByID[$0] }
     }
@@ -12730,9 +12731,9 @@ extension AppKitController {
         await Self.commandPaletteItemsSnapshot(alertsGroups: alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 
-    nonisolated private static func commandPaletteItemsSnapshot(
-        alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>
-    ) async -> Result<[CommandPaletteItem], Error> {
+    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>) async -> Result<
+        [CommandPaletteItem], Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(
