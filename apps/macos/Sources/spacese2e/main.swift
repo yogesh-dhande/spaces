@@ -306,8 +306,13 @@ private struct TerminalServiceControlCommand: ParsableCommand {
     @Option(name: .long) var scrollHorizontal: Double?
     @Option(name: .long) var scrollVertical: Double?
     @Option(name: .long) var scrollMods: Int32?
+    @Option(name: .long) var selectionStartColumn: UInt16?
+    @Option(name: .long) var selectionStartRow: UInt32?
+    @Option(name: .long) var selectionEndColumn: UInt16?
+    @Option(name: .long) var selectionEndRow: UInt32?
     @Flag(name: .long) var directControl = false
     @Flag(name: .long) var appendNewline = false
+    @Flag(name: .long) var selectionRectangle = false
 
     func run() throws {
         let trimmedCommand = try required(command, label: "command")
@@ -318,7 +323,8 @@ private struct TerminalServiceControlCommand: ParsableCommand {
         let controlRequest = TerminalControlRequest(
             command: trimmedCommand, text: text, key: key, clientID: normalizedClientID, client: client, attachmentMode: parsedAttachmentMode,
             columns: nil, rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: scrollHorizontal, scrollVertical: scrollVertical,
-            scrollMods: scrollMods, appendNewline: appendNewline)
+            scrollMods: scrollMods, appendNewline: appendNewline, selectionStartColumn: selectionStartColumn, selectionStartRow: selectionStartRow,
+            selectionEndColumn: selectionEndColumn, selectionEndRow: selectionEndRow, selectionRectangle: selectionRectangle ? true : nil)
         if directControl {
             let paths = try TerminalSessionPaths.forSession(id: trimmedSessionID)
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
