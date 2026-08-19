@@ -12,7 +12,11 @@ import Foundation
 /// re-derivation.
 ///
 /// Reasons that describe screen content (`input`, `input_output`, `output`, `state_change`,
-/// `scroll`, `clear_screen`, `resize`) are therefore output-shaped. They arrive at
+/// `scroll`, `clear_screen`, `selection`, `resize`) are therefore output-shaped. `selection`
+/// belongs here because the shared highlight lives in the exported snapshot like any other
+/// screen content: a newer frame renders it exactly, and a pane parked on the takeover or
+/// unavailable presentation needs the output notification to notice its first renderable
+/// frame even when that frame arrived under `selection`. They arrive at
 /// interaction frequency, and applying the payload has already updated the mirror's frame
 /// and the client's cached runtime/attachment state by the time this routing runs. Every
 /// change a pane refresh actually reacts to — a runtime-state transition, an attachment or
@@ -40,7 +44,7 @@ public enum TerminalRemoteSessionStateNotificationRouting {
             return [.spacesTerminalRuntimeStateDidChange]
         case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
             TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-            TerminalRemoteSessionStateReason.resize:
+            TerminalRemoteSessionStateReason.selection, TerminalRemoteSessionStateReason.resize:
             return [.spacesTerminalOutputDidChange]
         case TerminalRemoteSessionStateReason.clipboardWrite:
             // Deliberately no notification. A clipboard write changes nothing a pane presents — the
@@ -81,7 +85,7 @@ public enum TerminalRemoteSessionStateNotificationRouting {
         switch reason {
         case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
             TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-            TerminalRemoteSessionStateReason.resize:
+            TerminalRemoteSessionStateReason.selection, TerminalRemoteSessionStateReason.resize:
             return true
         default: return false
         }

@@ -71,7 +71,10 @@ public enum GhosttyTerminalSnapshotViewport {
                 snapshot.clusters, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
             linkURLs: croppedCellText(
                 snapshot.linkURLs, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
-            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture)
+            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture,
+            selection: croppedSelection(
+                snapshot.selection, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
+            scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset + UInt32(rowOffset))
     }
 
     /// Rebases a cell-text table into the cropped grid's coordinates, dropping entries for cells the crop
@@ -88,6 +91,96 @@ public enum GhosttyTerminalSnapshotViewport {
             cropped[row * columns + column] = text
         }
         return cropped
+    }
+
+    /// Rebases the shared selection into the cropped grid, the same way `croppedCellText` rebases the
+    /// per-cell text tables: an entry entirely outside the window disappears, and one that straddles a
+    /// window edge is clamped to it with the extends flags recording what got cut off.
+    ///
+    /// A stream (non-rectangle) selection carries only one column range per end, because every row
+    /// strictly between `startRow` and `endRow` is implicitly selected full width by convention: the
+    /// struct has no per-row ranges to crop. That means a boundary row's occupied columns depend on
+    /// whether it is still the selection's true start/end row after cropping or an interior row this
+    /// crop exposes for the first time, which is the same test the extends flags already need.
+    private static func croppedSelection(
+        _ selection: GhosttyTerminalSelectionRange?, sourceColumns: Int, columnOffset: Int, rowOffset: Int, columns: Int, rows: Int
+    ) -> GhosttyTerminalSelectionRange? {
+        guard let selection else { return nil }
+        let originalStartRow = Int(selection.startRow)
+        let originalEndRow = Int(selection.endRow)
+        let originalStartColumn = Int(selection.startColumn)
+        let originalEndColumn = Int(selection.endColumn)
+
+        let windowRowStart = rowOffset
+        let windowRowEnd = rowOffset + rows - 1
+        let windowColumnStart = columnOffset
+        let windowColumnEnd = columnOffset + columns - 1
+
+        var overlapRowStart = max(originalStartRow, windowRowStart)
+        var overlapRowEnd = min(originalEndRow, windowRowEnd)
+        guard overlapRowStart <= overlapRowEnd else { return nil }
+
+        let clippedAbove = originalStartRow < windowRowStart
+        let clippedBelow = originalEndRow > windowRowEnd
+
+        if selection.isRectangle {
+            let overlapColumnStart = max(originalStartColumn, windowColumnStart)
+            let overlapColumnEnd = min(originalEndColumn, windowColumnEnd)
+            guard overlapColumnStart <= overlapColumnEnd else { return nil }
+            return GhosttyTerminalSelectionRange(
+                startColumn: UInt16(overlapColumnStart - windowColumnStart), startRow: UInt16(overlapRowStart - windowRowStart),
+                endColumn: UInt16(overlapColumnEnd - windowColumnStart), endRow: UInt16(overlapRowEnd - windowRowStart), isRectangle: true,
+                extendsAbove: selection.extendsAbove || clippedAbove, extendsBelow: selection.extendsBelow || clippedBelow)
+        }
+
+        // A surviving row's own occupied columns only cover the window when it is a true boundary row
+        // that the row crop didn't already clip: an interior row is full width by convention, but a
+        // boundary row that survived the row crop can still miss the column window entirely (e.g. the
+        // start row's text sits to the right of a narrow leading window). Trim such a row away before
+        // assuming any surviving row intersects the window.
+        var startRowTrimmed = false
+        var endRowTrimmed = false
+        if !clippedAbove, originalStartColumn > windowColumnEnd {
+            overlapRowStart += 1
+            startRowTrimmed = true
+        }
+        if !clippedBelow, originalEndColumn < windowColumnStart {
+            overlapRowEnd -= 1
+            endRowTrimmed = true
+        }
+        guard overlapRowStart <= overlapRowEnd else { return nil }
+
+        // A trimmed boundary row means the selection continues beyond what this window shows, the same
+        // as if the row crop itself had clipped it.
+        let extendsAbove = selection.extendsAbove || clippedAbove || startRowTrimmed
+        let extendsBelow = selection.extendsBelow || clippedBelow || endRowTrimmed
+
+        guard overlapRowStart < overlapRowEnd else {
+            // Exactly one row of the selection survives the crop. Its occupied columns depend on whether
+            // it is still the true start row, the true end row, both (a single-row selection), or
+            // neither (an interior row, hence full width).
+            let row = overlapRowStart
+            let occupiedStart = row == originalStartRow ? originalStartColumn : 0
+            let occupiedEnd = row == originalEndRow ? originalEndColumn : sourceColumns - 1
+            let clampedStart = max(occupiedStart, windowColumnStart)
+            let clampedEnd = min(occupiedEnd, windowColumnEnd)
+            guard clampedStart <= clampedEnd else { return nil }
+            return GhosttyTerminalSelectionRange(
+                startColumn: UInt16(clampedStart - windowColumnStart), startRow: UInt16(row - windowRowStart),
+                endColumn: UInt16(clampedEnd - windowColumnStart), endRow: UInt16(row - windowRowStart), isRectangle: false,
+                extendsAbove: extendsAbove, extendsBelow: extendsBelow)
+        }
+
+        // More than one row survives the crop. A surviving true boundary row is known by now to
+        // intersect the window (an out-of-window one was trimmed above), so it clamps into the window
+        // like any partially-visible row. Any other surviving top or bottom row is interior to the
+        // original selection, hence full width, whether the row crop clipped it or the column trim
+        // above did.
+        let startColumn = (clippedAbove || startRowTrimmed) ? 0 : min(max(originalStartColumn - windowColumnStart, 0), columns - 1)
+        let endColumn = (clippedBelow || endRowTrimmed) ? columns - 1 : min(max(originalEndColumn - windowColumnStart, 0), columns - 1)
+        return GhosttyTerminalSelectionRange(
+            startColumn: UInt16(startColumn), startRow: UInt16(overlapRowStart - windowRowStart), endColumn: UInt16(endColumn),
+            endRow: UInt16(overlapRowEnd - windowRowStart), isRectangle: false, extendsAbove: extendsAbove, extendsBelow: extendsBelow)
     }
 
     public static func window(

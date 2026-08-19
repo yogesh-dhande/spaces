@@ -62,12 +62,26 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
     public let scrollRects: [GhosttyRenderScrollRectOperation]
     public let replaceCellRuns: [GhosttyRenderCellRun]
     public let changedCellCount: Int
+    /// The shared terminal selection, projected into the target frame's viewport. Applying a delta
+    /// replaces the baseline's selection wholesale with this value: there is no merge with whatever
+    /// selection the baseline carried, since the daemon always recomputes the full projection.
+    public let selection: GhosttyTerminalSelectionRange?
+    /// Total rows in the terminal's screen plus scrollback, as of the target frame.
+    public let scrollbarTotal: UInt32
+    /// Index of the target frame's viewport top row within `scrollbarTotal`.
+    public let scrollbarOffset: UInt32
+    /// True when the producing terminal's scroll-rect buffer overflowed since the previous frame: this
+    /// delta's `scrollRects` are absent or incomplete, so a consumer that tracks content movement through
+    /// them must treat movement as unknown rather than trust a partial list. Full frames need no such
+    /// flag, since they carry the whole grid rather than a diff.
+    public let scrollRectsOverflowed: Bool
 
     public init(
         baseRevision: UInt64?, targetRevision: UInt64?, ownerEpoch: UInt64, columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int,
         cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32, mouseReportingActive: Bool = false,
         mouseShiftCapture: UInt8 = 0, scrollRects: [GhosttyRenderScrollRectOperation] = [], replaceCellRuns: [GhosttyRenderCellRun] = [],
-        changedCellCount: Int
+        changedCellCount: Int, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0,
+        scrollRectsOverflowed: Bool = false
     ) {
         self.baseRevision = baseRevision
         self.targetRevision = targetRevision
@@ -84,18 +98,25 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
         self.scrollRects = scrollRects
         self.replaceCellRuns = replaceCellRuns
         self.changedCellCount = changedCellCount
+        self.selection = selection
+        self.scrollbarTotal = scrollbarTotal
+        self.scrollbarOffset = scrollbarOffset
+        self.scrollRectsOverflowed = scrollRectsOverflowed
     }
 }
 
 public struct GhosttyRenderUpdate: Codable, Sendable, Equatable {
     // Version 4 added the sparse per-cell grapheme cluster and OSC 8 link payloads to both binary
-    // bodies. The version byte is the only guard for payloads that outlive a build (persisted final
-    // frames, demo recordings), so any layout change must bump it — decoders reject other versions
+    // bodies. Version 5 added the shared terminal selection (projected into the frame's viewport by the
+    // daemon) and the viewport's scrollbar position (total rows and this viewport's offset within them)
+    // to both bodies, plus a delta-only scroll-rects-overflowed flag marking that a delta's scroll rects
+    // are absent or incomplete. The version byte is the only guard for payloads that outlive a build (persisted
+    // final frames, demo recordings), so any layout change must bump it — decoders reject other versions
     // rather than misread offsets. There is deliberately no decoder for older versions: pre-release,
     // a persisted final frame from an earlier build rendering as "no final frame" once is accepted
     // over carrying a compatibility path, and live sessions re-export at the current version on the
     // next frame.
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public let version: Int
     public let kind: GhosttyRenderUpdateKind
@@ -278,11 +299,15 @@ public enum GhosttyRenderUpdateApplier {
             grid.scroll(operation, blank: blankCell(for: delta))
         }
         for run in delta.replaceCellRuns { try applyCellRun(run, to: &grid, rows: baseline.rows) }
+        // Selection and scrollbar are replaced wholesale from the delta rather than merged with the
+        // baseline: the daemon recomputes the full projection for every frame it exports, so the delta's
+        // values are already the complete, current answer.
         return GhosttyTerminalSnapshot(
             columns: delta.columns, rows: delta.rows, cursorColumn: delta.cursorColumn, cursorRow: delta.cursorRow,
             cursorVisible: delta.cursorVisible, defaultForegroundRGB: delta.defaultForegroundRGB, defaultBackgroundRGB: delta.defaultBackgroundRGB,
             cells: grid.cells, clusters: grid.clusters, linkURLs: grid.linkURLs, mouseReportingActive: delta.mouseReportingActive,
-            mouseShiftCapture: delta.mouseShiftCapture)
+            mouseShiftCapture: delta.mouseShiftCapture, selection: delta.selection, scrollbarTotal: delta.scrollbarTotal,
+            scrollbarOffset: delta.scrollbarOffset)
     }
 
     /// Writes the run's cells at its start index, then rebases the run's own cluster/link entries — keyed
@@ -309,7 +334,8 @@ public enum GhosttyRenderUpdateApplier {
 public enum GhosttyRenderUpdateFactory {
     public static func makeUpdate(
         target frame: GhosttyRenderFrame, baseline: GhosttyRenderUpdateBaseline?, forceFull: Bool = false,
-        forceFullReason: String = "initial_baseline", nativeScrollRects: [GhosttyRenderScrollRectOperation] = []
+        forceFullReason: String = "initial_baseline", nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
+        nativeScrollRectsOverflowed: Bool = false
     ) -> GhosttyRenderUpdate {
         guard !forceFull else { return .full(frame, fallbackReason: forceFullReason) }
         guard let baseline else { return .full(frame, fallbackReason: "missing_baseline") }
@@ -319,7 +345,7 @@ public enum GhosttyRenderUpdateFactory {
             return .full(frame, fallbackReason: "invalid_scroll_rect")
         }
 
-        let delta = makeDelta(from: baseline, to: frame, scrollRects: scrollRects)
+        let delta = makeDelta(from: baseline, to: frame, scrollRects: scrollRects, scrollRectsOverflowed: nativeScrollRectsOverflowed)
         return GhosttyRenderUpdate.delta(delta)
     }
 
@@ -333,7 +359,8 @@ public enum GhosttyRenderUpdateFactory {
     }
 
     private static func makeDelta(
-        from baseline: GhosttyRenderUpdateBaseline, to frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation]
+        from baseline: GhosttyRenderUpdateBaseline, to frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation],
+        scrollRectsOverflowed: Bool
     ) -> GhosttyRenderDeltaFrame {
         let previous = normalized(baseline.snapshot)
         let target = normalized(frame.snapshot)
@@ -344,12 +371,18 @@ public enum GhosttyRenderUpdateFactory {
             codepoint: 0, foregroundRGB: target.defaultForegroundRGB, backgroundRGB: target.defaultBackgroundRGB, flags: 0)
         for operation in scrollRects { scrolled.scroll(operation, blank: blank) }
         let runs = changedRuns(from: scrolled, to: target)
+        // The selection and scrollbar values always ride the delta, from the target snapshot, whether or
+        // not any cell changed: a drag that only moves the selection, or a scroll that only moves the
+        // scrollbar thumb, has to reach a client the same way an output change does, and this factory
+        // never withholds a delta for having "nothing" to report: an empty replaceCellRuns and empty
+        // scrollRects (see changedRuns above) is itself a valid, useful delta.
         return GhosttyRenderDeltaFrame(
             baseRevision: baseline.sessionRevision, targetRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, columns: target.columns,
             rows: target.rows, cursorColumn: target.cursorColumn, cursorRow: target.cursorRow, cursorVisible: target.cursorVisible,
             defaultForegroundRGB: target.defaultForegroundRGB, defaultBackgroundRGB: target.defaultBackgroundRGB,
             mouseReportingActive: target.mouseReportingActive, mouseShiftCapture: target.mouseShiftCapture, scrollRects: scrollRects,
-            replaceCellRuns: runs, changedCellCount: runs.reduce(0) { $0 + $1.cells.count })
+            replaceCellRuns: runs, changedCellCount: runs.reduce(0) { $0 + $1.cells.count }, selection: target.selection,
+            scrollbarTotal: target.scrollbarTotal, scrollbarOffset: target.scrollbarOffset, scrollRectsOverflowed: scrollRectsOverflowed)
     }
 
     private static func normalized(_ snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshot {
@@ -364,7 +397,8 @@ public enum GhosttyRenderUpdateFactory {
             columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells, clusters: snapshot.clusters, linkURLs: snapshot.linkURLs,
-            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture)
+            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture, selection: snapshot.selection,
+            scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
     }
 
     private static func validatedScrollRects(_ scrollRects: [GhosttyRenderScrollRectOperation], columns: Int, rows: Int)
@@ -445,6 +479,16 @@ public enum GhosttyRenderUpdateBinaryCodec {
     private static let clusterPayloadFlag: UInt16 = 1 << 15
     private static let linkPayloadFlag: UInt16 = 1 << 14
     private static let payloadFlagMask: UInt16 = clusterPayloadFlag | linkPayloadFlag
+
+    /// The selection flag byte's bit layout: bit 0 marks a present selection (the four coordinate
+    /// fields that follow are meaningless zeros when it is clear), bit 1 marks a rectangle (column-block)
+    /// selection, and bits 2/3 mark that the selection continues above/below this frame's viewport.
+    /// Shared by the writer and the reader, so both nested structs reach these through the enclosing
+    /// enum rather than each other.
+    private static let selectionPresentFlag: UInt8 = 1 << 0
+    private static let selectionRectangleFlag: UInt8 = 1 << 1
+    private static let selectionExtendsAboveFlag: UInt8 = 1 << 2
+    private static let selectionExtendsBelowFlag: UInt8 = 1 << 3
 
     public static func encode(_ update: GhosttyRenderUpdate) throws -> Data {
         var writer = BinaryWriter()
@@ -631,11 +675,35 @@ public enum GhosttyRenderUpdateBinaryCodec {
             }
         }
 
+        /// Writes the selection and scrollbar fields shared by both the snapshot and delta bodies: one
+        /// flag byte, the four selection coordinates (zeros when there is no selection), then the two
+        /// scrollbar counters. Always 17 bytes, whether or not a selection is present, so the reader
+        /// never has to branch on the body's total length to find what follows.
+        mutating func appendSelectionAndScrollbar(_ selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32)
+            throws
+        {
+            var flags: UInt8 = 0
+            if let selection {
+                flags |= selectionPresentFlag
+                if selection.isRectangle { flags |= selectionRectangleFlag }
+                if selection.extendsAbove { flags |= selectionExtendsAboveFlag }
+                if selection.extendsBelow { flags |= selectionExtendsBelowFlag }
+            }
+            appendUInt8(flags)
+            appendUInt16(selection?.startColumn ?? 0)
+            appendUInt16(selection?.startRow ?? 0)
+            appendUInt16(selection?.endColumn ?? 0)
+            appendUInt16(selection?.endRow ?? 0)
+            appendUInt32(scrollbarTotal)
+            appendUInt32(scrollbarOffset)
+        }
+
         mutating func appendSnapshot(_ snapshot: GhosttyTerminalSnapshot) throws {
-            // Snapshot header is 19 bytes; each cell is 14 bytes (see appendCell). Cells carrying a
-            // cluster or link add a sparse entry each after the block, which the reservation does not
-            // size for: they are rare enough that sizing for them would over-reserve every frame.
-            data.reserveCapacity(data.count + 19 + snapshot.cells.count * 14)
+            // Snapshot header is 36 bytes (19 fixed fields plus the 17-byte selection/scrollbar section);
+            // each cell is 14 bytes (see appendCell). Cells carrying a cluster or link add a sparse entry
+            // each after the block, which the reservation does not size for: they are rare enough that
+            // sizing for them would over-reserve every frame.
+            data.reserveCapacity(data.count + 36 + snapshot.cells.count * 14)
             try appendUInt16Clamped(snapshot.cursorColumn)
             try appendUInt16Clamped(snapshot.cursorRow)
             appendUInt8(snapshot.cursorVisible ? 1 : 0)
@@ -643,16 +711,18 @@ public enum GhosttyRenderUpdateBinaryCodec {
             appendUInt32(snapshot.defaultBackgroundRGB)
             appendUInt8(snapshot.mouseReportingActive ? 1 : 0)
             appendUInt8(snapshot.mouseShiftCapture)
+            try appendSelectionAndScrollbar(snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
             try appendUInt32Clamped(snapshot.cells.count)
             try appendCellBlock(snapshot.cells, clusters: snapshot.clusters, linkURLs: snapshot.linkURLs)
         }
 
         mutating func appendDelta(_ delta: GhosttyRenderDeltaFrame) throws {
-            // Header 23 bytes, each scroll rect 16 bytes, run-count 4 bytes, each run header 6 bytes,
-            // each cell 14 bytes (see appendCell), plus each run's sparse cell-text section (see
+            // Header 41 bytes (23 fixed fields, the 17-byte selection/scrollbar section, and the 1-byte
+            // scroll-rects-overflowed flag), each scroll rect 16 bytes, run-count 4 bytes, each run header
+            // 6 bytes, each cell 14 bytes (see appendCell), plus each run's sparse cell-text section (see
             // appendCellBlock) which the reservation deliberately does not size for.
             let runCells = delta.replaceCellRuns.reduce(0) { $0 + $1.cells.count }
-            data.reserveCapacity(data.count + 23 + delta.scrollRects.count * 16 + 4 + delta.replaceCellRuns.count * 6 + runCells * 14)
+            data.reserveCapacity(data.count + 41 + delta.scrollRects.count * 16 + 4 + delta.replaceCellRuns.count * 6 + runCells * 14)
             try appendUInt16Clamped(delta.cursorColumn)
             try appendUInt16Clamped(delta.cursorRow)
             appendUInt8(delta.cursorVisible ? 1 : 0)
@@ -660,6 +730,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
             appendUInt32(delta.defaultBackgroundRGB)
             appendUInt8(delta.mouseReportingActive ? 1 : 0)
             appendUInt8(delta.mouseShiftCapture)
+            try appendSelectionAndScrollbar(delta.selection, scrollbarTotal: delta.scrollbarTotal, scrollbarOffset: delta.scrollbarOffset)
+            appendUInt8(delta.scrollRectsOverflowed ? 1 : 0)
             try appendUInt32Clamped(delta.changedCellCount)
             try appendUInt32Clamped(delta.scrollRects.count)
             for scrollRect in delta.scrollRects {
@@ -777,6 +849,27 @@ public enum GhosttyRenderUpdateBinaryCodec {
             return value
         }
 
+        /// Reads the selection and scrollbar fields written by `BinaryWriter.appendSelectionAndScrollbar`:
+        /// the flag byte, the four coordinates (ignored when the present bit is clear), then the two
+        /// scrollbar counters.
+        private mutating func readSelectionAndScrollbar() throws -> (
+            selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32
+        ) {
+            let flags = try readUInt8()
+            let startColumn = try readUInt16()
+            let startRow = try readUInt16()
+            let endColumn = try readUInt16()
+            let endRow = try readUInt16()
+            let scrollbarTotal = try readUInt32()
+            let scrollbarOffset = try readUInt32()
+            guard flags & selectionPresentFlag != 0 else { return (nil, scrollbarTotal, scrollbarOffset) }
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow,
+                isRectangle: flags & selectionRectangleFlag != 0, extendsAbove: flags & selectionExtendsAboveFlag != 0,
+                extendsBelow: flags & selectionExtendsBelowFlag != 0)
+            return (selection, scrollbarTotal, scrollbarOffset)
+        }
+
         mutating func readSnapshot(columns: Int, rows: Int) throws -> GhosttyTerminalSnapshot {
             let cursorColumn = Int(try readUInt16())
             let cursorRow = Int(try readUInt16())
@@ -785,12 +878,14 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let defaultBackgroundRGB = try readUInt32()
             let mouseReportingActive = try readUInt8() != 0
             let mouseShiftCapture = try readUInt8()
+            let (selection, scrollbarTotal, scrollbarOffset) = try readSelectionAndScrollbar()
             let cellCount = Int(try readUInt32())
             let block = try readCellBlock(count: cellCount)
             return GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
                 defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: block.cells, clusters: block.clusters,
-                linkURLs: block.linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
+                linkURLs: block.linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture, selection: selection,
+                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
         }
 
         mutating func readDelta(baseRevision: UInt64?, targetRevision: UInt64?, ownerEpoch: UInt64, columns: Int, rows: Int) throws
@@ -803,6 +898,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let defaultBackgroundRGB = try readUInt32()
             let mouseReportingActive = try readUInt8() != 0
             let mouseShiftCapture = try readUInt8()
+            let (selection, scrollbarTotal, scrollbarOffset) = try readSelectionAndScrollbar()
+            let scrollRectsOverflowed = try readUInt8() != 0
             let changedCellCount = Int(try readUInt32())
             let scrollRectCount = Int(try readUInt32())
             var scrollRects: [GhosttyRenderScrollRectOperation] = []
@@ -827,7 +924,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
                 baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
                 cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible, defaultForegroundRGB: defaultForegroundRGB,
                 defaultBackgroundRGB: defaultBackgroundRGB, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
-                scrollRects: scrollRects, replaceCellRuns: runs, changedCellCount: changedCellCount)
+                scrollRects: scrollRects, replaceCellRuns: runs, changedCellCount: changedCellCount, selection: selection,
+                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, scrollRectsOverflowed: scrollRectsOverflowed)
         }
 
         private mutating func readFixedWidthInteger<T: FixedWidthInteger>() throws -> T {

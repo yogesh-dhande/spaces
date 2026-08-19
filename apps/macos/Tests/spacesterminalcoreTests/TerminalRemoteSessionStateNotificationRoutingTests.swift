@@ -38,7 +38,7 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
         for reason in [
             TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
             TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-            TerminalRemoteSessionStateReason.resize,
+            TerminalRemoteSessionStateReason.selection, TerminalRemoteSessionStateReason.resize,
         ] {
             XCTAssertEqual(
                 TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason), [.spacesTerminalOutputDidChange],
@@ -71,7 +71,8 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
             TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.attachmentState,
             TerminalRemoteSessionStateReason.sessionMetadata, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
             TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll,
-            TerminalRemoteSessionStateReason.clearScreen, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.resize,
+            TerminalRemoteSessionStateReason.clearScreen, TerminalRemoteSessionStateReason.selection,
+            TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.resize,
             TerminalRemoteSessionStateReason.terminated, TerminalRemoteSessionStateReason.clipboardWrite,
         ]
         for reason in declaredReasons + ["not_a_reason", ""] {

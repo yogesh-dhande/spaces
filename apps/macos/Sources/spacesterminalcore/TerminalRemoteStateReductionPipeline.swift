@@ -51,12 +51,35 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// is what checks that before actually collapsing.
     var isCoalescibleOnApply: Bool { TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason: incomingPayload.reason) }
 
-    /// This output, carrying forward the one-shot effects of the older output it replaces. Nothing
-    /// else is merged: the reduction chain already folded the skipped payload's state into this one's
-    /// `storedPayload`, and its metrics describe a frame that never reached the screen.
+    /// This output, carrying forward the one-shot effects of the older output it replaces, plus the
+    /// skipped frame's scroll rects merged into the surviving frame.
+    ///
+    /// The reduction chain already folds the skipped payload's state into this one's `storedPayload`,
+    /// and its metrics describe a frame that never reached the screen, so those need no extra work here.
+    /// `scrollRects` is different: the mirror's drag-carry buffer (`GhosttyMirrorTerminalView`)
+    /// accumulates rects only from frames that actually get applied, so a coalesced-away frame's rects
+    /// would otherwise vanish with no trace, and the surviving frame would still report
+    /// `scrollRectsOverflowed == false` as if nothing had been skipped. A drag rebased against that
+    /// under-reports how far the content moved and lands on the wrong rows. So when both this output and
+    /// the skipped one carry a frame, the surviving frame is rebuilt with the skipped frame's rects
+    /// (older) ahead of this frame's own rects (newer), and `scrollRectsOverflowed` ORed across both.
+    /// When the skipped output carries no frame there is nothing to merge: `ApplyMailbox.mayCollapse`
+    /// already forbids collapsing a frameless newer output onto a pending frame-carrying one, so the
+    /// reverse (frame-carrying newer output, frameless skipped one) is the only case that reaches here,
+    /// and it needs no rect merge.
     func inheritingEffects(ofCoalesced skipped: TerminalRemoteStateReductionOutput) -> TerminalRemoteStateReductionOutput {
-        TerminalRemoteStateReductionOutput(
-            incomingPayload: incomingPayload, reduction: reduction, reduceMS: reduceMS,
+        var mergedReduction = reduction
+        if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
+            let mergedFrame = GhosttyRenderFrame(
+                version: survivingFrame.version, sessionRevision: survivingFrame.sessionRevision, ownerEpoch: survivingFrame.ownerEpoch,
+                snapshot: survivingFrame.snapshot, scrollRects: skippedFrame.scrollRects + survivingFrame.scrollRects,
+                scrollRectsOverflowed: skippedFrame.scrollRectsOverflowed || survivingFrame.scrollRectsOverflowed)
+            mergedReduction = TerminalRemoteStateReductionResult(
+                payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: mergedFrame,
+                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedOutOfBandPayload: base.isRefusedOutOfBandPayload)
+        }
+        return TerminalRemoteStateReductionOutput(
+            incomingPayload: incomingPayload, reduction: mergedReduction, reduceMS: reduceMS,
             coalescedAwayCount: coalescedAwayCount + skipped.coalescedAwayCount + 1,
             inheritedResyncRequest: inheritedResyncRequest || skipped.requestsResync)
     }
