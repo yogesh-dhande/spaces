@@ -500,7 +500,8 @@
         private func automationOperations(cancelRun: @escaping @Sendable (String) throws -> AutomationRun) -> AutomationOperations {
             AutomationOperations(
                 create: { _ in throw AutomationValidationError("unused test operation") },
-                update: { _, _ in throw AutomationValidationError("unused test operation") }, delete: { _ in }, list: { [] }, runs: { _ in [] },
+                update: { _, _ in throw AutomationValidationError("unused test operation") },
+                setNextRun: { _, _ in throw AutomationValidationError("unused test operation") }, delete: { _ in }, list: { [] }, runs: { _ in [] },
                 trigger: { _ in throw AutomationValidationError("unused test operation") }, cancelRun: cancelRun,
                 endAgents: { _ in throw AutomationValidationError("unused test operation") })
         }

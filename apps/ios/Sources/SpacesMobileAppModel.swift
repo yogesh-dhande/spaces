@@ -1071,6 +1071,32 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Sets a one-time next run for an automation, overriding only its next occurrence. Refreshes the
+    /// overview on success exactly like `triggerAutomation`, since the response carries no overview and
+    /// the automation's next fire time is what changed.
+    ///
+    /// Returns nil once the daemon accepts the time, or the rejection text to show. The next-run sheet
+    /// prints that beside its picker instead of routing it to the app-wide error banner: the user is
+    /// looking at the control that caused it and stays there to correct it.
+    func setAutomationNextRun(id: String, nextRunTime: Date) async -> String? {
+        // The sheet's Schedule button is already disabled while a mutation is in flight, so reaching this
+        // means nothing was sent; reporting it keeps the sheet open rather than closing as though the time
+        // had been accepted.
+        guard !isMutating else { return "Another action is still in progress." }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        do {
+            _ = try await bridgeClient.setAutomationNextRun(id: id, nextRunTime: nextRunTime, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return nil }
+            await refresh()
+            return nil
+        } catch {
+            guard identity == overviewIdentity else { return nil }
+            return error.localizedDescription
+        }
+    }
+
     /// Cancels a running (or queued) automation run.
     func cancelAutomationRun(runID: String) async {
         guard !isMutating else { return }

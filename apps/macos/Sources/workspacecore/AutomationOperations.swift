@@ -9,6 +9,9 @@ import Foundation
 public struct AutomationOperations: Sendable {
     public let create: @Sendable (AutomationDraft) throws -> Automation
     public let update: @Sendable (_ id: String, _ draft: AutomationDraft) throws -> Automation
+    /// Sets the one-time next-run override. `nextRunTime` stays the ISO8601 wire string so both transports
+    /// share the daemon's one parse site (and its one "Invalid next run time." rejection).
+    public let setNextRun: @Sendable (_ id: String, _ nextRunTime: String) throws -> Automation
     public let delete: @Sendable (_ id: String) throws -> Void
     public let list: @Sendable () throws -> [Automation]
     public let runs: @Sendable (_ automationID: String?) throws -> [AutomationRun]
@@ -18,13 +21,15 @@ public struct AutomationOperations: Sendable {
 
     public init(
         create: @escaping @Sendable (AutomationDraft) throws -> Automation,
-        update: @escaping @Sendable (String, AutomationDraft) throws -> Automation, delete: @escaping @Sendable (String) throws -> Void,
+        update: @escaping @Sendable (String, AutomationDraft) throws -> Automation,
+        setNextRun: @escaping @Sendable (String, String) throws -> Automation, delete: @escaping @Sendable (String) throws -> Void,
         list: @escaping @Sendable () throws -> [Automation], runs: @escaping @Sendable (String?) throws -> [AutomationRun],
         trigger: @escaping @Sendable (String) throws -> AutomationRun, cancelRun: @escaping @Sendable (String) throws -> AutomationRun,
         endAgents: @escaping @Sendable (String) throws -> AutomationRun
     ) {
         self.create = create
         self.update = update
+        self.setNextRun = setNextRun
         self.delete = delete
         self.list = list
         self.runs = runs

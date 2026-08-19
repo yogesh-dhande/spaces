@@ -13,11 +13,11 @@ import spacesterminalcore
 /// in gravity areas without forcing them to tile the line's pinned width, which leaves the leftover width
 /// unattributed and the columns free to slide.
 @MainActor final class AutomationTableGrid {
-    static let schedule: CGFloat = 180
-    static let nextRun: CGFloat = 88
+    static let schedule: CGFloat = 224
+    /// Wide enough for the next-run chip, which carries the value plus its disclosure chevron.
+    static let nextRun: CGFloat = 132
     static let device: CGFloat = 96
     static let toggle: CGFloat = 36
-    static let action: CGFloat = 88
     static let nameMinimum: CGFloat = 110
     static let nameMaximum: CGFloat = 320
     static let spacing: CGFloat = 10
@@ -34,17 +34,14 @@ import spacesterminalcore
 
     /// Builds the header line and fixes the grid to it. `device` is nil when the table shows a single
     /// device and the column is dropped from every line at once. Call once, before any row line.
-    func makeHeaderLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView)
-        -> NSStackView
-    {
+    func makeHeaderLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> NSStackView {
         // Schedule holds its preferred width while space is tight, then absorbs the surplus after Name
-        // reaches its readable cap. This keeps the trailing status and action columns from bunching at
+        // reaches its readable cap. This keeps the trailing status and toggle columns from bunching at
         // the table's right edge in a wide pane.
         growableWidth(schedule, preferred: Self.schedule, minimum: 120)
         fixWidth(nextRun, Self.nextRun)
         if let device { flexWidth(device, preferred: Self.device, minimum: 78) }
         fixWidth(toggle, Self.toggle)
-        fixWidth(action, Self.action)
 
         name.translatesAutoresizingMaskIntoConstraints = false
         // Name gets the first claim on available width, up to a readable cap, and truncates rather than
@@ -58,16 +55,13 @@ import spacesterminalcore
         let maximumName = name.widthAnchor.constraint(lessThanOrEqualToConstant: Self.nameMaximum)
         NSLayoutConstraint.activate([minimumName, maximumName])
 
-        headerColumns = Self.columnOrder(
-            status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle, action: action)
+        headerColumns = Self.columnOrder(status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle)
         return Self.makeLine(headerColumns)
     }
 
     /// Builds one row line on the grid the header established.
-    func makeRowLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView) -> NSStackView
-    {
-        let columns = Self.columnOrder(
-            status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle, action: action)
+    func makeRowLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> NSStackView {
+        let columns = Self.columnOrder(status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle)
         precondition(columns.count == headerColumns.count, "row line must have the same columns as the header line")
         for (column, headerColumn) in zip(columns, headerColumns) {
             column.translatesAutoresizingMaskIntoConstraints = false
@@ -87,12 +81,10 @@ import spacesterminalcore
         pendingAlignment = []
     }
 
-    private static func columnOrder(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView)
-        -> [NSView]
-    {
+    private static func columnOrder(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> [NSView] {
         var columns: [NSView] = [status, name, schedule, nextRun]
         if let device { columns.append(device) }
-        columns.append(contentsOf: [toggle, action])
+        columns.append(toggle)
         return columns
     }
 
@@ -144,7 +136,7 @@ import spacesterminalcore
 /// Hand-rolled rather than an `NSTableView` row: the pane rebuilds wholesale on every overview refresh, so
 /// there is no diffing to gain, and the row's two gestures read straight off an `NSView` — right-click
 /// opens the context menu through the standard `menu` property, and double-click opens the editor — while
-/// the enable switch and the contextual action keep their own click handling as ordinary subviews.
+/// the enable switch and the next-run chip keep their own click handling as ordinary subviews.
 @MainActor final class AutomationsTableRowView: NSView, NSGestureRecognizerDelegate {
     private let onDoubleClick: () -> Void
     private var hoverTrackingArea: NSTrackingArea?
@@ -164,7 +156,7 @@ import spacesterminalcore
         translatesAutoresizingMaskIntoConstraints = false
         // A recognizer rather than a `mouseDown` override so the double-click is genuinely row-wide: it
         // observes events for the whole subtree, where a raw override only sees what the responder chain
-        // happens to bubble up. Clicks that land on a control (the enable switch, the action button) are
+        // happens to bubble up. Clicks that land on a control (the enable switch, the next-run chip) are
         // refused below so a double-click there stays the control's own interaction.
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(rowDoubleClicked))
         doubleClick.numberOfClicksRequired = 2
@@ -177,7 +169,7 @@ import spacesterminalcore
     @objc private func rowDoubleClicked() { onDoubleClick() }
 
     /// Refuses the double-click only where an actionable control owns the click (the enable switch, the
-    /// action button). A plain `NSControl` test would be wrong here: the row's labels are `NSTextField`s,
+    /// next-run chip). A plain `NSControl` test would be wrong here: the row's labels are `NSTextField`s,
     /// which are controls too, and they cover most of the row the gesture is meant to serve.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
         let location = convert(event.locationInWindow, from: nil)

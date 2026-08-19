@@ -13,7 +13,7 @@ extension TerminalServiceAutomationSummary {
             agentCommand: automation.agentCommand, agentPrompt: automation.agentPrompt, workspaceID: automation.workspaceID,
             timeoutSeconds: automation.timeoutSeconds, concurrencyPolicy: automation.concurrencyPolicy.rawValue,
             missedRunPolicy: automation.missedRunPolicy.rawValue,
-            nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.fractionalString(from:)),
+            nextFireTime: automation.effectiveNextFireTime.map(TerminalSessionTimestamp.fractionalString(from:)),
             createdAt: TerminalSessionTimestamp.fractionalString(from: automation.createdAt),
             updatedAt: TerminalSessionTimestamp.fractionalString(from: automation.updatedAt))
     }

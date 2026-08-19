@@ -793,6 +793,19 @@ public enum SpacesDeviceClient {
             .automations ?? []
     }
 
+    /// Overrides an automation's next occurrence on a paired device with `nextRunTime`. The daemon validates
+    /// the instant (future, on an enabled automation) and returns the updated automation as a one-element
+    /// list; the cron schedule resumes after the overridden run fires.
+    @discardableResult public static func setAutomationNextRun(
+        id: String, nextRunTime: Date, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationSummary] {
+        try request(
+            .init(command: .setAutomationNextRun(.init(id: id, nextRunTime: TerminalSessionTimestamp.fractionalString(from: nextRunTime)))),
+            device: device, clientApp: clientApp, profile: profile
+        ).automations ?? []
+    }
+
     /// Deletes an automation on a paired device (cancelling any running run and cleaning up its artifacts).
     @discardableResult public static func deleteAutomation(
         id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -1029,8 +1042,8 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation,
-            .cancelAutomationRun, .endAutomationAgents:
+            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun,
+            .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds

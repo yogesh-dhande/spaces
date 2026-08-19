@@ -139,9 +139,51 @@
             XCTAssertNotNil(SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: iso), relativeTo: now))
         }
 
+        func testNextRunChipValueFallsBackToNotScheduledPlaceholder() {
+            let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+            let iso = ISO8601DateFormatter().string(from: now.addingTimeInterval(300))
+
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextRunChipValue(makeAutomation(enabled: true, triggerKind: "cron", nextFireTime: iso), relativeTo: now),
+                SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, triggerKind: "cron", nextFireTime: iso), relativeTo: now))
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextRunChipValue(makeAutomation(enabled: true, nextFireTime: nil), relativeTo: now), "Not scheduled")
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextRunChipValue(makeAutomation(enabled: false, triggerKind: "cron", nextFireTime: iso), relativeTo: now),
+                "Not scheduled")
+        }
+
+        func testNextRunSummaryNamesScheduledNotScheduledAndManual() {
+            let fireDate = Date(timeIntervalSinceReferenceDate: 1_000_000)
+            let iso = ISO8601DateFormatter().string(from: fireDate)
+            let expectedFormatter = DateFormatter()
+            expectedFormatter.dateStyle = .medium
+            expectedFormatter.timeStyle = .short
+
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextRunSummary(makeAutomation(triggerKind: "cron", nextFireTime: iso)),
+                "Scheduled: \(expectedFormatter.string(from: fireDate))")
+            XCTAssertEqual(SpacesMobileAutomations.nextRunSummary(makeAutomation(triggerKind: "cron", nextFireTime: nil)), "Not scheduled")
+            XCTAssertEqual(SpacesMobileAutomations.nextRunSummary(makeAutomation(triggerKind: "manual", nextFireTime: nil)), "Manual")
+            // A one-time override on a manual automation arrives as a next fire time, so the sheet reports
+            // the scheduled instant rather than calling the automation manual.
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextRunSummary(makeAutomation(triggerKind: "manual", nextFireTime: iso)),
+                "Scheduled: \(expectedFormatter.string(from: fireDate))")
+        }
+
+        func testNextRunValidationRejectsInstantsThatAreNotInTheFuture() {
+            let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+            XCTAssertNil(SpacesMobileAutomations.nextRunValidationMessage(for: now.addingTimeInterval(60), relativeTo: now))
+            XCTAssertNotNil(SpacesMobileAutomations.nextRunValidationMessage(for: now, relativeTo: now))
+            XCTAssertNotNil(SpacesMobileAutomations.nextRunValidationMessage(for: now.addingTimeInterval(-1), relativeTo: now))
+        }
+
         func testRunTriggerLabelMapsKnownRawValues() {
             XCTAssertEqual(SpacesMobileAutomations.runTriggerLabel(makeRun(id: "r", automationID: "a", trigger: "manual")), "Manual")
             XCTAssertEqual(SpacesMobileAutomations.runTriggerLabel(makeRun(id: "r", automationID: "a", trigger: "cron")), "Cron")
+            XCTAssertEqual(SpacesMobileAutomations.runTriggerLabel(makeRun(id: "r", automationID: "a", trigger: "scheduled")), "Scheduled")
             XCTAssertEqual(
                 SpacesMobileAutomations.runTriggerLabel(makeRun(id: "r", automationID: "a", trigger: "missed_catch_up")), "Missed catch-up")
         }
@@ -471,6 +513,56 @@
             XCTAssertEqual(model.automationRows.first?.lastRunStatus, "running")
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
+        }
+
+        func testSetAutomationNextRunSendsTheScheduleThenReloadsOverview() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let nextRun = Date(timeIntervalSinceReferenceDate: 1_000_000)
+            let scheduled = makeAutomation(
+                id: "automation-a", name: "Deploy", triggerKind: "cron", nextFireTime: TerminalSessionTimestamp.fractionalString(from: nextRun))
+            let refreshedOverview = makeOverview(automations: [scheduled])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "setAutomationNextRun" { return SpacesDeviceAPIResponse(ok: true, message: "Scheduled next run.") }
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: nextRun)
+
+            XCTAssertNil(rejection)
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["setAutomationNextRun", "overview"])
+            guard case .setAutomationNextRun(let payload)? = requests.first?.command else {
+                XCTFail("Expected setAutomationNextRun request.")
+                return
+            }
+            XCTAssertEqual(payload.id, "automation-a")
+            XCTAssertEqual(payload.nextRunTime, TerminalSessionTimestamp.fractionalString(from: nextRun))
+            XCTAssertEqual(model.automationRows.first?.automation.nextFireTime, scheduled.nextFireTime)
+            XCTAssertFalse(model.isMutating)
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// The sheet shows the daemon's refusal beside its picker, so the rejection comes back to the
+        /// caller instead of raising the app-wide error banner behind the sheet.
+        func testSetAutomationNextRunReturnsTheDaemonRefusalWithoutRaisingTheErrorBanner() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "setAutomationNextRun" {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Enable the automation to schedule its next run.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: Date(timeIntervalSinceReferenceDate: 1_000_000))
+
+            XCTAssertEqual(rejection, "Enable the automation to schedule its next run.")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isMutating)
         }
 
         func testCancelAutomationRunSendsCancelThenReloadsOverview() async {

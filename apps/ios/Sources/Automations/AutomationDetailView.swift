@@ -3,10 +3,11 @@ import spacesdevicecore
 import spacesterminalcore
 
 /// Per-automation detail, pushed by tapping a row in `AutomationsListView`: the automation's schedule,
-/// target workspace, and command up top, an explicit "Run Now" button as the only manual trigger, and
-/// this automation's own run history below. Run Now stays enabled while a run is already in flight — the
-/// daemon's concurrency policy decides whether the new attempt runs, queues, or is skipped, and that
-/// outcome shows up as a new row in the runs list once the overview refreshes, mirroring how
+/// target workspace, and command up top, and this automation's own run history below. The "Next run"
+/// fact is the screen's one interactive control, a chip opening `AutomationNextRunSheet`, which holds
+/// both Run Now and the one-time next-run picker. Run Now stays enabled while a run is already in
+/// flight: the daemon's concurrency policy decides whether the new attempt runs, queues, or is skipped,
+/// and that outcome shows up as a new row in the runs list once the overview refreshes, mirroring how
 /// `SpacesMobileAppModel.triggerAutomation` already surfaces the outcome elsewhere with no separate
 /// confirmation.
 struct AutomationDetailView: View {
@@ -18,6 +19,7 @@ struct AutomationDetailView: View {
     /// comment for why the overview wins on conflict. Mirrors the machinery the per-automation
     /// `AutomationRunsView` mode used before this screen replaced it.
     @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
+    @State private var isShowingNextRunSheet = false
 
     private var automation: TerminalServiceAutomationSummary? {
         model.automationRows.first(where: { $0.automation.id == automationID })?.automation
@@ -44,13 +46,14 @@ struct AutomationDetailView: View {
         if let automation {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    runNowButton(automation)
                     factsSection(automation)
                     runsSection
                 }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable {
                 await model.refresh()
                 await loadRuns()
+            }.sheet(isPresented: $isShowingNextRunSheet) {
+                AutomationNextRunSheet(model: model, automation: automation, onMutated: { await loadRuns() })
             }
         } else {
             // Reachable if the automation is deleted on the Mac while this screen is open on iOS: the
@@ -64,17 +67,6 @@ struct AutomationDetailView: View {
         }
     }
 
-    private func runNowButton(_ automation: TerminalServiceAutomationSummary) -> some View {
-        Button {
-            Task {
-                await model.triggerAutomation(id: automation.id)
-                await loadRuns()
-            }
-        } label: { Text("Run Now") }.buttonStyle(BrandPrimaryButtonStyle()).disabled(model.isMutating).padding(.horizontal, 20).padding(
-            .bottom, 14
-        ).accessibilityIdentifier("automations.detail.runNow")
-    }
-
     private func factsSection(_ automation: TerminalServiceAutomationSummary) -> some View {
         VStack(spacing: 0) {
             HeaderBand {
@@ -83,7 +75,7 @@ struct AutomationDetailView: View {
             }
             VStack(spacing: 0) {
                 factRow(label: "Schedule", value: SpacesMobileAutomations.triggerSummary(automation))
-                if let nextFire = SpacesMobileAutomations.nextFireDescription(automation) { factRow(label: "Next run", value: nextFire) }
+                nextRunRow(automation)
                 if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
                     factRow(label: "Workspace", value: workspaceName)
                 }
@@ -91,6 +83,27 @@ struct AutomationDetailView: View {
                 commandBlock(automation)
             }.padding(.top, 4)
         }.padding(.bottom, 14)
+    }
+
+    /// The "Next run" fact, whose value is the screen's control: tapping the chip opens the next-run
+    /// sheet. Present for every automation, including one that never fires on its own, since the sheet is
+    /// also where Run Now lives and where a manual automation gets a one-shot scheduled run.
+    private func nextRunRow(_ automation: TerminalServiceAutomationSummary) -> some View {
+        HStack(spacing: 10) {
+            Text("Next run").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
+            Spacer(minLength: 0)
+            Button {
+                isShowingNextRunSheet = true
+            } label: {
+                HStack(spacing: 5) {
+                    Text(SpacesMobileAutomations.nextRunChipValue(automation)).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.muted)
+                }.padding(.horizontal, 8).padding(.vertical, 5).background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }.buttonStyle(.plain).accessibilityIdentifier("automations.detail.nextRun")
+            // Trimmed against the plain fact rows' 8, so the chip's own padding keeps this row the same
+            // height as the rest of the fact list.
+        }.padding(.vertical, 5).padding(.horizontal, 20)
     }
 
     private func factRow(label: String, value: String) -> some View {
