@@ -322,11 +322,12 @@ extension AppKitController {
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let epoch = self.panelCoordinator.paneReplacementEpoch
             let result = await Self.deviceMutation(device: device) { device in
                 try mutation(device, SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
             switch result {
-            case .success(let response): self.applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
+            case .success(let response): self.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
             case .failure(let error): self.showError(error)
             }
         }

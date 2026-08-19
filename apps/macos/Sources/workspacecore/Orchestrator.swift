@@ -1702,9 +1702,13 @@ public final class WorkspaceOrchestrator {
         let env = terminalLaunchEnvironment(base: baseEnvironment, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let launchCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
+        // Fractional precision (not `nowISO8601()`'s whole seconds) so a rapid restart's replacement
+        // session never stamps the same createdAt as the one it replaces: the client-side replacement
+        // diff (TerminalSessionReplacementDiff) orders same-second pairings by this field.
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind, automationRunID: automationRunID
+            shell: shellPath, command: launchCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()), workspaceID: workspace.id,
+            kind: kind, automationRunID: automationRunID
         )
 
         // The same pre-spawn release a configured process gets, for the same reason: this environment
@@ -1795,7 +1799,7 @@ public final class WorkspaceOrchestrator {
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let shellCommand = interactiveShellCommand(cwd: workspace.dir)
         let command = commandPrefixedWithShellEnvironment(shellCommand, env: env)
-        let createdAt = nowISO8601()
+        let createdAt = TerminalSessionTimestamp.fractionalString(from: Date())
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: generatedTitle, workingDirectory: workingDirectory,
             shell: shellPath, command: command, createdAt: createdAt, workspaceID: workspace.id, kind: .shell)

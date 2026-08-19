@@ -1103,19 +1103,18 @@ extension OrchestratorTests {
         XCTAssertEqual(capture.openIntents.map(\.replacesSessionID), [nil, launchedSessionID], "and the replacement still claims that pane")
     }
 
-    /// An orchestrator whose window opener reaches no client must never ask one to hold a pane. The two
-    /// halves are wired independently: the Device API injects a no-op opener but leaves the closer at its
-    /// real IPC-posting default, so a restart served there would send a hold whose releasing open can
-    /// never arrive, and the client (whose overview pruning skips held panes) would show the terminated
-    /// session for good. Both restart flavors read the same flag, so both stay plain teardowns here.
-    func testAnOrchestratorThatCannotOpenPanesNeverAsksAClientToHoldOne() throws {
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try makeTemporaryStore()
-        let closes = TerminalCloseCapture()
-        let orchestrator = makeTestOrchestrator(
+    /// The orchestrator shape every client mutation is served on: the Device API injects a window opener
+    /// that reaches no client, but leaves the closer at its real IPC-posting default. Starting or
+    /// restarting a configured process from the sidebar, from iOS, or from the CLI runs here.
+    private func makeDeviceAPIShapedOrchestrator(
+        store: SQLiteStore, opens: TerminalOpenCapture, closes: TerminalCloseCapture,
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+    ) -> WorkspaceOrchestrator {
+        makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, _, _ in
+            builtInTerminalWindowOpener: { sessionID, _, openIntent in
+                opens.sessionIDs.append(sessionID)
+                opens.openIntents.append(openIntent)
                 guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
                 try? paths.ensureDirectories()
                 FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
@@ -1135,6 +1134,84 @@ extension OrchestratorTests {
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
                         updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            }, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+    }
+
+    /// Records the exit of a configured process the way the reconciler does, leaving the row and its
+    /// ended session in place so the next start of that process is a restart of an exited run.
+    private func markConfiguredProcessExited(store: SQLiteStore, process: RunningProcessRecord) throws {
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: process.id, workspaceID: process.workspaceID, templateID: process.templateID, templateName: process.templateName,
+                command: process.command, terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID, pid: nil, status: .exited,
+                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: "2026-05-11T18:05:00Z"))
+    }
+
+    /// Starting a configured process whose previous run exited keeps that run's pane for the replacement,
+    /// even though the orchestrator serving the start cannot post the replacement's open. Tearing it down
+    /// instead is what removed the ended pane the user was reading: the pane vanished and the new run had
+    /// none, against the rule that starting a target never removes a pane. The pairing still reaches the
+    /// client, in the refreshed overview the mutation returns, because the process row keeps its id and
+    /// only the session it names changes.
+    func testStartingAnExitedProcessHoldsItsPaneEvenWhenTheOpenCannotBePosted() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeDeviceAPIShapedOrchestrator(store: store, opens: opens, closes: closes)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            let api = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
+            try markConfiguredProcessExited(store: store, process: api)
+            try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+        }
+
+        let endedSessionID = try XCTUnwrap(opens.sessionIDs.first)
+        let closesForEndedSession = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == endedSessionID }.map(\.1)
+        XCTAssertEqual(closesForEndedSession, [.awaitReplacement], "the ended run's pane is held for the replacement, never torn down")
+        XCTAssertEqual(opens.sessionIDs.count, 2, "the start launched a replacement session")
+        XCTAssertEqual(
+            opens.openIntents.map(\.replacesSessionID), [nil, endedSessionID],
+            "and its open names the pane it takes over for a client that can hear it")
+        let restarted = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
+        XCTAssertEqual(restarted.status, .running)
+        XCTAssertEqual(restarted.terminalTrackingID, opens.sessionIDs.last, "the row keeps its id and names the replacement session")
+    }
+
+    /// A start whose replacement never launches must not leave the hold behind. Nothing else can settle
+    /// it: the process row still names the ended session, so no overview diff pairs it with anything, and
+    /// the client would keep a pane waiting for a session that is not coming.
+    func testAFailedStartOfAnExitedProcessReleasesTheHoldItPlaced() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let launchCount = TerminalLaunchAttemptCapture()
+        let orchestrator = makeDeviceAPIShapedOrchestrator(
+            store: store, opens: opens, closes: closes,
+            // The cold launch succeeds; the relaunch of the exited process throws.
+            builtInTerminalSessionLauncher: { configuration in
+                launchCount.count += 1
+                if launchCount.count > 1 { throw TerminalLaunchFailure() }
+                let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: getpid(),
+                    childPID: 9876, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
             })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1146,13 +1223,94 @@ extension OrchestratorTests {
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try orchestrator.launchWorkspace(workspaceID: workspace.id)
             let api = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
-            // The per-process restart is the path the Device API serves, and the full restart follows the
-            // same rule; neither may hold a pane here.
+            try markConfiguredProcessExited(store: store, process: api)
+            XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "api"))
+        }
+
+        let endedSessionID = try XCTUnwrap(opens.sessionIDs.first)
+        let closesForEndedSession = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == endedSessionID }.map(\.1)
+        XCTAssertEqual(closesForEndedSession, [.awaitReplacement, .teardown], "the hold is placed by the stop and released when the launch fails")
+    }
+
+    /// Restarting a running target keeps its pane for the replacement on the same orchestrator, which is
+    /// the shape every client's Restart action runs on. The target's row survives the restart naming the
+    /// replacement, so the pairing reaches the client in the refreshed overview exactly as a start's does.
+    func testRestartingARunningProcessHoldsItsPaneForTheReplacement() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeDeviceAPIShapedOrchestrator(store: store, opens: opens, closes: closes)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            let api = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
             try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: api.id)
+        }
+
+        let previousSessionID = try XCTUnwrap(opens.sessionIDs.first)
+        let closesForPreviousSession = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == previousSessionID }.map(\.1)
+        XCTAssertEqual(closesForPreviousSession, [.awaitReplacement], "the running session's pane is held rather than removed")
+        XCTAssertEqual(opens.openIntents.map(\.replacesSessionID), [nil, previousSessionID])
+    }
+
+    /// Stopping a runtime target removes its pane, so its close stays a plain teardown however the
+    /// orchestrator is wired. A hold here would be released by nothing, since a stop has no replacement.
+    func testStoppingAProcessTearsDownItsPaneRatherThanHoldingIt() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeDeviceAPIShapedOrchestrator(store: store, opens: opens, closes: closes)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            let api = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
+            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: api.id)
+        }
+
+        XCTAssertFalse(closes.dispositions.isEmpty, "the stop closes the process's pane")
+        XCTAssertFalse(closes.dispositions.contains(.awaitReplacement), "and never as a hold, since nothing is coming to claim it")
+    }
+
+    /// A workspace restart keeps tearing its panes down on an orchestrator that cannot post the opens.
+    /// Its holds are placed by the stop, for every process at once and before it knows which templates it
+    /// will relaunch, and only the daemon's own release pass ends the ones no relaunch reached, so that
+    /// path still requires a client that will receive the replacements' opens.
+    func testAWorkspaceRestartThatCannotOpenPanesNeverAsksAClientToHoldOne() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeDeviceAPIShapedOrchestrator(store: store, opens: opens, closes: closes)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
             try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
         }
 
-        XCTAssertFalse(closes.dispositions.isEmpty, "the restarts do close the previous sessions' panes")
+        XCTAssertFalse(closes.dispositions.isEmpty, "the restart does close the previous session's pane")
         XCTAssertFalse(closes.dispositions.contains(.awaitReplacement), "but never as a hold this orchestrator could not release")
     }
 
