@@ -1111,6 +1111,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// Clears the daemon's shared selection for every viewer of the session. Never owner-gated: iOS
+    /// never creates a selection (#514), it only ever asks to clear the one the daemon already has, and
+    /// any attached client may do that regardless of who owns input. Uses its own short-lived command
+    /// channel, matching `openTerminalLink`, rather than the owner-only input channel `sendText`/
+    /// `sendKey` share.
+    ///
+    /// Best-effort: a failed clear leaves the shared selection painted until the next daemon frame or a
+    /// retap resolves it, so there is nothing to surface to the user for a gesture this transient.
+    func clearSelection() async {
+        // The daemon rejects selection commands for ended sessions with sessionNotRunning; the UI
+        // hides these controls, and this guard keeps any other caller honest.
+        guard !isEndedState else { return }
+        let commandChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await commandChannel.close() } }
+        try? await bridgeClient.clearSelection(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
+    }
+
+    /// Reads the daemon's shared selection and writes it to the pasteboard. Returns whether the copy
+    /// succeeded so the Copy pill can swap its label to "Copied" only on success; a failure leaves the
+    /// pill reading "Copy" with no alert, so the user can simply retap.
+    @discardableResult func copySelection() async -> Bool {
+        guard !isEndedState else { return false }
+        let commandChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await commandChannel.close() } }
+        guard let text = try? await bridgeClient.readSelectionText(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
+        else { return false }
+        (pasteboardOverrideForTesting ?? .general).string = text
+        return true
+    }
+
     func recordRenderedText(_ text: String) {
         guard isOwner, let ownerRenderEpochState else { return }
         guard Self.hasVisibleRenderedContent(text) else { return }
