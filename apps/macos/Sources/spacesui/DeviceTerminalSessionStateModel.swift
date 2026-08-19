@@ -1064,11 +1064,13 @@
         /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke
         /// path and so use `interactiveControlRequestTimeoutSeconds` in place of the default. Attach,
         /// detach, heartbeat, takeover, and appearance changes are infrequent session-management calls
-        /// made off that path and keep the default deadline.
+        /// made off that path and keep the default deadline. Selection commands join them: a drag
+        /// commits one `setSelection` on release rather than streaming per-pixel like scroll, so it is
+        /// not a hot per-keystroke path either.
         private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
             switch TerminalControlCommand(request: request) {
             case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
-            case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
+            case .attach, .detach, .heartbeat, .takeover, .setAppearance, .setSelection, .clearSelection, .readSelectionText, .unsupported: false
             }
         }
 
@@ -1110,7 +1112,11 @@
                 let response = try requestClient.send(controlAPIRequest, timeoutSeconds: timeoutSeconds)
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
-                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
+                    // `selectionText` must survive this adapter: it is the sole carrier of the
+                    // daemon-authoritative copy text for a `setSelection`/`readSelectionText` on a
+                    // paired device's session, where the selection can extend beyond the mirror's
+                    // viewport-clipped snapshot.
+                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message, selectionText: response.terminalSelectionText))
             case .resolveTerminalLink(let payload):
                 guard let terminalLink = payload.terminalLink?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLink.isEmpty else {
                     throw WorkspaceError.invalidArgument(message: "Missing terminal link to resolve.")

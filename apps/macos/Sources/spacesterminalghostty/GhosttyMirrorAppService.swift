@@ -61,7 +61,16 @@
             runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
                 GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, content: content, state: state)
             }
-            runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len)) }
+            runtimeConfig.write_clipboard_cb = { _, kind, content, len, _ in
+                // `supports_selection_clipboard` above makes Ghostty auto-write a mirror's local drag
+                // selection here as GHOSTTY_CLIPBOARD_SELECTION the moment the drag completes. That write
+                // is viewport-clipped (it only knows what this mirror can see) and would race with the
+                // daemon's setSelection response, which is the single, authoritative pasteboard writer for
+                // a shared-selection commit (see GhosttyMirrorTerminalView's mouse-up handling). Drop it
+                // here. Explicit copy (Cmd+C, OSC 52) reports GHOSTTY_CLIPBOARD_STANDARD and still writes.
+                guard kind != GHOSTTY_CLIPBOARD_SELECTION else { return }
+                GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len))
+            }
             // Mirror surfaces set no `GhosttyEmbeddedSurfaceUserData` (they are not host-managed sessions),
             // so no close_surface_cb is wired — it would never receive a valid userdata here.
 

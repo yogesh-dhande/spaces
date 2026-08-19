@@ -103,6 +103,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         var snapshotTextValue: String?
         var sessionSnapshotTextValue: String?
         var debugVisibleSurfaceTextValue: String?
+        var debugSurfaceSelectionTextValue: String?
         var effectiveTitle = "ghostty"
         var effectiveWorkingDirectory = "/tmp/work"
         var didReleaseSurface = false
@@ -149,6 +150,15 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
         func sessionSnapshotText() -> String? { sessionSnapshotTextValue ?? snapshotTextValue }
         func applyTerminalTextSize(_ size: TerminalTextSize) { appliedTerminalTextSizes.append(size) }
+        /// Controls what `copySharedSelectionToPasteboard` reports; defaults to the real protocol's
+        /// "nothing shared to find" default so tests that don't care about the shared-selection path
+        /// still exercise the ordinary local-read fallback.
+        var sharedSelectionCopyResult = false
+        var copySharedSelectionCallCount = 0
+        func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
+            copySharedSelectionCallCount += 1
+            completion(sharedSelectionCopyResult)
+        }
         func copySelectionToPasteboard() -> Bool {
             copiedSelection = true
             return true
@@ -188,6 +198,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         }
         var debugSearchState: GhosttyTerminalSearchDebugState { searchDebugState }
         func debugVisibleSurfaceText() -> String? { debugVisibleSurfaceTextValue ?? snapshotTextValue }
+        func debugSurfaceSelectionText() -> String? { debugSurfaceSelectionTextValue }
     }
 
     private final class ClientCapture: @unchecked Sendable {
@@ -2510,6 +2521,75 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    /// The daemon's shared selection can hold text set by a different device that this pane's own local
+    /// mirror never saw (it may have scrolled elsewhere), so Copy must reach the daemon first and only
+    /// fall back to the local session-host actions when there is nothing shared to read.
+    @MainActor func testGhosttyOwnerCopySucceedsFromSharedSelectionWithoutFallingBackToLocalRead() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-copy-shared", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-copy-shared", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        host.sharedSelectionCopyResult = true
+        var localCopyCalls = 0
+        let controller = makeGhosttyController(
+            sessionID: "session-copy-shared", paths: paths, host: host,
+            copySelectionAction: {
+                localCopyCalls += 1
+                return true
+            })
+
+        controller.copy(nil)
+
+        XCTAssertEqual(host.copySharedSelectionCallCount, 1)
+        XCTAssertEqual(localCopyCalls, 0)
+    }
+
+    /// Mirrors the case above: when the daemon reports nothing shared to read, Copy falls back to the
+    /// existing local session-host actions rather than leaving the pasteboard untouched.
+    @MainActor func testGhosttyOwnerCopyFallsBackToLocalReadWhenNoSharedSelection() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        host.sharedSelectionCopyResult = false
+        var localCopyCalls = 0
+        let controller = makeGhosttyController(
+            sessionID: "session-copy-nofallback", paths: paths, host: host,
+            copySelectionAction: {
+                localCopyCalls += 1
+                return true
+            })
+
+        controller.copy(nil)
+
+        XCTAssertEqual(host.copySharedSelectionCallCount, 1)
+        XCTAssertEqual(localCopyCalls, 1)
+    }
+
     @MainActor func testGhosttyOwnerCommandVPastesImageBeforeTextPaste() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4287,6 +4367,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         }
         var debugSurfaceRefreshRequestCount: Int { 0 }
         func debugVisibleSurfaceText() -> String? { nil }
+        func debugSurfaceSelectionText() -> String? { nil }
     }
 
     /// Builds an owner-mode pane whose Ghostty host resolution actually runs — mirroring
