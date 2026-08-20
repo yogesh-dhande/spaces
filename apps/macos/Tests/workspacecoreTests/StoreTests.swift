@@ -483,6 +483,28 @@ final class StoreTests: XCTestCase {
             sql: """
                 CREATE TABLE migration_state (current_version INTEGER NOT NULL);
                 INSERT INTO migration_state(current_version) VALUES (15);
+                -- Every v15 database carries `automations` (the v13→v14 step creates it), and later steps
+                -- alter it, so the fixture declares it in its v15 shape rather than describing a database
+                -- version 15 never produced.
+                CREATE TABLE automations (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  trigger_kind TEXT NOT NULL,
+                  cron_expression TEXT,
+                  kind TEXT NOT NULL DEFAULT 'script',
+                  script TEXT NOT NULL,
+                  agent_command TEXT,
+                  agent_prompt TEXT,
+                  workspace_id TEXT NOT NULL,
+                  timeout_seconds INTEGER,
+                  concurrency_policy TEXT NOT NULL,
+                  missed_run_policy TEXT NOT NULL,
+                  next_fire_time REAL,
+                  created_at REAL NOT NULL,
+                  updated_at REAL NOT NULL,
+                  anchor_time_zone_identifier TEXT
+                );
                 CREATE TABLE projects (
                   id TEXT PRIMARY KEY,
                   name TEXT NOT NULL,

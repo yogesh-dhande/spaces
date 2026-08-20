@@ -1166,11 +1166,7 @@ import spacesterminalcore
         // Tracks the generation of whichever recordPending call is most recent, so the teardown defer
         // clears exactly the entry left standing at the end of the test, not a stale generation.
         var pendingGeneration: UInt64?
-        defer {
-            if let pendingGeneration {
-                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
-            }
-        }
+        defer { if let pendingGeneration { TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration) } }
 
         XCTAssertFalse(
             harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
@@ -1208,11 +1204,7 @@ import spacesterminalcore
         let harness = try Harness(self)
         let sessionID = UUID().uuidString
         var pendingGeneration: UInt64?
-        defer {
-            if let pendingGeneration {
-                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
-            }
-        }
+        defer { if let pendingGeneration { TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration) } }
 
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
@@ -1272,12 +1264,12 @@ import spacesterminalcore
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation),
-            paths: paths)
+                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation), paths: paths)
 
         XCTAssertTrue(
             harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
-            "a freshly committed relaunch row must read as launch-pending until the new run's runtime state commits, even though the previous run's exited runtime row is still on disk")
+            "a freshly committed relaunch row must read as launch-pending until the new run's runtime state commits, even though the previous run's exited runtime row is still on disk"
+        )
     }
 
     func testCancelKillsCommandAndRecordsCanceled() throws {
@@ -1817,6 +1809,200 @@ import spacesterminalcore
             "the subscriber's remote watch edge is removed")
         XCTAssertNotNil(try harness.store.agentWindow(id: child.id), "the watched child agent row is untouched by the subscriber-side delete")
     }
+
+    // MARK: - Next-run override
+
+    /// A one-time override fires at its own instant instead of the cron schedule's, then the cron schedule
+    /// resumes computing subsequent occurrences from its expression (not from the overridden instant).
+    func testNextRunOverrideFiresAtItsTimeAndCronResumes() throws {
+        let utc = TimeZone(identifier: "UTC")!
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now, timeZone: { utc })
+        let automation = try harness.insertAutomation(triggerKind: .cron, cronExpression: "0 9 * * *")
+        try harness.service.computeInitialNextFireTime(automationID: automation.id)
+        let cronAnchor = try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime)
+
+        let overrideTime = clock.now().addingTimeInterval(60)
+        XCTAssertLessThan(overrideTime, cronAnchor, "the override fires before the cron anchor it temporarily replaces")
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: overrideTime)
+
+        harness.service.tick()
+        XCTAssertTrue(try harness.store.automationRuns(automationID: automation.id).isEmpty, "no run fires before the override's own time")
+
+        clock.advance(by: 61)
+        harness.service.tick()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        XCTAssertEqual(runs.count, 1, "exactly one run fires at the override")
+        XCTAssertEqual(runs.first?.trigger, .scheduled, "the fire is attributed to the override, not to cron")
+
+        let refreshed = try XCTUnwrap(harness.store.automation(id: automation.id))
+        XCTAssertNil(refreshed.nextFireOverride, "the override is cleared once it fires")
+        let schedule = try AutomationCronSchedule.parse("0 9 * * *")
+        XCTAssertEqual(
+            refreshed.nextFireTime, schedule.nextFireDate(after: clock.now(), timeZone: utc),
+            "the cron schedule resumes from its expression, computed from now")
+    }
+
+    /// A pending override outranks a due cron anchor it outran: ordinary cron firing is suppressed until the
+    /// override itself fires (or is replaced by an edit).
+    func testPendingOverrideSuppressesTheCronOccurrenceItOutran() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", nextFireTime: clock.now().addingTimeInterval(-60))
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: clock.now().addingTimeInterval(3600))
+
+        harness.service.tick()
+
+        XCTAssertTrue(
+            try harness.store.automationRuns(automationID: automation.id).isEmpty, "the pending override suppresses the due cron occurrence")
+    }
+
+    /// A manual automation has no cron schedule to resume, so its override fires exactly once and leaves the
+    /// automation with no next fire time afterward.
+    func testManualAutomationOverrideFiresOnceAsAOneShot() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(triggerKind: .manual)
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: clock.now().addingTimeInterval(60))
+
+        clock.advance(by: 61)
+        harness.service.tick()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        XCTAssertEqual(runs.count, 1, "the override fires exactly once")
+        XCTAssertEqual(runs.first?.trigger, .scheduled)
+        let refreshed = try XCTUnwrap(harness.store.automation(id: automation.id))
+        XCTAssertNil(refreshed.nextFireOverride, "the override is consumed")
+        XCTAssertNil(refreshed.nextFireTime, "a manual automation has no cron anchor to resume")
+
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRuns(automationID: automation.id).count, 1, "a further tick does not fire again")
+    }
+
+    /// A pending override is the user's explicit claim on the next run: a restart neither fires a missed cron
+    /// catch-up nor re-anchors while it stands, and an override whose time passed while the daemon was down
+    /// fires (late) on the first tick of the fresh service.
+    func testOverrideSurvivesDaemonRestartReconcileAndFiresLate() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", missedRunPolicy: .runOnce,
+            nextFireTime: clock.now().addingTimeInterval(-3 * 24 * 60 * 60))
+        let overrideTime = clock.now().addingTimeInterval(60)
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: overrideTime)
+
+        harness.makeService().reconcileMissedRunsOnStart()
+
+        XCTAssertTrue(
+            try harness.store.automationRuns(automationID: automation.id).isEmpty,
+            "a restart neither catches up nor advances the anchor while an override is pending")
+        XCTAssertEqual(
+            try harness.store.automation(id: automation.id)?.nextFireOverride, overrideTime, "the override persists across the restart reconcile")
+
+        clock.advance(by: 61)
+        harness.makeService().tick()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        XCTAssertEqual(runs.count, 1, "the overdue override fires late on the first tick of the fresh service")
+        XCTAssertEqual(runs.first?.trigger, .scheduled)
+    }
+
+    /// An override is an absolute instant the user picked outright, not a derived anchor, so a device
+    /// time-zone change leaves it untouched even while it moves the cron anchor.
+    func testOverrideSurvivesTimeZoneRecompute() throws {
+        let newYork = TimeZone(identifier: "America/New_York")!
+        let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+        let zone = MutableTimeZone(newYork)
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_705_341_600))
+        let harness = try Harness(self, now: clock.now, timeZone: zone.provide)
+        let automation = try harness.insertAutomation(triggerKind: .cron, cronExpression: "0 9 * * *")
+        try harness.service.computeInitialNextFireTime(automationID: automation.id)
+        let cronAnchorBefore = try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime)
+
+        let overrideTime = clock.now().addingTimeInterval(3 * 24 * 60 * 60)
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: overrideTime)
+
+        zone.set(losAngeles)
+        harness.service.tick()
+
+        let refreshed = try XCTUnwrap(harness.store.automation(id: automation.id))
+        XCTAssertEqual(refreshed.nextFireOverride, overrideTime, "the user-picked override is byte-identical after the zone change")
+        XCTAssertNotEqual(refreshed.nextFireTime, cronAnchorBefore, "the cron anchor still moves when the zone changes")
+    }
+
+    /// An explicit edit re-authors the automation's schedule, so it also clears any pending one-time
+    /// next-run override rather than leaving a stale override standing against the edited automation.
+    func testUpdatingAnAutomationClearsItsNextRunOverride() throws {
+        // A fixed whole-second clock, matching the other override tests: the real wall clock's fractional
+        // seconds survive a Swift round trip but can lose precision through SQLite's REAL affinity text
+        // conversion, which would make the exact-equality assertion below flaky for reasons unrelated to
+        // the behavior under test.
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let draft = AutomationDraft(
+            name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true", agentCommand: nil,
+            agentPrompt: nil, workspaceID: "workspace-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+        let created = try harness.service.createAutomation(draft)
+        let overrideTime = harness.now().addingTimeInterval(60)
+        _ = try harness.service.setAutomationNextRunTime(id: created.id, nextRunTime: overrideTime)
+        XCTAssertEqual(try harness.store.automation(id: created.id)?.nextFireOverride, overrideTime, "the override is set before the edit")
+
+        var editedDraft = draft
+        editedDraft.name = "Nightly (renamed)"
+        _ = try harness.service.updateAutomation(id: created.id, draft: editedDraft)
+
+        XCTAssertNil(try harness.store.automation(id: created.id)?.nextFireOverride, "an explicit edit clears the pending override")
+    }
+
+    func testSchedulingAPastTimeIsRejected() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(triggerKind: .manual)
+        XCTAssertThrowsError(try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: harness.now().addingTimeInterval(-60))) {
+            error in XCTAssertTrue(error is AutomationValidationError, "a past next-run time is rejected as invalid")
+        }
+        XCTAssertNil(try harness.store.automation(id: automation.id)?.nextFireOverride, "the rejected schedule never persists an override")
+    }
+
+    func testSchedulingADisabledAutomationIsRejected() throws {
+        let harness = try Harness(self)
+        let enabled = try harness.insertAutomation(triggerKind: .manual)
+        // Disable directly through the store: the harness's `insertAutomation` always creates an enabled row,
+        // and disabling through `updateAutomation` is not the behavior under test here.
+        let disabled = Automation(
+            id: enabled.id, name: enabled.name, enabled: false, triggerKind: enabled.triggerKind, cronExpression: enabled.cronExpression,
+            kind: enabled.kind, script: enabled.script, workspaceID: enabled.workspaceID, timeoutSeconds: enabled.timeoutSeconds,
+            concurrencyPolicy: enabled.concurrencyPolicy, missedRunPolicy: enabled.missedRunPolicy, nextFireTime: enabled.nextFireTime,
+            createdAt: enabled.createdAt, updatedAt: enabled.updatedAt)
+        try harness.store.upsertAutomation(disabled)
+
+        XCTAssertThrowsError(try harness.service.setAutomationNextRunTime(id: enabled.id, nextRunTime: harness.now().addingTimeInterval(60))) {
+            error in XCTAssertTrue(error is AutomationValidationError, "scheduling a disabled automation is rejected")
+        }
+        XCTAssertNil(try harness.store.automation(id: enabled.id)?.nextFireOverride, "the rejected schedule never persists an override")
+    }
+
+    /// The concurrency gate applies to an override fire exactly as it does to any other trigger: a `.skip`
+    /// automation with a run already active records the override fire as a skipped/concurrency row, and the
+    /// override is still consumed (cleared) rather than retried on every subsequent tick forever.
+    func testOverrideFireObeysTheConcurrencyPolicy() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(concurrency: .skip)
+        let running = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(running.status, .running, "a run is active before the override fires")
+
+        _ = try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: clock.now().addingTimeInterval(60))
+        clock.advance(by: 61)
+        harness.service.tick()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        let scheduled = try XCTUnwrap(runs.first { $0.trigger == .scheduled }, "the override fires despite the active run")
+        XCTAssertEqual(scheduled.status, .skipped, "the skip concurrency policy still applies to an override fire")
+        XCTAssertEqual(scheduled.skipReason, .concurrency)
+        XCTAssertNil(try harness.store.automation(id: automation.id)?.nextFireOverride, "the override is consumed rather than retried forever")
+    }
 }
 
 // MARK: - Test harness
@@ -1865,12 +2051,12 @@ import spacesterminalcore
     func insertAutomation(
         script: String = "true", kind: AutomationKind = .script, triggerKind: AutomationTriggerKind = .manual, cronExpression: String? = nil,
         concurrency: AutomationConcurrencyPolicy = .allow, missedRunPolicy: AutomationMissedRunPolicy = .runOnce, timeoutSeconds: Int? = nil,
-        nextFireTime: Date? = nil, workspaceID: String = "workspace-1"
+        nextFireTime: Date? = nil, workspaceID: String = "workspace-1", nextFireOverride: Date? = nil
     ) throws -> Automation {
         let automation = Automation(
             id: UUID().uuidString, name: "Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
             workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy,
-            nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
+            nextFireTime: nextFireTime, createdAt: now(), updatedAt: now(), nextFireOverride: nextFireOverride)
         try store.upsertAutomation(automation)
         return automation
     }

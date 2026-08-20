@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import spacesdevicecore
 import spacesterminalcore
 
 @testable import spacesui
@@ -177,6 +178,218 @@ extension ProcessProfileEnvironmentSuites {
             #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .claimReplacedPane) == nil)
             #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: nil) == "predecessor")
             #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: nil, openAction: .installUnselectedTab) == nil)
+        }
+
+        // MARK: - Overview-driven retarget
+
+        private func openRequest(sessionID: String, workspaceID: String = "workspace-1") -> AppKitController.DeviceTerminalOpenRequest {
+            AppKitController.DeviceTerminalOpenRequest(
+                workspaceID: workspaceID, deviceID: "local", sessionID: sessionID, title: "api", workingDirectory: "/tmp", kind: .process)
+        }
+
+        /// A start or restart of a runtime target is served by the Device API, whose orchestrator has no
+        /// opener to any client, so the replacement's open never arrives and the overview diff is the only
+        /// thing that names the pairing. Whatever that retarget can or cannot do with the pane, it is the
+        /// last word on the restart: leaving the hold behind would keep a dead session's pane alive, and
+        /// its id in every keep-set, until the app relaunched.
+        @Test func anOverviewReplacementAlwaysSettlesTheHoldItsCloseRecorded() {
+            let controller = makeController()
+            let coordinator = controller.panelCoordinator
+            coordinator.closePane(forSessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+
+            coordinator.retargetPaneForReplacement(replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(coordinator.sessionIDsHeldForReplacement.isEmpty)
+        }
+
+        /// Restarting a target the user never had a pane open for must not conjure one. The open path
+        /// installs a pane when it has no predecessor to claim, which is right for an open the user asked
+        /// for and wrong for a refresh: every restart on any client would land a pane on this one.
+        @Test func anOverviewReplacementForATargetWithNoPaneOpensNothing() {
+            let controller = makeController()
+            let coordinator = controller.panelCoordinator
+
+            coordinator.retargetPaneForReplacement(replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(coordinator.openPanes().isEmpty)
+            #expect(coordinator.sessionIDsHeldForReplacement.isEmpty)
+        }
+
+        /// The ordinary shape of a restart the user is not watching: the workspace's panel has never been
+        /// materialized this launch, so the held pane exists only in the persisted layout. The retarget
+        /// restores that panel — protecting the predecessor from the pruning the restore would otherwise
+        /// apply, since the device no longer retains its session — and hands the pane to the replacement in
+        /// the slot the predecessor held, ahead of the workspace's other pane. The predecessor's id is gone
+        /// from the layout, so nothing keeps a dead session's pane, and the hold is settled.
+        @Test func aHeldPersistedPaneIsHandedToTheReplacementInPlace() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.rebuildFlatSidebarData()
+            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+
+            controller.panelCoordinator.retargetPaneForReplacement(replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.isEmpty, "the hold is settled by the retarget")
+            let restored = controller.panelCoordinator.layout(for: .workspace(deviceID: deviceID, workspaceID: "workspace-1"))
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: restored) == ["replacement", "other"],
+                "the replacement took the predecessor's slot rather than being appended after the workspace's other pane")
+            let persisted = try #require(try controller.clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1"))
+            let persistedLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(persisted.utf8))
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: persistedLayout) == ["replacement", "other"],
+                "the handover is persisted, so a relaunch restores the replacement and not the session it replaced")
+        }
+
+        /// The remote-daemon shape, and the reason the retarget cannot key off the hold: a device reached
+        /// over the network posts no close IPC at all, so nothing marks the pane and the refreshed overview
+        /// is the only word that the process row's session changed. The pane is simply still placed and no
+        /// longer retained, one prune away from closing. Driven in the order the refresh runs in: install
+        /// the overview, retarget against the previous one, then prune.
+        @Test func aPlacedPaneIsHandedOverWithNoCloseEverArriving() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            let before = section(deviceID: deviceID, processSessionID: "predecessor", retained: ["predecessor"])
+            controller.deviceSections = [before]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the pane is placed and unheld")
+
+            let after = section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement"], createdAt: "2026-01-01T00:01:00Z")
+            controller.deviceSections = [after]
+            controller.rebuildFlatSidebarData()
+            controller.retargetReplacedTerminalPanes(previousOverview: before.overview, overview: try #require(after.overview), deviceID: deviceID)
+            controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["replacement"])
+
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["replacement"],
+                "the pane survived the refresh pointing at the replacement instead of being pruned away")
+        }
+
+        /// Fix for the remote-daemon gap one step further than `aPlacedPaneIsHandedOverWithNoCloseEverArriving`:
+        /// there the predecessor's panel had already been restored (its pane was placed, just unheld). Here
+        /// the panel has never been materialized this launch either, so the predecessor starts with neither
+        /// a hold nor an in-memory placement — only a persisted layout. The restore attempt does not depend
+        /// on a hold, so the pane is still found and handed over in place.
+        @Test func aPersistedPaneWithNoHoldIsHandedToTheReplacementInPlace() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.rebuildFlatSidebarData()
+            #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.isEmpty, "precondition: no close ever recorded a hold")
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") == nil, "precondition: nothing is materialized yet")
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(claimed)
+            let restored = controller.panelCoordinator.layout(for: .workspace(deviceID: deviceID, workspaceID: "workspace-1"))
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: restored) == ["replacement", "other"],
+                "the replacement took the predecessor's slot rather than being appended after the workspace's other pane")
+        }
+
+        /// A session id with no home anywhere — never held, never placed, no persisted layout, no pending
+        /// panel window record — must still be rejected: the retarget cannot conjure a pane for a
+        /// replacement that had nothing to inherit.
+        @Test func aWhollyUnknownPredecessorSessionIsRejected() {
+            let controller = makeController()
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "nonexistent-predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(!claimed)
+            #expect(controller.panelCoordinator.openPanes().isEmpty)
+        }
+
+        // MARK: - Replacement epoch
+
+        /// `paneReplacementEpoch` is what tells a client-side overview apply that its data predates a pane
+        /// replacement (see `SidebarController.applySidebarDataSnapshot`/`applyRemoteDeviceSection`), so a
+        /// successful retarget must bump it. Reuses the persisted-pane-with-no-hold shape, the simplest
+        /// scenario that reaches a claim.
+        @Test func aSuccessfulRetargetBumpsTheReplacementEpoch() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.rebuildFlatSidebarData()
+            let epochBeforeRetarget = controller.panelCoordinator.paneReplacementEpoch
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(claimed)
+            #expect(controller.panelCoordinator.paneReplacementEpoch == epochBeforeRetarget + 1)
+        }
+
+        /// A retarget that finds nothing to claim changes nothing about any pane, so it must not bump the
+        /// epoch either: a bump with no accompanying replacement would make a client skip a prune it still
+        /// owed, over a session change that never happened.
+        @Test func aRejectedRetargetLeavesTheReplacementEpochUnchanged() {
+            let controller = makeController()
+            let epochBeforeRetarget = controller.panelCoordinator.paneReplacementEpoch
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "nonexistent-predecessor", request: openRequest(sessionID: "replacement"))
+
+            #expect(!claimed)
+            #expect(controller.panelCoordinator.paneReplacementEpoch == epochBeforeRetarget)
+        }
+
+        /// One local device holding the workspace the retarget runs against: enough sidebar data to resolve
+        /// the workspace's device and panel scope, the session behind its process row, and a retention
+        /// keep-set for its restore. `createdAt` defaults to a fixed instant; the overview-diffing retarget
+        /// test below passes a later one for the replacement so the pairing clears the diff's ordering gate
+        /// (`TerminalSessionReplacementDiff` requires the replacement to be strictly newer).
+        private func section(deviceID: String, processSessionID: String, retained: [String], createdAt: String = "2026-01-01T00:00:00Z")
+            -> AppKitController.DeviceSection
+        {
+            let workspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                processRows: [
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1", sessionID: processSessionID,
+                        runState: .running, canRun: true, canStop: true, canRestart: true)
+                ])
+            let overview = SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [workspace],
+                sessions: [
+                    SpacesDeviceTerminalSessionSummary(
+                        id: processSessionID, title: "api", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo api",
+                        state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678,
+                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt,
+                        updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
+                ], retainedTerminalSessionIDs: retained)
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
         /// An ordinary teardown close of a session with no materialized pane records nothing, so a plain

@@ -236,6 +236,20 @@ import spacesterminalcore
         XCTAssertNotNil(summary.nextFireTime)
     }
 
+    /// A pending one-time override is what clients read as the next fire time, so every transport renders the
+    /// overridden occurrence without any client-side special-casing of the cron anchor.
+    func testAutomationSummaryCarriesNextRunOverride() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let (service, _) = try makeService(now: { now })
+        let created = try service.createAutomation(draft(name: "Deploy", trigger: .cron, cron: "0 9 * * *"))
+        let override = now.addingTimeInterval(600)
+        let scheduled = try service.setAutomationNextRunTime(id: created.id, nextRunTime: override)
+        XCTAssertEqual(scheduled.nextFireTime, created.nextFireTime)
+
+        let summary = TerminalServiceAutomationSummary(scheduled)
+        XCTAssertEqual(summary.nextFireTime, TerminalSessionTimestamp.fractionalString(from: override))
+    }
+
     func testAutomationSummaryCarriesAgentKindFields() throws {
         let (service, _) = try makeService()
         let automation = try service.createAutomation(

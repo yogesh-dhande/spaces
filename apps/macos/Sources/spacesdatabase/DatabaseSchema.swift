@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 16
+    public static let currentVersion = 17
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -96,8 +96,9 @@ public enum DatabaseSchema {
     /// persisted next-due epoch for a cron automation and doubles as the missed-run anchor a restarted
     /// daemon reads to decide whether a fire was missed while it was down. `anchor_time_zone_identifier`
     /// records the zone that produced that absolute instant, so a restart after an offline zone change can
-    /// reinterpret the same wall-clock occurrence in the device's current zone. Timestamps are stored as
-    /// REAL epoch seconds.
+    /// reinterpret the same wall-clock occurrence in the device's current zone. `next_fire_override` is a
+    /// user-chosen one-time instant that replaces the next occurrence (cron or manual) and is cleared once
+    /// it fires or the automation is explicitly edited. Timestamps are stored as REAL epoch seconds.
     static let automationsSQL = """
             CREATE TABLE IF NOT EXISTS automations (
               id TEXT PRIMARY KEY,
@@ -115,6 +116,7 @@ public enum DatabaseSchema {
               missed_run_policy TEXT NOT NULL,
               next_fire_time REAL,
               anchor_time_zone_identifier TEXT,
+              next_fire_override REAL,
               created_at REAL NOT NULL,
               updated_at REAL NOT NULL
             );
@@ -147,7 +149,7 @@ public enum DatabaseSchema {
     /// agent_sessions` precedent (`ON DELETE CASCADE`): a run history row is a child of its automation and
     /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
     /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
-    /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
+    /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, `missed_catch_up`, or `scheduled`).
     /// `terminal_session_id` links to the workspace-bound session that carried the command. `kind` is the
     /// automation's `script`/`agent` kind stamped onto the run at creation time: an automation's kind can be
     /// edited once its runs are terminal, but a retained historical run keeps the session shape it actually
@@ -547,6 +549,10 @@ public enum DatabaseSchema {
                     );
                     ALTER TABLE projects ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0;
                     """)
+        },
+        // Existing rows carry NULL: no automation could have a next-run override before this version.
+        DatabaseMigrationStep(fromVersion: 16, toVersion: 17, description: "Persist automation next-run overrides", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN next_fire_override REAL;")
         },
     ]
 

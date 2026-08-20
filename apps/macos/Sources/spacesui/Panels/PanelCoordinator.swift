@@ -75,6 +75,16 @@ import spacesterminalcore
     /// capped so a close that never arrives cannot grow the set without bound.
     private var pendingReplacementClaims: Set<String> = []
     private static let pendingReplacementMarkerLimit = 64
+    /// Bumped every time a pane changes which session it hosts through the replacement machinery: a
+    /// held-pane or in-memory claim, and a persisted-layout/pending-window rewrite, all funnel through
+    /// `noteReplacedPaneClaimed`, which is this counter's one increment site.
+    ///
+    /// Exists so a client-side overview apply can tell whether its data predates a pane replacement that
+    /// already happened: `SidebarController` captures this value when an overview's data is captured (load
+    /// start for the local snapshot, pull start or push receipt for a remote one) and compares it at apply
+    /// time. A mismatch means the overview's keep-set was built before the replacement, so it cannot
+    /// contain the replacement session, and pruning against it would close the pane that was just claimed.
+    private(set) var paneReplacementEpoch = 0
     /// Window shells for materialized global panels, keyed by panel window id.
     private var panelWindows: [String: PanelWindowController] = [:]
     /// Runtime-target titles resolved during the current title pass (see
@@ -323,6 +333,64 @@ import spacesterminalcore
         .terminalSession(deviceID: request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID) ?? "", sessionID: request.sessionID)
     }
 
+    /// Points a runtime target's replacement at the pane its predecessor occupied, when the pairing
+    /// reaches this client as an overview diff instead of as the replacement's own open.
+    ///
+    /// Every start and restart of a runtime target is served by the Device API, whose orchestrator has no
+    /// opener to any client, so `openOrFocusTerminalPane`'s claim route is never reached for one. The
+    /// device's refreshed overview names the same pairing (`TerminalSessionReplacementDiff`), and this
+    /// applies it: the pane keeps its tab, its position in any split, and its window, and starts showing
+    /// the replacement instead of the ended session's last frame.
+    ///
+    /// Deliberately never installs a pane. Only a predecessor that has one — placed, held, restorable
+    /// from a persisted workspace layout, or waiting inside a panel window whose device has not connected
+    /// yet — hands it over; a target restarted with no pane open stays with no pane, where the open path
+    /// would have installed one.
+    ///
+    /// A hold placed by the predecessor's `awaitReplacement` close always ends here, since this is the
+    /// last thing the client will hear about that restart. A remote device's daemon posts no close at
+    /// all, so there is never a hold for a remote restart: the predecessor's pane is found the same way a
+    /// held one is, by checking whether it is already placed, restoring it from a persisted workspace
+    /// layout, or finding it in a pending panel window record — none of which needs a hold on record.
+    @discardableResult func retargetPaneForReplacement(replacedSessionID: String, request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+        let wasHeld = panesHeldForReplacement.contains(replacedSessionID)
+        guard placement(forSessionID: request.sessionID) == nil else {
+            // The replacement already has a pane of its own, so the predecessor's is not its to take.
+            // Checked first, before any restore attempt below, so a predecessor that turns out to be
+            // unclaimable is never speculatively materialized for nothing.
+            panesHeldForReplacement.remove(replacedSessionID)
+            return false
+        }
+        // A predecessor with no pane behind it is the ordinary shape for a workspace whose panel has not
+        // been shown this launch: the pane exists only in the persisted layout, and claiming it needs
+        // that layout materialized first, exactly as the replacement's open would have restored it. Not
+        // gated on `wasHeld`: a remote device's restart never records one, and the same persisted-only gap
+        // shows up there too.
+        if placement(forSessionID: replacedSessionID) == nil, let scope = workspaceScope(forWorkspaceID: request.workspaceID) {
+            restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus, protectingSessionID: replacedSessionID)
+        }
+        if let replacedPlacement = placement(forSessionID: replacedSessionID) {
+            if claimReplacedPane(replacedSessionID: replacedSessionID, placement: replacedPlacement, request: request, focusIntent: .withoutFocus) {
+                return true
+            }
+            // The replacement could not be attached, so this pane cannot become the terminal it is being
+            // kept for. Close it as the terminating close the hold deferred.
+            if wasHeld { closePane(forSessionID: replacedSessionID, sessionIsTerminating: true, disposition: .teardown) }
+            return false
+        }
+        // No in-memory or restored-workspace placement: the other persisted home for a predecessor's pane
+        // is a global panel window still waiting on its device. Retarget the pending record so the pane
+        // comes back pointed at the replacement, in its saved slot. Reached whether or not a hold was
+        // recorded; a session id with no home in any of the above is absent here too and falls through to
+        // `false`.
+        if host.retargetPendingPanelWindowPane(replacing: replacedSessionID, with: paneContentDescriptor(for: request)) {
+            noteReplacedPaneClaimed(replacedSessionID)
+            return true
+        }
+        panesHeldForReplacement.remove(replacedSessionID)
+        return false
+    }
+
     /// Points a predecessor's pane at the replacement session, keeping its tab, its position in any
     /// split, and its window. Nothing is selected, brought forward, or focused: a replacement lands in
     /// the pane the user already had, and if that pane happened to be the visible one it simply starts
@@ -391,6 +459,7 @@ import spacesterminalcore
         let wasHeld = panesHeldForReplacement.remove(replacedSessionID) != nil
         pendingReplacementReleases.remove(replacedSessionID)
         if !wasHeld { recordPendingReplacementMarker(replacedSessionID, in: &pendingReplacementClaims) }
+        paneReplacementEpoch += 1
     }
 
     /// Records an out-of-order marker, dropping the set when it grows past the point where its entries
@@ -891,16 +960,26 @@ import spacesterminalcore
     private func scheduleTerminalPaneContentPreparation(request: AppKitController.DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) {
         let sessionID = request.sessionID
         guard contentPreparationTasks[sessionID] == nil else { return }
-        contentPreparationTasks[sessionID] = Task { @MainActor [weak self] in
+        // This Task can outlive the moment it was scheduled: it suspends on the await below and may
+        // resume much later. `host` is `unowned` on the coordinator, which is only safe to read while
+        // something else is guaranteed to keep the host alive; a suspended Task is not that guarantee.
+        // Capturing `host` strongly here evaluates the capture synchronously at Task creation, while the
+        // host is certainly alive, so the Task pins its own strong reference for its whole lifetime
+        // instead of re-reading the unowned property after resuming. That creates a temporary retain
+        // cycle (host -> coordinator -> task -> host), which is fine: it breaks once the Task finishes.
+        // In the running app the host lives for the process anyway, so this changes nothing there; it
+        // matters in test processes, where one test's host can deallocate while another test's Task
+        // (sharing the process) is still suspended on this await.
+        contentPreparationTasks[sessionID] = Task { @MainActor [weak self, host] in
             guard let self else { return }
             defer { self.contentPreparationTasks[sessionID] = nil }
-            let result = await self.host.prepareTerminalPaneOpenRequest(request)
+            let result = await host.prepareTerminalPaneOpenRequest(request)
             guard !Task.isCancelled else { return }
             guard self.placement(forSessionID: sessionID) != nil else { return }
             guard self.contentControllers[sessionID] is TerminalPanePlaceholderContentController else { return }
             switch result {
             case .success(let preparedRequest):
-                guard let content = self.host.makeTerminalPaneContent(request: preparedRequest, focusIntent: focusIntent) else {
+                guard let content = host.makeTerminalPaneContent(request: preparedRequest, focusIntent: focusIntent) else {
                     (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(message: "Terminal pane failed to open.")
                     return
                 }
@@ -912,7 +991,7 @@ import spacesterminalcore
                 // for an open the user is waiting on; raising one for a launch a script triggered would
                 // interrupt whatever they were doing to announce a pane they never asked to see.
                 (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(error: error)
-                self.host.reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
+                host.reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
             }
         }
     }
