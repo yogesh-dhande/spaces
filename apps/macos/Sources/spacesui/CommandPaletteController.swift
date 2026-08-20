@@ -140,6 +140,9 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteMainWindowVisibility = nil
             commandPaletteReturnTerminalSessionID = nil
             commandPaletteReturnApplicationProcessID = nil
+            // A dismissal in picker mode resolves the picker as cancelled, matching
+            // `dismissCommandPalette()`: its completion must be delivered exactly once.
+            takeSessionPickerContext()?.completion(nil)
         }
     }
 

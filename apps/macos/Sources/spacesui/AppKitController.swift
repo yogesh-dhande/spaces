@@ -10145,7 +10145,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 try EditorLauncher.open(cliExecutablePath: target.cliExecutablePath, directory: workspace.dir)
             }
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
+            // Unlike other external opens, an editor open leaves Spaces visible so it can stay
+            // in use on one display while the editor occupies another. A hide still pending from
+            // a just-preceding external focus would defeat that, so cancel it. The palette is
+            // dismissed without its return-focus restore so closing it cannot pull focus back
+            // from the editor. When the palette was the only visible Spaces window, that leaves
+            // no Spaces window on screen: accepted, because the palette closes for every action
+            // it takes and the main window was already hidden before the editor was asked for.
+            // Revealing it here would make this shortcut unhide the app, which no palette action
+            // does.
+            cancelDeferredExternalWindowHide()
+            commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
         } catch { showError(error) }
     }
 
