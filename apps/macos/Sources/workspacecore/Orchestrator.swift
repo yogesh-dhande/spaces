@@ -920,9 +920,7 @@ public final class WorkspaceOrchestrator {
                 // committing. Leaving the workspace alone costs one delayed retire; retiring on a failed
                 // probe deletes the record and, through `archiveWorkspace`, the user's checkout with it.
                 guard !undeterminedWorktreePaths.contains(normalizedWorkspacePath) else { continue }
-                do {
-                    _ = try archiveWorkspace(workspaceID: workspace.id)
-                } catch {
+                do { _ = try archiveWorkspace(workspaceID: workspace.id) } catch {
                     // `archiveWorkspace` claims both the project and the workspace key, so it loses this
                     // race whenever some other lifecycle operation already holds either one. The retire
                     // self-heals on a later scan once the worktree removal is still visible and nothing
@@ -944,8 +942,8 @@ public final class WorkspaceOrchestrator {
                         if (try store.workspace(dir: normalizedPath)) != nil { return nil }
                         let workspace = WorkspaceRecord(
                             id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
-                            dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false,
-                            isRunning: false, lastLaunchedAt: nil)
+                            dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isRunning: false,
+                            lastLaunchedAt: nil)
                         try store.upsert(workspace: workspace)
                         try seedWorkspaceSettings(project: project, workspace: workspace)
                         // Setup is deferred here exactly like `createWorkspaceUnlocked`: it runs after the
@@ -1702,10 +1700,13 @@ public final class WorkspaceOrchestrator {
         let env = terminalLaunchEnvironment(base: baseEnvironment, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let launchCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
+        // Fractional precision (not `nowISO8601()`'s whole seconds) so a rapid restart's replacement
+        // session never stamps the same createdAt as the one it replaces: the client-side replacement
+        // diff (TerminalSessionReplacementDiff) orders same-second pairings by this field.
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind, automationRunID: automationRunID
-        )
+            shell: shellPath, command: launchCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()), workspaceID: workspace.id,
+            kind: kind, automationRunID: automationRunID)
 
         // The same pre-spawn release a configured process gets, for the same reason: this environment
         // carries the workspace's `$SPACES_<NAME>_PORT` values, and the command behind it can bind one the
@@ -1795,7 +1796,7 @@ public final class WorkspaceOrchestrator {
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let shellCommand = interactiveShellCommand(cwd: workspace.dir)
         let command = commandPrefixedWithShellEnvironment(shellCommand, env: env)
-        let createdAt = nowISO8601()
+        let createdAt = TerminalSessionTimestamp.fractionalString(from: Date())
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: generatedTitle, workingDirectory: workingDirectory,
             shell: shellPath, command: command, createdAt: createdAt, workspaceID: workspace.id, kind: .shell)

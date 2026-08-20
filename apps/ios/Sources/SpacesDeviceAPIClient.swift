@@ -315,6 +315,18 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Sets a one-time next run for an automation, overriding only its next occurrence. Like
+    /// `triggerAutomation`, the response carries no overview, so the caller reloads it: see
+    /// `SpacesMobileAppModel.setAutomationNextRun`.
+    func setAutomationNextRun(id: String, nextRunTime: Date, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .setAutomationNextRun(.init(id: id, nextRunTime: TerminalSessionTimestamp.fractionalString(from: nextRunTime))),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Cancels a running (or queued) automation run.
     func cancelAutomationRun(runID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
         try await mutation(

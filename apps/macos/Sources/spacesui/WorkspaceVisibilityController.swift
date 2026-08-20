@@ -81,9 +81,18 @@ import workspacecore
     }
 
     private func reloadWorkspaceVisibilityRows() {
+        // The tree is shared with the iOS Workspaces sheet, so it reads its own project/workspace inputs
+        // rather than `workspacecore` summaries (which no client-neutral module can import); the mapping
+        // from this host's model onto them lives here.
+        let projectsByDevice = Dictionary(grouping: host.projects, by: \.deviceID).mapValues { projects in
+            projects.map { WorkspaceVisibilityTree.Project(id: $0.id, name: $0.name, isGitRepo: $0.isGitRepo, isHidden: $0.isHidden) }
+        }
+        let workspacesByProject = host.workspacesByProject.mapValues { workspaces in
+            workspaces.map { WorkspaceVisibilityTree.Workspace(id: $0.id, name: $0.displayName, isDefault: $0.isDefault, isHidden: $0.isHidden) }
+        }
         workspaceVisibilityOutline.devices = WorkspaceVisibilityTree.build(
-            devices: host.deviceSections.map { .init(deviceID: $0.deviceID, name: $0.displayName) }, projects: host.projects,
-            workspacesByProject: host.workspacesByProject, query: workspaceVisibilityQuery)
+            devices: host.deviceSections.map { .init(deviceID: $0.deviceID, name: $0.displayName) }, projectsByDevice: projectsByDevice,
+            workspacesByProject: workspacesByProject, query: workspaceVisibilityQuery)
         guard let outlineView = workspaceVisibilityOutlineView else { return }
         outlineView.reloadData()
         workspaceVisibilityOutline.expandAll(outlineView)
@@ -192,6 +201,7 @@ import workspacecore
                     return completion(false)
                 }
             }
+            let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateWorkspaceMetadata(
                     workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, device: device,
@@ -201,7 +211,7 @@ import workspacecore
             case .success(let response):
                 if isHidden, host.selectedWorkspaceID == workspaceID { host.selectedWorkspaceID = nil }
                 host.applyDeviceMutationResponse(
-                    response, deviceID: device.id, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
+                    response, deviceID: device.id, epoch: epoch, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
                 completion(true)
             case .failure(let error):
                 host.showError(error)
@@ -272,6 +282,7 @@ import workspacecore
             // the prompt above exists so the user never hides active work unknowingly - not to
             // guarantee nothing hidden ever runs - and the dialog lists every hidden row, so such a
             // workspace stays one unhide away. The single-workspace hide has the same shape.
+            let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateProjectMetadata(projectID: projectID, isHidden: isHidden, device: device, clientApp: clientApp)
             }
@@ -284,7 +295,7 @@ import workspacecore
                     host.selectedWorkspaceID = nil
                 }
                 if isHidden, host.selectedProjectID == projectID { host.selectedProjectID = nil }
-                host.applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: isHidden ? nil : projectID)
+                host.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedProjectID: isHidden ? nil : projectID)
                 completion(true)
             case .failure(let error):
                 host.showError(error)

@@ -9,7 +9,7 @@ struct SpacesTabView: View {
     @State private var selectedSession: SelectedTerminalSessionRoute?
     @State private var selectedBrowserSession: SelectedBrowserSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
-    @State private var isShowingFilters = false
+    @State private var isShowingVisibilitySheet = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingStop: PendingStop?
@@ -40,18 +40,22 @@ struct SpacesTabView: View {
             model.pendingTerminalDeepLinkSession = nil
         }.accessibilityIdentifier("tab.spaces").overviewPolling(
             model: model, tab: .spaces, activeDetailRouteID: activeDetailRouteID, refreshGeneration: terminalListRefreshGeneration
-        ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.confirmationDialog(
+        ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(isPresented: $isShowingVisibilitySheet) {
+            WorkspaceVisibilitySheet(model: model)
+        }.confirmationDialog(
             "Hide this workspace?", isPresented: hideWorkspaceDialogBinding, titleVisibility: .visible, presenting: pendingHideWorkspace
         ) { workspace in
             // Hiding stops the workspace first, so a running one loses its processes and agents — the
             // confirm button says so rather than hiding that behind a bare "Hide".
-            Button(workspace.isRunning ? "Stop and Hide" : "Hide", role: .destructive) { Task { await model.hideWorkspace(workspace) } }
+            Button(workspace.isRunning ? "Stop and Hide" : "Hide", role: .destructive) {
+                Task { await model.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true) }
+            }
             Button("Cancel", role: .cancel) {}
         } message: { workspace in
             Text(
                 workspace.isRunning
-                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
-                    : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
+                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents. Bring it back from Workspaces."
+                    : "\"\(workspace.displayName)\" leaves this list. Bring it back from Workspaces.")
         }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
             stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
@@ -148,18 +152,17 @@ struct SpacesTabView: View {
                         Section {
                             ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.loading)
                         }
-                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
+                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
                         Section {
                             ContentUnavailableView(
                                 "No Workspaces", systemImage: "rectangle.stack",
-                                description: Text("Create a workspace or adjust the current filters.")
+                                description: Text("Create a workspace, clear the search, or check Workspaces for hidden ones.")
                             ).frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.empty)
                         }
                     } else {
                         ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
                         ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
                     }
-                    if !model.isActiveDeviceBlocked { hiddenSection }
                 }.listStyle(.plain).listSectionSpacing(0).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden)
                     .refreshable { await model.refresh() }
             }
@@ -183,7 +186,7 @@ struct SpacesTabView: View {
                 if case .hero = model.daemonCompatibilityPresentation { sections.append(["compatibilityHero@\(SpacesListRowID.compatibilityHero)"]) }
             } else if model.isLoading && model.overview == nil {
                 sections.append(["loading@\(SpacesListRowID.loading)"])
-            } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
+            } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
                 sections.append(["empty@\(SpacesListRowID.empty)"])
             } else {
                 for projectGroup in projectGroups {
@@ -201,13 +204,6 @@ struct SpacesTabView: View {
                 for group in model.terminalGroups {
                     sections.append(["looseBand@\(SpacesListRowID.looseBand(group.workspaceID))"])
                     sections.append(contentsOf: group.sessions.map { ["looseSession@\(SpacesListRowID.looseSession($0.id))"] })
-                }
-            }
-            if !model.isActiveDeviceBlocked, isHiddenSectionVisible {
-                sections.append(["hiddenHeader@\(SpacesListRowID.hiddenHeader)"])
-                if model.isHiddenSectionExpanded {
-                    sections.append(contentsOf: model.hiddenProjects.map { ["hiddenProject@\(SpacesListRowID.hiddenProject($0.projectID))"] })
-                    sections.append(contentsOf: model.hiddenWorkspaces.map { ["hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))"] })
                 }
             }
             return sections
@@ -267,6 +263,12 @@ struct SpacesTabView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
     }
 
+    /// Live search over the list, beside the button that opens the Workspaces sheet. The two are
+    /// different jobs: the field narrows what is on screen for a moment, the sheet decides what this
+    /// device lists at all.
+    ///
+    /// Demo Mode's backend cannot serve `setWorkspaceHidden`/`setProjectHidden`, so the sheet is not
+    /// offered there — the same reasoning that keeps Hide out of `WorkspaceBandActions`.
     private var searchFilterRow: some View {
         HStack(spacing: 8) {
             HStack(spacing: 7) {
@@ -274,32 +276,15 @@ struct SpacesTabView: View {
                 TextField("Search workspaces", text: $model.searchText).font(.system(size: 13)).textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }.padding(.horizontal, 10).frame(height: 36).background(Theme.surface2, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            Button {
-                isShowingFilters.toggle()
-            } label: {
-                Image(systemName: "line.3.horizontal.decrease.circle").font(.system(size: 18, weight: .semibold))
-            }.buttonStyle(.plain).foregroundStyle(Theme.accent).popover(isPresented: $isShowingFilters) {
-                filterPopover.presentationCompactAdaptation(.popover)
+            if !model.isDemoModeEnabled {
+                Button {
+                    isShowingVisibilitySheet = true
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle").font(.system(size: 18, weight: .semibold))
+                }.buttonStyle(.plain).foregroundStyle(Theme.accent).accessibilityLabel("Workspaces").accessibilityIdentifier(
+                    "spaces.workspaceVisibility")
             }
         }
-    }
-
-    private var filterPopover: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Rows").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.muted)
-            ForEach(SpacesMobileWorkspaceRowType.allCases) { type in
-                Toggle(isOn: Binding(get: { model.visibleRowTypes.contains(type) }, set: { _ in model.toggleRowTypeFilter(type) })) {
-                    Label(type.label, systemImage: type.iconName)
-                }
-            }
-            Divider()
-            Text("State").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.muted)
-            ForEach([SpacesDeviceRunState.notStarted, .running, .exited], id: \.self) { state in
-                Toggle(isOn: Binding(get: { model.visibleRunStates.contains(state) }, set: { _ in model.toggleRunStateFilter(state) })) {
-                    Text(state.mobileLabel)
-                }
-            }
-        }.padding(16).frame(width: 260)
     }
 
     // MARK: - Project / workspace sections
@@ -423,9 +408,7 @@ struct SpacesTabView: View {
                 BandRow(
                     dotKind: row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), tile: .tile(for: row.type), title: row.title,
                     detail: row.detail
-                ) {
-                    runtimeTrailingIndicator(for: row)
-                }
+                ) { runtimeTrailingIndicator(for: row) }
             }.buttonStyle(.plain).disabled(isRuntimeRowDisabled(row)).accessibilityIdentifier(rowIdentifier)
 
             // Long-press only offers a menu when the row has something to offer. A row with neither a
@@ -564,96 +547,11 @@ struct SpacesTabView: View {
         }
     }
 
-    // MARK: - Hidden workspaces
-
-    /// Demo Mode's backend cannot serve `setWorkspaceHidden`/`setProjectHidden`, so the recovery section
-    /// that depends on them stays off there — the same reasoning that keeps Hide itself out of
-    /// `WorkspaceBandActions`. The section is otherwise unfiltered by search or the row/state filters: it
-    /// exists to recover a workspace or project that the filtered browse below can no longer show, not to
-    /// be browsed itself. Loose terminal-session groups set the precedent for how search affects an
-    /// auxiliary section here — they stay on screen and filter their own contents rather than disappearing
-    /// outright — so this section likewise stays on screen while a search is active instead of hiding.
-    private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && (!model.hiddenWorkspaces.isEmpty || !model.hiddenProjects.isEmpty) }
-
-    /// The Hidden header and each hidden row (project or workspace) are separate list sections rather than
-    /// rows of one section, for the same reason each workspace is its own section: hiding and unhiding add
-    /// and remove a row while the section around it survives, and a row leaving a surviving section is the
-    /// update the collection view miscounts (see `workspaceSection`). A whole section arriving or leaving
-    /// is sound, so every row that can come and go independently owns one.
-    ///
-    /// Hidden projects list before hidden workspaces: a project entry recovers a whole group of workspaces
-    /// at once, so it reads as the "bigger" recovery action and leads.
-    @ViewBuilder private var hiddenSection: some View {
-        if isHiddenSectionVisible {
-            Section {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { model.toggleHiddenSectionExpanded() }
-                } label: {
-                    HeaderBand {
-                        Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                        Spacer(minLength: 0)
-                        Text("\(model.hiddenProjects.count + model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(
-                            Theme.mutedSecondary
-                        ).monospacedDigit()
-                        Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.mutedSecondary)
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
-            }
-            if model.isHiddenSectionExpanded {
-                ForEach(model.hiddenProjects) { project in Section { hiddenProjectRow(project) } }
-                ForEach(model.hiddenWorkspaces) { workspace in Section { hiddenWorkspaceRow(workspace) } }
-            }
-        }
-    }
-
-    /// One hidden project's recovery row: unhiding clears only the project's own flag, resurfacing every
-    /// workspace under it (each still subject to its own `isHidden` flag independently).
-    private func hiddenProjectRow(_ project: SpacesMobileHiddenProjectSummary) -> some View {
-        BandRow(
-            dotKind: nil, tile: TypeIconTile(systemName: "folder"), title: project.projectName,
-            detail: project.workspaceCount == 1 ? "1 workspace" : "\(project.workspaceCount) workspaces", detailIsMonospaced: false
-        ) { EmptyView() }.bandListRow().accessibilityIdentifier("project.hidden.\(project.projectID)").contextMenu { unhideProjectButton(project) }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideProjectButton(project) }.id(
-                SpacesListRowID.hiddenProject(project.projectID))
-    }
-
-    private func hiddenWorkspaceRow(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
-        BandRow(
-            dotKind: nil, tile: TypeIconTile(systemName: workspace.isGitWorkspace ? "arrow.triangle.branch" : "folder"), title: workspace.displayName,
-            detail: workspace.projectName, detailIsMonospaced: false
-        ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu {
-            // A workspace hidden from another client while this one's delete is still unresolved lands
-            // here; it is leaving either way, so it offers no unhide.
-            if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) }
-        }.swipeActions(edge: .trailing, allowsFullSwipe: false) { if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) } }.id(
-            SpacesListRowID.hiddenWorkspace(workspace.id))
-    }
-
-    /// No confirmation: unlike Hide (which can stop a running workspace), unhiding only changes
-    /// visibility and cannot lose anything, so it fires directly from the swipe or the menu.
-    private func unhideButton(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
-        Button {
-            Task { await model.unhideWorkspace(workspace) }
-        } label: {
-            Label("Unhide", systemImage: "eye")
-        }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("workspace.unhide.\(workspace.id)")
-    }
-
-    /// Same no-confirmation reasoning as `unhideButton`: unhiding a project only changes visibility.
-    private func unhideProjectButton(_ project: SpacesMobileHiddenProjectSummary) -> some View {
-        Button {
-            Task { await model.unhideProject(project) }
-        } label: {
-            Label("Unhide", systemImage: "eye")
-        }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("project.unhide.\(project.projectID)")
-    }
-
     // MARK: - Loose terminal-session groups
 
-    /// The band and each loose session are separate sections, like the Hidden section's rows: a session
-    /// ending drops its row while the band around it stays, and a row leaving a surviving section is what
-    /// the collection view miscounts.
+    /// The band and each loose session are separate sections, for the same reason each workspace is: a
+    /// session ending drops its row while the band around it stays, and a row leaving a surviving section
+    /// is what the collection view miscounts.
     @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
         let workspace = model.overview?.workspaces.first { $0.id == group.workspaceID }
         // A loose group belongs to a workspace this list is still showing, so a delete running against
@@ -734,7 +632,6 @@ private enum SpacesListRowID {
     static let compatibilityHero = "compatibility.hero"
     static let loading = "loading"
     static let empty = "empty"
-    static let hiddenHeader = "hidden.header"
 
     static func projectCaption(_ projectID: String) -> String { "project.caption.\(projectID)" }
     static func workspaceBand(_ workspaceID: String) -> String { "workspace.band.\(workspaceID)" }
@@ -743,8 +640,6 @@ private enum SpacesListRowID {
     static func runtimeRow(_ rowID: String) -> String { "runtime.row.\(rowID)" }
     static func looseBand(_ workspaceID: String) -> String { "loose.band.\(workspaceID)" }
     static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
-    static func hiddenWorkspace(_ workspaceID: String) -> String { "hidden.workspace.\(workspaceID)" }
-    static func hiddenProject(_ projectID: String) -> String { "hidden.project.\(projectID)" }
 }
 
 /// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.

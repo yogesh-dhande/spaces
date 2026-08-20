@@ -1613,6 +1613,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// a remote caller drive the same scheduler state.
     case createAutomation(TerminalServiceAutomationFields)
     case updateAutomation(TerminalServiceAutomationUpdatePayload)
+    /// Overrides only the automation's next occurrence; the cron schedule resumes after it fires.
+    case setAutomationNextRun(TerminalServiceAutomationNextRunPayload)
     case deleteAutomation(SpacesDeviceAutomationReference)
     case listAutomations
     case listAutomationRuns(TerminalServiceAutomationRunsListPayload)
@@ -1675,6 +1677,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .openServiceTunnel: "openServiceTunnel"
         case .createAutomation: "createAutomation"
         case .updateAutomation: "updateAutomation"
+        case .setAutomationNextRun: "setAutomationNextRun"
         case .deleteAutomation: "deleteAutomation"
         case .listAutomations: "listAutomations"
         case .listAutomationRuns: "listAutomationRuns"
@@ -1805,6 +1808,7 @@ extension SpacesDeviceAPICommand: Codable {
         case openServiceTunnel
         case createAutomation
         case updateAutomation
+        case setAutomationNextRun
         case deleteAutomation
         case listAutomations
         case listAutomationRuns
@@ -1887,6 +1891,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         case .createAutomation: self = .createAutomation(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
         case .updateAutomation: self = .updateAutomation(try container.decode(TerminalServiceAutomationUpdatePayload.self, forKey: key))
+        case .setAutomationNextRun: self = .setAutomationNextRun(try container.decode(TerminalServiceAutomationNextRunPayload.self, forKey: key))
         case .deleteAutomation: self = .deleteAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
         case .listAutomations:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
@@ -1952,6 +1957,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         case .createAutomation(let payload): try container.encode(payload, forKey: .createAutomation)
         case .updateAutomation(let payload): try container.encode(payload, forKey: .updateAutomation)
+        case .setAutomationNextRun(let payload): try container.encode(payload, forKey: .setAutomationNextRun)
         case .deleteAutomation(let payload): try container.encode(payload, forKey: .deleteAutomation)
         case .listAutomations: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .listAutomations)
         case .listAutomationRuns(let payload): try container.encode(payload, forKey: .listAutomationRuns)

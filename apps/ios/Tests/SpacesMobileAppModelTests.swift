@@ -92,25 +92,37 @@
     }
 
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
-        func testWorkspaceGroupsFilterByTypeStateAndSearch() {
+        /// The Spaces tab's live search: a workspace-level match keeps the whole workspace, a row-level
+        /// match keeps the workspace as the band over just its matching rows, and anything matching
+        /// neither drops out. Order is the list's own throughout — searching narrows, it never reranks.
+        func testWorkspaceGroupsNarrowByLiveSearch() {
             let model = makeModel()
             model.overview = makeOverview()
 
             XCTAssertEqual(model.workspaceGroups.count, 2)
             XCTAssertEqual(model.workspaceGroups.first?.rows.count, 2)
 
-            model.visibleRowTypes = [.codingAgents]
-            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["feature"])
-            XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["Codex"])
-
-            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
-            model.visibleRunStates = [.running]
-            XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["api", "Codex"])
-
-            model.visibleRunStates = Set([.notStarted, .running, .exited])
             model.searchText = "docs"
             XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["docs"])
             XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["shell"])
+
+            model.searchText = "Codex"
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["feature"])
+            XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["Codex"])
+
+            model.searchText = "zzz"
+            XCTAssertTrue(model.workspaceGroups.isEmpty)
+        }
+
+        /// Search is fuzzy, not substring: a few characters of a name in order find it. This is the same
+        /// matcher the Workspaces sheet and the Mac's command palette use.
+        func testWorkspaceGroupsSearchMatchesFuzzily() {
+            let model = makeModel()
+            model.overview = makeOverview()
+
+            model.searchText = "dcs"
+
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["docs"])
         }
 
         func testRuntimeRowActionAvailabilitySurvivesModelMapping() {
@@ -243,7 +255,7 @@
             XCTAssertTrue(Set(model.terminalGroups.map(\.id)).isDisjoint(with: Set(model.workspaceGroups.map(\.id))))
         }
 
-        func testHideWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
+        func testHidingAWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
             let runningOverview = makeOverview(featureIsRunning: true)
@@ -255,28 +267,75 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             let staleStoppedWorkspace = makeOverview(featureIsRunning: false).workspaces[0]
 
-            await model.hideWorkspace(staleStoppedWorkspace)
+            await model.setWorkspaceHidden(workspaceID: staleStoppedWorkspace.id, isHidden: true)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
         }
 
-        /// `hiddenWorkspaces` is the mirror image of the `workspaceGroups` exclusion above: a hidden
-        /// workspace is absent from the filtered browse list but present in the recovery list.
-        func testHiddenWorkspaceIsExcludedFromVisibleButPresentInHiddenWorkspaces() {
+        /// Hiding a project stops every workspace running under it first, for the same reason hiding one
+        /// workspace stops it: nothing may be left running with no row left to stop it from.
+        func testHidingAProjectStopsItsRunningWorkspacesFirst() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let runningOverview = makeOverview(featureIsRunning: true)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" { return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(runningOverview)) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.setProjectHidden(projectID: "project-1", isHidden: true)
+
+            let requests = await recorder.snapshot()
+            // Only the running workspace is stopped; the stopped one needs nothing.
+            XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateProjectMetadata"])
+            guard case .stopWorkspace(let payload) = requests[1].command else {
+                XCTFail("Expected a stopWorkspace command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+        }
+
+        /// The Workspaces sheet is the mirror image of the `workspaceGroups` exclusion: a hidden workspace
+        /// is absent from the browse list but listed — unchecked — in the sheet it is recovered from.
+        func testHiddenWorkspaceIsExcludedFromTheListButListedUncheckedInTheVisibilitySheet() {
             let model = makeModel()
             model.overview = makeOverview(featureIsHidden: true)
 
             XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
-            XCTAssertEqual(model.hiddenWorkspaces.map(\.id), ["workspace-feature"])
+            let project = model.workspaceVisibilityProjects(query: "").first
+            XCTAssertEqual(project?.workspaces.map(\.workspaceID), ["workspace-docs", "workspace-feature"])
+            XCTAssertEqual(project?.workspaces.first { $0.workspaceID == "workspace-feature" }?.isChecked, false)
+            XCTAssertEqual(project?.trailingText, "1 of 2 shown")
         }
 
-        /// With no hidden workspaces, the recovery list is empty regardless of what else the overview has.
-        func testHiddenWorkspacesIsEmptyWhenNoneAreHidden() {
+        /// A hidden project's own row reads as hidden and its whole subtree dims, while each workspace
+        /// keeps its own checkbox — the project flag suppresses them without writing theirs.
+        func testHiddenProjectIsListedUncheckedWithItsSubtreeDimmedInTheVisibilitySheet() {
+            let model = makeModel()
+            model.overview = makeOverview(projectIsHidden: true)
+
+            let project = model.workspaceVisibilityProjects(query: "").first
+            XCTAssertEqual(project?.projectID, "project-1")
+            XCTAssertEqual(project?.isChecked, false)
+            XCTAssertEqual(project?.trailingText, "project hidden")
+            XCTAssertEqual(project?.workspaces.allSatisfy(\.isDimmed), true)
+            XCTAssertEqual(project?.workspaces.allSatisfy(\.isChecked), true)
+        }
+
+        /// The sheet's search is the same fuzzy matcher as the tab's, narrowing the outline without
+        /// reordering it.
+        func testVisibilitySheetSearchNarrowsTheOutline() {
             let model = makeModel()
             model.overview = makeOverview()
 
-            XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
+            let matched = model.workspaceVisibilityProjects(query: "dcs")
+
+            XCTAssertEqual(matched.map(\.projectID), ["project-1"])
+            XCTAssertEqual(matched.first?.workspaces.map(\.workspaceID), ["workspace-docs"])
+            XCTAssertTrue(model.workspaceVisibilityProjects(query: "zzz").isEmpty)
         }
 
         /// A hidden project's workspaces disappear from every visible surface — the browse list and its
@@ -290,47 +349,21 @@
             XCTAssertTrue(model.terminalGroups.isEmpty)
         }
 
-        /// A project-hidden workspace must not also appear as its own row in `hiddenWorkspaces` — it
-        /// recovers through the single project entry in `hiddenProjects` instead, so the two lists never
-        /// double-list one workspace.
-        func testProjectHiddenWorkspacesAreExcludedFromHiddenWorkspacesIndividually() {
+        /// Every project and workspace flag is independent, so the outline shows both at once: the project
+        /// hidden and one of its workspaces hidden by its own flag as well.
+        func testVisibilitySheetShowsProjectAndWorkspaceFlagsIndependently() {
             let model = makeModel()
-            model.overview = makeOverview(projectIsHidden: true)
+            model.overview = makeOverview(featureIsHidden: true, projectIsHidden: true)
 
-            XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
+            let project = model.workspaceVisibilityProjects(query: "").first
+            XCTAssertEqual(project?.isChecked, false)
+            XCTAssertEqual(project?.workspaces.first { $0.workspaceID == "workspace-feature" }?.isChecked, false)
+            XCTAssertEqual(project?.workspaces.first { $0.workspaceID == "workspace-docs" }?.isChecked, true)
         }
 
-        /// A workspace hidden by its own flag while its project stays visible keeps its individual row in
-        /// `hiddenWorkspaces` — only project-level hiding collapses workspaces into the project entry.
-        func testWorkspaceHiddenIndependentlyOfItsProjectKeepsItsIndividualHiddenRow() {
-            let model = makeModel()
-            model.overview = makeOverview(featureIsHidden: true, projectIsHidden: false)
-
-            XCTAssertEqual(model.hiddenWorkspaces.map(\.id), ["workspace-feature"])
-            XCTAssertTrue(model.hiddenProjects.isEmpty)
-        }
-
-        /// A hidden project surfaces once in `hiddenProjects`, carrying the count of workspaces the
-        /// overview still lists under it (both fixture workspaces share `project-1`).
-        func testHiddenProjectsSurfacesWithWorkspaceCount() {
-            let model = makeModel()
-            model.overview = makeOverview(projectIsHidden: true)
-
-            XCTAssertEqual(model.hiddenProjects.map(\.projectID), ["project-1"])
-            XCTAssertEqual(model.hiddenProjects.first?.workspaceCount, 2)
-        }
-
-        /// With no hidden projects, the recovery list is empty regardless of what else the overview has.
-        func testHiddenProjectsIsEmptyWhenNoneAreHidden() {
-            let model = makeModel()
-            model.overview = makeOverview()
-
-            XCTAssertTrue(model.hiddenProjects.isEmpty)
-        }
-
-        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike `hideWorkspace`, never checks
-        /// or stops anything first — there is nothing running to stop on a workspace that is already hidden.
-        func testUnhideWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
+        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike hiding, never checks or stops
+        /// anything first — there is nothing running to stop on a workspace that is already hidden.
+        func testUnhidingAWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
             let refreshedOverview = makeOverview(featureIsHidden: false)
@@ -341,9 +374,8 @@
                     result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            let hiddenWorkspace = makeOverview(featureIsHidden: true).workspaces[0]
 
-            await model.unhideWorkspace(hiddenWorkspace)
+            await model.setWorkspaceHidden(workspaceID: "workspace-feature", isHidden: false)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["updateWorkspaceMetadata"])
@@ -356,9 +388,10 @@
             XCTAssertEqual(model.overview, refreshedOverview)
         }
 
-        /// Unhiding a project sends `updateProjectMetadata(isHidden: false)` — the recovery action clears
-        /// only the project flag, mirroring `unhideWorkspace`'s single-field mutation.
-        func testUnhideProjectSendsUpdateProjectMetadataFalseAndPublishesRefreshedOverview() async {
+        /// Unhiding a project sends `updateProjectMetadata(isHidden: false)` and nothing else: it clears
+        /// only the project flag, so the workspaces that were shown before it was hidden come back exactly
+        /// as they were, and none is started.
+        func testUnhidingAProjectSendsUpdateProjectMetadataFalseAndPublishesRefreshedOverview() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
             let refreshedOverview = makeOverview(projectIsHidden: false)
@@ -370,12 +403,8 @@
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = makeOverview(projectIsHidden: true)
-            guard let hiddenProject = model.hiddenProjects.first else {
-                XCTFail("Expected a hidden project.")
-                return
-            }
 
-            await model.unhideProject(hiddenProject)
+            await model.setProjectHidden(projectID: "project-1", isHidden: false)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["updateProjectMetadata"])
@@ -1111,7 +1140,7 @@
             await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
             let requestsAfterDelete = await recorder.snapshot()
 
-            await model.hideWorkspace(overview.workspaces[0])
+            await model.setWorkspaceHidden(workspaceID: overview.workspaces[0].id, isHidden: true)
 
             let requestsAfterHide = await recorder.snapshot()
             XCTAssertEqual(requestsAfterHide.count, requestsAfterDelete.count, "the hide must issue nothing")
@@ -1402,21 +1431,9 @@
             XCTAssertNotNil(processRow?.statusDotKind(exitAcknowledged: false))
         }
 
-        func testBrowserSessionRowsSurviveRunStateFilter() {
-            let model = makeModel()
-            model.overview = makeOverview(
-                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
-                featureConfig: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
-                    SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")
-                ]))
-            // A run-state filter that excludes every "real" run state must still leave browser rows visible.
-            model.visibleRunStates = [.running]
-
-            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
-            XCTAssertTrue(rows.contains { $0.title == "Dashboard" })
-        }
-
-        func testRowTypeFilterExcludesAndIncludesBrowserSessions() {
+        /// A browser session row carries no run state, but it is searchable like any other row: it is found
+        /// by its own title, and dropped when the search names something else.
+        func testSearchMatchesBrowserSessionRowsByTitle() {
             let model = makeModel()
             model.overview = makeOverview(
                 featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
@@ -1424,13 +1441,12 @@
                     SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")
                 ]))
 
-            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases.filter { $0 != .browserSessions })
-            let rowsWithFilterOff = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
-            XCTAssertFalse(rowsWithFilterOff.contains { $0.title == "Dashboard" })
+            model.searchText = "Dashboard"
+            XCTAssertEqual(model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows.map(\.title), ["Dashboard"])
 
-            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
-            let rowsWithFilterOn = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
-            XCTAssertTrue(rowsWithFilterOn.contains { $0.title == "Dashboard" })
+            model.searchText = "Codex"
+            let codexRows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertFalse(codexRows.contains { $0.title == "Dashboard" })
         }
 
         func testBrowserSessionProxyURLUsesFixedPortAndIdentityHost() {
@@ -1675,10 +1691,10 @@
             XCTAssertEqual(model.overview, concurrentMutationOverview)
         }
 
-        func testRefreshedSessionLookupIgnoresVisibleFilters() {
+        func testRefreshedSessionLookupIgnoresTheActiveSearch() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
-            model.visibleRunStates = [.notStarted]
+            model.searchText = "zzz"
 
             XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).isEmpty)
             XCTAssertEqual(model.refreshedSession(forRowID: "process:process-api")?.id, "session-api")
@@ -1726,10 +1742,10 @@
             XCTAssertEqual(model.refreshedSession(forRowID: "process:template-api", in: responseOverview)?.id, "session-api-new")
         }
 
-        func testRuntimeRowLookupBySessionIgnoresVisibleFilters() {
+        func testRuntimeRowLookupBySessionIgnoresTheActiveSearch() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
-            model.visibleRunStates = [.notStarted]
+            model.searchText = "zzz"
 
             XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).isEmpty)
             XCTAssertEqual(model.runtimeRow(forSessionID: "session-api")?.title, "api")

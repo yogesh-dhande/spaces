@@ -16,17 +16,25 @@ extension SQLiteStore {
 
     private static let automationColumns = """
         id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
-        timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
+        timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at,
+        next_fire_override
         """
 
+    /// A full upsert therefore CLEARS a pending next-run override whenever the caller passes an `Automation`
+    /// with `nextFireOverride == nil` — exactly the rule for an explicit user edit of the automation
+    /// (`AutomationService.updateAutomation` builds its updated row with no override).
     public func upsertAutomation(_ automation: Automation) throws {
         try execute(
             sql: """
                 INSERT INTO automations(
                   id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
-                  timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
+                  timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at,
+                  next_fire_override
                 )
-                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                VALUES (
+                  ?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?,
+                  NULLIF(?, '')
+                )
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   enabled = excluded.enabled,
@@ -42,7 +50,8 @@ extension SQLiteStore {
                   missed_run_policy = excluded.missed_run_policy,
                   next_fire_time = excluded.next_fire_time,
                   anchor_time_zone_identifier = excluded.anchor_time_zone_identifier,
-                  updated_at = excluded.updated_at
+                  updated_at = excluded.updated_at,
+                  next_fire_override = excluded.next_fire_override
                 """,
             bindings: [
                 automation.id, automation.name, automation.enabled ? "1" : "0", automation.triggerKind.rawValue, automation.cronExpression ?? "",
@@ -50,6 +59,7 @@ extension SQLiteStore {
                 automation.timeoutSeconds.map(String.init) ?? "", automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue,
                 automation.nextFireTime.map(Self.epochString) ?? "", automation.anchorTimeZoneIdentifier ?? "",
                 Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
+                automation.nextFireOverride.map(Self.epochString) ?? "",
             ])
     }
 
@@ -76,6 +86,22 @@ extension SQLiteStore {
             bindings: [nextFireTime.map(Self.epochString) ?? "", anchorTimeZoneIdentifier ?? "", id])
     }
 
+    /// Persists (or clears) a user-chosen one-time next-run override. Touches only `next_fire_override`, never
+    /// `updated_at`, so setting or consuming an override is not mistaken for a user edit of the automation.
+    public func setAutomationNextFireOverride(id: String, nextFireOverride: Date?) throws {
+        try execute(
+            sql: "UPDATE automations SET next_fire_override = NULLIF(?, '') WHERE id = ?",
+            bindings: [nextFireOverride.map(Self.epochString) ?? "", id])
+    }
+
+    /// Enabled automations holding a pending one-time next-run override, of either trigger kind: a manual
+    /// automation can carry a one-shot override, so this is not restricted to cron rows.
+    public func enabledAutomationsWithNextFireOverride() throws -> [Automation] {
+        try queryRows(
+            sql: "SELECT \(Self.automationColumns) FROM automations WHERE enabled = 1 AND next_fire_override IS NOT NULL ORDER BY created_at, id"
+        ).compactMap(Self.decodeAutomation)
+    }
+
     public func deleteAutomation(id: String) throws { try execute(sql: "DELETE FROM automations WHERE id = ?", bindings: [id]) }
 
     public func automationIDs(workspaceID: String) throws -> [String] {
@@ -83,7 +109,7 @@ extension SQLiteStore {
     }
 
     private static func decodeAutomation(row: [String]) -> Automation? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 18 else { return nil }
         guard let triggerKind = AutomationTriggerKind(rawValue: row[3]) else { return nil }
         guard let kind = AutomationKind(rawValue: row[5]) else { return nil }
         guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: row[11]) else { return nil }
@@ -94,7 +120,7 @@ extension SQLiteStore {
             script: row[6], agentCommand: row[7].isEmpty ? nil : row[7], agentPrompt: row[8].isEmpty ? nil : row[8], workspaceID: row[9],
             timeoutSeconds: row[10].isEmpty ? nil : Int(row[10]), concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy,
             nextFireTime: date(fromEpoch: row[13]), createdAt: createdAt, updatedAt: updatedAt,
-            anchorTimeZoneIdentifier: row[14].isEmpty ? nil : row[14])
+            anchorTimeZoneIdentifier: row[14].isEmpty ? nil : row[14], nextFireOverride: date(fromEpoch: row[17]))
     }
 
     // MARK: - Automation runs

@@ -38,7 +38,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             self?.refreshRemoteOverviewSubscriptions()
         })
         reloadCoordinator = SidebarReloadCoordinator<SidebarDataSnapshot>(
-            loadSnapshot: { await AppKitController.initialSidebarDataSnapshot() },
+            loadSnapshot: { [weak self] in
+                // Captured before the (off-main) DB read below, at the moment this reload's data starts
+                // being gathered: see `capturedLocalReloadEpoch`. `SidebarReloadCoordinator` runs at most
+                // one load at a time and applies before starting the next, so a plain instance field
+                // carries this safely from here to the apply site.
+                self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
+                return await AppKitController.initialSidebarDataSnapshot()
+            },
             applySnapshot: { [weak self] snapshot, forceRemoteRefresh, bypassesBackoff in
                 self?.applySidebarDataSnapshot(
                     snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
@@ -95,9 +102,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Remote devices with an overview pull in flight, so nothing starts a second connection to a
     /// device that is still answering (or still timing out).
     private var remoteOverviewPullsInFlight: Set<String> = []
-    /// Per-device counter stamped onto each pull, bumped whenever something invalidates what an
-    /// in-flight pull can still tell us about the device; see `invalidateInFlightRemoteOverviewPulls`.
+    /// Per-device counter stamped onto each pull, bumped whenever something moves the ground it was
+    /// dialing on — a user retry, a network-path change, or a subscription push applying newer data; see
+    /// `invalidateInFlightRemoteOverviewPulls`. Gates only a pull's *failure*: a retry or network change
+    /// installs no data of its own, so a failure that predates one of those tells us nothing (the ground
+    /// moved before we heard back) and is discarded, but a *success* is discarded only when a push
+    /// actually applied something newer — gated separately by `remoteOverviewPushApplyGenerations`, since a
+    /// success is otherwise the freshest answer regardless of what else moved.
     private var remoteOverviewPullGenerations: [String: Int] = [:]
+    /// Per-device counter bumped only where a subscription push applies its overview (`onOverview`,
+    /// alongside the `invalidateInFlightRemoteOverviewPulls` call). A pull captures this at its start and
+    /// compares it at completion: if it advanced, a push applied newer data while the pull was in flight,
+    /// so the pull's success is stale and is discarded instead of overwriting what is already showing.
+    private var remoteOverviewPushApplyGenerations: [String: Int] = [:]
     /// Pacing for pulls that fail. The in-flight guard above bounds how many connections a failing
     /// device carries at once but not how often it is dialed, and only a successful pull stamps the
     /// freshness window; this is what keeps a device that fails fast from being re-dialed by every
@@ -119,6 +136,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// result and disconnect means.
     private var remoteOverviewSubscriptions: RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIOverviewStreamClient>!
     private var reloadCoordinator: SidebarReloadCoordinator<SidebarDataSnapshot>!
+    /// `PanelCoordinator.paneReplacementEpoch` as of the moment the in-flight local reload's `loadSnapshot`
+    /// began gathering data. Read at apply time to tell a snapshot whose DB read predates a pane
+    /// replacement from one that postdates it: see `PanelCoordinator.paneReplacementEpoch` and the guard
+    /// around the retarget/prune block in `applySidebarDataSnapshot`.
+    private var capturedLocalReloadEpoch = 0
     /// Set when a database-change signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
     private var pendingDatabaseReload = false
@@ -398,9 +420,31 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // placeholder overview (mirroring the remote path's `load.overview == nil` branch), and absence
         // of a real overview is never evidence a session's product row was removed.
         if AppKitController.localSnapshotAuthorizesPanePrune(loadState: localLoadState, compatibility: snapshot.localCompatibility) {
-            host.panelCoordinator.pruneOpenPanes(
-                deviceID: snapshot.localDeviceID,
-                catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
+            // Hand over the panes whose runtime target merely swapped sessions before pruning could close
+            // them: a start or restart replaces the session a row names, and the predecessor is exactly
+            // what the keep-set below no longer retains. Runs unconditionally, even against a snapshot
+            // whose DB read predates a later pane claim: `capturedLocalReloadEpoch` is compared below
+            // BEFORE this call (the retarget itself bumps the epoch when it claims a pane, so comparing
+            // after would wrongly treat a fresh, non-stale snapshot as stale). A stale overview diffed
+            // against the newer installed rows can only produce reversed pairings, which
+            // `TerminalSessionReplacementDiff`'s createdAt gate drops, and `retargetPaneForReplacement`
+            // no-ops when the replacement already has a pane, so retargeting from stale data is safe.
+            // Skipping it here instead would permanently lose a pairing this snapshot was the only
+            // carrier of: the next apply's previous overview already contains the replacement, so the
+            // pairing could never be recovered and the predecessor's pane would be pruned outright.
+            let epochWasFreshBeforeRetarget = capturedLocalReloadEpoch == host.panelCoordinator.paneReplacementEpoch
+            host.retargetReplacedTerminalPanes(
+                previousOverview: previousLocalSection?.overview, overview: snapshot.localDeviceOverview, deviceID: snapshot.localDeviceID)
+            // Pruning, unlike the retarget above, is skipped when this snapshot's DB read predates a pane
+            // replacement: its keep-set was built before the replacement, so it cannot name the
+            // replacement session, and pruning against it would close the pane that was just claimed. The
+            // restart activity that bumped the epoch also queues a fresh reload (its own DB write), and
+            // that reload prunes normally once it applies, so a skipped prune self-heals.
+            if epochWasFreshBeforeRetarget {
+                host.panelCoordinator.pruneOpenPanes(
+                    deviceID: snapshot.localDeviceID,
+                    catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
+            }
         }
         // Diff against the runtime map actually installed, not the raw snapshot. An unreachable local
         // daemon answers with the offline placeholder, whose empty map reads as every running workspace
@@ -595,6 +639,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // out — from stacking connections on it.
         guard remoteOverviewPullsInFlight.insert(record.id).inserted else { return }
         let generation = remoteOverviewPullGenerations[record.id] ?? 0
+        let pushApplyGenerationAtStart = remoteOverviewPushApplyGenerations[record.id] ?? 0
+        // Captured at pull start, the moment this attempt's eventual data begins going stale relative to
+        // any pane replacement that lands while it is in flight; see `PanelCoordinator.paneReplacementEpoch`.
+        let capturedEpoch = host.panelCoordinator.paneReplacementEpoch
         Task { @MainActor [weak self] in
             let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
                 do {
@@ -615,7 +663,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // parked in offline for no reason; it arms the backoff instead, which paces the retries
             // without freezing the device's state for a fixed window.
             switch result {
-            case .success: self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
+            case .success:
+                self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
+                // A success is a fresh read of the device and applies unless a push actually installed
+                // newer data while this pull was in flight — a retry or network-path change moves the
+                // ground but installs no data of its own, so it must not discard a success on its own; see
+                // `remoteOverviewPushApplyGenerations`.
+                guard
+                    Self.pullSuccessStillFreshest(
+                        pushApplyGeneration: pushApplyGenerationAtStart,
+                        currentPushApplyGeneration: self.remoteOverviewPushApplyGenerations[record.id] ?? 0)
+                else {
+                    // A subscription push already applied a newer overview while this pull was in flight.
+                    // Applying this snapshot now would retarget/prune the sidebar's open panes against data
+                    // older than what is already showing, which can close a pane that the newer overview
+                    // just retargeted to a replacement session, because the replacement does not exist in
+                    // this stale snapshot.
+                    DeviceLinkTrace.log(deviceID: record.id, event: "pull_success_superseded")
+                    self.settleSupersededPullSuccess(deviceID: record.id)
+                    return
+                }
             case .failure:
                 guard
                     Self.pullFailureStillDescribesDevice(
@@ -627,36 +694,69 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 let delay = self.remoteOverviewPullBackoff.recordFailure(deviceID: record.id)
                 DeviceLinkTrace.log(deviceID: record.id, event: "pull_backoff_armed", detail: "delay_ms=\(Self.milliseconds(delay))")
             }
-            self.applyRemoteDeviceSection(deviceID: record.id, result: result)
+            self.applyRemoteDeviceSection(deviceID: record.id, result: result, epoch: capturedEpoch)
         }
     }
 
-    /// Retires whatever pull is currently in flight for `deviceID`, so its answer can no longer report
-    /// the device as offline. Called wherever the ground the in-flight attempt was dialing on has moved:
-    /// this Mac's network path changed, or the user asked for the device again.
+    /// Retires whatever pull is currently in flight for `deviceID`, so its eventual *failure* can no
+    /// longer report the device offline on stale grounds. Called wherever the ground the in-flight attempt
+    /// was dialing on has moved: this Mac's network path changed, the user asked for the device again, or
+    /// a subscription push just applied a newer overview for it.
+    ///
+    /// Deliberately does not gate a pull's *success*: a retry or network-path change moves the ground but
+    /// installs no data of its own, so an in-flight pull's success is still the freshest answer for the
+    /// device and must apply. Only a push, which does install data, can make a success stale — tracked
+    /// separately by `remoteOverviewPushApplyGenerations`, bumped alongside this call in `onOverview`.
     ///
     /// The in-flight attempt is deliberately not cancelled or replaced. Its connect is a blocking dial
     /// inside a detached task, and letting a second one start alongside it is exactly the connection
     /// stacking `remoteOverviewPullsInFlight` exists to prevent; what replaces it is the subscription
-    /// reopened in the same pass, with the watchdog's next tick behind that.
+    /// (already open, in the push case) reopened in the other cases, with the watchdog's next tick behind
+    /// that.
     private func invalidateInFlightRemoteOverviewPulls(deviceID: String) {
         remoteOverviewPullGenerations[deviceID] = (remoteOverviewPullGenerations[deviceID] ?? 0) + 1
     }
 
-    /// Whether a completed pull's *failure* still describes the device, or belongs to a network this Mac
-    /// has already left.
+    /// Whether a completed pull's *failure* still describes the device, or belongs to an attempt
+    /// invalidated after it started by a retry or a network-path change.
     ///
-    /// A pull that started before the path changed is dialing an address that was reachable on the old
-    /// network, and its failure arrives seconds later, by which time the reopened subscription may
+    /// A pull that started before the network path changed is dialing an address that was reachable on
+    /// the old network, and its failure arrives seconds later, by which time the reopened subscription may
     /// already have published a healthy overview over the new one. Letting that failure through flips a
-    /// working device to offline and parks it there until the watchdog's next tick.
+    /// working device to offline and parks it there until the watchdog's next tick. A retry invalidates for
+    /// the same reason: the user asked for the device again, so a failure of the attempt that predates
+    /// their click is not the answer to it.
     ///
-    /// Only failures are held to this. A success is evidence the device answered, which no change of
-    /// network can make untrue, and dropping it would strand a section at "loading…" after a user retry
-    /// whose own pull never started (the in-flight guard refused it). Pure so the rule is directly
+    /// Not used for a pull's success; see `pullSuccessStillFreshest`. Pure so the rule is directly
     /// testable.
     nonisolated static func pullFailureStillDescribesDevice(pullGeneration: Int, currentGeneration: Int) -> Bool {
         pullGeneration >= currentGeneration
+    }
+
+    /// Whether a completed pull's *success* is still the freshest answer for the device, or was made stale
+    /// by a subscription push that applied newer data while the pull was in flight.
+    ///
+    /// Unlike a failure, a success is discarded only on evidence that something newer actually landed — a
+    /// retry or network-path change alone does not disqualify it, because neither installs data of its
+    /// own; the pull remains the freshest read of the device until a push proves otherwise. Applying a
+    /// stale success would overwrite newer data with an older snapshot and re-run retarget/prune against
+    /// it, closing a pane the newer overview just retargeted to a replacement session, because the
+    /// replacement does not exist in the stale snapshot. A superseded success is dropped before it reaches
+    /// that path; see `settleSupersededPullSuccess` for the minimal cleanup it still performs. Pure so the
+    /// rule is directly testable.
+    nonisolated static func pullSuccessStillFreshest(pushApplyGeneration: Int, currentPushApplyGeneration: Int) -> Bool {
+        pushApplyGeneration >= currentPushApplyGeneration
+    }
+
+    /// What a superseded pull's success still owes the sidebar: nothing about its data (that is stale by
+    /// definition, see `pullSuccessStillFreshest`), but a section that is still showing "loading…" must not
+    /// be left there — a subscription push already applied newer data while this pull was in flight, so
+    /// flipping the state here without touching the section's data cannot strand the user on stale content.
+    private func settleSupersededPullSuccess(deviceID: String) {
+        guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        guard host.deviceSections[index].loadState == .loading else { return }
+        host.deviceSections[index].loadState = .loaded
+        applySidebarDataChange()
     }
 
     /// Enables and opens live overview subscriptions for paired remote devices, and arms the
@@ -878,9 +978,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             let daemonStatus = overview.overview.daemonStatus
             let compatibility = SpacesWireCompatibility.evaluate(daemonStatus: daemonStatus)
             Task { @MainActor in
-                self?.applyRemoteDeviceSection(
+                guard let self else { return }
+                // Captured as the first thing this hop does, not before the hop is scheduled:
+                // `paneReplacementEpoch` lives on the main-actor `PanelCoordinator`, and `onOverview` itself
+                // runs off-main (a stream callback), so there is no way to read it before hopping onto the
+                // main actor. Nothing else can run on the main actor between the hop starting and this line,
+                // since a task body executes without interruption up to its first `await`.
+                // Accepted residual: a push whose stream delivery lags a whole pull round trip (the daemon
+                // sent it before answering the pull, but it arrives here after the pull's newer overview
+                // applied and retargeted a pane) captures the post-retarget epoch and still prunes. No
+                // client-side capture point can order data across two connections; closing this fully
+                // needs a daemon-stamped overview revision, and the lag it requires is far outside normal
+                // delivery behavior.
+                let capturedEpoch = self.host.panelCoordinator.paneReplacementEpoch
+                // A push is always the newer answer for this device: retire whatever pull is mid-flight so
+                // its eventual failure cannot report this device offline on stale grounds, and record that
+                // this push is about to apply data newer than any pull success already in flight (see
+                // `remoteOverviewPushApplyGenerations`).
+                self.invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
+                self.remoteOverviewPushApplyGenerations[deviceID] = (self.remoteOverviewPushApplyGenerations[deviceID] ?? 0) + 1
+                self.applyRemoteDeviceSection(
                     deviceID: deviceID,
-                    result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)))
+                    result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)),
+                    epoch: capturedEpoch)
             }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] error in
@@ -972,7 +1092,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             DeviceLinkTrace.log(deviceID: deviceID, event: "stream_disconnect_ignored_incompatible")
             return
         }
-        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
+        // A failure carries no overview, so it never reaches the retarget/prune block that the epoch
+        // guards; the current epoch is passed only because the parameter is shared with the success path.
+        applyRemoteDeviceSection(
+            deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed),
+            epoch: host.panelCoordinator.paneReplacementEpoch)
     }
 
     /// What a failed load must do to a device section that is already painted.
@@ -996,7 +1120,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return currentReason == reason ? .unchanged : .repaintReason
     }
 
-    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
+    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>, epoch: Int) {
         guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
@@ -1058,6 +1182,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 return
             }
             let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+            // Captured before the section is overwritten: a remote daemon posts no pane close at all, so
+            // the difference between these two overviews is the only thing that names a session's
+            // replacement on this client.
+            let previousOverview = host.deviceSections[index].overview
             let mapped = AppKitController.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -1080,8 +1208,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Only this success-with-overview branch prunes — the reachable-but-incompatible branch above
             // and the offline `.failure` branch below carry no overview, and absence of an overview is never
             // evidence a session's product row was removed.
-            host.panelCoordinator.pruneOpenPanes(
-                deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
+            //
+            // Hand over the panes whose runtime target merely swapped sessions before pruning could close
+            // them. Runs unconditionally, even against an overview whose read predates a later pane claim:
+            // `epoch` (stamped when the pull started or the push was received) is compared below BEFORE
+            // this call (the retarget itself bumps the epoch when it claims a pane, so comparing after
+            // would wrongly treat a fresh, non-stale overview as stale). A stale overview diffed against
+            // the newer installed rows can only produce reversed pairings, which
+            // `TerminalSessionReplacementDiff`'s createdAt gate drops, and `retargetPaneForReplacement`
+            // no-ops when the replacement already has a pane, so retargeting from stale data is safe.
+            // Skipping it here instead would permanently lose a pairing this overview was the only carrier
+            // of: the next apply's previous overview already contains the replacement, so the pairing
+            // could never be recovered and the predecessor's pane would be pruned outright.
+            let epochWasFreshBeforeRetarget = epoch == host.panelCoordinator.paneReplacementEpoch
+            host.retargetReplacedTerminalPanes(previousOverview: previousOverview, overview: overview.overview, deviceID: deviceID)
+            // Pruning, unlike the retarget above, is skipped when this overview predates a pane
+            // replacement: its keep-set was built before the replacement, so it cannot name the
+            // replacement session, and pruning against it would close the pane that was just claimed. The
+            // activity that bumped the epoch also produces a fresher overview (the daemon's own state
+            // changed), and that overview prunes normally once it arrives, so a skipped prune self-heals.
+            if epochWasFreshBeforeRetarget {
+                host.panelCoordinator.pruneOpenPanes(
+                    deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
+            }
         case .failure(let error):
             let reason = error.localizedDescription
             let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)

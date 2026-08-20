@@ -354,6 +354,44 @@ enum AutomationsViewModel {
 
     private static func paddedTwoDigits(_ value: Int) -> String { value < 10 ? "0\(value)" : "\(value)" }
 
+    // MARK: - Next-run popover (pure, unit-testable)
+
+    /// The quiet line under the next-run popover's title, stating what the automation is currently set to do
+    /// next. A pending one-time override arrives as the summary's own `nextFireTime`, so a manual automation
+    /// holding one reads as scheduled rather than as "Manual".
+    static func nextRunSummaryLine(for automation: TerminalServiceAutomationSummary, timeZone: TimeZone) -> String {
+        if automation.enabled, let iso = automation.nextFireTime, let date = TerminalSessionTimestamp.date(from: iso) {
+            let parts = gregorianCalendar(timeZone).dateComponents([.year, .month, .day, .hour, .minute], from: date)
+            return "Scheduled: \(monthDayText(parts)) \(parts.year ?? 0) \(clockText(parts))"
+        }
+        guard AutomationTriggerKind(rawValue: automation.triggerKind) == .cron else { return "Manual" }
+        return "Not scheduled"
+    }
+
+    /// Resolves the popover's typed `YYYY-MM-DD` date plus hour and minute into an instant in the device's
+    /// time zone, or nil when any part is malformed. A date that names a day its month does not have (such as
+    /// `2026-02-31`) is malformed too: the calendar would otherwise roll it forward into March silently.
+    static func parseNextRunInstant(dateText: String, hour: Int, minute: Int, timeZone: TimeZone) -> Date? {
+        let fields = dateText.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "-", omittingEmptySubsequences: false)
+        guard fields.count == 3, let year = Int(fields[0]), let month = Int(fields[1]), let day = Int(fields[2]) else { return nil }
+        guard (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+        let calendar = gregorianCalendar(timeZone)
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        guard let date = calendar.date(from: components) else { return nil }
+        let resolved = calendar.dateComponents([.year, .month, .day], from: date)
+        guard resolved.year == year, resolved.month == month, resolved.day == day else { return nil }
+        return date
+    }
+
+    /// Whether a picked next-run instant can be submitted. The daemon rejects a non-future time, so the
+    /// popover refuses it inline first.
+    static func nextRunInstantIsAcceptable(_ instant: Date, now: Date) -> Bool { instant > now }
+
     // MARK: - Schedule preview zone (pure, unit-testable)
 
     /// The time zone to preview a cron schedule in for the automation's target device: the Mac's own current

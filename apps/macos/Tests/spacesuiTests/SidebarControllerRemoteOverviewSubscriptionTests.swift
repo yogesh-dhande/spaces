@@ -1,8 +1,12 @@
+import AppKit
 import Foundation
 import Testing
+import spacesclientcore
+import spacesdevicecore
 import spacesterminalcore
 
 @testable import spacesui
+@testable import workspacecore
 
 /// A stand-in for the overview stream client. The coordinator never touches the client beyond
 /// holding it and handing it back, so identity is all a test needs.
@@ -404,6 +408,30 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(SidebarController.pullFailureStillDescribesDevice(pullGeneration: 3, currentGeneration: 3))
     }
 
+    /// A success is gated on a *different* counter than a failure: `remoteOverviewPushApplyGenerations`,
+    /// bumped only where a subscription push actually applies an overview, not
+    /// `remoteOverviewPullGenerations`, bumped by a retry or a network-path change that install no data of
+    /// their own. A retry-style invalidation must not touch whether an in-flight pull's eventual success
+    /// still applies: it would otherwise strand the sidebar on nothing until the next watchdog tick, even
+    /// though the pull's answer is the freshest one available.
+    @Test func aPullInvalidatedByARetryStillAppliesItsSuccess() {
+        #expect(SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 0, currentPushApplyGeneration: 0))
+    }
+
+    /// The case the split exists for: a subscription push applied a newer overview while this pull was
+    /// still in flight. Applying the pull's answer afterwards would retarget/prune the sidebar's open
+    /// panes against data older than what is already showing, which can close a pane the newer overview
+    /// just retargeted to a replacement session that does not exist in the stale snapshot.
+    @Test func aSuccessFromAPullThatAPushAppliedOverMidFlightIsSuperseded() {
+        #expect(!SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 0, currentPushApplyGeneration: 1))
+    }
+
+    /// The ordinary case for a success: nothing applied newer data while it was in flight, so its snapshot
+    /// is current and applies normally.
+    @Test func aSuccessFromTheCurrentPullStillApplies() {
+        #expect(SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 2, currentPushApplyGeneration: 2))
+    }
+
     /// Unchanged from the rule the watchdog always had: an offline section, and equally one left at
     /// "loading…" by an attempt whose result never arrived, are both re-probed whatever they last knew
     /// about compatibility — the offline transition drops the verdict, so it is `nil` by then anyway.
@@ -577,5 +605,245 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         // The credential-less state is re-derived on every sidebar load — far more often than a watchdog
         // probe — so the unchanged repeat must rebuild nothing rather than discard scroll and focus.
         #expect(!rebuilds(from: reconnectRequired, to: reconnectRequired))
+    }
+}
+
+extension ProcessProfileEnvironmentSuites {
+    /// Covers the epoch fence `SidebarController.applyRemoteDeviceSection` checks before its
+    /// retarget/prune block: an overview whose data predates a pane replacement must not prune the pane
+    /// the replacement just claimed, the same guarantee `PanelReplacementHoldTests` exercises for the
+    /// local apply path. Nests under `ProcessProfileEnvironmentSuites` because building a real
+    /// `AppKitController` mutates the process-global `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`.
+    @MainActor @Suite final class SidebarControllerRemoteApplyEpochTests {
+        private let root: URL
+        private let originalDatabasePath: String?
+        private let originalRuntimeDirectory: String?
+
+        init() throws {
+            originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+            originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+            root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+            setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+        }
+
+        deinit {
+            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        private func makeController() -> AppKitController {
+            let profile = SpacesProfile(
+                source: .explicitDatabasePath, databasePath: root.appendingPathComponent("spaces.db").path, rootDirectory: root.path,
+                isInstalledProfile: false, runtimeDirectory: root.appendingPathComponent("runtime").path,
+                ipcNotificationObject: "com.spaces.test.\(UUID().uuidString)", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+            let owner = SpacesProcessLeaseOwner(
+                pid: ProcessInfo.processInfo.processIdentifier, executablePath: "/tmp/spaces-test", profileRoot: root.path, token: UUID().uuidString,
+                acquiredAt: "2026-01-01T00:00:00Z")
+            let lease = SpacesProcessLease(
+                owner: owner, leaseDirectoryPath: root.appendingPathComponent("app-owner-lease").path, metadataPath: "unused", fileManager: .default)
+            let context = SpacesAppLaunchContext(profile: profile, appOwnerLease: lease, desktopControlState: .passive(owner))
+            return AppKitController(launchContext: context)
+        }
+
+        private let deviceID = "device-remote"
+
+        private func device() -> SpacesPairedDeviceRecord {
+            SpacesPairedDeviceRecord(
+                id: deviceID, name: "Linux Box", platform: "linux", hosts: ["10.0.0.4"], port: 19000, certificateFingerprint: "fingerprint",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        }
+
+        /// An overview naming `processSessionID` as row "api"'s session in workspace-1, parameterized by
+        /// `createdAt` and the retention set so a test can build both the stale baseline and a later
+        /// overview that genuinely replaces it. `extraRowSessionID`, when given, adds a second row ("other")
+        /// so a pane unrelated to the pairing under test can also survive layout restoration: restoring a
+        /// persisted layout prunes any pane whose session is not in `retainedTerminalSessionIDs`
+        /// (`restoredWorkspacePanelLayout`), so a session absent from every overview never gets a pane.
+        private func overview(processSessionID: String, createdAt: String, retained: [String], extraRowSessionID: String? = nil)
+            -> SpacesDeviceOverviewPayload
+        {
+            var processRows = [
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1", sessionID: processSessionID,
+                    runState: .running, canRun: true, canStop: true, canRestart: true)
+            ]
+            var sessions = [
+                SpacesDeviceTerminalSessionSummary(
+                    id: processSessionID, title: "api", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo api", state: .running,
+                    backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678, workspaceID: "workspace-1",
+                    workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt, updatedAt: createdAt,
+                    isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
+            ]
+            if let extraRowSessionID {
+                processRows.append(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "other", workspaceID: "workspace-1", name: "other", command: "echo other", processID: "process-2",
+                        sessionID: extraRowSessionID, runState: .running, canRun: true, canStop: true, canRestart: true))
+                sessions.append(
+                    SpacesDeviceTerminalSessionSummary(
+                        id: extraRowSessionID, title: "other", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo other",
+                        state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1235, childPID: 5679,
+                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt,
+                        updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
+                )
+            }
+            let workspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: processRows.count, processRows: processRows)
+            return SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [workspace], sessions: sessions, retainedTerminalSessionIDs: retained)
+        }
+
+        /// A device section retaining `processSessionID` (and `extraRowSessionID`, when given) alone,
+        /// mirroring `PanelReplacementHoldTests`' local fixture but built as a remote (non-local) section.
+        private func section(processSessionID: String, extraRowSessionID: String? = nil) -> AppKitController.DeviceSection {
+            let overview = overview(
+                processSessionID: processSessionID, createdAt: "2026-01-01T00:00:00Z",
+                retained: [processSessionID] + (extraRowSessionID.map { [$0] } ?? []), extraRowSessionID: extraRowSessionID)
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "Linux Box", isLocal: false, loadState: .loaded, device: device(), projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
+        private func openRequest(sessionID: String) -> AppKitController.DeviceTerminalOpenRequest {
+            AppKitController.DeviceTerminalOpenRequest(
+                workspaceID: "workspace-1", deviceID: deviceID, sessionID: sessionID, title: "api", workingDirectory: "/tmp/workspace-1",
+                kind: .process)
+        }
+
+        /// Places `predecessor`'s pane on a fresh controller and hands it to `replacement` in memory (the
+        /// overview-diff retarget path `AppKitController.retargetReplacedTerminalPanes` drives in
+        /// production), which bumps `paneReplacementEpoch`. Returns the epoch as it stood *before* that
+        /// claim, the value a pull or push already in flight when the claim happened would have captured.
+        private func makeControllerWithAClaimedReplacement() throws -> (controller: AppKitController, epochBeforeClaim: Int) {
+            let controller = makeController()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the pane is placed")
+            let epochBeforeClaim = controller.panelCoordinator.paneReplacementEpoch
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+            #expect(claimed, "precondition: the claim succeeded")
+            #expect(controller.panelCoordinator.paneReplacementEpoch != epochBeforeClaim, "precondition: the epoch moved")
+            #expect(controller.panelCoordinator.placement(forSessionID: "replacement") != nil, "precondition: the pane now hosts the replacement")
+            return (controller, epochBeforeClaim)
+        }
+
+        /// An overview whose keep-set was built before a pane replacement (its `epoch` predates the
+        /// current `paneReplacementEpoch`) cannot name the replacement session, since that session did not
+        /// exist yet when the overview's data was read. Pruning against it would close the pane the
+        /// replacement just claimed; skipping the retarget/prune block for a stale epoch is what protects
+        /// it, so the claimed pane stays placed even though this overview retains nothing under the
+        /// device.
+        @Test func aStaleEpochLeavesAnAlreadyClaimedPaneAlone() throws {
+            let (controller, epochBeforeClaim) = try makeControllerWithAClaimedReplacement()
+
+            let staleOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: staleOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: epochBeforeClaim)
+
+            #expect(
+                controller.panelCoordinator.placement(forSessionID: "replacement") != nil,
+                "the stale overview's prune was skipped, so the already-claimed pane stayed put")
+        }
+
+        /// The ordinary case: nothing bumped the epoch between this overview's data being read and it
+        /// being applied, so its prune runs and a pane the fresh keep-set no longer retains is closed —
+        /// here, the replacement's own session having genuinely ended in the time since the claim.
+        @Test func aCurrentEpochPrunesAPaneNoLongerRetained() throws {
+            let (controller, _) = try makeControllerWithAClaimedReplacement()
+            let currentEpoch = controller.panelCoordinator.paneReplacementEpoch
+
+            let freshOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: freshOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: currentEpoch)
+
+            #expect(controller.panelCoordinator.placement(forSessionID: "replacement") == nil, "an overview whose epoch is current prunes normally")
+        }
+
+        /// The stale-epoch skip guards pruning only, never the retarget: a genuine replacement pairing
+        /// this overview itself carries (row "api" moving from `predecessorB` to `replacementB`, with a
+        /// strictly later `createdAt`) must still be handed to its pane even though the epoch moved for a
+        /// claim unrelated to this pairing. `TerminalSessionReplacementDiff` pairs sessions off this
+        /// overview's own previous/current snapshots, not off the epoch, so replaying it against data that
+        /// predates the unrelated claim is safe. The applied overview also leaves `replacementB` out of
+        /// `retainedTerminalSessionIDs`, so a pass here cannot be explained by pruning failing to touch a
+        /// retained session: the pane surviving must come from the retarget, since the stale epoch skips
+        /// the prune that would otherwise be the only thing keeping it open.
+        @Test func aStaleEpochStillAppliesAReplacementItsOwnOverviewCarries() throws {
+            let controller = makeController()
+
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessorB")), to: PanelLayout())
+            // An unrelated pane whose claim below moves the epoch without touching the pairing under test,
+            // standing in for a concurrent restart elsewhere in the workspace.
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-unrelated", pane: Pane(id: "u", content: .terminalSession(deviceID: deviceID, sessionID: "unrelated-old")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(processSessionID: "predecessorB", extraRowSessionID: "unrelated-old")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessorB") != nil, "precondition: the pane under test is placed")
+            #expect(controller.panelCoordinator.placement(forSessionID: "unrelated-old") != nil, "precondition: the unrelated pane is placed")
+
+            let epochBeforeUnrelatedClaim = controller.panelCoordinator.paneReplacementEpoch
+            let unrelatedClaimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "unrelated-old", request: openRequest(sessionID: "unrelated-new"))
+            #expect(unrelatedClaimed, "precondition: the unrelated claim succeeded and moved the epoch")
+            #expect(controller.panelCoordinator.paneReplacementEpoch != epochBeforeUnrelatedClaim, "precondition: the epoch moved")
+
+            let currentOverview = overview(processSessionID: "replacementB", createdAt: "2026-01-01T00:00:01Z", retained: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: currentOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: epochBeforeUnrelatedClaim)
+
+            #expect(
+                controller.panelCoordinator.placement(forSessionID: "replacementB") != nil,
+                "the pairing this overview carries was retargeted even though the epoch moved for an unrelated claim")
+        }
+
+        /// The same fence guards the device-mutation response path
+        /// (`AppKitController.applyDeviceMutationResponse` → `applyDeviceOverview`), which every mutation
+        /// call site threads its own pre-dispatch epoch capture into (see the call sites across
+        /// `AppKitController.swift`, `WorkspaceVisibilityController.swift`, and
+        /// `SidebarRuntimeTargetItem.swift`). A mutation response snapshotted before a claim it raced must
+        /// not prune the pane that claim installed, mirroring the pull/push apply path the tests above
+        /// exercise on `SidebarController.applyRemoteDeviceSection`.
+        @Test func aStaleEpochMutationResponseLeavesAnAlreadyClaimedPaneAlone() throws {
+            let (controller, epochBeforeClaim) = try makeControllerWithAClaimedReplacement()
+
+            let staleOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: staleOverview)))
+            controller.applyDeviceMutationResponse(response, deviceID: deviceID, epoch: epochBeforeClaim)
+
+            #expect(
+                controller.panelCoordinator.placement(forSessionID: "replacement") != nil,
+                "the stale mutation response's prune was skipped, so the already-claimed pane stayed put")
+        }
     }
 }

@@ -66,6 +66,8 @@ import workspacecore
     /// Device mutations for the same automation are serialized so rapid switch changes reach the daemon in
     /// selection order and the last user selection is the persisted state.
     private let automationMutationQueue = AutomationMutationQueue()
+    /// The open next-run popover, held so opening another chip's popover replaces it rather than stacking.
+    private var nextRunPopover: NSPopover?
 
     private let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -332,7 +334,7 @@ import workspacecore
         }
         return grid.makeHeaderLine(
             status: RowPrimitives.statusSlot(), name: header("Name"), schedule: header("Schedule"), nextRun: header("Next run", alignment: .right),
-            device: showDevice ? header("Device") : nil, toggle: header("On"), action: header("", alignment: .right))
+            device: showDevice ? header("Device") : nil, toggle: header("On"))
     }
 
     private func makeTableDivider() -> NSView {
@@ -377,13 +379,17 @@ import workspacecore
         // available on hover rather than being lost to truncation.
         scheduleColumn.toolTip = schedule.cronDetail.map { "\(schedule.summary) (\($0))" } ?? schedule.summary
 
-        let nextRun = makeCellLabel(
-            AutomationsViewModel.nextRunDescription(for: automation, now: now), font: Self.tabularFigures(Typography.rowDetail), color: Theme.muted)
-        nextRun.alignment = .right
+        let nextRunChip = makeNextRunChip(AutomationsViewModel.nextRunDescription(for: automation, now: now), identifier: identifier)
+        // Trailing spacer on the leading side so the chip hugs the column's right edge, under the right-aligned
+        // "Next run" header, instead of stretching across the grid-pinned column width.
+        let nextRunColumn = NSStackView(views: [NSView(), nextRunChip])
+        nextRunColumn.orientation = .horizontal
+        nextRunColumn.alignment = .centerY
+        nextRunColumn.spacing = 0
 
-        // The beat rewrites exactly this string in place. Strong captures are fine: the refresher list is
+        // The beat rewrites exactly this title in place. Strong captures are fine: the refresher list is
         // replaced on every render, releasing the previous rows.
-        relativeTimeLabelRefreshers.append { now in nextRun.stringValue = AutomationsViewModel.nextRunDescription(for: automation, now: now) }
+        relativeTimeLabelRefreshers.append { now in nextRunChip.title = AutomationsViewModel.nextRunDescription(for: automation, now: now) }
 
         let enabledSwitch = NSSwitch()
         enabledSwitch.controlSize = .small
@@ -399,8 +405,8 @@ import workspacecore
 
         let device = showDevice ? makeCellLabel(row.deviceName, font: Typography.rowDetail, color: Theme.muted) : nil
         let line = grid.makeRowLine(
-            status: RowPrimitives.statusSlot(compactStatusDot(for: row)), name: name, schedule: scheduleColumn, nextRun: nextRun, device: device,
-            toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
+            status: RowPrimitives.statusSlot(compactStatusDot(for: row)), name: name, schedule: scheduleColumn, nextRun: nextRunColumn,
+            device: device, toggle: toggleColumn)
 
         // Pinned edge to edge: the line carries the grid's own horizontal inset, the same one the header
         // applies, so both start their columns at the same origin.
@@ -413,27 +419,23 @@ import workspacecore
         return rowView
     }
 
-    /// The row's single contextual action: a running automation offers its live terminal, everything else
-    /// offers the manual trigger. Both stay quiet text controls so the table reads as data, not buttons.
-    private func makeRowActionButton(_ row: AutomationTableRow, identifier: NSUserInterfaceItemIdentifier) -> NSButton {
-        guard let running = row.runningRun else {
-            return makeTextActionButton(
-                title: "Run now", tooltip: "Run this automation now", action: #selector(runNowTapped(_:)), identifier: identifier)
-        }
-        return makeTextActionButton(
-            title: "Open terminal", tooltip: "Open this run's live terminal", action: #selector(openRunTerminalTapped(_:)),
-            identifier: NSUserInterfaceItemIdentifier("\(row.deviceID)::\(running.id)"))
-    }
-
-    private func makeTextActionButton(title: String, tooltip: String, action: Selector, identifier: NSUserInterfaceItemIdentifier) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: Theme.muted, .font: Typography.metadataEmphasis])
-        button.alignment = .right
-        button.toolTip = tooltip
-        button.identifier = identifier
-        return button
+    /// The Next run value as a chip that opens the scheduling popover. It is the column's value and its
+    /// control at once, so it stays clickable even with nothing scheduled: an automation with no next run is
+    /// exactly the one a user reaches for to give it one. The trailing chevron marks it as a disclosure
+    /// rather than a command, and it carries no leading glyph because the column header already names it.
+    private func makeNextRunChip(_ title: String, identifier: NSUserInterfaceItemIdentifier) -> NSButton {
+        let chip = NSButton(title: title, target: self, action: #selector(nextRunChipTapped(_:)))
+        chip.bezelStyle = .inline
+        chip.controlSize = .small
+        chip.font = Self.tabularFigures(Typography.rowDetail)
+        chip.contentTintColor = Theme.muted
+        chip.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(scale: .small))
+        chip.imagePosition = .imageTrailing
+        chip.toolTip = "Set when this automation runs next"
+        chip.identifier = identifier
+        chip.setContentHuggingPriority(.required, for: .horizontal)
+        return chip
     }
 
     private func makeCellLabel(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
@@ -444,12 +446,12 @@ import workspacecore
         return label
     }
 
-    /// The row's right-click menu. The per-row Edit and Delete buttons the card layout carried are gone, so
-    /// this menu is where they live; double-clicking the row repeats Edit.
+    /// The row's right-click menu: every per-row command lives here, since the row itself carries only its
+    /// data plus the enable switch and the next-run chip. Double-clicking the row repeats Edit.
     private func makeAutomationRowMenu(_ row: AutomationTableRow) -> NSMenu {
         let identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(row.automation.id)")
         let menu = NSMenu()
-        func addItem(_ title: String, symbol: String, action: Selector) {
+        func addItem(_ title: String, symbol: String, action: Selector, identifier: NSUserInterfaceItemIdentifier = identifier) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
@@ -457,6 +459,13 @@ import workspacecore
             menu.addItem(item)
         }
         addItem("Run now", symbol: "play", action: #selector(runNowMenuItem(_:)))
+        // Offered only while a run is in flight: that run's terminal is the one thing a live automation has
+        // that a resting one does not.
+        if let running = row.runningRun {
+            addItem(
+                "Open terminal", symbol: "terminal", action: #selector(openRunTerminalMenuItem(_:)),
+                identifier: NSUserInterfaceItemIdentifier("\(row.deviceID)::\(running.id)"))
+        }
         addItem("Edit…", symbol: "pencil", action: #selector(editMenuItem(_:)))
         menu.addItem(.separator())
         addItem("Delete…", symbol: "trash", action: #selector(deleteMenuItem(_:)))
@@ -724,6 +733,7 @@ import workspacecore
         switch AutomationRunTrigger(rawValue: run.trigger) {
         case .manual: "manual"
         case .cron: "cron"
+        case .scheduled: "scheduled"
         case .missedCatchUp: "missed catch-up"
         case nil: run.trigger
         }
@@ -760,7 +770,7 @@ import workspacecore
 
     @objc private func newAutomationTapped() { host.automationEditor.presentCreate(inputs: host.automationDeviceInputs()) }
 
-    // The automations table reaches one automation from three places — the row's action button, its context
+    // The automations table reaches one automation from three places — the row's next-run chip, its context
     // menu, and its double-click — so each action is a plain method and the `@objc` entry points only decode
     // the `deviceID::automationID` identifier their sender carries.
 
@@ -774,11 +784,6 @@ import workspacecore
         host.automationEditor.presentEdit(deviceID: deviceID, automation: automation)
     }
 
-    @objc private func runNowTapped(_ sender: NSButton) {
-        guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
-        runNow(deviceID: deviceID, automationID: automationID)
-    }
-
     @objc private func runNowMenuItem(_ sender: NSMenuItem) {
         guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
         runNow(deviceID: deviceID, automationID: automationID)
@@ -790,9 +795,61 @@ import workspacecore
         }
     }
 
+    /// Opens the next-run popover anchored to the row's chip. The automation is re-resolved from the current
+    /// device inputs rather than captured with the row, so a pane that re-rendered since still edits the
+    /// daemon's automation.
+    @objc private func nextRunChipTapped(_ sender: NSButton) {
+        guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue),
+            let input = host.automationDeviceInputs().first(where: { $0.deviceID == deviceID }),
+            let automation = input.automations.first(where: { $0.id == automationID })
+        else { return }
+        nextRunPopover?.close()
+        // The daemon schedules in the device's own zone, so the popover reads and writes times in that zone.
+        let zone = AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: input.isLocal, reportedTimeZoneIdentifier: input.timeZoneIdentifier)
+        let content = AutomationNextRunPopover(
+            automation: automation, timeZone: zone, zoneSuffix: AutomationsViewModel.schedulePreviewZoneSuffix(previewTimeZone: zone),
+            onRunNow: { [weak self] in
+                self?.closeNextRunPopover()
+                self?.runNow(deviceID: deviceID, automationID: automationID)
+            },
+            onSchedule: { [weak self] instant in
+                guard let self else { return nil }
+                return await setNextRun(deviceID: deviceID, automationID: automationID, at: instant)
+            })
+        let popover = NSPopover()
+        popover.contentViewController = content
+        popover.behavior = .transient
+        nextRunPopover = popover
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+    }
+
+    /// Sends the one-time next-run override off the main actor, returning the daemon's message for the
+    /// popover's inline error, or nil once the pane has been asked to reload with the daemon's new state.
+    private func setNextRun(deviceID: String, automationID: String, at instant: Date) async -> String? {
+        guard let device = host.automationDeviceRecord(deviceID: deviceID) else { return "That device is not available." }
+        let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
+        let error = await Task.detached(priority: .userInitiated) { () -> Error? in
+            do {
+                _ = try SpacesDeviceClient.setAutomationNextRun(
+                    id: automationID, nextRunTime: instant, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                )
+                return nil
+            } catch { return error }
+        }.value
+        if let error { return error.localizedDescription }
+        closeNextRunPopover()
+        host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
+        return nil
+    }
+
+    private func closeNextRunPopover() {
+        nextRunPopover?.close()
+        nextRunPopover = nil
+    }
+
     /// Opens a running automation's live terminal. The run is re-resolved from the current device inputs
     /// rather than captured with the row, so a pane that re-rendered since still opens the daemon's run.
-    @objc private func openRunTerminalTapped(_ sender: NSButton) {
+    @objc private func openRunTerminalMenuItem(_ sender: NSMenuItem) {
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue),
             let run = host.automationDeviceInputs().first(where: { $0.deviceID == deviceID })?.runs.first(where: { $0.id == runID })
         else { return }

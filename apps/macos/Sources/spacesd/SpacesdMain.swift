@@ -208,8 +208,8 @@ enum SpacesDaemonProfileCommandRouting {
         // runs-list included — enter the queue-confined `AutomationService`, whose serial queue can be mid-tick
         // behind an engine→main hop; bridging any automation command onto the main actor could block main behind
         // that hop (a transitive one-way-rule violation). So the whole family runs on the transport thread.
-        case .automationCreate, .automationUpdate, .automationDelete, .automationList, .automationRunsList, .automationTrigger, .automationRunCancel,
-            .automationEndAgents:
+        case .automationCreate, .automationUpdate, .automationSetNextRun, .automationDelete, .automationList, .automationRunsList, .automationTrigger,
+            .automationRunCancel, .automationEndAgents:
             true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
         case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe, .agentUnsubscribe,
@@ -982,6 +982,7 @@ enum SpacesDaemonErrorClassification {
         // (see `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`).
         case .profileCommand(.automationCreate(let payload)): return automationCommandOffMain(.automationCreate(payload))
         case .profileCommand(.automationUpdate(let payload)): return automationCommandOffMain(.automationUpdate(payload))
+        case .profileCommand(.automationSetNextRun(let payload)): return automationCommandOffMain(.automationSetNextRun(payload))
         case .profileCommand(.automationDelete(let id)): return automationCommandOffMain(.automationDelete(id: id))
         case .profileCommand(.automationList): return automationCommandOffMain(.automationList)
         case .profileCommand(.automationRunsList(let payload)): return automationCommandOffMain(.automationRunsList(payload))
@@ -1872,6 +1873,8 @@ enum SpacesDaemonErrorClassification {
         // to fail loudly if that peeling ever regresses.
         case .automationCreate: preconditionFailure("`.automationCreate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .automationUpdate: preconditionFailure("`.automationUpdate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationSetNextRun:
+            preconditionFailure("`.automationSetNextRun` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .automationDelete: preconditionFailure("`.automationDelete` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .automationList: preconditionFailure("`.automationList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .automationRunsList: preconditionFailure("`.automationRunsList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
@@ -1914,6 +1917,10 @@ enum SpacesDaemonErrorClassification {
         case .automationUpdate(let payload):
             let automation = try service.updateAutomation(id: payload.id, draft: automationDraft(from: payload.fields))
             return TerminalServiceProfileCommandResponse(message: "Updated automation.", automations: [TerminalServiceAutomationSummary(automation)])
+        case .automationSetNextRun(let payload):
+            let automation = try service.setAutomationNextRunTime(id: payload.id, nextRunTime: Self.automationNextRunDate(from: payload.nextRunTime))
+            return TerminalServiceProfileCommandResponse(
+                message: "Scheduled next automation run.", automations: [TerminalServiceAutomationSummary(automation)])
         case .automationDelete(let id):
             try service.deleteAutomationCommand(id: id)
             return TerminalServiceProfileCommandResponse(message: "Deleted automation.")
@@ -1934,6 +1941,15 @@ enum SpacesDaemonErrorClassification {
             return TerminalServiceProfileCommandResponse(message: "Ended automation run agents.", automationRuns: try automationRunSummaries([run]))
         default: preconditionFailure("runAutomationCommand received a non-automation profile command")
         }
+    }
+
+    /// The daemon's one parse of a next-run-override wire timestamp, shared by both transports so an
+    /// unparseable instant is rejected identically over the profile socket and the Device API.
+    private nonisolated static func automationNextRunDate(from wireValue: String) throws -> Date {
+        guard let date = TerminalSessionTimestamp.date(from: wireValue) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Invalid next run time.")
+        }
+        return date
     }
 
     private nonisolated func automationDraft(from fields: TerminalServiceAutomationFields) throws -> AutomationDraft {
@@ -2234,6 +2250,7 @@ enum SpacesDaemonErrorClassification {
     private static func makeAutomationOperations(_ service: @escaping @Sendable () throws -> AutomationService) -> AutomationOperations {
         AutomationOperations(
             create: { draft in try service().createAutomation(draft) }, update: { id, draft in try service().updateAutomation(id: id, draft: draft) },
+            setNextRun: { id, nextRunTime in try service().setAutomationNextRunTime(id: id, nextRunTime: automationNextRunDate(from: nextRunTime)) },
             delete: { id in try service().deleteAutomationCommand(id: id) }, list: { try service().listAutomations() },
             runs: { automationID in try service().listAutomationRuns(automationID: automationID) },
             trigger: { id in try service().triggerAutomation(id: id) }, cancelRun: { runID in try service().cancelAutomationRun(runID: runID) },

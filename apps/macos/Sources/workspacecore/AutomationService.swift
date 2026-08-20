@@ -129,11 +129,13 @@ public final class AutomationService: @unchecked Sendable {
         try store.setAutomationNextFireTime(id: automationID, nextFireTime: nextFireTime, anchorTimeZoneIdentifier: zone.identifier)
     }
 
-    /// One scheduler + executor step: poll running runs for completion/timeout, fire due cron automations,
-    /// advance escalations, and promote a queued run whose automation is now idle. Idempotent per minute:
-    /// a cron automation fires once when its `nextFireTime` elapses because firing recomputes it forward.
+    /// One scheduler + executor step: poll running runs for completion/timeout, fire due automations (a
+    /// pending next-run override first, then ordinary cron), advance escalations, and promote a queued run
+    /// whose automation is now idle. Idempotent per minute: a cron automation fires once when its
+    /// `nextFireTime` elapses because firing recomputes it forward, and an override fires once because firing
+    /// clears it.
     ///
-    /// Invariant: `pollRunningRuns` runs BEFORE `fireDueCronAutomations`, so a run whose command exited
+    /// Invariant: `pollRunningRuns` runs BEFORE `fireDueAutomations`, so a run whose command exited
     /// between ticks is finalized before the concurrency gate judges overlap this tick. Otherwise a due fire
     /// under the `skip` policy would read the just-exited run as still `.running`, consume the cron anchor,
     /// and record a skipped occurrence against work that is no longer running — so `skip` only ever skips
@@ -146,7 +148,7 @@ public final class AutomationService: @unchecked Sendable {
             recomputeCronAnchorsIfTimeZoneChanged()
             pollRunningRuns()
             detachExitedAutomationSessionRuntimeTargets()
-            fireDueCronAutomations()
+            fireDueAutomations()
             processPendingKills()
             promoteQueuedRuns()
         }
@@ -154,7 +156,9 @@ public final class AutomationService: @unchecked Sendable {
 
     /// Recomputes every enabled cron automation's next fire time from now when the device's current zone
     /// differs from the zone persisted beside that anchor. Anchors are absolute instants, so a zone change
-    /// would otherwise keep firing daily/weekly schedules at the old zone's wall-clock time.
+    /// would otherwise keep firing daily/weekly schedules at the old zone's wall-clock time. A pending
+    /// next-run override is left untouched: it is an absolute instant the user picked outright, not a
+    /// derived anchor, so a zone change never moves it.
     private func recomputeCronAnchorsIfTimeZoneChanged() {
         let zone = timeZone()
         do {
@@ -195,6 +199,10 @@ public final class AutomationService: @unchecked Sendable {
         let currentZone = timeZone()
         do {
             for automation in try store.enabledCronAutomations() {
+                // A pending override is the user's explicit claim on the next run: a restart neither fires a
+                // missed cron catch-up nor re-anchors while it stands. An override whose time already passed
+                // while the daemon was down still fires (late) on the first tick, through `fireDueAutomations`.
+                guard automation.nextFireOverride == nil else { continue }
                 guard let schedule = automation.parsedCronSchedule else { continue }
                 let dueTime: Date?
                 if let identifier = automation.anchorTimeZoneIdentifier, identifier != currentZone.identifier {
@@ -284,8 +292,10 @@ public final class AutomationService: @unchecked Sendable {
 
     /// Applies a validated draft to an existing automation (including enabling/disabling it), preserving its
     /// id and creation time. Its next fire time is recomputed from now for an enabled cron automation and
-    /// cleared otherwise, so disabling or switching to manual removes a stale schedule anchor. Throws when
-    /// the automation does not exist.
+    /// cleared otherwise, so disabling or switching to manual removes a stale schedule anchor. An explicit
+    /// edit also clears any pending one-time next-run override, since the user is re-authoring the schedule
+    /// (the rebuilt `Automation` carries no override, and `upsertAutomation` writes exactly what it is given).
+    /// Throws when the automation does not exist.
     public func updateAutomation(id: String, draft: AutomationDraft) throws -> Automation {
         try queue.sync { try updateAutomationLocked(id: id, draft: draft) }
     }
@@ -340,6 +350,21 @@ public final class AutomationService: @unchecked Sendable {
                 throw AutomationValidationError("Failed to start a run for automation \(id).")
             }
             return run
+        }
+    }
+
+    /// Sets a one-time next-run override, replacing the automation's next occurrence with the given instant.
+    /// Does not touch the cron anchor: it stays as it is and is recomputed from now when the override fires
+    /// (`fireDueAutomations`), so a cron automation's schedule resumes from its expression rather than from
+    /// the overridden instant.
+    public func setAutomationNextRunTime(id: String, nextRunTime: Date) throws -> Automation {
+        try queue.sync {
+            let automation = try requireAutomation(id: id)
+            guard nextRunTime > now() else { throw AutomationValidationError("Next run time must be in the future.") }
+            // A disabled automation never fires, so accepting a schedule here would silently do nothing.
+            guard automation.enabled else { throw AutomationValidationError("Enable the automation to schedule its next run.") }
+            try store.setAutomationNextFireOverride(id: id, nextFireOverride: nextRunTime)
+            return try requireAutomation(id: id)
         }
     }
 
@@ -477,10 +502,34 @@ public final class AutomationService: @unchecked Sendable {
         }
     }
 
-    private func fireDueCronAutomations() {
+    /// Fires every automation whose next occurrence is due: first a pending one-time next-run override (of
+    /// either trigger kind), then ordinary cron firing. Overrides go first because a due override CONSUMES
+    /// the occurrence it stands in for — firing it, clearing it, and (for a cron automation) re-anchoring the
+    /// schedule from now — so the second loop, which re-fetches from the store, always sees each
+    /// automation's fresh post-override state and cannot double-fire it in the same tick.
+    private func fireDueAutomations() {
         let currentTime = now()
         do {
+            for automation in try store.enabledAutomationsWithNextFireOverride() {
+                guard let override = automation.nextFireOverride, override <= currentTime else { continue }
+                guard !workspaceCancellationsInProgress.contains(automation.workspaceID) else { continue }
+                // Durable claim BEFORE the launch, the same at-most-once rationale as the cron anchor below:
+                // clear the override and re-anchor the cron schedule from now, so the occurrence can only
+                // ever be lost, never duplicated, and the resumed cron does not immediately re-fire a stale
+                // anchor the override outran.
+                try store.setAutomationNextFireOverride(id: automation.id, nextFireOverride: nil)
+                if automation.triggerKind == .cron, let schedule = automation.parsedCronSchedule {
+                    let zone = timeZone()
+                    try store.setAutomationNextFireTime(
+                        id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: zone),
+                        anchorTimeZoneIdentifier: zone.identifier)
+                }
+                _ = fire(automation: automation, trigger: .scheduled)
+            }
             for automation in try store.enabledCronAutomations() {
+                // A pending override replaces the next occurrence, so ordinary cron firing is suppressed until
+                // it fires (the anchor it outran is recomputed from now at that moment, above).
+                guard automation.nextFireOverride == nil else { continue }
                 guard let schedule = automation.parsedCronSchedule, let nextFireTime = automation.nextFireTime, nextFireTime <= currentTime else {
                     continue
                 }

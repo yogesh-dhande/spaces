@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-import workspacecore
+import spacesdevicecore
 
 @testable import spacesui
 
@@ -11,13 +11,8 @@ import workspacecore
         let controller = WorkspaceVisibilityOutlineController()
         controller.devices = WorkspaceVisibilityTree.build(
             devices: [WorkspaceVisibilityTree.Device(deviceID: "device-mac", name: "Local")],
-            projects: [
-                ProjectSummary(
-                    id: "p1", name: "harbor", dir: "/repos/harbor", isGitRepo: true, defaultBranch: "main", isHidden: false, deviceID: "device-mac")
-            ],
-            workspacesByProject: [
-                "p1": [WorkspaceSummary(id: "w1", branch: "main", dir: "/repos/main", isRunning: false, isHidden: false, isDefault: true)]
-            ], query: "")
+            projectsByDevice: ["device-mac": [WorkspaceVisibilityTree.Project(id: "p1", name: "harbor", isGitRepo: true, isHidden: false)]],
+            workspacesByProject: ["p1": [WorkspaceVisibilityTree.Workspace(id: "w1", name: "main", isDefault: true, isHidden: false)]], query: "")
 
         let outlineView = NSOutlineView()
         let deviceItem = controller.outlineView(outlineView, child: 0, ofItem: nil)

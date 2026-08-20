@@ -438,7 +438,8 @@ extension WorkspaceOrchestrator {
         let sessionID = sessionID ?? UUID().uuidString
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
-            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601(), workspaceID: workspaceID, kind: kind)
+            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()),
+            workspaceID: workspaceID, kind: kind)
 
         builtInTerminalWindowOpener(sessionID, showMode, openIntent)
         let waitStartedAt = currentDate()
@@ -526,8 +527,7 @@ extension WorkspaceOrchestrator {
         {
             return false
         }
-        guard
-            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+        guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
             let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
         let age = now.timeIntervalSince(createdAt)
@@ -625,12 +625,18 @@ extension WorkspaceOrchestrator {
         return ReplacedTerminalSessionReservations(sessionIDsByProcessKey: sessionIDsByProcessKey)
     }
 
-    /// The session a single-process restart's replacement takes over from, or nil when this orchestrator
-    /// cannot post the replacement's open. Same gate as the workspace restart's reservations.
-    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? {
-        guard deliversTerminalWindowOpens else { return nil }
-        return normalizedTerminalSessionID(process.terminalTrackingID)
-    }
+    /// The session a single-process restart's replacement takes over from.
+    ///
+    /// Deliberately not gated on `deliversTerminalWindowOpens`, unlike the workspace restart's
+    /// reservations above. Every start and restart of a configured process is served by the Device API,
+    /// whose orchestrator has no opener to any client, so gating here made the ordinary case — starting a
+    /// process whose previous run exited, while its ended pane is open — a plain teardown that closed the
+    /// pane out from under the reader. This path can hold safely without an opener because the pairing
+    /// reaches the client another way: the process keeps its row across the restart and only the session
+    /// it names changes, so the refreshed overview tells the client which pane to point at the
+    /// replacement. A launch that never happens still releases the hold from `restartProcessInTerminal`'s
+    /// own teardown close, which is the one thing no client can infer.
+    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? { normalizedTerminalSessionID(process.terminalTrackingID) }
 
     /// Releases every pane this restart is still holding: held by the stop, and never claimed by a
     /// replacement. Only emitted holds are released, so a stop that failed before sending them cannot
