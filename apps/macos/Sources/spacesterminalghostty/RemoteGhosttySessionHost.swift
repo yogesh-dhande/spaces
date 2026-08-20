@@ -384,6 +384,7 @@
             let clientID = client.id
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
+            let pasteboardChangeCountAtCopy = terminalView.selectionPasteboardChangeCount
             // `self` is only captured where this closure is already main-actor isolated (the outer
             // `Task`'s own capture list), never carried through the nested detached closure: passing a
             // main-actor class reference through a nonisolated closure into a later main-actor closure is
@@ -400,7 +401,10 @@
                     completion(false)
                     return
                 }
-                self.terminalView.writeSelectionTextToPasteboard(selectionText)
+                // A copy the user made while the read was in flight wins: the guarded write yields to
+                // it, and the flow still completes as handled because the caller's fallback is another
+                // clipboard write that would clobber that newer copy all the same.
+                self.terminalView.writeSelectionTextToPasteboard(selectionText, ifPasteboardUnchangedSince: pasteboardChangeCountAtCopy)
                 completion(true)
             }
         }
@@ -1018,6 +1022,8 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let inputFailureHandler = self.inputFailureHandler
+            selectionCommitGeneration += 1
+            let commitGeneration = selectionCommitGeneration
             let pasteboardChangeCountAtCommit = terminalView.selectionPasteboardChangeCount
             let queue = inputQueue
             queue.enqueue(
@@ -1033,14 +1039,24 @@
                     // wrapping this in another closure would carry `self` through the same
                     // nonisolated-into-main-actor capture the compiler flags as a data-race risk.
                     if let selectionText = response.selectionText {
-                        await self?.writeSelectionTextToPasteboard(selectionText, ifPasteboardUnchangedSince: pasteboardChangeCountAtCommit)
+                        await self?.writeSelectionTextToPasteboard(
+                            selectionText, forCommitGeneration: commitGeneration, ifPasteboardUnchangedSince: pasteboardChangeCountAtCommit)
                     }
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
+        /// Monotonic count of committed drags, so only the NEWEST commit's response may write the
+        /// pasteboard. Two drags can finish inside one round trip; without this gate the earlier
+        /// response's write would move the pasteboard change count and make the newer response's
+        /// unchanged-pasteboard guard reject the newer text.
+        private var selectionCommitGeneration = 0
+
         /// Writes `setSelection`'s confirmed selection text to the pasteboard. Called from
-        /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call.
-        private func writeSelectionTextToPasteboard(_ text: String, ifPasteboardUnchangedSince changeCount: Int) {
+        /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call. Writes only
+        /// for the newest committed drag, and only while the pasteboard still holds what it held at
+        /// that commit, so a copy the user made during the round trip is never overwritten.
+        private func writeSelectionTextToPasteboard(_ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int) {
+            guard commitGeneration == selectionCommitGeneration else { return }
             terminalView.writeSelectionTextToPasteboard(text, ifPasteboardUnchangedSince: changeCount)
         }
 
