@@ -377,6 +377,131 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 4)
     }
 
+    /// A collector for tests that need a coalesced apply's frame itself, scroll rects included:
+    /// `AppliedOutput`'s `frameText` view only pins the screen text, which says nothing about how content
+    /// moved to produce it.
+    private final class RawOutputCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var outputs: [TerminalRemoteStateReductionOutput] = []
+
+        func record(_ output: TerminalRemoteStateReductionOutput) {
+            lock.lock()
+            outputs.append(output)
+            lock.unlock()
+        }
+
+        var recorded: [TerminalRemoteStateReductionOutput] {
+            lock.lock()
+            defer { lock.unlock() }
+            return outputs
+        }
+    }
+
+    /// Coalescing a run of deltas must not drop the rects of the frames it collapses away.
+    /// `GhosttyMirrorTerminalView` accumulates its drag-carry buffer only from applied frames, so a
+    /// coalesced-away frame's rects have nowhere else to reach it; if `inheritingEffects(ofCoalesced:)`
+    /// only carried forward `coalescedAwayCount` and `inheritedResyncRequest` (as it used to), the
+    /// surviving apply would silently under-report how far content moved, and a drag rebased against it
+    /// would land on the wrong rows while `scrollRectsOverflowed` still claimed the carry was trustworthy.
+    func testCoalescedFrameScrollRectsSurviveOnTheApplyThatReplacesThem() async throws {
+        let sessionID = "pipeline-coalesced-scroll-rects"
+        let alpha = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let bravo = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let charlie = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "charl"))
+
+        // The skipped delta (alpha -> bravo) overflows; the surviving one (bravo -> charlie) does not.
+        // The merged carry must still be poisoned: an OR, not whichever the surviving delta happened to say.
+        let skippedRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 80, deltaRows: 3, deltaColumns: 0)
+        let survivingRect = GhosttyRenderScrollRectOperation(rowStart: 2, rowCount: 4, columnStart: 0, columnCount: 80, deltaRows: 2, deltaColumns: 0)
+        let alphaToBravo = GhosttyRenderUpdateFactory.makeUpdate(
+            target: bravo, baseline: GhosttyRenderUpdateBaseline(frame: alpha), nativeScrollRects: [skippedRect], nativeScrollRectsOverflowed: true)
+        let bravoToCharlie = GhosttyRenderUpdateFactory.makeUpdate(
+            target: charlie, baseline: GhosttyRenderUpdateBaseline(frame: bravo), nativeScrollRects: [survivingRect],
+            nativeScrollRectsOverflowed: false)
+        XCTAssertEqual(alphaToBravo.kind, .delta)
+        XCTAssertEqual(bravoToCharlie.kind, .delta)
+
+        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(alpha))
+        let firstDeltaPayload = payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: alphaToBravo)
+        let secondDeltaPayload = payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: bravoToCharlie)
+
+        let collector = RawOutputCollector()
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmitForTesting: { probe.recordSubmission() })
+
+        // Seed the baseline on its own so the two deltas below are the only entries in the mailbox when
+        // the main actor is held, which is what makes the second collapse onto the first deterministic.
+        pipeline.submit(seedPayload)
+        try await waitUntil("seed applied") { collector.recorded.count == 1 }
+
+        let release = blockMainThread()
+        pipeline.submit(firstDeltaPayload)
+        pipeline.submit(secondDeltaPayload)
+        try await waitUntil("both deltas submitted to the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("the coalesced delta applied") { collector.recorded.count == 2 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 2)
+
+        let coalesced = collector.recorded[1]
+        XCTAssertEqual(coalesced.coalescedAwayCount, 1, "the alpha->bravo delta must have been coalesced into the surviving apply")
+        let mergedFrame = try XCTUnwrap(coalesced.reduction?.frameToApply)
+        XCTAssertEqual(
+            mergedFrame.scrollRects, [skippedRect, survivingRect],
+            "the coalesced-away delta's rects must precede the surviving delta's own rects, oldest first")
+        XCTAssertTrue(mergedFrame.scrollRectsOverflowed, "an overflow on either the skipped or surviving frame must poison the merged carry")
+    }
+
+    /// The rect merge above is what a stalled main actor grows: every extra collapse appends the
+    /// skipped frame's rects onto the pending one's. Past `GhosttyRenderFrame.maxAccumulatedScrollRects`
+    /// the merged carry stops pretending to be a complete history: the rects are dropped and the frame
+    /// reports overflowed, the same cancelled-carry state the mirror's own buffer degrades to, so the
+    /// mailbox holds a bounded amount no matter how long the stall lasts.
+    func testCoalescedScrollRectMergePastTheCapDropsRectsAndReportsOverflow() async throws {
+        let sessionID = "pipeline-coalesced-scroll-rect-cap"
+        let alpha = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let bravo = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let charlie = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "charl"))
+
+        let rect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 80, deltaRows: 3, deltaColumns: 0)
+        let skippedRects = Array(repeating: rect, count: GhosttyRenderFrame.maxAccumulatedScrollRects)
+        let alphaToBravo = GhosttyRenderUpdateFactory.makeUpdate(
+            target: bravo, baseline: GhosttyRenderUpdateBaseline(frame: alpha), nativeScrollRects: skippedRects, nativeScrollRectsOverflowed: false)
+        let bravoToCharlie = GhosttyRenderUpdateFactory.makeUpdate(
+            target: charlie, baseline: GhosttyRenderUpdateBaseline(frame: bravo), nativeScrollRects: [rect], nativeScrollRectsOverflowed: false)
+        XCTAssertEqual(alphaToBravo.kind, .delta)
+        XCTAssertEqual(bravoToCharlie.kind, .delta)
+
+        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(alpha))
+        let firstDeltaPayload = payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: alphaToBravo)
+        let secondDeltaPayload = payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: bravoToCharlie)
+
+        let collector = RawOutputCollector()
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmitForTesting: { probe.recordSubmission() })
+
+        pipeline.submit(seedPayload)
+        try await waitUntil("seed applied") { collector.recorded.count == 1 }
+
+        let release = blockMainThread()
+        pipeline.submit(firstDeltaPayload)
+        pipeline.submit(secondDeltaPayload)
+        try await waitUntil("both deltas submitted to the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("the coalesced delta applied") { collector.recorded.count == 2 }
+        try await settle()
+
+        let coalesced = collector.recorded[1]
+        XCTAssertEqual(coalesced.coalescedAwayCount, 1, "the alpha->bravo delta must have been coalesced into the surviving apply")
+        let mergedFrame = try XCTUnwrap(coalesced.reduction?.frameToApply)
+        XCTAssertEqual(mergedFrame.scrollRects, [], "a merge past the cap keeps no rects; a truncated history would rebase drags to the wrong rows")
+        XCTAssertTrue(mergedFrame.scrollRectsOverflowed, "a merge past the cap must report the cancelled carry")
+    }
+
     /// A delta that cannot apply resets the baseline inside the reducer. The reset belongs to its place
     /// in the series: the payloads after it must see the cleared baseline, and the full frame that
     /// follows must re-seed it, all without any of them overtaking the others. Submissions are paced so
@@ -572,8 +697,25 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             do {
                 let applied = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: baseline)
                 baseline = applied
-                let frame = GhosttyRenderFrame(sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot)
-                guard let encoded = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)) else {
+                // Mirrors the reducer's split: the frame handed to the live apply keeps a delta's scroll
+                // rects for the mirror's drag carry, while the frame stored (and here eagerly encoded)
+                // on the payload is poisoned — a full frame encodes no rect fields on the wire, and a
+                // replayed stored payload must poison a mirror's carry.
+                let scrollRects: [GhosttyRenderScrollRectOperation]
+                let scrollRectsOverflowed: Bool
+                switch decodedUpdate.kind {
+                case .delta:
+                    scrollRects = decodedUpdate.delta?.scrollRects ?? []
+                    scrollRectsOverflowed = decodedUpdate.delta?.scrollRectsOverflowed ?? true
+                case .full, .resyncRequired:
+                    scrollRects = []
+                    scrollRectsOverflowed = true
+                }
+                let frame = GhosttyRenderFrame(
+                    sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot,
+                    scrollRects: scrollRects, scrollRectsOverflowed: scrollRectsOverflowed)
+                let storedFrame = GhosttyRenderFrame(sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot)
+                guard let encoded = try? GhosttyRenderUpdateBinaryCodec.encode(.full(storedFrame)) else {
                     return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, nil)
                 }
                 return (payload.replacingRenderUpdate(encoded), decodedUpdate, frame, nil)

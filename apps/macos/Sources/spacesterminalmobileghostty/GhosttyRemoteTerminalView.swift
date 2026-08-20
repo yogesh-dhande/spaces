@@ -95,6 +95,10 @@ import Foundation
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
+        /// A plain tap on the terminal content while the daemon's shared selection is present. iOS never
+        /// creates a selection, only clears the shared one (#514 tracks drag-to-select parity), so this
+        /// fires instead of the usual link-probe/focus tap handling; see `handleTapToActivateInput`.
+        public let onClearSelectionTapped: (@MainActor () -> Void)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -104,7 +108,7 @@ import Foundation
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
-            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil, onClearSelectionTapped: (@MainActor () -> Void)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -123,6 +127,7 @@ import Foundation
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
             self.onPasteClipboardImage = onPasteClipboardImage
+            self.onClearSelectionTapped = onClearSelectionTapped
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -141,6 +146,7 @@ import Foundation
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
+            hostView.onClearSelectionTapped = onClearSelectionTapped.map { callback in { _ = Task { @MainActor in callback() } } }
             // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
             // handler's answer (did the clipboard image claim this paste?) before deciding whether to
             // fall through to the text paste. UIKit delivers the paste on the main thread.
@@ -199,6 +205,7 @@ import Foundation
             case ignored
             case openedLink
             case focused
+            case clearedSelection
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -323,6 +330,9 @@ import Foundation
         /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
         /// declared image carried nothing readable, so the text paste runs instead.
         public var onPasteClipboardImage: (() -> Bool)?
+        /// Fires from `handleTapToActivateInput` when a plain tap lands while the daemon's shared
+        /// selection is present. Never fires from the copy pill's own tap target.
+        public var onClearSelectionTapped: (() -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -564,12 +574,20 @@ import Foundation
             latestRenderFrame =
                 ownerEpoch.flatMap { ownerEpoch in
                     ownerEpoch.bootstrapSnapshot.map { GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: ownerEpoch.ownerEpoch, snapshot: $0) }
-                } ?? endedRender.map { GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: $0.snapshot) }
+                } ?? endedRender.map(Self.renderFrame(forEndedRender:))
             let nextKey = ownerEpoch.map { "owner|\($0.id)" } ?? endedRender.map { "ended|\($0.id)" } ?? "status|\(fallbackText)"
             if nextKey != lastRenderKey { lastRenderKey = nextKey }
             latestSnapshot = nextSnapshot
             renderLatestSnapshot()
             reportInputReadinessIfNeeded()
+        }
+
+        /// The frame an ended render applies: no session revision (a frozen render never advances) and
+        /// owner epoch 0 (unused once a session has no live owner). Shared by `update` and by
+        /// `reapplyActiveEndedRenderFrameIfNeeded` so the two never drift on how an ended render becomes
+        /// a frame.
+        private static func renderFrame(forEndedRender endedRender: GhosttyRemoteTerminalEndedRender) -> GhosttyRenderFrame {
+            GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: endedRender.snapshot)
         }
 
         public override func layoutSubviews() {
@@ -661,6 +679,11 @@ import Foundation
         /// Counts host render passes even when there is no native mirror, which lets keyboard-transition
         /// tests distinguish local surface updates from remote viewport reports.
         public private(set) var renderLatestSnapshotCallCountForTesting = 0
+        /// Counts how many times a tap on an ended session's frozen frame has forced that frame back
+        /// onto the mirror surface after the link probe ran (see `reapplyActiveEndedRenderFrameIfNeeded`).
+        /// The repaint itself is invisible from outside the surface when there is no mirror to observe
+        /// (the unit test environment), so this is what lets a test see the re-apply actually fired.
+        public private(set) var reappliedEndedRenderFrameCountForTesting = 0
 
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
@@ -701,8 +724,35 @@ import Foundation
         /// other tap only focuses the keyboard. Click-driven TUI interaction (vim cursor placement,
         /// tmux pane taps) is intentionally dropped: every such TUI has a keyboard equivalent, and
         /// scrolling stays a separate path that keeps working.
+        ///
+        /// While the daemon's shared selection is present, a plain tap is exclusively a clear gesture
+        /// instead: it neither opens a link nor focuses the keyboard, matching a tap that dismisses a
+        /// transient overlay. The highlight itself is not cleared here; it disappears only once a
+        /// render frame without a selection arrives, so the paint always reflects the daemon's actual
+        /// selection state rather than a locally-guessed one. The copy pill sits in its own SwiftUI
+        /// overlay above this view and captures its own taps, so a pill tap never reaches here.
+        ///
+        /// Reading the rendered snapshot's viewport-projected selection means a selection scrolled
+        /// wholly off this viewport does not turn the tap into a clear, deliberately, matching
+        /// the Mac mirror's guard: the export omits a selection with no viewport overlap, and a tap
+        /// with no visible highlight means link-or-focus, not deselect. See the click-to-clear
+        /// scope note in docs/spec.md.
+        ///
+        /// On an ended session's frozen final frame (`activeEndedRender != nil`) the selection can
+        /// never change again and the daemon rejects a clear with `sessionNotRunning`, so a tap goes
+        /// back to being link-or-focus; the painted highlight simply remains part of the final render.
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
-            if openTerminalLink(at: location) { return .openedLink }
+            if currentRenderedSnapshot?.selection != nil, activeEndedRender == nil {
+                onClearSelectionTapped?()
+                return .clearedSelection
+            }
+            let openedLink = openTerminalLink(at: location)
+            // The probe above synthesizes a left press/release on the mirror surface even when it finds
+            // no link, and Ghostty clears the surface's local selection on that press. An ended surface
+            // gets no further frames of its own to heal it, so the frozen frame is pushed back here,
+            // unconditionally on the ended path, to keep the surface canonical.
+            reapplyActiveEndedRenderFrameIfNeeded()
+            if openedLink { return .openedLink }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
             return .focused
@@ -1080,6 +1130,18 @@ import Foundation
                 .init(sessionID: ownerEpoch.sessionID, source: "ios-host-view", name: name, attributes: eventAttributes))
         }
 
+        /// Forces the frozen ended render's frame back onto the mirror surface after a tap's link
+        /// probe. A no-op unless a session has ended: `applyLatestRenderFrameIfPossible` skips a frame
+        /// whose identity has not changed, and this frame's value has not, so the applied-frame identity
+        /// is cleared first to defeat that dedupe and force the repaint through.
+        private func reapplyActiveEndedRenderFrameIfNeeded() {
+            guard let endedRender = activeEndedRender else { return }
+            latestRenderFrame = Self.renderFrame(forEndedRender: endedRender)
+            lastAppliedRenderFrameIdentity = nil
+            reappliedEndedRenderFrameCountForTesting += 1
+            applyLatestRenderFrameIfPossible()
+        }
+
         private func applyLatestRenderFrameIfPossible() {
             guard let mirror, let frame = mirrorRenderFrame() else {
                 lastAppliedRenderFrameIdentity = nil
@@ -1155,6 +1217,8 @@ import Foundation
             // The frame's clusters live in one buffer the cells point into, so they stay alive for
             // exactly the span of the C call and no cell owns memory Ghostty would have to free.
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
+            let selectionFields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(
+                selection: snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
             return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
                 if let base = extras.baseAddress {
                     for placement in clusterExtras.placements {
@@ -1179,6 +1243,17 @@ import Foundation
                     cSnapshot.mouse_shift_capture = acceptsTerminalInput ? snapshot.mouseShiftCapture : 0
                     cSnapshot.cell_count = buffer.count
                     cSnapshot.cells = buffer.baseAddress
+                    cSnapshot.selection_flags = selectionFields.selectionFlags
+                    cSnapshot.selection_start_x = selectionFields.selectionStartX
+                    cSnapshot.selection_start_y = selectionFields.selectionStartY
+                    cSnapshot.selection_end_x = selectionFields.selectionEndX
+                    cSnapshot.selection_end_y = selectionFields.selectionEndY
+                    cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                    cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                    // iOS never drags a local selection (it only paints the daemon's shared selection and
+                    // clears it), so there is no in-progress drag-carry to describe: scroll_rect_count and
+                    // scroll_rects stay at their zero/nil default and scroll_carry_valid stays false.
+                    cSnapshot.scroll_carry_valid = false
 
                     var cFrame = ghostty_render_frame_s()
                     cFrame.version = UInt32(frame.version)

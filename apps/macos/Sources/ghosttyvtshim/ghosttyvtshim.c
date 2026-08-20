@@ -66,6 +66,12 @@ typedef bool (*GhosttyRenderStateRowCellsNextFn)(GhosttyRenderStateRowCells);
 typedef GhosttyResult (*GhosttyRenderStateRowCellsGetFn)(GhosttyRenderStateRowCells, GhosttyRenderStateRowCellsData, void *);
 typedef GhosttyResult (*GhosttyCellGetFn)(GhosttyCell, GhosttyCellData, void *);
 typedef GhosttyResult (*GhosttyRowGetFn)(GhosttyRow, GhosttyRowData, void *);
+typedef GhosttyResult (*GhosttyTerminalGridRefFn)(GhosttyTerminal, GhosttyPoint, GhosttyGridRef *);
+typedef GhosttyResult (*GhosttyTerminalPointFromGridRefFn)(GhosttyTerminal, const GhosttyGridRef *, GhosttyPointTag, GhosttyPointCoordinate *);
+typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
+    GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
+);
+typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
 
 typedef struct {
     void *handle;
@@ -117,6 +123,10 @@ typedef struct {
     GhosttyRenderStateRowCellsGetFn row_cells_get;
     GhosttyCellGetFn cell_get;
     GhosttyRowGetFn grid_row_get;
+    GhosttyTerminalGridRefFn terminal_grid_ref;
+    GhosttyTerminalPointFromGridRefFn terminal_point_from_grid_ref;
+    GhosttyTerminalSelectionFormatAllocFn terminal_selection_format_alloc;
+    GhosttyTerminalTakeRenderScrollRectsFn terminal_take_render_scroll_rects;
 } SpacesGhosttyVtSymbols;
 
 struct SpacesGhosttyVtSession {
@@ -393,6 +403,13 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->row_cells_get = (GhosttyRenderStateRowCellsGetFn)dlsym(handle, "ghostty_render_state_row_cells_get");
     symbols->cell_get = (GhosttyCellGetFn)dlsym(handle, "ghostty_cell_get");
     symbols->grid_row_get = (GhosttyRowGetFn)dlsym(handle, "ghostty_row_get");
+    symbols->terminal_grid_ref = (GhosttyTerminalGridRefFn)dlsym(handle, "ghostty_terminal_grid_ref");
+    symbols->terminal_point_from_grid_ref =
+        (GhosttyTerminalPointFromGridRefFn)dlsym(handle, "ghostty_terminal_point_from_grid_ref");
+    symbols->terminal_selection_format_alloc =
+        (GhosttyTerminalSelectionFormatAllocFn)dlsym(handle, "ghostty_terminal_selection_format_alloc");
+    symbols->terminal_take_render_scroll_rects =
+        (GhosttyTerminalTakeRenderScrollRectsFn)dlsym(handle, "ghostty_terminal_take_render_scroll_rects");
 
     if (
         symbols->terminal_new == NULL ||
@@ -442,7 +459,11 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->row_cells_next == NULL ||
         symbols->row_cells_get == NULL ||
         symbols->cell_get == NULL ||
-        symbols->grid_row_get == NULL
+        symbols->grid_row_get == NULL ||
+        symbols->terminal_grid_ref == NULL ||
+        symbols->terminal_point_from_grid_ref == NULL ||
+        symbols->terminal_selection_format_alloc == NULL ||
+        symbols->terminal_take_render_scroll_rects == NULL
     ) {
         dlclose(handle);
         memset(symbols, 0, sizeof(*symbols));
@@ -1584,6 +1605,19 @@ bool spaces_ghostty_vt_session_scroll_viewport_with_info(
     return true;
 }
 
+bool spaces_ghostty_vt_session_scrollbar(SpacesGhosttyVtSession *session, SpacesGhosttyVtScrollbar *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScrollbar scrollbar = {0};
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out = spaces_ghostty_vt_scrollbar_from_ghostty(scrollbar);
+    return true;
+}
+
 bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
     SpacesGhosttyVtScrollbar before = {0};
     SpacesGhosttyVtScrollbar after = {0};
@@ -1591,9 +1625,184 @@ bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, 
     return before.offset != after.offset;
 }
 
+size_t spaces_ghostty_vt_session_take_scroll_rects(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtScrollRect *out,
+    size_t capacity,
+    bool *overflowed
+) {
+    if (overflowed != NULL) *overflowed = false;
+    if (session == NULL || session->terminal == NULL) return 0;
+
+    // No destination (or a zero capacity) still has to drain the terminal's pending buffer, matching
+    // the wrapped API's own no-op-but-clears contract.
+    if (out == NULL || capacity == 0) {
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+    }
+
+    // GhosttyTerminalScrollRect is a sized (ABI-versioned) struct, so each output slot's `size` is set
+    // before the call, matching every other sized-struct output in this library.
+    GhosttyTerminalScrollRect *vt_rects = (GhosttyTerminalScrollRect *)calloc(capacity, sizeof(GhosttyTerminalScrollRect));
+    if (vt_rects == NULL) {
+        // Still drain the terminal's pending buffer so a caller that retries after freeing memory sees
+        // fresh rects rather than a backlog, even though this particular call reports none.
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+    }
+    for (size_t index = 0; index < capacity; index++) {
+        vt_rects[index].size = sizeof(GhosttyTerminalScrollRect);
+    }
+
+    size_t written = session->symbols.terminal_take_render_scroll_rects(session->terminal, vt_rects, capacity, overflowed);
+    for (size_t index = 0; index < written; index++) {
+        out[index].row_start = vt_rects[index].row_start;
+        out[index].row_count = vt_rects[index].row_count;
+        out[index].column_start = vt_rects[index].column_start;
+        out[index].column_count = vt_rects[index].column_count;
+        out[index].delta_rows = vt_rects[index].delta_rows;
+        out[index].delta_columns = vt_rects[index].delta_columns;
+    }
+    free(vt_rects);
+    return written;
+}
+
 bool spaces_ghostty_vt_session_format_plain(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
     if (session == NULL) return false;
     return spaces_ghostty_vt_format_plain_for_terminal(&session->symbols, session->terminal, out_ptr, out_len);
+}
+
+// Builds an untracked screen-space grid reference, clamping into the terminal's current screen
+// extent first. Screen space runs from row 0 (oldest scrollback row) through the bottom of the
+// active area, so a caller can hand in raw drag coordinates without knowing where that boundary is.
+static bool spaces_ghostty_vt_session_screen_grid_ref(
+    SpacesGhosttyVtSession *session, uint16_t x, uint32_t y, uint16_t max_x, uint32_t max_y, GhosttyGridRef *out_ref
+) {
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+
+    GhosttyPoint point = {0};
+    point.tag = GHOSTTY_POINT_TAG_SCREEN;
+    point.value.coordinate.x = x;
+    point.value.coordinate.y = y;
+
+    return session->symbols.terminal_grid_ref(session->terminal, point, out_ref) == GHOSTTY_SUCCESS;
+}
+
+bool spaces_ghostty_vt_session_set_selection(
+    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle
+) {
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScrollbar scrollbar = {0};
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    uint16_t max_x = session->columns > 0 ? (uint16_t)(session->columns - 1) : 0;
+    uint32_t max_y = scrollbar.total > 0 ? (uint32_t)(scrollbar.total - 1) : 0;
+
+    GhosttyGridRef start_ref = {0};
+    GhosttyGridRef end_ref = {0};
+    if (!spaces_ghostty_vt_session_screen_grid_ref(session, start_x, start_y, max_x, max_y, &start_ref)) return false;
+    if (!spaces_ghostty_vt_session_screen_grid_ref(session, end_x, end_y, max_x, max_y, &end_ref)) return false;
+
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    selection.start = start_ref;
+    selection.end = end_ref;
+    selection.rectangle = rectangle;
+
+    return session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection) == GHOSTTY_SUCCESS;
+}
+
+void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session) {
+    if (session == NULL || session->terminal == NULL) return;
+    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+}
+
+char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len) {
+    if (out_len != NULL) *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return NULL;
+
+    GhosttyTerminalSelectionFormatOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+    options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+    options.unwrap = true;
+    options.trim = true;
+    options.selection = NULL;  // The terminal's current active selection.
+
+    uint8_t *formatted = NULL;
+    size_t formatted_len = 0;
+    if (session->symbols.terminal_selection_format_alloc(session->terminal, NULL, options, &formatted, &formatted_len) !=
+        GHOSTTY_SUCCESS) {
+        return NULL;
+    }
+
+    char *result = (char *)malloc(formatted_len + 1);
+    if (result == NULL) {
+        session->symbols.ghostty_free(NULL, formatted, formatted_len);
+        return NULL;
+    }
+    if (formatted_len > 0) memcpy(result, formatted, formatted_len);
+    result[formatted_len] = '\0';
+
+    session->symbols.ghostty_free(NULL, formatted, formatted_len);
+
+    if (out_len != NULL) *out_len = formatted_len;
+    return result;
+}
+
+void spaces_ghostty_vt_session_selection_text_free(char *text) {
+    free(text);
+}
+
+bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
+
+    bool valid = false;
+    GhosttyResult valid_result = session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION_VALID, &valid);
+    if (valid_result == GHOSTTY_NO_VALUE) {
+        // No selection at all; `out` is already zeroed.
+        return true;
+    }
+    if (valid_result != GHOSTTY_SUCCESS) return false;
+
+    out->present = true;
+    out->valid = valid;
+    if (!valid) {
+        // A garbage pin: the raw GHOSTTY_TERMINAL_DATA_SELECTION snapshot has collapsed to a
+        // meaningless position, so it is not read; coordinates stay zeroed.
+        return true;
+    }
+
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    GhosttyPointCoordinate start_coordinate = {0};
+    GhosttyPointCoordinate end_coordinate = {0};
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.start, GHOSTTY_POINT_TAG_SCREEN, &start_coordinate) !=
+        GHOSTTY_SUCCESS) {
+        return false;
+    }
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.end, GHOSTTY_POINT_TAG_SCREEN, &end_coordinate) !=
+        GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    // GhosttySelection endpoints preserve drag direction and may be reversed; order them here so
+    // callers get the selected span rather than which end the drag started from.
+    bool reversed =
+        start_coordinate.y > end_coordinate.y || (start_coordinate.y == end_coordinate.y && start_coordinate.x > end_coordinate.x);
+    GhosttyPointCoordinate ordered_start = reversed ? end_coordinate : start_coordinate;
+    GhosttyPointCoordinate ordered_end = reversed ? start_coordinate : end_coordinate;
+
+    out->rectangle = selection.rectangle;
+    out->start_x = ordered_start.x;
+    out->start_y = ordered_start.y;
+    out->end_x = ordered_end.x;
+    out->end_y = ordered_end.y;
+    return true;
 }
 
 void spaces_ghostty_vt_snapshot_free(SpacesGhosttyVtSnapshot *snapshot) {

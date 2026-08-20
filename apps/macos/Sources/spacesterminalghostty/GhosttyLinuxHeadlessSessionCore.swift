@@ -207,6 +207,16 @@
         private var handoffTranscriptReplayOffset: UInt64?
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
+        /// Scroll rects a `.selfContained` export drained from Ghostty but could not ship (a self-contained
+        /// export always forces a full frame, and a full frame never carries rects). See
+        /// `TerminalStreamScrollRectCarry` for why this exists; folded/drained in `makeRenderUpdate`.
+        private var streamScrollRectCarry = TerminalStreamScrollRectCarry()
+        /// Set when `renderFrame()` discovers a scrollback-garbaged selection pin and clears it.
+        /// Broadcasting synchronously from inside `renderFrame()` would reenter `makeStatePayload`
+        /// while it is still building the very payload that just observed the clear, so this defers
+        /// the notification to the next engine-actor turn instead; `makeStatePayload` consumes and
+        /// resets the flag right after each `renderFrame()` call.
+        private var pendingSelectionGarbagePinBroadcast = false
         private var localOwnerCommandInputOutputResyncPending = false
         private var scrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         /// Pending precise horizontal delta for wheel reports. Only consulted while an application
@@ -784,6 +794,9 @@
             case "scroll": response = scroll(request)
             case "mouseButton": response = mouseButton(request)
             case "setAppearance": response = setAppearance(request)
+            case "setSelection": response = setSelection(request)
+            case "clearSelection": response = clearSelection(request)
+            case "readSelectionText": response = readSelectionText(request)
             default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
             logMobileTakeoverPerformance(
@@ -1211,6 +1224,67 @@
             applyThemeAppearance(appearance)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.stateChange)
             return TerminalControlResponse(ok: true, message: "Applied \(appearance.rawValue) appearance.")
+        }
+
+        private func setSelection(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard started, let vtSession else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            // Selection is deliberately shared state, not owner-gated, for the same reason as the macOS
+            // host's set-selection handler: any attached viewer may set it, and the result is broadcast
+            // to every other viewer.
+            guard let startColumn = request.selectionStartColumn, let startRow = request.selectionStartRow,
+                let endColumn = request.selectionEndColumn, let endRow = request.selectionEndRow
+            else { return TerminalControlResponse(ok: false, message: "Missing selection endpoints.", errorCode: .invalidArgument) }
+            guard
+                spaces_ghostty_vt_session_set_selection(
+                    vtSession, startColumn, startRow, endColumn, endRow, request.selectionRectangle ?? false)
+            else { return TerminalControlResponse(ok: false, message: "Unable to set terminal selection.") }
+            let text = selectionText(session: vtSession)
+            // A selection mutation writes no output, so nothing else advances the screen revision.
+            // Without a bump, this broadcast's frame would carry the baseline's own revision and
+            // `makeRenderUpdate` would force a full frame ("baseline_already_current"); a full frame
+            // invalidates a mirror's scroll carry, canceling the local drag that is replacing an
+            // existing selection. (The macOS host covers this in `renderFrameRevision`, which bumps
+            // when the baseline revision matches but the snapshot content moved.)
+            screenStateRevision &+= 1
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection)
+            return TerminalControlResponse(ok: true, message: "Set terminal selection.", selectionText: text)
+        }
+
+        private func clearSelection(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard started, let vtSession else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            // Not owner-gated for the same reason as `setSelection` above.
+            spaces_ghostty_vt_session_clear_selection(vtSession)
+            // Same revision bump as `setSelection` above: the clear that a mouse-down sends while
+            // replacing a selection must ship as a delta, not a carry-invalidating full frame.
+            screenStateRevision &+= 1
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection)
+            return TerminalControlResponse(ok: true, message: "Cleared terminal selection.")
+        }
+
+        private func readSelectionText(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard started, let vtSession else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            // A pure read: never broadcasts, and not owner-gated so any viewer can read what the shared
+            // selection currently says.
+            return TerminalControlResponse(ok: true, message: "Read terminal selection.", selectionText: selectionText(session: vtSession))
+        }
+
+        /// Reads the session's active selection as plain text. Nil when there is none; empty when the
+        /// selection has nothing to copy (e.g. a zero-width click), matching the shim's own null/empty
+        /// distinction.
+        private func selectionText(session: OpaquePointer) -> String? {
+            var length = 0
+            guard let pointer = spaces_ghostty_vt_session_selection_text_copy(session, &length) else { return nil }
+            defer { spaces_ghostty_vt_session_selection_text_free(pointer) }
+            guard length > 0 else { return "" }
+            return pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
+                String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+            }
         }
 
         private func ownerRequestIsCurrent(_ request: TerminalControlRequest) -> Bool {
@@ -1860,9 +1934,21 @@
             if includeScreenState {
                 let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
                 let snapshotExportStartedAt = performanceLoggingEnabled ? Date() : nil
-                frame = try? renderFrame()
+                let capturedFrame = try? renderFrame()
+                frame = capturedFrame?.frame
+                // `renderFrame()` may have just cleared a scrollback-garbaged selection pin. Broadcasting
+                // that clear from here would reenter this very method (`broadcastCurrentState` calls back
+                // into `makeStatePayload`), so defer it to the next engine-actor turn instead.
+                if pendingSelectionGarbagePinBroadcast {
+                    pendingSelectionGarbagePinBroadcast = false
+                    Task { @TerminalEngineActor [weak self] in self?.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection) }
+                }
                 let renderUpdateEncodeStartedAt = performanceLoggingEnabled ? Date() : nil
-                renderUpdateValue = frame.map { makeRenderUpdate(for: $0, reason: reason, exportMode: exportMode) }
+                renderUpdateValue = capturedFrame.map {
+                    makeRenderUpdate(
+                        for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, nativeScrollRectsOverflowed: $0.scrollRectsOverflowed,
+                        exportMode: exportMode)
+                }
                 renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
                 if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateEncodeStartedAt {
                     let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
@@ -1893,7 +1979,27 @@
                 outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
         }
 
-        private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String, exportMode: RenderStateExportMode) -> GhosttyRenderUpdate {
+        private func makeRenderUpdate(
+            for frame: GhosttyRenderFrame, reason: String, nativeScrollRects capturedScrollRects: [GhosttyRenderScrollRectOperation] = [],
+            nativeScrollRectsOverflowed capturedScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode
+        ) -> GhosttyRenderUpdate {
+            // A `.selfContained` export always forces a full frame below (`forceFullForSelfContainedExport`),
+            // and a full frame never carries scroll rects, so the rects Ghostty just drained for this export
+            // would otherwise vanish. Carry them for the next stream export instead. A `.streamDeltaAllowed`
+            // export that itself ends up emitting a full frame (baseline reset, delta-apply failure, etc.) is
+            // still correct to drain here: a client poisons its own carry on any full frame it receives, so
+            // the rects this drain hands it are moot the moment the full frame lands.
+            let nativeScrollRects: [GhosttyRenderScrollRectOperation]
+            let nativeScrollRectsOverflowed: Bool
+            switch exportMode {
+            case .selfContained:
+                streamScrollRectCarry.fold(rects: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
+                nativeScrollRects = []
+                nativeScrollRectsOverflowed = false
+            case .streamDeltaAllowed:
+                (nativeScrollRects, nativeScrollRectsOverflowed) = streamScrollRectCarry.drain(
+                    mergingWith: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
+            }
             let forceFullForSelfContainedExport = exportMode == .selfContained
             let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
             let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reason != TerminalRemoteSessionStateReason.scroll
@@ -1911,7 +2017,8 @@
                     "self_contained_state_export"
                 } else { "baseline_already_current" }
             let update = GhosttyRenderUpdateFactory.makeUpdate(
-                target: frame, baseline: renderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason)
+                target: frame, baseline: renderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
+                nativeScrollRects: nativeScrollRects, nativeScrollRectsOverflowed: nativeScrollRectsOverflowed)
             let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
             switch update.kind {
             case .full: if shouldUpdateStreamBaseline { renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
@@ -1928,14 +2035,66 @@
             return update
         }
 
-        private func renderFrame() throws -> GhosttyRenderFrame {
+        private func renderFrame() throws -> (frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool)
+        {
             guard let vtSession else { throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable }
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
+            var scrollbar = SpacesGhosttyVtScrollbar()
+            let hasScrollbar = spaces_ghostty_vt_session_scrollbar(vtSession, &scrollbar)
+            let scrollbarTotal = hasScrollbar ? UInt32(clamping: scrollbar.total) : 0
+            let scrollbarOffset = hasScrollbar ? UInt32(clamping: scrollbar.offset) : 0
+            let selection = resolvedSelection(
+                session: vtSession, viewportRowOffset: scrollbarOffset, columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows))
             let snapshot = GhosttyVtSessionBridge.snapshot(
-                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession))
-            return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession), selection: selection,
+                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
+            let (scrollRects, scrollRectsOverflowed) = takeScrollRects(session: vtSession)
+            let frame = GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+            return (frame, scrollRects, scrollRectsOverflowed)
+        }
+
+        /// Reads the session's active selection in screen space and projects it into the viewport this
+        /// frame is exporting (see `GhosttyTerminalSelectionProjection`). When the selection is present but
+        /// its tracked endpoint pins were garbaged by a scrollback trim, clears it and defers a broadcast
+        /// (see `pendingSelectionGarbagePinBroadcast`) rather than reporting stale, meaningless coordinates.
+        private func resolvedSelection(session: OpaquePointer, viewportRowOffset: UInt32, columns: Int, rows: Int) -> GhosttyTerminalSelectionRange?
+        {
+            var state = SpacesGhosttyVtSelectionState()
+            guard spaces_ghostty_vt_session_selection_state(session, &state), state.present else { return nil }
+            guard state.valid else {
+                spaces_ghostty_vt_session_clear_selection(session)
+                // The clear is a screen-state mutation with no output attached, so bump the
+                // revision here for the same delta-vs-full reason as the control handlers: the
+                // frame this very export is building reads `screenStateRevision` after this
+                // returns, so it already carries the cleared selection under the new revision.
+                screenStateRevision &+= 1
+                pendingSelectionGarbagePinBroadcast = true
+                return nil
+            }
+            return GhosttyTerminalSelectionProjection.project(
+                startColumn: state.start_x, startRow: state.start_y, endColumn: state.end_x, endRow: state.end_y, isRectangle: state.rectangle,
+                viewportRowOffset: viewportRowOffset, columns: columns, rows: rows)
+        }
+
+        /// Copies out and clears the session's pending render scroll rects. The buffer capacity matches
+        /// the ghostty fork's pending-scroll-rect ring (`Terminal.zig`'s `pending_render_scroll_rects: [64]
+        /// RenderScrollRect`), so a full ring is always copied out in one call rather than truncated.
+        private func takeScrollRects(session: OpaquePointer) -> (rects: [GhosttyRenderScrollRectOperation], overflowed: Bool) {
+            let capacity = 64
+            var buffer = [SpacesGhosttyVtScrollRect](repeating: SpacesGhosttyVtScrollRect(), count: capacity)
+            var overflowed = false
+            let count = buffer.withUnsafeMutableBufferPointer { pointer in
+                spaces_ghostty_vt_session_take_scroll_rects(session, pointer.baseAddress, capacity, &overflowed)
+            }
+            guard count > 0 else { return ([], overflowed) }
+            let rects = buffer[0..<count].map {
+                GhosttyRenderScrollRectOperation(
+                    rowStart: Int($0.row_start), rowCount: Int($0.row_count), columnStart: Int($0.column_start), columnCount: Int($0.column_count),
+                    deltaRows: Int($0.delta_rows), deltaColumns: Int($0.delta_columns))
+            }
+            return (rects, overflowed)
         }
 
         private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {

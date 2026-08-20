@@ -26,8 +26,14 @@ public enum GhosttyVtSessionBridge {
     /// Converts a libghostty-vt snapshot into the Swift render snapshot the render pipeline consumes.
     /// The raw snapshot's `cells` buffer stays owned by the caller (freed with
     /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
-    /// snapshot — it is a terminal mode, queried separately — so the caller supplies it.
-    public static func snapshot(from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool) -> GhosttyTerminalSnapshot {
+    /// snapshot — it is a terminal mode, queried separately — so the caller supplies it. Selection and
+    /// scrollbar are likewise queried separately (the shim has no per-snapshot equivalent of the
+    /// embedded surface's combined export) and default to absent/zero, which is what the ended-session
+    /// scrollback replay caller wants: a replay has no live selection or scrollbar to report.
+    public static func snapshot(
+        from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, selection: GhosttyTerminalSelectionRange? = nil,
+        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+    ) -> GhosttyTerminalSnapshot {
         var cells: [GhosttyTerminalSnapshot.Cell] = []
         var clusters: [Int: String] = [:]
         if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
@@ -44,7 +50,8 @@ public enum GhosttyVtSessionBridge {
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
-            clusters: clusters, mouseReportingActive: mouseReportingActive)
+            clusters: clusters, mouseReportingActive: mouseReportingActive, selection: selection, scrollbarTotal: scrollbarTotal,
+            scrollbarOffset: scrollbarOffset)
     }
 
     /// Rebuilds a cell's grapheme cluster from the shim's base codepoint plus the extra codepoints it

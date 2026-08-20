@@ -50,6 +50,13 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let mouseReportingActive: Bool
     /// The exporting terminal's shift-capture request as 0 = unset, 1 = false, 2 = true.
     public let mouseShiftCapture: UInt8
+    /// The shared terminal selection, projected into this snapshot's viewport by the daemon. Nil when
+    /// there is no selection or the selection does not intersect this viewport at all.
+    public let selection: GhosttyTerminalSelectionRange?
+    /// Total rows in the terminal's screen plus scrollback, as of this snapshot.
+    public let scrollbarTotal: UInt32
+    /// Index of this viewport's top row within `scrollbarTotal`, where 0 is the oldest row.
+    public let scrollbarOffset: UInt32
 
     public static let mouseShiftCaptureUnset: UInt8 = 0
     public static let mouseShiftCaptureDisabled: UInt8 = 1
@@ -57,7 +64,8 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
-        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0
+        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0,
+        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -71,6 +79,9 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.linkURLs = Self.normalizedLinkURLs(linkURLs, cellCount: cells.count)
         self.mouseReportingActive = mouseReportingActive
         self.mouseShiftCapture = mouseShiftCapture
+        self.selection = selection
+        self.scrollbarTotal = scrollbarTotal
+        self.scrollbarOffset = scrollbarOffset
     }
 
     /// Records `cluster` as cell `index`'s text, or clears the cell's entry when the cluster is one the
@@ -126,20 +137,46 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 
+    /// Upper bound any accumulator of `scrollRects` across frames applies before falling back to the
+    /// overflowed state: content that moved through this many rects has scrolled far past any local
+    /// anchor worth carrying, and an unbounded accumulation (a stalled main actor coalescing frames, a
+    /// view that cannot apply for a while) would otherwise grow without limit. Shared by the reduction
+    /// pipeline's coalesce merge and the mirror view's drag-carry buffer so the two bounds cannot drift.
+    public static let maxAccumulatedScrollRects = 512
+
     public let version: Int
     public let sessionRevision: UInt64?
     public let ownerEpoch: UInt64
     public let columns: Int
     public let rows: Int
     public let snapshot: GhosttyTerminalSnapshot
+    /// How the terminal's content moved to produce this frame from the previously materialized one, so a
+    /// mirror view can carry a local drag-selection anchor across the repaint. Empty for a frame that is
+    /// not a delta continuation (an initial baseline, a full re-baseline, or a resync) — see
+    /// `scrollRectsOverflowed` for why those still need a value here.
+    public let scrollRects: [GhosttyRenderScrollRectOperation]
+    /// True when `scrollRects` cannot be trusted to fully describe how content moved since the previous
+    /// frame: either the producing delta's own scroll-rect ring buffer overflowed, or this frame is not a
+    /// delta continuation at all (a full/re-baseline frame carries the whole grid, not a diff, so it has
+    /// no scroll rects to report). A consumer accumulating rects across skipped frames must poison its
+    /// buffer whenever this is true. Defaults to true so that only a construction site that positively
+    /// knows how content moved since the previous frame (the delta materializer) can claim a trustworthy
+    /// carry; every other frame (baselines, replay repaints, daemon-side frames whose carry fields are
+    /// never read) is untrusted by default.
+    public let scrollRectsOverflowed: Bool
 
-    public init(version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot) {
+    public init(
+        version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot,
+        scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = true
+    ) {
         self.version = version
         self.sessionRevision = sessionRevision
         self.ownerEpoch = ownerEpoch
         self.columns = snapshot.columns
         self.rows = snapshot.rows
         self.snapshot = snapshot
+        self.scrollRects = scrollRects
+        self.scrollRectsOverflowed = scrollRectsOverflowed
     }
 
     public static func encode(_ frame: GhosttyRenderFrame) throws -> Data { try JSONEncoder().encode(frame) }

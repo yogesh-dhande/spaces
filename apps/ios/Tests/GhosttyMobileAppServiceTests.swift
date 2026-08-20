@@ -3245,14 +3245,89 @@
             XCTAssertFalse(hostView.debugAppliedFrameCoversHostColumnsForTesting, "releasing the mirror drops what it recorded about the surface")
         }
 
-        private func filledSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
+        private func filledSnapshot(columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil) -> GhosttyTerminalSnapshot {
             GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
                 defaultBackgroundRGB: 0x1A1E26,
                 cells: (0..<(columns * rows)).map { index in
                     GhosttyTerminalSnapshot.Cell(
                         codepoint: UnicodeScalar("a").value + UInt32(index % 26), foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
-                })
+                }, selection: selection)
+        }
+
+        /// While the daemon's shared selection is present, a plain tap is exclusively a clear gesture: it
+        /// neither probes for a link nor focuses the keyboard, matching `handleTapToActivateInput`'s
+        /// documented precedence. The highlight itself is left untouched here; only the daemon's next
+        /// frame (carrying no selection) or a fresh applied frame can make it disappear.
+        func testRemoteTerminalHostViewTapWithSelectionPresentClearsInsteadOfProbingOrFocusing() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            var linkProbeCount = 0
+            hostView.debugTapLinkHandlerForTesting = { _ in
+                linkProbeCount += 1
+                return true
+            }
+            var clearCount = 0
+            hostView.onClearSelectionTapped = { clearCount += 1 }
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
+            hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection), renderStateKey: "selection", fallbackText: "")
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .clearedSelection)
+
+            XCTAssertEqual(clearCount, 1)
+            XCTAssertEqual(linkProbeCount, 0, "a selection-clearing tap must not also probe for a link")
+        }
+
+        /// On an ended session's frozen final frame the selection can never change again and the daemon
+        /// rejects a clear with `sessionNotRunning`, so a tap on a selection-bearing ended render falls
+        /// through to the normal link-probe/focus handling instead of clearing. The link probe itself
+        /// synthesizes a click that mutates the mirror surface (Ghostty clears a selection on left
+        /// press), so the fall-through must also re-apply the frozen frame afterward to keep the
+        /// surface canonical; `reappliedEndedRenderFrameCountForTesting` is the seam that lets this test
+        /// see that re-apply happened.
+        func testRemoteTerminalHostViewTapWithSelectionOnEndedRenderDoesNotClear() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            var clearCount = 0
+            hostView.onClearSelectionTapped = { clearCount += 1 }
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
+            let endedRender = GhosttyRemoteTerminalEndedRender(
+                id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection))
+            hostView.update(ownerEpoch: nil, endedRender: endedRender, fallbackText: "")
+            let reappliedCountBeforeTap = hostView.reappliedEndedRenderFrameCountForTesting
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+
+            XCTAssertEqual(clearCount, 0)
+            // `debugTapLinkHandlerForTesting` stands in for the real link probe here, so this cannot
+            // observe the probe's synthesized click actually clearing the mirror surface's own
+            // selection; it instead confirms the fall-through unconditionally re-applies the frozen
+            // ended render's frame afterward, which is what heals the surface once the probe mutates it.
+            XCTAssertEqual(
+                hostView.reappliedEndedRenderFrameCountForTesting, reappliedCountBeforeTap + 1,
+                "a tap on an ended frame must re-apply the frozen frame after the link probe runs")
+        }
+
+        /// A frame that carries no selection leaves the pre-existing tap handling (link probe, then
+        /// focus) untouched, and never calls `onClearSelectionTapped`: the clear path only engages while
+        /// the daemon actually has a shared selection to clear.
+        func testRemoteTerminalHostViewTapWithoutSelectionPresentBehavesAsBeforeAndSendsNoClear() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            var clearCount = 0
+            hostView.onClearSelectionTapped = { clearCount += 1 }
+            hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10), renderStateKey: "no-selection", fallbackText: "")
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+
+            XCTAssertEqual(clearCount, 0)
         }
 
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
@@ -5111,6 +5186,63 @@
                 defaultBackgroundRGB: 0x1A1E26, cells: cells)
         }
 
+    }
+
+    /// Pins the pure C-frame marshalling `GhosttyRemoteTerminalHostView.withCFrame` leans on for the
+    /// host-anchored shared selection: none of it needs a live surface, a window, or the main actor, so
+    /// it is exercised directly here instead of through the view. Mirrors
+    /// `GhosttyMirrorSelectionMarshallingTests` on the macOS side, minus the scroll-rect carry buffer and
+    /// absolute-row conversion the iOS mirror has no use for (iOS never drags a local selection).
+    final class GhosttyRemoteTerminalSelectionMarshallingTests: XCTestCase {
+        func testNilSelectionMapsToAllZeroFieldsWithScrollbarPassthrough() {
+            let fields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(selection: nil, scrollbarTotal: 500, scrollbarOffset: 12)
+
+            XCTAssertEqual(
+                fields,
+                .init(
+                    selectionFlags: 0, selectionStartX: 0, selectionStartY: 0, selectionEndX: 0, selectionEndY: 0, scrollbarTotal: 500,
+                    scrollbarOffset: 12))
+        }
+
+        func testPresentSelectionSetsPresentFlagAndCopiesCoordinates() {
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: 3, startRow: 10, endColumn: 20, endRow: 15, isRectangle: false, extendsAbove: false, extendsBelow: false)
+
+            let fields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(
+                selection: selection, scrollbarTotal: 0, scrollbarOffset: 0)
+
+            XCTAssertEqual(fields.selectionFlags, GhosttyRemoteTerminalSelectionMarshalling.selectionFlagPresent)
+            XCTAssertEqual(fields.selectionStartX, 3)
+            XCTAssertEqual(fields.selectionStartY, 10)
+            XCTAssertEqual(fields.selectionEndX, 20)
+            XCTAssertEqual(fields.selectionEndY, 15)
+        }
+
+        func testRectangleAndExtendFlagsCombineWithPresent() {
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 0, endColumn: 0, endRow: 0, isRectangle: true, extendsAbove: true, extendsBelow: true)
+
+            let fields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(
+                selection: selection, scrollbarTotal: 0, scrollbarOffset: 0)
+
+            let expectedFlags =
+                GhosttyRemoteTerminalSelectionMarshalling.selectionFlagPresent | GhosttyRemoteTerminalSelectionMarshalling.selectionFlagRectangle
+                | GhosttyRemoteTerminalSelectionMarshalling.selectionFlagExtendsAbove
+                | GhosttyRemoteTerminalSelectionMarshalling.selectionFlagExtendsBelow
+            XCTAssertEqual(fields.selectionFlags, expectedFlags)
+        }
+
+        /// A selection that is present but neither a rectangle nor extending past this viewport carries
+        /// only the present bit: the marshalling must not set a flag the daemon never asked for.
+        func testStreamSelectionWithNoExtendCarriesOnlyThePresentFlag() {
+            let selection = GhosttyTerminalSelectionRange(
+                startColumn: 1, startRow: 2, endColumn: 8, endRow: 4, isRectangle: false, extendsAbove: false, extendsBelow: false)
+
+            let fields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(
+                selection: selection, scrollbarTotal: 0, scrollbarOffset: 0)
+
+            XCTAssertEqual(fields.selectionFlags, GhosttyRemoteTerminalSelectionMarshalling.selectionFlagPresent)
+        }
     }
 
     private func descendants<ViewType: UIView>(of view: UIView, matching type: ViewType.Type) -> [ViewType] {

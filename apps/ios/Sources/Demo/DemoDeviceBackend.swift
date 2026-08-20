@@ -137,6 +137,13 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             }
             return ok()
         case .send, .key, .takeover, .mouseButton: return reject(Self.terminalInputRejection)
+        // Recorded demo frames never carry a shared selection, so no highlight or Copy pill ever
+        // appears and these are unreachable in practice; they still answer honestly: clearing nothing
+        // is an accepted no-op, committing a selection is a write and is refused like other input, and
+        // there is never selection text to read.
+        case .clearSelection: return ok()
+        case .setSelection: return reject(Self.terminalInputRejection)
+        case .readSelectionText: return reject(Self.unsupportedInDemo)
         }
     }
 

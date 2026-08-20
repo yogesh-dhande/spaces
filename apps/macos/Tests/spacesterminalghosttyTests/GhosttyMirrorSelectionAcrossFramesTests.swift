@@ -9,6 +9,11 @@ import spacesterminalcore
 /// a test runner writes another line while the user is dragging out a selection or reading one they
 /// already made, and the highlight has to stay on the words they picked: what they copy afterwards
 /// is what they saw highlighted, not a range the new output moved or erased.
+///
+/// The guarantee is split between the daemon and the mirror: a completed drag commits the selection
+/// to the daemon, which keeps it anchored and echoes it inside every later frame, while a drag still
+/// in progress is local to the mirror and rides the stream's scroll-rect carry. The harness below
+/// stands in for the daemon on both sides of that split.
 @MainActor final class GhosttyMirrorSelectionAcrossFramesTests: XCTestCase {
     /// One row of distinct characters, so any two ranges of it differ in text. The frame that arrives
     /// mid-selection changes only the far-right end of the row, well right of every cell the drags
@@ -37,11 +42,21 @@ import spacesterminalcore
         super.tearDown()
     }
 
-    /// The user finishes a selection and the program prints again. The highlight stays where they put
-    /// it, over the same text, ready to be copied.
+    /// The user finishes a selection and the program prints again. Releasing the drag commits the
+    /// selection to the daemon, whose next frame carries both the new output and the selection it
+    /// keeps anchored, so the highlight stays where they put it, over the same text, ready to be
+    /// copied.
     func testCompletedSelectionSurvivesLaterOutput() throws {
         let view = makeAttachedView(sessionID: "sel-frames-1")
         defer { view.removeFromSuperview() }
+        var committed: GhosttyTerminalSelectionRange?
+        view.onSetSelection = { startColumn, startRow, endColumn, endRow, isRectangle in
+            // The grid is one screen row with no scrollback, so the absolute rows the commit reports
+            // are already this viewport's rows and the daemon's projection is the identity.
+            committed = GhosttyTerminalSelectionRange(
+                startColumn: startColumn, startRow: UInt16(startRow), endColumn: endColumn, endRow: UInt16(endRow), isRectangle: isRectangle,
+                extendsAbove: false, extendsBelow: false)
+        }
         try applyOriginalFrame(to: view, renderStateKey: "sel-frames-1")
 
         send(.leftMouseDown, x: 60, to: view)
@@ -52,8 +67,9 @@ import spacesterminalcore
         XCTAssertTrue(view.debugHasSurfaceSelection, "the drag did not select anything to begin with")
         let selected = try XCTUnwrap(view.debugSurfaceSelectionText, "the drag did not select anything to begin with")
         XCTAssertFalse(selected.isEmpty, "the drag did not select anything to begin with")
+        let echoed = try XCTUnwrap(committed, "releasing the drag did not commit the selection to the daemon")
 
-        try applyChangedFrame(to: view, renderStateKey: "sel-frames-1")
+        try applyChangedFrame(to: view, renderStateKey: "sel-frames-1", selection: echoed)
 
         XCTAssertTrue(view.debugHasSurfaceSelection, "output printed after the selection cleared it")
         XCTAssertEqual(view.debugSurfaceSelectionText, selected, "output printed after the selection moved it off the selected text")
@@ -103,21 +119,38 @@ import spacesterminalcore
 
     // MARK: - Harness
 
+    /// Frames are built at the pane's own grid, the way the daemon streams them: the mirror reports
+    /// its viewport and the daemon sizes the session to it, so a streamed frame's grid matches the
+    /// surface's. A frame at any other size reads as a resize landing between applies, which cancels
+    /// an in-progress drag by design (the shrink test exercises exactly that).
     private func applyOriginalFrame(to view: GhosttyMirrorTerminalView, renderStateKey: String) throws {
-        let snapshot = Self.snapshot(text: Self.row)
+        let grid = try paneGrid(of: view)
+        let snapshot = Self.snapshot(text: Self.row, columns: grid.columns, rows: grid.rows)
         view.update(snapshot: snapshot, renderStateKey: renderStateKey)
-        try waitFor("the pane to paint the row") {
-            guard let painted = view.debugMirrorSurfaceSnapshot else { return false }
-            return painted.columns == snapshot.columns && painted.rows == snapshot.rows
-        }
+        try waitFor("the pane to paint the row") { view.debugMirrorSurfaceText?.contains("abcdefghij") ?? false }
+    }
+
+    /// The pane's surface grid, which only exists once the view has built its mirror surface.
+    private func paneGrid(of view: GhosttyMirrorTerminalView) throws -> (columns: Int, rows: Int) {
+        try XCTUnwrap(view.surfaceCellSize(), "the pane never produced a surface grid")
     }
 
     /// The frame the session sends while the user is selecting: the same row with only its far-right
     /// end rewritten, which is how a test tells an applied frame from a pending one without touching
-    /// any cell either drag covers.
-    private func applyChangedFrame(to view: GhosttyMirrorTerminalView, renderStateKey: String) throws {
+    /// any cell either drag covers. Delivered the way the daemon streams it: a delta continuation
+    /// whose scroll rects say nothing moved (empty and not overflowed), carrying whatever selection
+    /// the daemon holds. A default-initialized frame would instead claim an untrustworthy carry,
+    /// which cancels an in-progress drag by design.
+    private func applyChangedFrame(
+        to view: GhosttyMirrorTerminalView, renderStateKey: String, selection: GhosttyTerminalSelectionRange? = nil
+    ) throws {
+        let grid = try paneGrid(of: view)
         let changed = String(Self.row.dropLast(Self.changedSuffix.count)) + Self.changedSuffix
-        view.update(snapshot: Self.snapshot(text: changed), renderStateKey: renderStateKey)
+        let frame = GhosttyRenderFrame(
+            sessionRevision: nil, ownerEpoch: 0,
+            snapshot: Self.snapshot(text: changed, columns: grid.columns, rows: grid.rows, selection: selection), scrollRects: [],
+            scrollRectsOverflowed: false)
+        view.update(frame: frame, renderStateKey: renderStateKey)
         try waitFor("the pane to paint the later output") { view.debugMirrorSurfaceText?.contains(Self.changedSuffix) ?? false }
     }
 
@@ -125,7 +158,7 @@ import spacesterminalcore
     /// sends while the user is selecting.
     private func applyNarrowFrame(to view: GhosttyMirrorTerminalView, renderStateKey: String) throws {
         let narrow = String(Self.row.prefix(10))
-        view.update(snapshot: Self.snapshot(text: narrow), renderStateKey: renderStateKey)
+        view.update(snapshot: Self.snapshot(text: narrow, columns: narrow.count, rows: 1), renderStateKey: renderStateKey)
         try waitFor("the pane to paint the narrower grid") {
             guard let painted = view.debugMirrorSurfaceSnapshot else { return false }
             return painted.columns == narrow.count
@@ -168,15 +201,21 @@ import spacesterminalcore
         return view
     }
 
-    /// A single-row frame, the shape that keeps the whole test on one line of text. Nothing is
-    /// tracking the mouse: the program the user is selecting from is printing, not reading clicks.
-    private static func snapshot(text: String) -> GhosttyTerminalSnapshot {
-        let cells = text.unicodeScalars.map { scalar in
+    /// A frame whose top row holds `text` (space-padded to `columns`) over otherwise blank rows, the
+    /// shape that keeps the whole test on one line of text. Nothing is tracking the mouse: the
+    /// program the user is selecting from is printing, not reading clicks.
+    private static func snapshot(
+        text: String, columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil
+    ) -> GhosttyTerminalSnapshot {
+        let padded = text.padding(toLength: columns, withPad: " ", startingAt: 0)
+        let topRow = padded.unicodeScalars.map { scalar in
             GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFF_FFFF, backgroundRGB: 0, flags: 0)
         }
+        let blank = GhosttyTerminalSnapshot.Cell(codepoint: 0x20, foregroundRGB: 0xFF_FFFF, backgroundRGB: 0, flags: 0)
+        let cells = topRow + Array(repeating: blank, count: columns * (rows - 1))
         return GhosttyTerminalSnapshot(
-            columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
-            defaultBackgroundRGB: 0, cells: cells, mouseReportingActive: false)
+            columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
+            defaultBackgroundRGB: 0, cells: cells, mouseReportingActive: false, selection: selection)
     }
 
     // 30 seconds matches the embedded-surface waits across this target. Note this suite runs in its

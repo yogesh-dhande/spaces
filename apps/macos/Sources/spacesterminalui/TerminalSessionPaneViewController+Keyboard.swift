@@ -45,23 +45,32 @@ extension TerminalSessionPaneViewController {
                 NSSound.beep()
                 return
             }
-            let copied =
-                copySelectionAction?() ?? ghosttyRendererHost?.performBindingAction("copy_to_clipboard") ?? ghosttyRendererHost?
-                .copySelectionToPasteboard() ?? false
-            guard copied else {
-                NSSound.beep()
+            // The daemon's shared selection is not owner-gated and can span rows the local mirror has
+            // scrolled away from (e.g. set by a different device viewing the same terminal), so it can
+            // hold text the local reads below cannot see. Try it first; fall back to those local reads
+            // only when there is no shared selection to find.
+            guard let ghosttyRendererHost else {
+                copyFromLocalGhosttySelection(beepOnFailure: true)
                 return
             }
-        case .ghosttyEndedFinalRender:
-            if canPerformLiveTerminalReadOnlyAction {
-                let copied =
-                    copySelectionAction?() ?? ghosttyRendererHost?.performBindingAction("copy_to_clipboard") ?? ghosttyRendererHost?
-                    .copySelectionToPasteboard() ?? false
-                if copied { return }
+            ghosttyRendererHost.copySharedSelectionToPasteboard { [weak self] copiedSharedSelection in
+                guard !copiedSharedSelection else { return }
+                self?.copyFromLocalGhosttySelection(beepOnFailure: true)
             }
+        case .ghosttyEndedFinalRender:
+            if canPerformLiveTerminalReadOnlyAction, copyFromLocalGhosttySelection(beepOnFailure: false) { return }
             copyOutputViewSelection(sender)
         case .ghosttyTakeoverStatus, .unavailable, .textView: copyOutputViewSelection(sender)
         }
+    }
+
+    @discardableResult
+    private func copyFromLocalGhosttySelection(beepOnFailure: Bool) -> Bool {
+        let copied =
+            copySelectionAction?() ?? ghosttyRendererHost?.performBindingAction("copy_to_clipboard") ?? ghosttyRendererHost?
+            .copySelectionToPasteboard() ?? false
+        if !copied, beepOnFailure { NSSound.beep() }
+        return copied
     }
 
     private func copyOutputViewSelection(_ sender: Any?) {

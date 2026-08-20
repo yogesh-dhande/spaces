@@ -80,6 +80,10 @@
         private var textSize: TerminalTextSize = .default
         private var latestFrame: GhosttyRenderFrame?
         private var renderStateKey = ""
+        /// Scroll rects accumulated since the last frame this view successfully applied, so a local
+        /// drag anchor can be carried through frames that arrive faster than the mirror applies them.
+        /// See `GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer` for the poisoning rules.
+        private var scrollRectCarryBuffer = GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer()
         private var lastGeometry: SurfaceGeometry?
         private var lastPushedSurfaceOcclusion: Bool?
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
@@ -140,6 +144,13 @@
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
         var onViewportSizeChanged: ViewportSizeHandler?
+        /// Clears the terminal's one shared selection. Not owner-gated: any attached client's plain
+        /// click clears it, matching the daemon's `clearSelection` command.
+        var onClearSelection: (@MainActor () -> Void)?
+        /// Reports this mirror's completed local drag as the terminal's new shared selection, in
+        /// absolute screen-space coordinates (start column/row, end column/row, rectangle). Not
+        /// owner-gated, matching the daemon's `setSelection` command.
+        var onSetSelection: (@MainActor (UInt16, UInt32, UInt16, UInt32, Bool) -> Void)?
         /// Counts mirror surfaces built for this pane. A surface negotiates its own grid when it is
         /// created, so a consumer that told the daemon a viewport size against an earlier surface can tell
         /// from this whether that size still describes a surface that exists.
@@ -296,6 +307,7 @@
 
         override func mouseDown(with event: NSEvent) {
             if suppressesFocusOnlyMousePress(for: event) { return }
+            clearSharedSelectionIfNeeded(for: event)
             focusWindow()
             sendMousePosition(event)
             _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, event: event)
@@ -305,6 +317,7 @@
             if suppressesFocusOnlyMouseRelease(for: event) { return }
             sendMousePosition(event)
             _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, event: event)
+            commitLocalSelectionIfPresent()
         }
 
         override func rightMouseDown(with event: NSEvent) {
@@ -406,6 +419,10 @@
         }
 
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
+            // Accumulate this frame's contribution to the drag-carry buffer before attempting to apply
+            // it, and only once per distinct frame: a repeat delivery of the same frame (the renderer
+            // reapplying state with nothing new to say) describes no additional movement.
+            if let frame, frame != latestFrame { scrollRectCarryBuffer.append(rects: frame.scrollRects, overflowed: frame.scrollRectsOverflowed) }
             self.renderStateKey = renderStateKey
             latestFrame = frame
             ensureMirrorIfNeeded()
@@ -471,6 +488,31 @@
         /// Unit tests inject a uniquely-named pasteboard here so paste tests never touch the user's
         /// real clipboard. Nil in the app, where paste keeps using `NSPasteboard.general`.
         var pasteboardOverrideForTesting: NSPasteboard?
+
+        /// Writes text to the pasteboard, using the same test-facing override as `pasteClipboardContents`.
+        /// The single writer for a shared-selection commit's response text: the mirror's local
+        /// copy-on-select write is suppressed (see `GhosttyMirrorAppService`'s `write_clipboard_cb`) so
+        /// this is never in a race with it.
+        func writeSelectionTextToPasteboard(_ text: String) {
+            let pasteboard = pasteboardOverrideForTesting ?? .general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
+
+        /// The change count of the pasteboard `writeSelectionTextToPasteboard` writes to. Captured at
+        /// drag-commit time so a selection response that spent a round trip in flight can detect a copy
+        /// the user made in the meantime and yield to it.
+        var selectionPasteboardChangeCount: Int { (pasteboardOverrideForTesting ?? .general).changeCount }
+
+        /// Copy-on-select writer for a shared-selection commit: writes only while the pasteboard still
+        /// holds what it held when the drag committed. A copy the user made during the round trip moved
+        /// the change count, and their copy must win over the older drag's confirmed text.
+        func writeSelectionTextToPasteboard(_ text: String, ifPasteboardUnchangedSince changeCount: Int) {
+            let pasteboard = pasteboardOverrideForTesting ?? .general
+            guard pasteboard.changeCount == changeCount else { return }
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
 
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
@@ -873,6 +915,43 @@
             suppressedFocusOnlyMouseButtonNumbers.remove(event.buttonNumber) != nil
         }
 
+        /// Clears the terminal's shared selection before a plain left click reaches the session, the
+        /// same way clicking away from a selection in any text view drops it. Shift is the local
+        /// escape hatch for extending a selection (matching `mouseButtonBelongsToSession`'s shift
+        /// carve-out), so a shift-click never clears here. Not gated on attachment ownership: any
+        /// client whose plain click would otherwise land on the shared selection may clear it.
+        ///
+        /// Reading the applied frame's viewport-projected selection means a selection scrolled
+        /// wholly off this viewport does not clear on click, deliberately. The export omits a
+        /// selection with no viewport overlap, and a click with no visible highlight means focus,
+        /// not deselect: the selection stays anchored (and copyable in full) until a viewer that
+        /// shows it clicks it away or a new selection replaces it. See the click-to-clear scope
+        /// note in docs/spec.md.
+        private func clearSharedSelectionIfNeeded(for event: NSEvent) {
+            guard !event.modifierFlags.contains(.shift) else { return }
+            let hasAppliedSelection = lastAppliedRenderFrameIdentity?.snapshot?.selection != nil
+            let hasPaintedSurfaceSelection = mirrorSurface().map { ghostty_surface_has_selection($0) } ?? false
+            guard hasAppliedSelection || hasPaintedSurfaceSelection else { return }
+            onClearSelection?()
+        }
+
+        /// Reports whatever local drag selection the mirror surface is now showing as the terminal's
+        /// new shared selection. `ghostty_mirror_selection_info` reports viewport-relative, signed
+        /// rows (an anchor scrolled above the visible grid still reads at its true row), which
+        /// `absoluteSelectionRow` rebases onto the scrollbar offset of the viewport this mirror last
+        /// painted. No-op when the mirror has no selection open: a click with no drag, or a release
+        /// this pane never captured because the session's application owns the mouse.
+        private func commitLocalSelectionIfPresent() {
+            guard let mirror else { return }
+            var info = ghostty_mirror_selection_info_s()
+            ghostty_mirror_selection_info(mirror, &info)
+            guard info.present else { return }
+            let scrollbarOffset = lastAppliedRenderFrameIdentity?.snapshot?.scrollbarOffset ?? 0
+            let startRow = GhosttyMirrorSelectionMarshalling.absoluteSelectionRow(virtualRow: info.start_y, scrollbarOffset: scrollbarOffset)
+            let endRow = GhosttyMirrorSelectionMarshalling.absoluteSelectionRow(virtualRow: info.end_y, scrollbarOffset: scrollbarOffset)
+            onSetSelection?(info.start_x, startRow, info.end_x, endRow, info.rectangle)
+        }
+
         @discardableResult private func updateSurfaceGeometry() -> Bool {
             guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return false }
             updateSurfaceOcclusion()
@@ -951,6 +1030,7 @@
                 }
                 lastAppliedRenderFrameIdentity = identity
                 frameApplyRetry = nil
+                scrollRectCarryBuffer.clear()
                 debugRenderFrameApplyCount += 1
                 return
             }
@@ -986,6 +1066,7 @@
             }
             lastAppliedRenderFrameIdentity = identity
             frameApplyRetry = nil
+            scrollRectCarryBuffer.clear()
             GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
             scheduleSurfacePresentationRefresh()
@@ -1071,6 +1152,17 @@
             // The frame's clusters live in one buffer the cells point into, so they stay alive for
             // exactly the span of the C call and no cell owns memory Ghostty would have to free.
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
+            let selectionFields = GhosttyMirrorSelectionMarshalling.cSnapshotSelectionFields(
+                selection: snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
+            // Read before the apply attempt below and cleared by the caller only once that attempt
+            // succeeds, so a refused frame leaves the gap it covers in the buffer for the next attempt.
+            var scrollRects = scrollRectCarryBuffer.rects.map { rect in
+                ghostty_render_scroll_rect_s(
+                    row_start: UInt16(clamping: rect.rowStart), row_count: UInt16(clamping: rect.rowCount),
+                    column_start: UInt16(clamping: rect.columnStart), column_count: UInt16(clamping: rect.columnCount),
+                    delta_rows: Int32(clamping: rect.deltaRows), delta_columns: Int32(clamping: rect.deltaColumns))
+            }
+            let scrollCarryValid = scrollRectCarryBuffer.isCarryValid
             return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
                 if let base = extras.baseAddress {
                     for placement in clusterExtras.placements {
@@ -1079,27 +1171,39 @@
                     }
                 }
                 return cells.withUnsafeMutableBufferPointer { buffer in
-                    var cSnapshot = ghostty_terminal_snapshot_s()
-                    cSnapshot.columns = UInt16(snapshot.columns)
-                    cSnapshot.rows = UInt16(snapshot.rows)
-                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                    cSnapshot.cursor_visible = snapshot.cursorVisible
-                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
-                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
-                    cSnapshot.cell_count = buffer.count
-                    cSnapshot.cells = buffer.baseAddress
+                    scrollRects.withUnsafeMutableBufferPointer { scrollRectsBuffer in
+                        var cSnapshot = ghostty_terminal_snapshot_s()
+                        cSnapshot.columns = UInt16(snapshot.columns)
+                        cSnapshot.rows = UInt16(snapshot.rows)
+                        cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                        cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                        cSnapshot.cursor_visible = snapshot.cursorVisible
+                        cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                        cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                        cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                        cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                        cSnapshot.cell_count = buffer.count
+                        cSnapshot.cells = buffer.baseAddress
+                        cSnapshot.scroll_rect_count = scrollRectsBuffer.count
+                        cSnapshot.scroll_rects = scrollRectsBuffer.baseAddress
+                        cSnapshot.scroll_carry_valid = scrollCarryValid
+                        cSnapshot.selection_flags = selectionFields.selectionFlags
+                        cSnapshot.selection_start_x = selectionFields.selectionStartX
+                        cSnapshot.selection_start_y = selectionFields.selectionStartY
+                        cSnapshot.selection_end_x = selectionFields.selectionEndX
+                        cSnapshot.selection_end_y = selectionFields.selectionEndY
+                        cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                        cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
 
-                    var cFrame = ghostty_render_frame_s()
-                    cFrame.version = UInt32(frame.version)
-                    cFrame.session_revision = frame.sessionRevision ?? 0
-                    cFrame.owner_epoch = frame.ownerEpoch
-                    cFrame.columns = UInt16(snapshot.columns)
-                    cFrame.rows = UInt16(snapshot.rows)
-                    cFrame.snapshot = cSnapshot
-                    return withUnsafePointer(to: &cFrame, body)
+                        var cFrame = ghostty_render_frame_s()
+                        cFrame.version = UInt32(frame.version)
+                        cFrame.session_revision = frame.sessionRevision ?? 0
+                        cFrame.owner_epoch = frame.ownerEpoch
+                        cFrame.columns = UInt16(snapshot.columns)
+                        cFrame.rows = UInt16(snapshot.rows)
+                        cFrame.snapshot = cSnapshot
+                        return withUnsafePointer(to: &cFrame, body)
+                    }
                 }
             }
         }

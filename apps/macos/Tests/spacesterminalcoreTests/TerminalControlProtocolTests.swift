@@ -139,6 +139,62 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing appearance.")
     }
 
+    func testSetSelectionRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(
+            command: .setSelection(
+                TerminalControlSetSelectionPayload(clientID: "viewer-1", startColumn: 4, startRow: 100, endColumn: 20, endRow: 102, rectangle: true))
+        )
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "setSelection")
+        XCTAssertEqual(decoded.commandValue.name, "setSelection")
+        // Selection is deliberately shared state: any attached viewer may set or clear it, unlike
+        // scroll/mouse input which are exclusive to whoever currently owns the session.
+        XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
+        XCTAssertEqual(decoded.selectionStartColumn, 4)
+        XCTAssertEqual(decoded.selectionStartRow, 100)
+        XCTAssertEqual(decoded.selectionEndColumn, 20)
+        XCTAssertEqual(decoded.selectionEndRow, 102)
+        XCTAssertEqual(decoded.selectionRectangle, true)
+        guard case .setSelection(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a setSelection command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "viewer-1")
+        XCTAssertEqual(payload.startColumn, 4)
+        XCTAssertEqual(payload.startRow, 100)
+        XCTAssertEqual(payload.endColumn, 20)
+        XCTAssertEqual(payload.endRow, 102)
+        XCTAssertEqual(payload.rectangle, true)
+    }
+
+    func testSetSelectionWithoutEndpointsReportsMissingPayload() throws {
+        let request = try TerminalControlCodec.decodeRequest(
+            #"{"command":"setSelection","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing selection endpoints.")
+    }
+
+    func testClearSelectionAndReadSelectionTextRoundTripThroughCodec() throws {
+        for command: TerminalControlCommand in [.clearSelection(.init(clientID: "viewer-1")), .readSelectionText(.init(clientID: "viewer-1"))] {
+            let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(TerminalControlRequest(command: command)))
+            XCTAssertEqual(decoded.command, command.name)
+            XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
+            XCTAssertNil(decoded.commandValue.requiredPayloadFailureMessage, "\(command.name) carries no required payload of its own")
+            XCTAssertEqual(decoded.clientID, "viewer-1")
+        }
+    }
+
+    /// `selectionText` is the one response field `setSelection`/`readSelectionText` add to the wire; it
+    /// must round-trip both present (a non-empty selection) and absent (no selection to report).
+    func testSelectionTextResponseFieldRoundTripsThroughCodec() throws {
+        let withText = TerminalControlResponse(ok: true, message: "Read terminal selection.", selectionText: "hello world")
+        let withoutText = TerminalControlResponse(ok: true, message: "Read terminal selection.")
+
+        XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withText)), withText)
+        XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withText)).selectionText, "hello world")
+        XCTAssertNil(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withoutText)).selectionText)
+    }
+
     func testTypedCommandWrapperReportsMissingPayloadFields() throws {
         let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1","asPaste":false}"#.data(using: .utf8)!)
         let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra","asPaste":false}"#.data(using: .utf8)!)

@@ -11,6 +11,9 @@ struct TerminalDetailView: View {
     /// appearance, so this uses the fixed brand dark background value
     /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
     private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
+    /// Gap between the Copy pill and the highlight's edge, on whichever side it sits: enough that the
+    /// pill never touches (let alone covers) the selected text.
+    private static let selectionCopyPillGap: CGFloat = 6
 
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
@@ -27,6 +30,17 @@ struct TerminalDetailView: View {
     @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    /// Measured size of the Copy pill's visible capsule (see `TerminalSelectionCopyPill`), captured via
+    /// `SelectionCopyPillSizePreferenceKey` so the overlay can right-align the capsule's trailing edge to
+    /// the selection's anchor point without knowing the label's rendered width ahead of time. Resets to
+    /// `.zero` whenever the pill is absent (the preference key's default), so a size from a previous
+    /// selection never leaks into the next one's first frame.
+    @State private var selectionCopyPillSize: CGSize = .zero
+    /// Whether the pill is showing its brief "Copied" confirmation instead of "Copy".
+    @State private var isSelectionCopyPillShowingCopied = false
+    /// Cancels a pending "Copied" -> "Copy" revert when a new copy starts before the previous one's timer
+    /// fires, so two quick copies do not race to leave the label in the wrong state.
+    @State private var selectionCopyFeedbackTask: Task<Void, Never>?
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
     /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
@@ -94,12 +108,14 @@ struct TerminalDetailView: View {
                                 guard model.pasteClipboardImageIntoComposer() else { return false }
                                 isShowingComposer = true
                                 return true
-                            }
+                            }, onClearSelectionTapped: { clearSelectionOnTerminalTap() }
                         ).ignoresSafeArea(.keyboard, edges: .bottom).accessibilityIdentifier("terminal.surface").allowsHitTesting(
                             model.shouldPresentLiveSurface
                         ).accessibilityHidden(!model.shouldPresentLiveSurface).background(Self.surfaceBackground)
 
                         if !model.shouldPresentLiveSurface { statusShell.onAppear { renderedText = "" } }
+
+                        selectionCopyPillOverlay
                     }
                 } else {
                     statusShell.onAppear { renderedText = "" }
@@ -153,6 +169,76 @@ struct TerminalDetailView: View {
             if let previewErrorMessage = model.linkPreviewErrorMessage { errorBanner(previewErrorMessage) }
             if let linkNotice = model.linkNotice { noticeBanner(linkNotice) }
         }.allowsHitTesting(false)
+    }
+
+    /// The Copy pill, positioned from the current frame's shared selection. Absent whenever the frame
+    /// carries no selection: the pill is not hidden-but-present, it is not built at all, so it never
+    /// intercepts a tap meant for the terminal underneath.
+    @ViewBuilder private var selectionCopyPillOverlay: some View {
+        if let placement = selectionCopyPillPlacement {
+            let origin = TerminalSelectionCopyPillLayout.origin(
+                anchor: placement.anchor, pillSize: selectionCopyPillSize, gap: Self.selectionCopyPillGap, contentOrigin: placement.contentOrigin,
+                gridSize: placement.gridSize)
+            TerminalSelectionCopyPill(isCopied: isSelectionCopyPillShowingCopied) { performCopySelection() }.background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: SelectionCopyPillSizePreferenceKey.self, value: proxy.size)
+                }
+            ).onPreferenceChange(SelectionCopyPillSizePreferenceKey.self) { selectionCopyPillSize = $0 }.offset(x: origin.x, y: origin.y)
+            // The anchor is a point in the terminal view's own top-leading coordinate space, so the pill
+            // must start from the stack's top-leading corner before the offset places it; the enclosing
+            // ZStack's default center alignment would otherwise shift the whole placement by half the
+            // stack minus half the pill.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    /// Anchor plus the grid bounds `TerminalSelectionCopyPillLayout.origin` clamps the pill into.
+    private struct SelectionCopyPillPlacement {
+        let anchor: TerminalSelectionCopyPillLayout.Anchor
+        let contentOrigin: CGPoint
+        let gridSize: CGSize
+    }
+
+    /// `contentOrigin`/cell metrics mirror exactly what `GhosttyRemoteTerminalHostView` itself measures
+    /// (`GhosttyRemoteTerminalViewport.contentInsets`/`cellMetrics(fontSize:)`), so the pill agrees with
+    /// the surface on where a row/column lands on screen without the two ever drifting apart.
+    private var selectionCopyPillPlacement: SelectionCopyPillPlacement? {
+        // The daemon rejects readSelectionText once the session has ended, so the pill would be a
+        // dead control on a frozen frame.
+        guard let snapshot = model.latestState?.renderSnapshot, snapshot.selection != nil, model.endedRender == nil,
+            let columns = model.viewportColumns, let rows = model.viewportRows
+        else { return nil }
+        let metrics = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: terminalFontSize)
+        let contentOrigin = CGPoint(x: GhosttyRemoteTerminalViewport.contentInsets.left, y: GhosttyRemoteTerminalViewport.contentInsets.top)
+        guard
+            let anchor = TerminalSelectionCopyPillLayout.anchor(
+                snapshot: snapshot, viewportColumns: columns, viewportRows: rows, contentOrigin: contentOrigin, cellWidth: metrics.width,
+                cellHeight: metrics.height)
+        else { return nil }
+        let gridSize = CGSize(width: CGFloat(columns) * metrics.width, height: CGFloat(rows) * metrics.height)
+        return SelectionCopyPillPlacement(anchor: anchor, contentOrigin: contentOrigin, gridSize: gridSize)
+    }
+
+    /// A plain tap on the terminal while a selection is present clears it for every viewer (see
+    /// `GhosttyRemoteTerminalHostView.handleTapToActivateInput`); the pill's own tap never reaches here,
+    /// it is a separate SwiftUI overlay that captures its own taps first.
+    private func clearSelectionOnTerminalTap() {
+        writeE2EEventIfNeeded(kind: "clear_selection", detail: nil)
+        Task { await model.clearSelection() }
+    }
+
+    private func performCopySelection() {
+        writeE2EEventIfNeeded(kind: "copy_selection", detail: nil)
+        selectionCopyFeedbackTask?.cancel()
+        selectionCopyFeedbackTask = Task {
+            let succeeded = await model.copySelection()
+            guard !Task.isCancelled else { return }
+            guard succeeded else { return }
+            isSelectionCopyPillShowingCopied = true
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            isSelectionCopyPillShowingCopied = false
+        }
     }
 
     private func sendTerminalText(_ text: String, asPaste: Bool = false) {
@@ -434,6 +520,15 @@ struct TerminalDetailView: View {
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
+}
+
+/// Reports the Copy pill's measured visible size back up to `TerminalDetailView`, so its overlay can
+/// right-align the capsule's trailing edge to the selection anchor without a two-pass layout. Defaults to
+/// `.zero`, which is also what a torn-down pill (no selection this frame) reports, so a stale size from a
+/// previous selection never carries into the next one.
+private struct SelectionCopyPillSizePreferenceKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
 private struct E2ECommandRequest: Decodable {

@@ -944,6 +944,95 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(followingPayload.decodedRenderUpdate).kind, .delta, "a kept promise must not leave every later frame full")
     }
 
+    /// A `.selfContained` export (e.g. a Device API `.state` poll) always forces a full frame, and a full
+    /// frame never carries scroll rects, so the rects Ghostty drained for that one-shot read would
+    /// otherwise vanish. `TerminalStreamScrollRectCarry` (`streamScrollRectCarry` on the host) exists to
+    /// fold them instead and hand them to the next stream export. This proves the host wiring end to end:
+    /// a one-shot export drains rects the stream never sees, then the next stream delta still carries
+    /// them, prepended ahead of whatever that export captured itself.
+    func testSelfContainedExportCarriesDrainedScrollRectsIntoNextStreamDelta() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-scroll-rect-carry-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-08-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        // Every capture below shares this 5x5 shape (only the fill letter changes) so scroll rects sized
+        // against a 5-row, 5-column grid stay valid and `canDelta` never trips on a column/row mismatch.
+        func fiveByFive(_ letter: Character) -> GhosttyTerminalSnapshot {
+            Self.snapshot(text: Array(repeating: String(repeating: letter, count: 5), count: 5).joined(separator: "\n"))
+        }
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(fiveByFive("a"))
+        let scrollRectsBox = MutableBox<[GhosttyRenderScrollRectOperation]>([])
+        let scrollRectsOverflowedBox = MutableBox(false)
+        GhosttyTerminalSnapshotCapture.sessionRenderStateCaptureHandlerForTesting = { _ in
+            guard let snapshot = capturedSnapshotBox.value else { return nil }
+            return GhosttyTerminalSnapshotCapture.CapturedSnapshot(
+                snapshot: snapshot, scrollRects: scrollRectsBox.value, scrollRectsOverflowed: scrollRectsOverflowedBox.value)
+        }
+        defer { GhosttyTerminalSnapshotCapture.sessionRenderStateCaptureHandlerForTesting = nil }
+
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-17T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+
+        // Seed a delta baseline: the first-ever `.streamDeltaAllowed` export always goes out full
+        // (`missing_baseline`), so this establishes what the scroll broadcast below can delta against.
+        let subscriberPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in subscriberPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) { subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        capturedSnapshotBox.value = fiveByFive("b")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { subscriberPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
+
+        // A one-shot self-contained export (e.g. a Device API `.state` poll) lands between two stream
+        // exports and drains rects Ghostty had queued. It never ships them itself (`forceFull` for
+        // `.selfContained`), so this is the read the fix must not let fall on the floor.
+        let carriedRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 5, deltaRows: 1, deltaColumns: 0)
+        scrollRectsBox.value = [carriedRect]
+        capturedSnapshotBox.value = fiveByFive("c")
+        let oneShotPayload = try await TerminalEngineActor.run {
+            host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll)
+        }
+        let oneShotUpdate = try XCTUnwrap(oneShotPayload?.decodedRenderUpdate)
+        XCTAssertEqual(oneShotUpdate.kind, .full, "a self-contained export always forces a full frame")
+        XCTAssertEqual(oneShotUpdate.fallbackReason, "self_contained_state_export")
+
+        // The next stream export captures its own rects on top of whatever it drains from the carry.
+        let streamRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 5, deltaRows: 2, deltaColumns: 0)
+        scrollRectsBox.value = [streamRect]
+        capturedSnapshotBox.value = fiveByFive("d")
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await waitUntil(timeout: 30) {
+            subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll && $0.renderUpdate != nil }
+        }
+        let scrollPayload = try XCTUnwrap(subscriberPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.scroll })
+        let scrollUpdate = try XCTUnwrap(scrollPayload.decodedRenderUpdate)
+        XCTAssertEqual(scrollUpdate.kind, .delta, "the carried rect must not itself force a full frame")
+        XCTAssertEqual(
+            scrollUpdate.delta?.scrollRects, [carriedRect, streamRect],
+            "the carried rect (older) must be prepended ahead of the rect this export captured itself")
+        XCTAssertEqual(scrollUpdate.delta?.scrollRectsOverflowed, false)
+    }
+
     /// A client that resynced between two broadcasts must never be left rendering a picture the session
     /// never had.
     ///
@@ -1379,6 +1468,42 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: Self.snapshot(text: "Codex"), snapshotText: nil))
             XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: "OpenAI Codex"))
 
+        }
+    }
+
+    /// A `"selection"` broadcast exists to move selection state in both directions, so it must carry a
+    /// render update even when the screen it describes is blank: the CLEAR that lands after a selection
+    /// is dismissed on an otherwise empty screen needs the same frame the SET did, or a viewer keeps
+    /// painting a highlight the daemon has already dropped. An `"output"` export on the same blank
+    /// screen ships no frame, since the visible-content gate exists precisely for output-driven reasons.
+    func testSelectionReasonExportsFrameOnBlankScreenWhileOutputDoesNot() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-selection-blank-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-08-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: " ") }
+            defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+            let localOwner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-19T00:00:00Z")
+            try host.startIfNeeded()
+            try host.attach(client: localOwner, mode: .owner, into: nil)
+
+            let selectionPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.selection))
+            XCTAssertNotNil(
+                selectionPayload.renderUpdate,
+                "a selection broadcast (set or clear) must always carry the frame, even on an otherwise blank screen")
+
+            let outputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.output))
+            XCTAssertNil(outputPayload.renderUpdate, "an output-driven export on a blank screen still ships no frame")
         }
     }
 
@@ -3021,6 +3146,87 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Reset the shared app-service scheme so dark does not leak into later tests.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
+    }
+
+    func testControlSetSelectionUpdatesTheSharedSelectionForAnyViewer() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let boxes = try await TerminalEngineActor.run { () -> (Box<GhosttyEmbeddedSessionHost>, Box<GhosttyHeadlessRendererHost>) in
+            let host = GhosttyEmbeddedSessionHost(
+                launchConfiguration: TerminalSessionLaunchConfiguration(
+                    sessionID: "control-set-selection-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "printf 'hello world\\n'; sleep 5",
+                    createdAt: "2026-07-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+            try host.startIfNeeded()
+            let rendererHost = try XCTUnwrap(host.rendererHost as? GhosttyHeadlessRendererHost)
+            XCTAssertTrue(rendererHost.resizeCellGrid(columns: 20, rows: 4))
+            return (Box(host), Box(rendererHost))
+        }
+        let host = boxes.0.value
+        let rendererHost = boxes.1.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        try await waitUntil(timeout: 30) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            guard let snapshot = rendererHost.sessionRenderStateSnapshot()?.snapshot else { return false }
+            return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains("hello world")
+        }
+
+        // A viewer that never took ownership can still set the shared selection: selection is
+        // deliberately shared state, not owner-gated (see `controlResponseForSetSelectionRequest`).
+        let setResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(
+                    command: .setSelection(
+                        TerminalControlSetSelectionPayload(
+                            clientID: "viewer-without-ownership", startColumn: 0, startRow: 0, endColumn: 4, endRow: 0, rectangle: false))))
+        }
+        XCTAssertTrue(setResponse.ok, setResponse.message)
+        XCTAssertEqual(setResponse.selectionText, "hello")
+
+        // Colors reach the surface on the io thread the same way appearance does, so pump ticks while
+        // polling for the exported selection to land.
+        try await waitUntil(timeout: 30) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.selection != nil
+        }
+        let selection = try XCTUnwrap(TerminalEngineActor.runSynchronously { rendererHost.sessionRenderStateSnapshot()?.snapshot.selection })
+        XCTAssertEqual(selection.startColumn, 0)
+        XCTAssertEqual(selection.startRow, 0)
+        XCTAssertEqual(selection.endColumn, 4)
+        XCTAssertEqual(selection.endRow, 0)
+        XCTAssertFalse(selection.isRectangle)
+
+        // A pure read must not disturb the shared selection.
+        let readResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(command: .readSelectionText(TerminalControlClientPayload(clientID: "viewer-without-ownership"))))
+        }
+        XCTAssertTrue(readResponse.ok, readResponse.message)
+        XCTAssertEqual(readResponse.selectionText, "hello")
+        XCTAssertNotNil(
+            TerminalEngineActor.runSynchronously { rendererHost.sessionRenderStateSnapshot()?.snapshot.selection },
+            "reading selection text must not clear it")
+
+        let clearResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(command: .clearSelection(TerminalControlClientPayload(clientID: "viewer-without-ownership"))))
+        }
+        XCTAssertTrue(clearResponse.ok, clearResponse.message)
+
+        try await waitUntil(timeout: 30) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.selection == nil
+        }
     }
 
     func testHeadlessDriverExportsNativeScrollRectAfterViewportScrollback() async throws {

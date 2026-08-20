@@ -502,6 +502,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let rendererSummary: String?
         let renderedOutput: String?
         let visibleSurfaceOutput: String?
+        let surfaceSelectionText: String?
         let summary: String?
         let state: String?
         let showsTerminalSurface: Bool?
@@ -1697,7 +1698,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let payload = TerminalSessionWindowStateDump(
             sessionID: sessionID, requestedMode: requestedMode, found: content != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
-            visibleSurfaceOutput: debugState?.visibleSurfaceOutput, summary: debugState?.summary, state: debugState?.state,
+            visibleSurfaceOutput: debugState?.visibleSurfaceOutput, surfaceSelectionText: debugState?.surfaceSelectionText,
+            summary: debugState?.summary, state: debugState?.state,
             showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
             didClose: debugState?.didCloseWindow, windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
             surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
@@ -2318,7 +2320,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
             scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
             mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
-            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
+            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance,
+            selectionStartColumn: request.selectionStartColumn, selectionStartRow: request.selectionStartRow,
+            selectionEndColumn: request.selectionEndColumn, selectionEndRow: request.selectionEndRow, selectionRectangle: request.selectionRectangle)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

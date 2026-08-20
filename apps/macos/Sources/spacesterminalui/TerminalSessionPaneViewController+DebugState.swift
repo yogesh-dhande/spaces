@@ -9,6 +9,10 @@ import spacesterminalghostty
 public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let renderedOutput: String
     public let visibleSurfaceOutput: String?
+    /// The live surface's shared-selection text (the daemon-owned selection the mirror paints from
+    /// streamed frames), gated the same as `visibleSurfaceOutput`. Nil when the terminal container is
+    /// hidden, there is no surface, or there is no active selection.
+    public let surfaceSelectionText: String?
     public let showsTerminalSurface: Bool
     public let showsTextRenderer: Bool
     public let rendererSummary: String
@@ -31,13 +35,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let takeoverMessage: String
 
     public init(
-        renderedOutput: String, visibleSurfaceOutput: String?, showsTerminalSurface: Bool, showsTextRenderer: Bool, rendererSummary: String,
-        summary: String, state: String, windowTitle: String, didCloseWindow: Bool, surfaceColumns: Int?, surfaceRows: Int?, windowIsKey: Bool,
-        firstResponderTypeName: String?, searchVisible: Bool, searchQuery: String, searchTotal: Int?, searchSelected: Int?, attachmentMode: String,
-        takeoverPending: Bool, takeoverButtonVisible: Bool, takeoverButtonEnabled: Bool, takeoverMessage: String
+        renderedOutput: String, visibleSurfaceOutput: String?, surfaceSelectionText: String?, showsTerminalSurface: Bool, showsTextRenderer: Bool,
+        rendererSummary: String, summary: String, state: String, windowTitle: String, didCloseWindow: Bool, surfaceColumns: Int?, surfaceRows: Int?,
+        windowIsKey: Bool, firstResponderTypeName: String?, searchVisible: Bool, searchQuery: String, searchTotal: Int?, searchSelected: Int?,
+        attachmentMode: String, takeoverPending: Bool, takeoverButtonVisible: Bool, takeoverButtonEnabled: Bool, takeoverMessage: String
     ) {
         self.renderedOutput = renderedOutput
         self.visibleSurfaceOutput = visibleSurfaceOutput
+        self.surfaceSelectionText = surfaceSelectionText
         self.showsTerminalSurface = showsTerminalSurface
         self.showsTextRenderer = showsTextRenderer
         self.rendererSummary = rendererSummary
@@ -69,6 +74,7 @@ extension TerminalSessionPaneViewController {
     public func debugStateDump() -> TerminalSessionWindowDebugState {
         let renderedOutput: String
         let visibleSurfaceOutput = !terminalContainer.isHidden ? ghosttyRendererHost?.debugVisibleSurfaceText() : nil
+        let surfaceSelectionText = !terminalContainer.isHidden ? ghosttyRendererHost?.debugSurfaceSelectionText() : nil
         if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
         let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
         if !terminalContainer.isHidden, let surfaceSnapshot,
@@ -84,8 +90,9 @@ extension TerminalSessionPaneViewController {
         }
         let searchState = debugTerminalSearchState
         return .init(
-            renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, showsTerminalSurface: !terminalContainer.isHidden,
-            showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
+            renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, surfaceSelectionText: surfaceSelectionText,
+            showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue,
+            summary: summaryLabel.stringValue,
             state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
             searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
