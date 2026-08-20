@@ -1332,6 +1332,8 @@ run_remote_device_ui_parity() {
   local_browser_url="$(remote_device_local_browser_url "$REMOTE_DEVICE_WEB_BROWSER_URL")"
   wait_for_http_body_contains "$local_browser_url" "remote device api sentinel"
   wait_for_condition "chrome_front_url" "$local_browser_url"
+  # Focusing a browser session must leave Spaces on screen so it stays usable on another display.
+  assert_spaces_stays_visible "after focusing a remote browser session"
   pass_case
 }
 
@@ -3076,6 +3078,42 @@ if result.returncode != 0:
     sys.exit(0)
 sys.stdout.write(result.stdout)
 PY
+}
+
+# Echoes "1" when the Spaces process is visible (System Events "visible of proc"; a hidden app
+# reports false) and "0" otherwise. Focusing or opening an external window must never hide Spaces,
+# so callers assert on this rather than on frontmost-ness, which a browser stealing focus changes
+# on its own.
+spaces_app_visible() {
+  local pid="${1:-$SPACES_PID}"
+  osascript - "$pid" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if visible of proc is false then
+        return "0"
+      else
+        return "1"
+      end if
+    end repeat
+  end tell
+  return "0"
+end run
+APPLESCRIPT
+}
+
+# Fails unless Spaces stays visible for a couple of seconds. A hide triggered by the action under
+# test does not have to be synchronous with it, so a single sample taken the moment Chrome comes
+# forward can pass while a delayed hide is still pending; this samples past any such delay.
+assert_spaces_stays_visible() {
+  local context="$1"
+  local deadline=$((SECONDS + 2))
+  while true; do
+    [[ "$(spaces_app_visible)" == "1" ]] || fail "Spaces hid itself $context"
+    (( SECONDS < deadline )) || break
+    sleep 0.25
+  done
 }
 
 activate_google_chrome() {
@@ -5714,6 +5752,9 @@ PY
     send_spaces_window_shortcut_with_ack "$admin_shortcut_index"
     transition_pause "$host cmd+number opens admin browser session"
     wait_for_condition "chrome_front_url" "$browser_admin_url"
+    # A GUI browser-session focus hands the front to Chrome without hiding Spaces, so Spaces stays
+    # usable on another display. Chrome being frontmost above is the hand-off; this is the other half.
+    assert_spaces_stays_visible "after cmd+number focused a browser session"
     admin_window_id="$(wait_for_chrome_window_id_for_url "$browser_admin_url" "admin")"
     wait_for_condition "chrome_window_active_url $admin_window_id" "$browser_admin_url"
     [[ "$admin_window_id" == "$docs_window_id" ]] \

@@ -246,16 +246,21 @@ extension AppKitController {
     /// Opens or focuses a sidebar runtime target through the same resolution pipeline the
     /// numbered shortcuts, command palette, and cycle focus use, so a sidebar click
     /// behaves identically to those paths.
+    ///
+    /// This path needs no palette dismissal of its own, unlike the cycle and editor paths.
+    /// Clicking a sidebar row makes the main window key, which makes a visible palette resign
+    /// key, and `windowDidResignKey` dismisses it before the click's action runs. The palette
+    /// keeps key status for as long as it is visible (it is the delegate's panel, and every
+    /// hand-off of key status dismisses it), so it cannot be left floating over the app this
+    /// focuses. The same reasoning covers `openWorkspaceFinder`.
     func focusSidebarRuntimeTarget(workspaceID: String, key: String) {
         Task { @MainActor [weak self] in
             guard let self, let context = self.focusableWindowContext(workspaceID: workspaceID),
                 let target = context.targets.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
             let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
-            guard let action = await self.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail) else {
-                return
-            }
-            self.hideAfterSuccessfulExternalWindowAction(action)
+            // The outcome is unused: a failed focus already showed its own error.
+            _ = await self.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail)
         }
     }
 
