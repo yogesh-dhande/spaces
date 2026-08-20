@@ -135,6 +135,27 @@ enum SpacesMobileAutomations {
         return "next \(relativeFormatter().localizedString(for: fireDate, relativeTo: now))"
     }
 
+    /// The "Next run" fact row's value on the detail screen. The row is a chip that opens the next-run
+    /// sheet for every automation, including the ones that never fire on their own, so it needs a value
+    /// even where `nextFireDescription` has nothing to say.
+    static func nextRunChipValue(_ automation: TerminalServiceAutomationSummary, relativeTo now: Date = Date()) -> String {
+        nextFireDescription(automation, relativeTo: now) ?? "Not scheduled"
+    }
+
+    /// The next-run sheet's secondary line: the absolute instant the automation fires next, else why it
+    /// has none. A one-time next-run override arrives as `nextFireTime` like any cron occurrence does, so
+    /// a manual automation holding an override reads as scheduled rather than as manual.
+    static func nextRunSummary(_ automation: TerminalServiceAutomationSummary) -> String {
+        if let fireDate = date(automation.nextFireTime) { return "Scheduled: \(absoluteFormatter().string(from: fireDate))" }
+        return automation.triggerKind == "cron" ? "Not scheduled" : "Manual"
+    }
+
+    /// Rejects a next-run instant that is not in the future, so the sheet says so inline instead of making
+    /// a round trip the daemon refuses on the same grounds.
+    static func nextRunValidationMessage(for nextRun: Date, relativeTo now: Date = Date()) -> String? {
+        nextRun > now ? nil : "Pick a time in the future."
+    }
+
     /// Human-readable outcome label for a run, used as the row title on the per-automation detail screen
     /// (`AutomationDetailView`) where the automation name is already the screen's own title, so repeating
     /// it on every row would be redundant — the outcome is the thing that differs row to row.
@@ -155,6 +176,9 @@ enum SpacesMobileAutomations {
         switch run.trigger {
         case "manual": "Manual"
         case "cron": "Cron"
+        // A run fired from a one-time next-run override: no cron occurrence to attribute it to, and not
+        // a manual trigger either, so the daemon records it under its own trigger kind.
+        case "scheduled": "Scheduled"
         case "missed_catch_up": "Missed catch-up"
         default: run.trigger
         }
@@ -236,6 +260,13 @@ enum SpacesMobileAutomations {
     private static func relativeFormatter() -> RelativeDateTimeFormatter {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
+        return formatter
+    }
+
+    private static func absoluteFormatter() -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
         return formatter
     }
 

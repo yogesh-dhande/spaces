@@ -370,6 +370,29 @@ public struct TerminalServiceAutomationUpdatePayload: Codable, Sendable, Equatab
     }
 }
 
+/// A one-time override of an automation's next occurrence. `nextRunTime` is an ISO8601 instant; the cron
+/// schedule resumes after the overridden run fires.
+public struct TerminalServiceAutomationNextRunPayload: Codable, Sendable, Equatable {
+    public let id: String
+    public let nextRunTime: String
+
+    public init(id: String, nextRunTime: String) {
+        self.id = id
+        self.nextRunTime = nextRunTime
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case nextRunTime
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeRequiredNonEmpty(forKey: .id)
+        nextRunTime = try container.decodeRequiredNonEmpty(forKey: .nextRunTime)
+    }
+}
+
 /// Optional automation filter for the runs listing. `nil` (or an empty value the daemon normalizes away)
 /// lists runs across every automation, newest first.
 public struct TerminalServiceAutomationRunsListPayload: Codable, Sendable, Equatable {
@@ -492,6 +515,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case terminalCommand(TerminalServiceTerminalCommandPayload)
     case automationCreate(TerminalServiceAutomationFields)
     case automationUpdate(TerminalServiceAutomationUpdatePayload)
+    case automationSetNextRun(TerminalServiceAutomationNextRunPayload)
     case automationDelete(id: String)
     case automationList
     case automationRunsList(TerminalServiceAutomationRunsListPayload)
@@ -522,6 +546,7 @@ extension TerminalServiceProfileCommand: Codable {
         case terminalCommand
         case automationCreate
         case automationUpdate
+        case automationSetNextRun
         case automationDelete
         case automationList
         case automationRunsList
@@ -562,6 +587,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
         case .automationCreate: self = .automationCreate(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
         case .automationUpdate: self = .automationUpdate(try container.decode(TerminalServiceAutomationUpdatePayload.self, forKey: key))
+        case .automationSetNextRun: self = .automationSetNextRun(try container.decode(TerminalServiceAutomationNextRunPayload.self, forKey: key))
         case .automationDelete: self = .automationDelete(id: try container.decodeRequiredNonEmpty(forKey: key))
         case .automationList:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
@@ -597,6 +623,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)
         case .automationCreate(let payload): try container.encode(payload, forKey: .automationCreate)
         case .automationUpdate(let payload): try container.encode(payload, forKey: .automationUpdate)
+        case .automationSetNextRun(let payload): try container.encode(payload, forKey: .automationSetNextRun)
         case .automationDelete(let id): try container.encode(id, forKey: .automationDelete)
         case .automationList: try container.encode(TerminalServiceEmptyPayload(), forKey: .automationList)
         case .automationRunsList(let payload): try container.encode(payload, forKey: .automationRunsList)

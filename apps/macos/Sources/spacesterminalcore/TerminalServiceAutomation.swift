@@ -27,7 +27,8 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
     public let timeoutSeconds: Int?
     public let concurrencyPolicy: String
     public let missedRunPolicy: String
-    /// The next scheduled fire time (ISO8601) for an enabled cron automation, or nil.
+    /// The next scheduled fire time (ISO8601): the one-time override when one is pending, otherwise the
+    /// cron schedule's next fire. Nil when nothing is scheduled.
     public let nextFireTime: String?
     public let createdAt: String
     public let updatedAt: String

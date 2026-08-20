@@ -1400,6 +1400,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest)
         case .createAutomation(let payload): return try handleCreateAutomationRequest(payload)
         case .updateAutomation(let payload): return try handleUpdateAutomationRequest(payload)
+        case .setAutomationNextRun(let payload): return try handleSetAutomationNextRunRequest(payload)
         case .deleteAutomation(let payload): return try handleDeleteAutomationRequest(payload)
         case .listAutomations: return try handleListAutomationsRequest()
         case .listAutomationRuns(let payload): return try handleListAutomationRunsRequest(payload, context: context)
@@ -2868,6 +2869,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let draft = try automationDraft(from: payload.fields)
         let automation = try automationOperations.update(payload.id, draft)
         return automationsResponse([automation], message: "Updated automation.")
+    }
+
+    private func handleSetAutomationNextRunRequest(_ payload: TerminalServiceAutomationNextRunPayload) throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let automation = try automationOperations.setNextRun(payload.id, payload.nextRunTime)
+        return automationsResponse([automation], message: "Scheduled next automation run.")
     }
 
     private func handleDeleteAutomationRequest(_ payload: SpacesDeviceAutomationReference) throws -> SpacesDeviceAPIResponse {

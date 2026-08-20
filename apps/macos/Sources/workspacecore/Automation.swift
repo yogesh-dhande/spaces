@@ -57,6 +57,10 @@ public struct Automation: Equatable, Sendable, Identifiable {
     /// The device time zone in which `nextFireTime` was computed. Persisted with the anchor so startup can
     /// reinterpret that same wall-clock occurrence if the device moved while the daemon was stopped.
     public let anchorTimeZoneIdentifier: String?
+    /// A user-chosen one-time instant that replaces this automation's next run. It survives daemon restarts
+    /// and time-zone recomputation, is cleared when it fires (after which a cron automation resumes from its
+    /// expression) and by an explicit edit of the automation.
+    public let nextFireOverride: Date?
     public let createdAt: Date
     public let updatedAt: Date
 
@@ -64,7 +68,7 @@ public struct Automation: Equatable, Sendable, Identifiable {
         id: String, name: String, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, kind: AutomationKind = .script,
         script: String, agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String, timeoutSeconds: Int?,
         concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy, nextFireTime: Date?, createdAt: Date,
-        updatedAt: Date, anchorTimeZoneIdentifier: String? = nil
+        updatedAt: Date, anchorTimeZoneIdentifier: String? = nil, nextFireOverride: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -81,6 +85,7 @@ public struct Automation: Equatable, Sendable, Identifiable {
         self.missedRunPolicy = missedRunPolicy
         self.nextFireTime = nextFireTime
         self.anchorTimeZoneIdentifier = anchorTimeZoneIdentifier
+        self.nextFireOverride = nextFireOverride
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -91,4 +96,8 @@ public struct Automation: Equatable, Sendable, Identifiable {
         guard triggerKind == .cron, let cronExpression, !cronExpression.isEmpty else { return nil }
         return try? AutomationCronSchedule.parse(cronExpression)
     }
+
+    /// The instant the clients render as "Next run": a pending one-time override outranks the cron anchor,
+    /// because while an override stands it is the only occurrence that fires.
+    public var effectiveNextFireTime: Date? { nextFireOverride ?? nextFireTime }
 }

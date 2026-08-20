@@ -495,6 +495,55 @@ struct AutomationsViewModelTests {
         #expect(AutomationsViewModel.compactDuration(-10) == "0 s")
     }
 
+    // MARK: - Next-run popover
+
+    @Test func nextRunSummaryLineNamesTheScheduledInstantOrWhyThereIsNone() {
+        let scheduled = automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", nextFireTime: "2026-08-06T02:00:00Z")
+        #expect(AutomationsViewModel.nextRunSummaryLine(for: scheduled, timeZone: Self.utc) == "Scheduled: Aug 6 2026 02:00")
+
+        // A cron automation the daemon has no upcoming fire for reads as unscheduled rather than as manual.
+        let unscheduled = automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *")
+        #expect(AutomationsViewModel.nextRunSummaryLine(for: unscheduled, timeZone: Self.utc) == "Not scheduled")
+
+        #expect(AutomationsViewModel.nextRunSummaryLine(for: automation(id: "a", name: "A"), timeZone: Self.utc) == "Manual")
+
+        // A one-time override on a manual automation arrives as its next fire time, so the line reports the
+        // instant it will fire at rather than calling it manual.
+        let overridden = automation(id: "a", name: "A", nextFireTime: "2026-08-06T09:15:00Z")
+        #expect(AutomationsViewModel.nextRunSummaryLine(for: overridden, timeZone: Self.utc) == "Scheduled: Aug 6 2026 09:15")
+
+        // A switched-off automation has no next fire whatever the daemon last computed.
+        let disabled = automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", enabled: false, nextFireTime: "2026-08-06T02:00:00Z")
+        #expect(AutomationsViewModel.nextRunSummaryLine(for: disabled, timeZone: Self.utc) == "Not scheduled")
+    }
+
+    @Test func nextRunInstantParsesInTheDeviceTimeZone() {
+        let tokyo = TimeZone(identifier: "Asia/Tokyo")!
+        let instant = AutomationsViewModel.parseNextRunInstant(dateText: "2026-08-06", hour: 9, minute: 30, timeZone: tokyo)
+        // 09:30 in Tokyo (UTC+9) is 00:30 UTC on the same day.
+        #expect(instant == date("2026-08-06T00:30:00Z"))
+        // The same typed values in UTC name a different instant, so the zone is genuinely applied.
+        #expect(
+            AutomationsViewModel.parseNextRunInstant(dateText: "2026-08-06", hour: 9, minute: 30, timeZone: Self.utc) == date("2026-08-06T09:30:00Z"))
+    }
+
+    @Test func nextRunInstantRejectsMalformedInput() {
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "6 Aug 2026", hour: 9, minute: 30, timeZone: Self.utc) == nil)
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "2026-08", hour: 9, minute: 30, timeZone: Self.utc) == nil)
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "", hour: 9, minute: 30, timeZone: Self.utc) == nil)
+        // A day its month does not have is malformed, not something to roll forward into the next month.
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "2026-02-31", hour: 9, minute: 30, timeZone: Self.utc) == nil)
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "2026-08-06", hour: 24, minute: 0, timeZone: Self.utc) == nil)
+        #expect(AutomationsViewModel.parseNextRunInstant(dateText: "2026-08-06", hour: 9, minute: 60, timeZone: Self.utc) == nil)
+    }
+
+    @Test func nextRunInstantMustBeInTheFuture() {
+        #expect(AutomationsViewModel.nextRunInstantIsAcceptable(date("2026-08-05T14:00:01Z"), now: now))
+        #expect(!AutomationsViewModel.nextRunInstantIsAcceptable(date("2026-08-05T13:59:59Z"), now: now))
+        // The current instant is not in the future either: the daemon would reject it.
+        #expect(!AutomationsViewModel.nextRunInstantIsAcceptable(now, now: now))
+    }
+
     // MARK: - Workspace choice preservation
 
     private typealias WorkspaceChoice = AutomationsViewModel.WorkspaceChoice
