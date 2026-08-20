@@ -454,6 +454,54 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertTrue(mergedFrame.scrollRectsOverflowed, "an overflow on either the skipped or surviving frame must poison the merged carry")
     }
 
+    /// The rect merge above is what a stalled main actor grows: every extra collapse appends the
+    /// skipped frame's rects onto the pending one's. Past `GhosttyRenderFrame.maxAccumulatedScrollRects`
+    /// the merged carry stops pretending to be a complete history: the rects are dropped and the frame
+    /// reports overflowed, the same cancelled-carry state the mirror's own buffer degrades to, so the
+    /// mailbox holds a bounded amount no matter how long the stall lasts.
+    func testCoalescedScrollRectMergePastTheCapDropsRectsAndReportsOverflow() async throws {
+        let sessionID = "pipeline-coalesced-scroll-rect-cap"
+        let alpha = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let bravo = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let charlie = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "charl"))
+
+        let rect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 80, deltaRows: 3, deltaColumns: 0)
+        let skippedRects = Array(repeating: rect, count: GhosttyRenderFrame.maxAccumulatedScrollRects)
+        let alphaToBravo = GhosttyRenderUpdateFactory.makeUpdate(
+            target: bravo, baseline: GhosttyRenderUpdateBaseline(frame: alpha), nativeScrollRects: skippedRects, nativeScrollRectsOverflowed: false)
+        let bravoToCharlie = GhosttyRenderUpdateFactory.makeUpdate(
+            target: charlie, baseline: GhosttyRenderUpdateBaseline(frame: bravo), nativeScrollRects: [rect], nativeScrollRectsOverflowed: false)
+        XCTAssertEqual(alphaToBravo.kind, .delta)
+        XCTAssertEqual(bravoToCharlie.kind, .delta)
+
+        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(alpha))
+        let firstDeltaPayload = payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: alphaToBravo)
+        let secondDeltaPayload = payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: bravoToCharlie)
+
+        let collector = RawOutputCollector()
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmitForTesting: { probe.recordSubmission() })
+
+        pipeline.submit(seedPayload)
+        try await waitUntil("seed applied") { collector.recorded.count == 1 }
+
+        let release = blockMainThread()
+        pipeline.submit(firstDeltaPayload)
+        pipeline.submit(secondDeltaPayload)
+        try await waitUntil("both deltas submitted to the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("the coalesced delta applied") { collector.recorded.count == 2 }
+        try await settle()
+
+        let coalesced = collector.recorded[1]
+        XCTAssertEqual(coalesced.coalescedAwayCount, 1, "the alpha->bravo delta must have been coalesced into the surviving apply")
+        let mergedFrame = try XCTUnwrap(coalesced.reduction?.frameToApply)
+        XCTAssertEqual(mergedFrame.scrollRects, [], "a merge past the cap keeps no rects; a truncated history would rebase drags to the wrong rows")
+        XCTAssertTrue(mergedFrame.scrollRectsOverflowed, "a merge past the cap must report the cancelled carry")
+    }
+
     /// A delta that cannot apply resets the baseline inside the reducer. The reset belongs to its place
     /// in the series: the payloads after it must see the cleared baseline, and the full frame that
     /// follows must re-seed it, all without any of them overtaking the others. Submissions are paced so

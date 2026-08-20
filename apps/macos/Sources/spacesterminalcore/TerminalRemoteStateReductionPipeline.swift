@@ -70,10 +70,22 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     func inheritingEffects(ofCoalesced skipped: TerminalRemoteStateReductionOutput) -> TerminalRemoteStateReductionOutput {
         var mergedReduction = reduction
         if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
+            // Bounded like the mirror's own carry buffer: repeated collapses onto one stalled pending
+            // output would otherwise grow the merged array (and re-copy it per collapse) without limit.
+            // Past the cap the rects are dropped and the frame reports overflowed, which the consumer
+            // already treats as a cancelled carry. A producer-side overflow flag alone keeps its rects:
+            // the flag rides through untouched and the consumer poisons on it, so the merge only has to
+            // bound what the merge itself can grow.
+            var mergedRects = skippedFrame.scrollRects + survivingFrame.scrollRects
+            var mergedOverflowed = skippedFrame.scrollRectsOverflowed || survivingFrame.scrollRectsOverflowed
+            if mergedRects.count > GhosttyRenderFrame.maxAccumulatedScrollRects {
+                mergedRects = []
+                mergedOverflowed = true
+            }
             let mergedFrame = GhosttyRenderFrame(
                 version: survivingFrame.version, sessionRevision: survivingFrame.sessionRevision, ownerEpoch: survivingFrame.ownerEpoch,
-                snapshot: survivingFrame.snapshot, scrollRects: skippedFrame.scrollRects + survivingFrame.scrollRects,
-                scrollRectsOverflowed: skippedFrame.scrollRectsOverflowed || survivingFrame.scrollRectsOverflowed)
+                snapshot: survivingFrame.snapshot, scrollRects: mergedRects,
+                scrollRectsOverflowed: mergedOverflowed)
             mergedReduction = TerminalRemoteStateReductionResult(
                 payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: mergedFrame,
                 dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedOutOfBandPayload: base.isRefusedOutOfBandPayload)

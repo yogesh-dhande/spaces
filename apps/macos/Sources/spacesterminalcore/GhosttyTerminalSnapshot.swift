@@ -137,6 +137,13 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 
+    /// Upper bound any accumulator of `scrollRects` across frames applies before falling back to the
+    /// overflowed state: content that moved through this many rects has scrolled far past any local
+    /// anchor worth carrying, and an unbounded accumulation (a stalled main actor coalescing frames, a
+    /// view that cannot apply for a while) would otherwise grow without limit. Shared by the reduction
+    /// pipeline's coalesce merge and the mirror view's drag-carry buffer so the two bounds cannot drift.
+    public static let maxAccumulatedScrollRects = 512
+
     public let version: Int
     public let sessionRevision: UInt64?
     public let ownerEpoch: UInt64

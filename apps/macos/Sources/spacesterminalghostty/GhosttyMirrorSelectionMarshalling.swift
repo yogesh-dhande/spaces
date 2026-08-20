@@ -65,7 +65,7 @@ enum GhosttyMirrorSelectionMarshalling {
         /// window, occluded surface) would otherwise grow this without limit; content that moved
         /// through this many rects has scrolled far past any drag anchor worth carrying, so past the
         /// cap the buffer poisons itself, which reads as a cancelled carry exactly like an overflow.
-        static let maxCarriedRects = 512
+        static let maxCarriedRects = GhosttyRenderFrame.maxAccumulatedScrollRects
 
         private(set) var rects: [GhosttyRenderScrollRectOperation] = []
         private(set) var poisoned = false
