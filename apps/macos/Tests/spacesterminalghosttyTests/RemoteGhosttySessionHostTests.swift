@@ -311,6 +311,29 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sentText.first?.1, true)
     }
 
+    /// The drag-commit copy-on-select write arrives a round trip after the drag. A copy the user
+    /// made inside that window must win: the guarded write yields when the pasteboard's change count
+    /// moved past the one captured at commit, and still writes when it did not.
+    @MainActor func testSelectionResponseWriteYieldsToACopyMadeDuringTheRoundTrip() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-selection-copy", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-mirror-selection-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        mirrorView.pasteboardOverrideForTesting = pasteboard
+
+        let countAtCommit = mirrorView.selectionPasteboardChangeCount
+        mirrorView.writeSelectionTextToPasteboard("dragged text", ifPasteboardUnchangedSince: countAtCommit)
+        XCTAssertEqual(pasteboard.string(forType: .string), "dragged text")
+
+        let staleCount = mirrorView.selectionPasteboardChangeCount
+        pasteboard.clearContents()
+        pasteboard.setString("user copy during round trip", forType: .string)
+        mirrorView.writeSelectionTextToPasteboard("older dragged text", ifPasteboardUnchangedSince: staleCount)
+        XCTAssertEqual(pasteboard.string(forType: .string), "user copy during round trip")
+    }
+
     // MARK: - Owner-targeted clipboard writes
 
     /// The product behavior: a program's copy inside the session lands on the clipboard of the machine

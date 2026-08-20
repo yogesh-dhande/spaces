@@ -499,6 +499,21 @@
             pasteboard.setString(text, forType: .string)
         }
 
+        /// The change count of the pasteboard `writeSelectionTextToPasteboard` writes to. Captured at
+        /// drag-commit time so a selection response that spent a round trip in flight can detect a copy
+        /// the user made in the meantime and yield to it.
+        var selectionPasteboardChangeCount: Int { (pasteboardOverrideForTesting ?? .general).changeCount }
+
+        /// Copy-on-select writer for a shared-selection commit: writes only while the pasteboard still
+        /// holds what it held when the drag committed. A copy the user made during the round trip moved
+        /// the change count, and their copy must win over the older drag's confirmed text.
+        func writeSelectionTextToPasteboard(_ text: String, ifPasteboardUnchangedSince changeCount: Int) {
+            let pasteboard = pasteboardOverrideForTesting ?? .general
+            guard pasteboard.changeCount == changeCount else { return }
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
+
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
             guard let text = (pasteboardOverrideForTesting ?? .general).string(forType: .string), !text.isEmpty else { return false }

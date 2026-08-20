@@ -1007,7 +1007,10 @@
         /// screen-space coordinates. Not owner-gated, matching the daemon's `setSelection` command.
         /// The response's `selectionText` is the single writer for this pasteboard write: see
         /// `GhosttyMirrorAppService`'s suppressed `GHOSTTY_CLIPBOARD_SELECTION` write for why the
-        /// mirror's own local copy-on-select must not also write here.
+        /// mirror's own local copy-on-select must not also write here. The write is therefore a round
+        /// trip behind the drag, which is inherent to writing the daemon's authoritative text: a paste
+        /// issued inside that window still sees the previous clipboard, and a copy the user makes
+        /// inside it wins over the response via the change-count guard below.
         private func sendRemoteSetSelection(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, isRectangle: Bool) {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
             let socketPath = paths.controlSocketPath
@@ -1015,6 +1018,7 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let inputFailureHandler = self.inputFailureHandler
+            let pasteboardChangeCountAtCommit = terminalView.selectionPasteboardChangeCount
             let queue = inputQueue
             queue.enqueue(
                 priority: .userInitiated,
@@ -1029,15 +1033,15 @@
                     // wrapping this in another closure would carry `self` through the same
                     // nonisolated-into-main-actor capture the compiler flags as a data-race risk.
                     if let selectionText = response.selectionText {
-                        await self?.writeSelectionTextToPasteboard(selectionText)
+                        await self?.writeSelectionTextToPasteboard(selectionText, ifPasteboardUnchangedSince: pasteboardChangeCountAtCommit)
                     }
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         /// Writes `setSelection`'s confirmed selection text to the pasteboard. Called from
         /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call.
-        private func writeSelectionTextToPasteboard(_ text: String) {
-            terminalView.writeSelectionTextToPasteboard(text)
+        private func writeSelectionTextToPasteboard(_ text: String, ifPasteboardUnchangedSince changeCount: Int) {
+            terminalView.writeSelectionTextToPasteboard(text, ifPasteboardUnchangedSince: changeCount)
         }
 
         private func sendRemoteClearScreenAndScrollback() {
