@@ -1166,11 +1166,7 @@ import spacesterminalcore
         // Tracks the generation of whichever recordPending call is most recent, so the teardown defer
         // clears exactly the entry left standing at the end of the test, not a stale generation.
         var pendingGeneration: UInt64?
-        defer {
-            if let pendingGeneration {
-                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
-            }
-        }
+        defer { if let pendingGeneration { TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration) } }
 
         XCTAssertFalse(
             harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
@@ -1208,11 +1204,7 @@ import spacesterminalcore
         let harness = try Harness(self)
         let sessionID = UUID().uuidString
         var pendingGeneration: UInt64?
-        defer {
-            if let pendingGeneration {
-                TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration)
-            }
-        }
+        defer { if let pendingGeneration { TerminalSessionPendingLaunchRegistry.shared.clear(sessionID: sessionID, generation: pendingGeneration) } }
 
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
@@ -1272,12 +1264,12 @@ import spacesterminalcore
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation),
-            paths: paths)
+                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .automation), paths: paths)
 
         XCTAssertTrue(
             harness.orchestrator.builtInSessionLaunchIsPending(sessionID: sessionID),
-            "a freshly committed relaunch row must read as launch-pending until the new run's runtime state commits, even though the previous run's exited runtime row is still on disk")
+            "a freshly committed relaunch row must read as launch-pending until the new run's runtime state commits, even though the previous run's exited runtime row is still on disk"
+        )
     }
 
     func testCancelKillsCommandAndRecordsCanceled() throws {
@@ -1967,9 +1959,9 @@ import spacesterminalcore
     func testSchedulingAPastTimeIsRejected() throws {
         let harness = try Harness(self)
         let automation = try harness.insertAutomation(triggerKind: .manual)
-        XCTAssertThrowsError(
-            try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: harness.now().addingTimeInterval(-60))
-        ) { error in XCTAssertTrue(error is AutomationValidationError, "a past next-run time is rejected as invalid") }
+        XCTAssertThrowsError(try harness.service.setAutomationNextRunTime(id: automation.id, nextRunTime: harness.now().addingTimeInterval(-60))) {
+            error in XCTAssertTrue(error is AutomationValidationError, "a past next-run time is rejected as invalid")
+        }
         XCTAssertNil(try harness.store.automation(id: automation.id)?.nextFireOverride, "the rejected schedule never persists an override")
     }
 
@@ -1985,9 +1977,9 @@ import spacesterminalcore
             createdAt: enabled.createdAt, updatedAt: enabled.updatedAt)
         try harness.store.upsertAutomation(disabled)
 
-        XCTAssertThrowsError(
-            try harness.service.setAutomationNextRunTime(id: enabled.id, nextRunTime: harness.now().addingTimeInterval(60))
-        ) { error in XCTAssertTrue(error is AutomationValidationError, "scheduling a disabled automation is rejected") }
+        XCTAssertThrowsError(try harness.service.setAutomationNextRunTime(id: enabled.id, nextRunTime: harness.now().addingTimeInterval(60))) {
+            error in XCTAssertTrue(error is AutomationValidationError, "scheduling a disabled automation is rejected")
+        }
         XCTAssertNil(try harness.store.automation(id: enabled.id)?.nextFireOverride, "the rejected schedule never persists an override")
     }
 
@@ -2009,8 +2001,7 @@ import spacesterminalcore
         let scheduled = try XCTUnwrap(runs.first { $0.trigger == .scheduled }, "the override fires despite the active run")
         XCTAssertEqual(scheduled.status, .skipped, "the skip concurrency policy still applies to an override fire")
         XCTAssertEqual(scheduled.skipReason, .concurrency)
-        XCTAssertNil(
-            try harness.store.automation(id: automation.id)?.nextFireOverride, "the override is consumed rather than retried forever")
+        XCTAssertNil(try harness.store.automation(id: automation.id)?.nextFireOverride, "the override is consumed rather than retried forever")
     }
 }
 

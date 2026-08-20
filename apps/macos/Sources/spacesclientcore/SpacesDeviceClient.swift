@@ -1042,8 +1042,8 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun,
-            .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
+            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,
+            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds

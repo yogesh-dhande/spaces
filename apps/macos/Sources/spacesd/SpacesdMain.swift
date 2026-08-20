@@ -2250,9 +2250,8 @@ enum SpacesDaemonErrorClassification {
     private static func makeAutomationOperations(_ service: @escaping @Sendable () throws -> AutomationService) -> AutomationOperations {
         AutomationOperations(
             create: { draft in try service().createAutomation(draft) }, update: { id, draft in try service().updateAutomation(id: id, draft: draft) },
-            setNextRun: { id, nextRunTime in
-                try service().setAutomationNextRunTime(id: id, nextRunTime: automationNextRunDate(from: nextRunTime))
-            }, delete: { id in try service().deleteAutomationCommand(id: id) }, list: { try service().listAutomations() },
+            setNextRun: { id, nextRunTime in try service().setAutomationNextRunTime(id: id, nextRunTime: automationNextRunDate(from: nextRunTime)) },
+            delete: { id in try service().deleteAutomationCommand(id: id) }, list: { try service().listAutomations() },
             runs: { automationID in try service().listAutomationRuns(automationID: automationID) },
             trigger: { id in try service().triggerAutomation(id: id) }, cancelRun: { runID in try service().cancelAutomationRun(runID: runID) },
             endAgents: { runID in try service().endAttributedAgents(runID: runID) })

@@ -662,19 +662,20 @@ extension ProcessProfileEnvironmentSuites {
         /// so a pane unrelated to the pairing under test can also survive layout restoration: restoring a
         /// persisted layout prunes any pane whose session is not in `retainedTerminalSessionIDs`
         /// (`restoredWorkspacePanelLayout`), so a session absent from every overview never gets a pane.
-        private func overview(processSessionID: String, createdAt: String, retained: [String], extraRowSessionID: String? = nil) -> SpacesDeviceOverviewPayload {
+        private func overview(processSessionID: String, createdAt: String, retained: [String], extraRowSessionID: String? = nil)
+            -> SpacesDeviceOverviewPayload
+        {
             var processRows = [
                 SpacesDeviceWorkspaceProcessRow(
-                    id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1",
-                    sessionID: processSessionID, runState: .running, canRun: true, canStop: true, canRestart: true)
+                    id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1", sessionID: processSessionID,
+                    runState: .running, canRun: true, canStop: true, canRestart: true)
             ]
             var sessions = [
                 SpacesDeviceTerminalSessionSummary(
-                    id: processSessionID, title: "api", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo api",
-                    state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678,
-                    workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project",
-                    createdAt: createdAt, updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true,
-                    attachmentSnapshot: .init(), rowKind: .process)
+                    id: processSessionID, title: "api", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo api", state: .running,
+                    backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678, workspaceID: "workspace-1",
+                    workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt, updatedAt: createdAt,
+                    isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
             ]
             if let extraRowSessionID {
                 processRows.append(
@@ -685,9 +686,9 @@ extension ProcessProfileEnvironmentSuites {
                     SpacesDeviceTerminalSessionSummary(
                         id: extraRowSessionID, title: "other", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo other",
                         state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1235, childPID: 5679,
-                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project",
-                        createdAt: createdAt, updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true,
-                        attachmentSnapshot: .init(), rowKind: .process))
+                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt,
+                        updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
+                )
             }
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
@@ -732,7 +733,8 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the pane is placed")
             let epochBeforeClaim = controller.panelCoordinator.paneReplacementEpoch
 
-            let claimed = controller.panelCoordinator.retargetPaneForReplacement(replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
             #expect(claimed, "precondition: the claim succeeded")
             #expect(controller.panelCoordinator.paneReplacementEpoch != epochBeforeClaim, "precondition: the epoch moved")
             #expect(controller.panelCoordinator.placement(forSessionID: "replacement") != nil, "precondition: the pane now hosts the replacement")
@@ -776,9 +778,7 @@ extension ProcessProfileEnvironmentSuites {
                         overview: SpacesDeviceOverview(device: device(), overview: freshOverview), daemonStatus: nil, compatibility: nil)),
                 epoch: currentEpoch)
 
-            #expect(
-                controller.panelCoordinator.placement(forSessionID: "replacement") == nil,
-                "an overview whose epoch is current prunes normally")
+            #expect(controller.panelCoordinator.placement(forSessionID: "replacement") == nil, "an overview whose epoch is current prunes normally")
         }
 
         /// The stale-epoch skip guards pruning only, never the retarget: a genuine replacement pairing

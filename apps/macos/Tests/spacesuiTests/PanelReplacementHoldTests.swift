@@ -383,9 +383,8 @@ extension ProcessProfileEnvironmentSuites {
                     SpacesDeviceTerminalSessionSummary(
                         id: processSessionID, title: "api", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: "echo api",
                         state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678,
-                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project",
-                        createdAt: createdAt, updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true,
-                        attachmentSnapshot: .init(), rowKind: .process)
+                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: createdAt,
+                        updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(), rowKind: .process)
                 ], retainedTerminalSessionIDs: retained)
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
             return AppKitController.DeviceSection(

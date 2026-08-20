@@ -126,8 +126,7 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
 
 extension SidebarRuntimeTargetItem {
     var attentionStatus: SidebarAttentionStatus? {
-        SidebarAttentionStatus.resolve(
-            kind: kind, runState: runState, agentActivityState: agentActivityState, isExitAcknowledged: isExitAcknowledged)
+        SidebarAttentionStatus.resolve(kind: kind, runState: runState, agentActivityState: agentActivityState, isExitAcknowledged: isExitAcknowledged)
     }
 }
 
@@ -169,8 +168,9 @@ extension AppKitController {
         // Undismissed attention ids this row owns, from the one alert-identity derivation
         // (`rowAlertsAttentionEntries`) the sidebar menu and the color downgrade below both read.
         func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
-            rowAlertsAttentionEntries(in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID)
-                .filter { !dismissedAttentionItemIDs.contains($0.attentionID) }.map(\.attentionID)
+            rowAlertsAttentionEntries(in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID).filter {
+                !dismissedAttentionItemIDs.contains($0.attentionID)
+            }.map(\.attentionID)
         }
         switch target.kind {
         case .browser:
@@ -186,8 +186,7 @@ extension AppKitController {
             let isExitAcknowledged =
                 row.runState == .exited
                 && isProcessExitAcknowledged(
-                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups,
-                    dismissedAttentionItemIDs: dismissedAttentionItemIDs)
+                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs)
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
@@ -327,7 +326,8 @@ extension AppKitController {
                 try mutation(device, SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
             switch result {
-            case .success(let response): self.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
+            case .success(let response):
+                self.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
             case .failure(let error): self.showError(error)
             }
         }

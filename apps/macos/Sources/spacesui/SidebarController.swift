@@ -671,7 +671,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // `remoteOverviewPushApplyGenerations`.
                 guard
                     Self.pullSuccessStillFreshest(
-                        pushApplyGeneration: pushApplyGenerationAtStart, currentPushApplyGeneration: self.remoteOverviewPushApplyGenerations[record.id] ?? 0)
+                        pushApplyGeneration: pushApplyGenerationAtStart,
+                        currentPushApplyGeneration: self.remoteOverviewPushApplyGenerations[record.id] ?? 0)
                 else {
                     // A subscription push already applied a newer overview while this pull was in flight.
                     // Applying this snapshot now would retarget/prune the sidebar's open panes against data

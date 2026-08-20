@@ -210,33 +210,11 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     var id: String { "loose:\(workspaceID)" }
 }
 
-/// One hidden project, surfaced in the Spaces tab's "Hidden" recovery section as a single row instead of
-/// listing its workspaces individually — iOS has no UI to hide a project (that is Mac-only), only to
-/// recover one, so this exists purely to back that row and its unhide action.
-struct SpacesMobileHiddenProjectSummary: Identifiable, Equatable {
-    let projectID: String
-    let projectName: String
-    let workspaceCount: Int
-
-    var id: String { projectID }
-}
-
-enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
+enum SpacesMobileWorkspaceRowType: String, Hashable {
     case processes
     case codingAgents
     case workspaceTerminals
     case browserSessions
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .processes: "Processes"
-        case .codingAgents: "Coding Agents"
-        case .workspaceTerminals: "Workspace Terminals"
-        case .browserSessions: "Browser Sessions"
-        }
-    }
 
     var iconName: String {
         switch self {
@@ -244,16 +222,6 @@ enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable 
         case .codingAgents: "cpu"
         case .workspaceTerminals: "terminal.fill"
         case .browserSessions: "globe"
-        }
-    }
-}
-
-extension SpacesDeviceRunState {
-    var mobileLabel: String {
-        switch self {
-        case .notStarted: "Not Started"
-        case .running: "Running"
-        case .exited: "Exited"
         }
     }
 }
@@ -520,17 +488,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Only a delete that asked for a branch to be deleted produces one, so a plain delete stays silent.
     var deletedWorkspaceNotice: String?
     var searchText = ""
-    var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
-    var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
     var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
     var selectedTab: SpacesMobileTab = .spaces
     /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
     /// launch starts fully expanded.
     var collapsedWorkspaceIDs: Set<String> = []
-    /// Whether the Spaces tab's "Hidden" recovery section is expanded. In-memory only, like
-    /// `collapsedWorkspaceIDs`; a fresh launch starts collapsed since it exists to be checked
-    /// occasionally, not browsed by default.
-    var isHiddenSectionExpanded = false
     /// Workspaces whose delete mutation is in flight. The daemon takes seconds to stop the workspace and
     /// remove its worktree, and every overview published in that window still lists it, so the Spaces tab
     /// marks the workspace as deleting instead of leaving it looking untouched (see
@@ -785,45 +747,27 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return overview.workspaces.filter { overview.isWorkspaceVisible($0) }
     }
 
-    /// Individually hidden workspaces whose project is *not* hidden, in the overview's own order — the
-    /// same order `visibleWorkspaces` uses without any further sort of its own. Backs the Spaces tab's
-    /// "Hidden" recovery section's per-workspace rows.
-    ///
-    /// A workspace under a hidden project is excluded here even though it is also invisible: it recovers
-    /// through its project's single entry in `hiddenProjects` instead of appearing a second time as its
-    /// own row, so the two lists never double-list one workspace.
-    var hiddenWorkspaces: [SpacesDeviceWorkspaceSummary] {
+    /// The Workspaces sheet's project -> workspace outline for the active device, filtered by the sheet's
+    /// own query. Built from the same shared tree the Mac's Workspaces dialog builds, so both clients list
+    /// the same rows, counts, and dimming. Unlike every other list here it reads the raw overview rather
+    /// than `visibleWorkspaces`: it is the surface hidden rows are recovered from, so it must list them.
+    func workspaceVisibilityProjects(query: String) -> [WorkspaceVisibilityProjectNode] {
         guard let overview else { return [] }
-        return overview.workspaces.filter { $0.isHidden && !overview.isProjectHidden(forProjectID: $0.projectID) }
-    }
-
-    /// Hidden projects, in the overview's own order, each carrying the count of workspaces the daemon
-    /// still lists under it. Backs the Spaces tab's "Hidden" recovery section's per-project rows — one
-    /// entry recovers every workspace under that project at once, rather than the section listing them
-    /// individually.
-    var hiddenProjects: [SpacesMobileHiddenProjectSummary] {
-        guard let overview else { return [] }
-        var workspaceCounts: [String: Int] = [:]
-        for workspace in overview.workspaces { workspaceCounts[workspace.projectID, default: 0] += 1 }
-        return overview.projects.filter(\.isHidden).map {
-            SpacesMobileHiddenProjectSummary(projectID: $0.id, projectName: $0.name, workspaceCount: workspaceCounts[$0.id] ?? 0)
-        }
+        return WorkspaceVisibilityTree.projectNodes(overview: overview, query: query)
     }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
-        let allFiltersSelected =
-            visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count && visibleRunStates.count == 3
-            && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return visibleWorkspaces.map { SpacesMobileWorkspaceGroup(workspace: $0, rows: workspaceRuntimeRows(for: $0)) } }
         return visibleWorkspaces.compactMap { workspace in
-            let allRows = workspaceRuntimeRows(for: workspace)
-            let filteredRows = allRows.filter { row in rowMatchesFilters(row, workspace: workspace, query: query) }
-            if allFiltersSelected { return SpacesMobileWorkspaceGroup(workspace: workspace, rows: allRows) }
-            if workspaceMatchesSearch(workspace, query: query), visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count {
-                return SpacesMobileWorkspaceGroup(workspace: workspace, rows: filteredRows)
-            }
-            guard !filteredRows.isEmpty else { return nil }
-            return SpacesMobileWorkspaceGroup(workspace: workspace, rows: filteredRows)
+            // A workspace whose own name, project, or directory matches keeps all of its rows: the user
+            // asked for the workspace, not for a subset of what runs in it. Otherwise it survives only as
+            // the band over its own matching rows.
+            let rows = workspaceRuntimeRows(for: workspace)
+            if workspaceMatchesSearch(workspace, query: query) { return SpacesMobileWorkspaceGroup(workspace: workspace, rows: rows) }
+            let matchingRows = rows.filter { rowMatchesSearch($0, workspace: workspace, query: query) }
+            guard !matchingRows.isEmpty else { return nil }
+            return SpacesMobileWorkspaceGroup(workspace: workspace, rows: matchingRows)
         }
     }
 
@@ -841,7 +785,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // exists beside the band being removed.
         let sessions = (overview?.sessions ?? []).filter { session in
             workspaceByID[session.workspaceID] != nil && !representedSessionIDs.contains(session.id)
-                && terminalSessionMatchesFilters(session, query: query)
+                && terminalSessionMatchesSearch(session, query: query)
         }
         let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
@@ -951,8 +895,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func undismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow) -> [SpacesMobileAttentionEvent] {
         guard let overview else { return [] }
         return SpacesMobileAttention.events(
-            in: overview, focusedSessionID: watchedTerminalSessionID,
-            watchWindowsBySessionID: terminalWatchWindowsBySessionID, includingHiddenWorkspaces: true
+            in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID,
+            includingHiddenWorkspaces: true
         ).filter { row.matches($0) && !dismissedAlertIDs.contains($0.id) }
     }
 
@@ -974,9 +918,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// one: every other row family's dot keeps tracking live state regardless of dismissal.
     func isExitAcknowledged(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
         guard case .process = row.source, let overview else { return false }
-        guard let event = SpacesMobileAttention.allEvents(in: overview).first(where: { row.matches($0) && $0.kind == .exited }) else {
-            return false
-        }
+        guard let event = SpacesMobileAttention.allEvents(in: overview).first(where: { row.matches($0) && $0.kind == .exited }) else { return false }
         return dismissedAlertIDs.contains(event.id)
     }
 
@@ -1169,8 +1111,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func toggleHiddenSectionExpanded() { isHiddenSectionExpanded.toggle() }
-
     /// Resolves a session summary for navigation, including sessions synthesized from
     /// workspace terminal rows that are not in the overview's session list.
     func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
@@ -1223,24 +1163,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var activeDeviceName: String? {
         guard let activeDeviceID else { return nil }
         return pairedDevices.first(where: { $0.id == activeDeviceID })?.name
-    }
-
-    func toggleRowTypeFilter(_ type: SpacesMobileWorkspaceRowType) {
-        if visibleRowTypes.contains(type) {
-            guard visibleRowTypes.count > 1 else { return }
-            visibleRowTypes.remove(type)
-        } else {
-            visibleRowTypes.insert(type)
-        }
-    }
-
-    func toggleRunStateFilter(_ state: SpacesDeviceRunState) {
-        if visibleRunStates.contains(state) {
-            guard visibleRunStates.count > 1 else { return }
-            visibleRunStates.remove(state)
-        } else {
-            visibleRunStates.insert(state)
-        }
     }
 
     /// Current bind status of the on-device browser proxy, so the UI can surface a bind failure.
@@ -2184,42 +2106,61 @@ private enum SpacesMobileMutationTimeoutRecovery {
         await performWorkspaceMutation { try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
     }
 
-    /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
-    /// leaves a hidden workspace running with no row left to stop it from.
-    func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+    /// Sets one workspace's visibility. Hiding stops the workspace first when it is running — matching the
+    /// Mac, which never leaves a hidden workspace running with no row left to stop it from. Unhiding
+    /// starts nothing: a hidden workspace was already stopped on the way in, so recovery is purely a
+    /// visibility change back to normal.
+    ///
+    /// The stop is decided from a freshly fetched overview rather than the polled snapshot this app is
+    /// showing, so a workspace someone started since the last poll is still stopped before it is hidden.
+    /// The caller's confirmation is decided from the cached state (that is all a prompt can read), so the
+    /// two can disagree in the seconds between; the fresh read is what governs what actually happens.
+    func setWorkspaceHidden(workspaceID: String, isHidden: Bool) async {
         // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving.
-        // `performWorkspaceMutation` below still gates on `isMutating`, since Hide rides the shared
+        // `performWorkspaceMutation` below still gates on `isMutating`, since this rides the shared
         // `commandChannel`, but that alone would not catch this: an unresolved delete leaves `isMutating`
-        // false (see `deleteWorkspace`), so hiding needs its own check of the pending-deletion mark. The
+        // false (see `deleteWorkspace`), so this needs its own check of the pending-deletion mark. The
         // marked predicate, not the local set: a delete started on another client is just as much a row
         // on its way out.
-        guard !isWorkspacePendingDeletion(workspace.id) else { return }
+        guard !isWorkspacePendingDeletion(workspaceID) else { return }
         await performWorkspaceMutation {
-            let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
-                throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+            if isHidden {
+                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+                guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspaceID }) else {
+                    throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+                }
+                if currentWorkspace.isRunning { _ = try await bridgeClient.stopWorkspace(workspaceID: workspaceID, commandChannel: commandChannel) }
             }
-            if currentWorkspace.isRunning { _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
-            return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
+            return try await bridgeClient.setWorkspaceHidden(workspaceID: workspaceID, isHidden: isHidden, commandChannel: commandChannel)
         }
     }
 
-    /// Unhides the workspace. Unlike `hideWorkspace`, this never stops anything — a hidden workspace was
-    /// already stopped on the way in, and unhiding is purely a visibility change back to normal.
-    func unhideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+    /// Sets a project's visibility, stopping every running workspace under it before hiding it, for the
+    /// same reason a workspace hide stops the workspace.
+    ///
+    /// The project flag is independent of each workspace's, so this never writes a child's flag: unhiding
+    /// the project brings back exactly the workspaces that were shown before it was hidden.
+    func setProjectHidden(projectID: String, isHidden: Bool) async {
         await performWorkspaceMutation {
-            try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: false, commandChannel: commandChannel)
+            if isHidden {
+                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+                for workspace in currentOverview.workspaces where workspace.projectID == projectID && workspace.isRunning {
+                    // A workspace that will not stop leaves the project visible: hiding it now would
+                    // strand that workspace out of view still running.
+                    _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+                }
+            }
+            return try await bridgeClient.setProjectHidden(projectID: projectID, isHidden: isHidden, commandChannel: commandChannel)
         }
     }
 
-    /// Unhides the project, clearing only its own flag. iOS has no UI to hide a project (that is
-    /// Mac-only, from the sidebar), so this is the recovery half only — like `unhideWorkspace`, it never
-    /// stops or otherwise touches the workspaces underneath it; they simply stop being suppressed by it.
-    func unhideProject(_ project: SpacesMobileHiddenProjectSummary) async {
-        await performWorkspaceMutation {
-            try await bridgeClient.setProjectHidden(projectID: project.projectID, isHidden: false, commandChannel: commandChannel)
-        }
+    /// Names of the running workspaces a project hide would stop, from the currently published overview —
+    /// what the confirmation prompt names.
+    func runningWorkspaceNames(inProjectID projectID: String) -> [String] {
+        (overview?.workspaces ?? []).filter { $0.projectID == projectID && $0.isRunning }.map(\.displayName)
     }
+
+    func isWorkspaceRunning(workspaceID: String) -> Bool { overview?.workspaces.first(where: { $0.id == workspaceID })?.isRunning == true }
 
     /// Reconciliation attempts after an indeterminate `archiveWorkspace` failure (see `deleteWorkspace`
     /// and `isIndeterminateDeleteOutcome`). The daemon
@@ -2645,36 +2586,30 @@ private enum SpacesMobileMutationTimeoutRecovery {
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
     }
 
-    private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
-        guard visibleRowTypes.contains(row.type) else { return false }
-        // Browser session rows carry no run state (see `SpacesMobileWorkspaceRuntimeRow.runState`), so
-        // the run-state filter only applies to rows that actually have one.
-        if !row.isBrowserSession { guard visibleRunStates.contains(row.runState) else { return false } }
+    /// The Spaces tab's live search, over every field a row is identified by. Fuzzy — the same matcher the
+    /// Workspaces sheet and the Mac's command palette use — so a few characters of a name find it without
+    /// the user typing a contiguous substring of it.
+    ///
+    /// Membership only, never order: the list stays in its own project/workspace order while the search
+    /// narrows it, rather than reshuffling under the user as they type.
+    private func matchesSearch(query: String, fields: [String]) -> Bool {
         guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
-            value.localizedStandardContains(query)
-        }
+        return FuzzyTextSearch.match(query: query, fields: fields.map { FuzzyTextSearch.Field(text: $0) }) != nil
+    }
+
+    private func rowMatchesSearch(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
+        matchesSearch(query: query, fields: [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail])
     }
 
     private func workspaceMatchesSearch(_ workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
-        guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.displayName, workspace.dir].contains { $0.localizedStandardContains(query) }
+        matchesSearch(query: query, fields: [workspace.projectName, workspace.displayName, workspace.dir])
     }
 
-    private func terminalSessionMatchesFilters(_ session: SpacesDeviceTerminalSessionSummary, query: String) -> Bool {
+    private func terminalSessionMatchesSearch(_ session: SpacesDeviceTerminalSessionSummary, query: String) -> Bool {
         guard session.rowKind == .liveSession else { return false }
-        guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
-        guard !query.isEmpty else { return true }
-        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title, session.liveTitle].compactMap(\.self).contains {
-            $0.localizedStandardContains(query)
-        }
-    }
-
-    private func runState(for state: TerminalSessionState) -> SpacesDeviceRunState {
-        switch state {
-        case .starting, .running: .running
-        case .exited, .failed: .exited
-        }
+        return matchesSearch(
+            query: query,
+            fields: [session.projectName, session.workspaceTitle, session.workingDirectory, session.title, session.liveTitle].compactMap(\.self))
     }
 
     /// Reads the model's currently published `overview` — the right data for every UI-facing caller,

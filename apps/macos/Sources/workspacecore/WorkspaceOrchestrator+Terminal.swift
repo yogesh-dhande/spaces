@@ -520,8 +520,7 @@ extension WorkspaceOrchestrator {
         {
             return false
         }
-        guard
-            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+        guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
             let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
         let age = now.timeIntervalSince(createdAt)
@@ -630,9 +629,7 @@ extension WorkspaceOrchestrator {
     /// it names changes, so the refreshed overview tells the client which pane to point at the
     /// replacement. A launch that never happens still releases the hold from `restartProcessInTerminal`'s
     /// own teardown close, which is the one thing no client can infer.
-    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? {
-        normalizedTerminalSessionID(process.terminalTrackingID)
-    }
+    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? { normalizedTerminalSessionID(process.terminalTrackingID) }
 
     /// Releases every pane this restart is still holding: held by the stop, and never claimed by a
     /// replacement. Only emitted holds are released, so a stop that failed before sending them cannot

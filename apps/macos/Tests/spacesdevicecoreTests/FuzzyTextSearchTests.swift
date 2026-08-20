@@ -1,10 +1,10 @@
 import Testing
 
-@testable import spacesui
+@testable import spacesdevicecore
 
-@Suite struct CommandPaletteFuzzySearchTests {
+@Suite struct FuzzyTextSearchTests {
     @Test func contiguousMatchesRankAheadOfSparseMatches() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "gst",
             candidates: [.init(id: "ghostty", fields: [.init(text: "Ghostty")]), .init(id: "greatest", fields: [.init(text: "Greatest")])])
 
@@ -13,7 +13,7 @@ import Testing
     }
 
     @Test func wordStartsRankAheadOfInteriorMatches() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "doc", candidates: [.init(id: "docs", fields: [.init(text: "Docs")]), .init(id: "adoc", fields: [.init(text: "adoc")])])
 
         #expect(results.map(\.id) == ["docs", "adoc"])
@@ -21,7 +21,7 @@ import Testing
 
     @Test func phraseCanMatchAcrossWorkspaceAndNameFields() throws {
         let match = try #require(
-            CommandPaletteFuzzySearch.match(
+            FuzzyTextSearch.match(
                 query: "atlas docs",
                 fields: [
                     .init(text: "Atlas Workspace", weight: 0.9), .init(text: "Docs", weight: 1.0),
@@ -33,7 +33,7 @@ import Testing
     }
 
     @Test func compactTokenCanMatchAcrossNameAndDetailViaCombinedField() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "fu",
             candidates: [
                 .init(
@@ -54,7 +54,7 @@ import Testing
     }
 
     @Test func nameWeightBeatsDetailWeightWhenBothMatch() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "claude",
             candidates: [
                 .init(
@@ -69,19 +69,19 @@ import Testing
     }
 
     @Test func matchingIsCaseAndDiacriticInsensitive() throws {
-        let match = try #require(CommandPaletteFuzzySearch.match(query: "resume", fields: [.init(text: "Resume"), .init(text: "Résumé")]))
+        let match = try #require(FuzzyTextSearch.match(query: "resume", fields: [.init(text: "Resume"), .init(text: "Résumé")]))
         #expect(match.score > 0.5)
     }
 
     @Test func resultsPreserveInputOrderWhenScoresTie() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "abc", candidates: [.init(id: "first", fields: [.init(text: "abc")]), .init(id: "second", fields: [.init(text: "abc")])])
 
         #expect(results.map(\.id) == ["first", "second"])
     }
 
     @Test func missingTokenRejectsCandidate() {
-        let results = CommandPaletteFuzzySearch.rank(
+        let results = FuzzyTextSearch.rank(
             query: "atlas docs", candidates: [.init(id: "workspace-only", fields: [.init(text: "Atlas Workspace"), .init(text: "Frontend")])])
 
         #expect(results.isEmpty)

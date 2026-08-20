@@ -221,7 +221,9 @@ enum SpacesMobileAutomations {
     /// live, polled state; otherwise a summary is synthesized from the run itself — mirroring
     /// `SpacesMobileAppModel.terminalSession(from:in:)` — so a retained historical run still opens its
     /// (by-then read-only) transcript after its session has aged out of the overview window.
-    static func runSession(for run: TerminalServiceAutomationRunSummary, overview: SpacesDeviceOverviewPayload?) -> SpacesDeviceTerminalSessionSummary? {
+    static func runSession(for run: TerminalServiceAutomationRunSummary, overview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         guard runIsNavigable(run), let sessionID = run.terminalSessionID else { return nil }
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
         let workspace = run.workspaceID.flatMap { id in overview?.workspaces.first { $0.id == id } }

@@ -750,9 +750,9 @@
                 createdAt: createdAt, attributedAgents: attributedAgents)
         }
 
-        private func makeSession(
-            id: String, title: String = "Session", state: TerminalSessionState = .running, workspaceID: String = "workspace-1"
-        ) -> SpacesDeviceTerminalSessionSummary {
+        private func makeSession(id: String, title: String = "Session", state: TerminalSessionState = .running, workspaceID: String = "workspace-1")
+            -> SpacesDeviceTerminalSessionSummary
+        {
             SpacesDeviceTerminalSessionSummary(
                 id: id, title: title, workingDirectory: "/tmp", shell: "zsh", command: nil, state: state, backend: .ghosttyEmbedded,
                 lifetimePolicy: .persistent, servicePID: 0, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil, projectID: nil,

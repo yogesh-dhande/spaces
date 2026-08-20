@@ -1,4 +1,5 @@
 import AppKit
+import spacesdevicecore
 import spacesterminalcore
 
 /// One row of the Workspaces dialog outline, in the reference form `NSOutlineView` needs for item

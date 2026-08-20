@@ -46,9 +46,7 @@ import spacesdevicecore
 
     private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [])
         -> SpacesDeviceOverviewPayload
-    {
-        SpacesDeviceOverviewPayload(workspaces: workspaces, sessions: sessions)
-    }
+    { SpacesDeviceOverviewPayload(workspaces: workspaces, sessions: sessions) }
 
     /// The case the diff exists for: a configured process whose run exited is started again. Its row keeps
     /// its id and names the replacement session, which is the only signal the client gets, since the

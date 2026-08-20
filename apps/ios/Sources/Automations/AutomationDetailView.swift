@@ -21,9 +21,7 @@ struct AutomationDetailView: View {
     @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
     @State private var isShowingNextRunSheet = false
 
-    private var automation: TerminalServiceAutomationSummary? {
-        model.automationRows.first(where: { $0.automation.id == automationID })?.automation
-    }
+    private var automation: TerminalServiceAutomationSummary? { model.automationRows.first(where: { $0.automation.id == automationID })?.automation }
 
     private var runs: [SpacesMobileAutomationRunRow] {
         SpacesMobileAutomations.mergedRunRows(
@@ -38,9 +36,7 @@ struct AutomationDetailView: View {
 
     /// Fetches this automation's run history through the daemon's retained-runs endpoint, supplying the
     /// older tail the overview window doesn't carry.
-    private func loadRuns() async {
-        if let runs = await model.fetchAutomationRuns(automationID: automationID) { fetchedRuns = runs }
-    }
+    private func loadRuns() async { if let runs = await model.fetchAutomationRuns(automationID: automationID) { fetchedRuns = runs } }
 
     @ViewBuilder private var content: some View {
         if let automation {
@@ -119,10 +115,9 @@ struct AutomationDetailView: View {
     /// scrolls, and hiding part of the command would misrepresent what the automation does.
     private func commandBlock(_ automation: TerminalServiceAutomationSummary) -> some View {
         let command = automation.kind == "agent" ? (automation.agentPrompt ?? "") : automation.script
-        return Text(command).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted).frame(
-            maxWidth: .infinity, alignment: .leading
-        ).padding(10).background(Theme.surface2).clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)).padding(.horizontal, 20).padding(
-            .top, 4)
+        return Text(command).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10).background(Theme.surface2).clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)).padding(.horizontal, 20).padding(
+                .top, 4)
     }
 
     @ViewBuilder private var runsSection: some View {

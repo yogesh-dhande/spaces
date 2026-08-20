@@ -551,8 +551,8 @@ public enum DatabaseSchema {
                     """)
         },
         // Existing rows carry NULL: no automation could have a next-run override before this version.
-        DatabaseMigrationStep(fromVersion: 16, toVersion: 17, description: "Persist automation next-run overrides", requiresBackup: true) {
-            handle in try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN next_fire_override REAL;")
+        DatabaseMigrationStep(fromVersion: 16, toVersion: 17, description: "Persist automation next-run overrides", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN next_fire_override REAL;")
         },
     ]
 

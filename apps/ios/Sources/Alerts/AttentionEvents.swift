@@ -233,8 +233,8 @@ enum SpacesMobileAttention {
     /// Derivation here deliberately suppresses nothing — no focused session, no watch windows, and hidden
     /// workspaces included — because a temporarily suppressed event is still one this overview describes,
     /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace,
-    /// directly or via its project, is exactly such a suppression: both are reversible from iOS
-    /// (`unhideWorkspace`, `unhideProject`), and reversing either must not resurface alerts the user
+    /// directly or via its project, is exactly such a suppression: both are reversible from iOS (the
+    /// Workspaces sheet's checkboxes), and reversing either must not resurface alerts the user
     /// already dismissed while it was hidden. A workspace the overview has stopped describing altogether
     /// is not suppressed but deleted, so its dismissals do prune — there is nothing left to resurface them.
     static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
