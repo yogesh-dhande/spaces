@@ -3830,7 +3830,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 "Spaces could not open this browser session because it is not allowed to control Google Chrome. Allow Spaces to control Google Chrome in System Settings > Privacy & Security > Automation."
         case .granted, .notDetermined, .unavailable:
             return
-                "Spaces could not open this browser session in Google Chrome. Workspace browser sessions open in Google Chrome; make sure it is installed and running."
+                // Not "installed and running": scripting a quit Chrome launches it, so a failure
+                // here means Chrome is missing or cannot be scripted, never merely closed.
+                "Spaces could not open this browser session in Google Chrome. Workspace browser sessions open in Google Chrome; make sure it is installed."
         }
     }
 
@@ -9905,15 +9907,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         NSPasteboard.general.setString(path, forType: .string)
     }
 
+    /// Reveals a workspace directory from the detail Reveal button or the sidebar row menu.
     @objc func revealDirectoryInFinder(_ sender: Any) {
         if let context = Self.senderWorkspacePathActionContext(sender) {
             if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: context.workspaceID) { return }
-            NSWorkspace.shared.selectFile(context.path, inFileViewerRootedAtPath: "")
+            revealPathInFinder(context.path)
             return
         }
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+        revealPathInFinder(path)
+    }
+
+    /// Reveals a path and reports a reveal macOS refused, most often a worktree deleted outside
+    /// Spaces whose row survives until the next discovery scan retires it. Spaces does not hide
+    /// itself for a Finder reveal, so nothing else would explain the absent Finder window: a
+    /// discarded `false` here reads as the click having done nothing at all.
+    private func revealPathInFinder(_ path: String) {
+        guard !NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") else { return }
+        showError(WorkspaceError.invalidArgument(message: Self.finderRevealFailureMessage(path: path)))
     }
 
     /// Accepts the `identifier.rawValue` from either an `NSMenuItem` or any
@@ -10329,10 +10341,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
         guard NSWorkspace.shared.open(url) else {
-            showError(WorkspaceError.invalidArgument(message: "Spaces could not reveal \(workspace.dir) in Finder."))
+            showError(WorkspaceError.invalidArgument(message: Self.finderRevealFailureMessage(path: workspace.dir)))
             return
         }
     }
+
+    /// One message for every Finder reveal entry point: the keyboard shortcut, the workspace
+    /// detail Reveal button, and the sidebar row menu.
+    nonisolated static func finderRevealFailureMessage(path: String) -> String { "Spaces could not reveal \(path) in Finder." }
 
     /// Marks a workspace whose delete the user just confirmed, and moves the selection off it: a marked
     /// row is inert, so it must not stay selected with its detail pane open. The marking is read on every
@@ -10532,6 +10548,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
+                // Unlike the editor path, this one needs no palette dismissal of its own. The editor
+                // runs off a Carbon global hotkey that fires with any app frontmost, so it can be
+                // invoked while the palette is key; this is a local monitor, and a visible palette is
+                // key with its search field first responder, so the `isTextInputFocused()` check above
+                // returns the event before reaching here. Finder therefore cannot be covered by the
+                // palette's return-focus restore.
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceFinder(workspaceID: workspaceID) }
                 return nil
             }

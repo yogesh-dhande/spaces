@@ -23,6 +23,14 @@ import systembridge
         }
     }
 
+    /// Every Finder reveal entry point reports a refused reveal through one message, so the
+    /// keyboard shortcut, the detail Reveal button, and the sidebar row menu cannot drift apart.
+    @Test func finderRevealFailureNamesTheDirectoryAndFinder() {
+        let message = AppKitController.finderRevealFailureMessage(path: "/Users/someone/code/harbor")
+        #expect(message.contains("/Users/someone/code/harbor"))
+        #expect(message.contains("Finder"))
+    }
+
     @Test func everyVariantNamesChromeAndNoOtherBrowser() {
         for status: ChromeAutomationStatus in [.denied, .granted, .notDetermined, .unavailable] {
             let message = AppKitController.browserSessionFocusFailureMessage(automationStatus: status)
