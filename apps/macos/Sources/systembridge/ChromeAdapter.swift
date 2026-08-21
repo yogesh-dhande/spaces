@@ -29,17 +29,17 @@ public final class ChromeAdapter {
 
     public func openWindow(url: String, background: Bool = false) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let activateLine = background ? "" : "activate"
         let script = """
             tell application "Google Chrome"
-              \(activateLine)
               set newWindow to make new window
               set URL of active tab of newWindow to "\(escaped)"
               return id of newWindow
             end tell
             """
         let output = try runChromeScript(script)
-        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        let windowID = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        if !background, windowID > 0 { bringChromeForward(raisedWindowID: windowID) }
+        return windowID
     }
 
     public func openTabInFirstAvailableWindow(windowIDs: [Int], containingAnyURLPrefix urlPrefixes: [String], url: String, background: Bool = false)
@@ -58,8 +58,8 @@ public final class ChromeAdapter {
             ? ""
             : """
                   set active tab index of w to count of tabs of w
+                  set minimized of w to false
                   set index of w to 1
-                  activate
             """
         let script = """
             set requestedWindowIDs to {\(requestedIDs)}
@@ -94,6 +94,7 @@ public final class ChromeAdapter {
             """
         let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let windowID = Int(output), windowID > 0 else { return nil }
+        if !background { bringChromeForward(raisedWindowID: windowID) }
         return windowID
     }
 
@@ -156,17 +157,6 @@ public final class ChromeAdapter {
         return (Int(output) ?? 0) > 0
     }
 
-    public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil, windowIDs: nil) }
-
-    /// Returns tabs from the requested Chrome AppleScript window ids without changing focus.
-    /// Window-cycle uses this to decide whether a workspace browser session is already open
-    /// in the client-tracked window, rather than accepting an unrelated tab with the same URL.
-    public func tabs(inWindowIDs windowIDs: [Int]) throws -> [ChromeWindowMatch] {
-        let uniqueWindowIDs = Array(Set(windowIDs.filter { $0 > 0 })).sorted()
-        guard !uniqueWindowIDs.isEmpty else { return [] }
-        return try queryTabs(urlPrefix: nil, windowIDs: uniqueWindowIDs)
-    }
-
     /// Returns the requested-window tab list and the frontmost active tab URL from one Chrome
     /// AppleScript invocation. Window cycling needs both values to build the open target set and
     /// locate the current browser target, so keeping them together avoids an extra Apple Events round trip.
@@ -209,46 +199,6 @@ public final class ChromeAdapter {
         return ChromeTabSnapshot(tabs: Self.parseTabRows(tabRows), frontmostActiveTabURL: frontmostURL?.isEmpty == false ? frontmostURL : nil)
     }
 
-    public func focusTab(windowID: Int, tabIndex: Int) throws -> Bool {
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              set requestedTabIndex to \(tabIndex)
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  if requestedTabIndex < 1 or requestedTabIndex > tabCount then
-                    return "0"
-                  end if
-                  set active tab index of w to requestedTabIndex
-                  set index of w to 1
-                  activate
-                  return "1"
-                end if
-              end repeat
-            end tell
-            return "0"
-            """
-        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
-    public func focusFirstTabOfFrontWindow() throws -> Bool {
-        let script = """
-            tell application "Google Chrome"
-              if (count of windows) is 0 then
-                return "0"
-              end if
-              set active tab index of front window to 1
-              set index of front window to 1
-              activate
-              return "1"
-            end tell
-            """
-        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
     /// Focuses the tab matching `urlPrefix` within a specific window, raising that window.
     /// Returns false when the window no longer exists or no longer holds a matching tab, so
     /// callers can adopt a moved tab or reopen the session. Scoping to one window id keeps the
@@ -272,8 +222,8 @@ public final class ChromeAdapter {
                       repeat with exactTargetURL in exactTargetURLs
                         if u is (exactTargetURL as string) then
                           set active tab index of w to i
+                          set minimized of w to false
                           set index of w to 1
-                          activate
                           return "1"
                         end if
                       end repeat
@@ -292,8 +242,8 @@ public final class ChromeAdapter {
                         end repeat
                         if excludedMatch is false then
                           set active tab index of w to i
+                          set minimized of w to false
                           set index of w to 1
-                          activate
                           return "1"
                         end if
                       end if
@@ -306,10 +256,10 @@ public final class ChromeAdapter {
             return "0"
             """
         let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
+        let focused = output == "1"
+        if focused { bringChromeForward(raisedWindowID: windowID) }
+        return focused
     }
-
-    public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool { try focusFirstMatchingTabMatch(urlPrefix: urlPrefix) != nil }
 
     public func focusFirstMatchingTabMatch(urlPrefix: String, excludingURLPrefixes: [String] = []) throws -> ChromeWindowMatch? {
         let escaped = Self.escapedAppleScriptString(urlPrefix)
@@ -330,8 +280,8 @@ public final class ChromeAdapter {
                     repeat with exactTargetURL in exactTargetURLs
                       if u is (exactTargetURL as string) then
                         set active tab index of w to i
+                        set minimized of w to false
                         set index of w to 1
-                        activate
                         return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
                       end if
                     end repeat
@@ -355,8 +305,8 @@ public final class ChromeAdapter {
                       end repeat
                       if excludedMatch is false then
                         set active tab index of w to i
+                        set minimized of w to false
                         set index of w to 1
-                        activate
                         return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
                       end if
                     end if
@@ -367,37 +317,9 @@ public final class ChromeAdapter {
             return ""
             """
         let output = try runChromeScript(script)
-        return Self.parseTabRows(output).first
-    }
-
-    public func extractTabToWindow(windowID: Int, tabIndex: Int) throws -> Int? {
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              set requestedTabIndex to \(tabIndex)
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  if requestedTabIndex < 1 or requestedTabIndex > tabCount then
-                    return ""
-                  end if
-                  set targetTab to tab requestedTabIndex of w
-                  set sourceURL to URL of targetTab
-                  if sourceURL is missing value or sourceURL is "" then
-                    return ""
-                  end if
-                  set newWindow to make new window
-                  set URL of active tab of newWindow to sourceURL
-                  close targetTab
-                  return id of newWindow
-                end if
-              end repeat
-            end tell
-            return ""
-            """
-        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let extractedWindowID = Int(output), extractedWindowID > 0 else { return nil }
-        return extractedWindowID
+        let match = Self.parseTabRows(output).first
+        if let match { bringChromeForward(raisedWindowID: match.windowID) }
+        return match
     }
 
     public func frontmostActiveTabURL() throws -> String? {
@@ -415,50 +337,6 @@ public final class ChromeAdapter {
             """
         let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output
-    }
-
-    private func queryTabs(urlPrefix: String?, windowIDs: [Int]?) throws -> [ChromeWindowMatch] {
-        let filterCondition: String
-        if let urlPrefix {
-            let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
-            filterCondition = "if u starts with \"\(escaped)\" then"
-        } else {
-            filterCondition = "if true then"
-        }
-        let windowIDSetup: String
-        let windowIDCondition: String
-        if let windowIDs {
-            let requestedIDs = windowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
-            windowIDSetup = "set requestedWindowIDs to {\(requestedIDs)}"
-            windowIDCondition = "if requestedWindowIDs contains (wid as string) then"
-        } else {
-            windowIDSetup = ""
-            windowIDCondition = "if true then"
-        }
-        let script = """
-            \(windowIDSetup)
-            set output to ""
-            tell application "Google Chrome"
-              repeat with w in windows
-                set wid to id of w
-                \(windowIDCondition)
-                  set titleText to title of w
-                  set tabCount to count of tabs of w
-                  repeat with i from 1 to tabCount
-                    set u to URL of tab i of w
-                    if u is not missing value then
-                      \(filterCondition)
-                        set output to output & wid & "\\t" & i & "\\t" & titleText & "\\t" & u & "\\n"
-                      end if
-                    end if
-                  end repeat
-                end if
-              end repeat
-            end tell
-            return output
-            """
-        let output = try runChromeScript(script)
-        return Self.parseTabRows(output)
     }
 
     private static func uniqueNonEmptyURLPrefixes(_ values: [String]) -> [String] {
@@ -502,6 +380,99 @@ public final class ChromeAdapter {
         }
         return parsed
     }
+
+    /// Brings Chrome forward and leaves the window the calling script targeted frontmost, including when
+    /// that window sits on a desktop Space other than the one being displayed.
+    ///
+    /// The activation never crosses Spaces; the raise does. `NSRunningApplication.activate(options: [])`
+    /// is front-window-only and leaves the displayed Space exactly as it was. Sending
+    /// `set index of w to 1` to an off-Space window while Chrome is *already* the active app is what
+    /// switches the desktop to that window's Space and raises it there.
+    ///
+    /// Which is why the order matters: the same `set index` issued while another app (Spaces) is still
+    /// frontmost does not apply to the current state at all, it applies to Chrome's *next* activation,
+    /// one request late. Raising first and activating second therefore activates onto whatever stale
+    /// window Chrome still considers its main one. Activating first and re-raising after needs no settle
+    /// delay for the Space-switch animation itself, but the activation must be confirmed to have landed
+    /// before the raise is issued; see `waitForChromeActivation`.
+    ///
+    /// The caller's own in-script `set index of w to 1` stays, and is not redundant with the re-raise
+    /// here. For a target already on the displayed Space the window is reachable, so that `set index`
+    /// applies immediately rather than to the next activation, and the activation raises the target
+    /// directly with no flash of an unrelated Chrome window. The re-raise below is what lands the
+    /// off-Space case. The callers also un-minimize the target (`set minimized of w to false`) right
+    /// before their raise, so the window is already restored by the time this runs.
+    ///
+    /// AppleScript's own `activate` is never used, in either case: it behaves like `.activateAllWindows`
+    /// and lifts every Chrome window above the app that was frontmost, burying the Spaces window.
+    ///
+    /// Skipped under XCTest for the reason the tests mock `osascript`: activation is a real system
+    /// effect, and a unit test must not raise the Chrome running on the machine it runs on.
+    private func bringChromeForward(raisedWindowID: Int) {
+        #if canImport(AppKit)
+            guard !Self.isRunningUnderXCTest else { return }
+            guard let chrome = NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).first else { return }
+            chrome.activate(options: [])
+            Self.waitForChromeActivation(chrome)
+            _ = try? runChromeScript(Self.raiseWindowScript(windowID: raisedWindowID))
+        #endif
+    }
+
+    #if canImport(AppKit)
+        /// How long `waitForChromeActivation` polls before giving up and proceeding anyway.
+        private static let chromeActivationWaitDeadlineSeconds: TimeInterval = 0.5
+
+        /// Blocks the calling thread until `app.isActive` is true or `chromeActivationWaitDeadlineSeconds`
+        /// elapses, whichever comes first.
+        ///
+        /// `NSRunningApplication.activate(options:)` reports only that the activation request was sent,
+        /// not that Chrome has actually become the active app. The raise in `bringChromeForward` is only
+        /// valid once Chrome is active (see that method's doc comment), which is exactly what this wait
+        /// confirms before the raise script runs.
+        ///
+        /// The poll depends on the app's main run loop pumping the workspace notifications that update
+        /// `isActive`, which holds for the shipping app (this call always runs off the main thread; see
+        /// `bringChromeForward`'s callers). Measured inside an `NSApplication`, `isActive` flips 3-4ms
+        /// after the activate, so the wait costs about one poll interval. Do not measure it from a bare
+        /// command-line harness: with no `NSApplication` the notifications never arrive, `isActive` stays
+        /// false, and the deadline burns in full. When Chrome is already active, the first check succeeds
+        /// and this is a no-op, which is the common case.
+        ///
+        /// If the deadline passes without Chrome becoming active, this simply returns and the caller
+        /// proceeds to the raise anyway: that is exactly today's behavior without this wait, so the wait
+        /// can only improve the outcome here, never regress it.
+        private static func waitForChromeActivation(_ app: NSRunningApplication) {
+            let deadline = Date().addingTimeInterval(chromeActivationWaitDeadlineSeconds)
+            while !app.isActive, Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        }
+    #endif
+
+    /// Raises the Chrome window with the given AppleScript id, crossing to the Space that window lives on
+    /// when it is not the displayed one. Only valid once Chrome is the active app, which is what makes
+    /// the reorder apply to the current state instead of to Chrome's next activation.
+    static func raiseWindowScript(windowID: Int) -> String {
+        """
+        tell application "Google Chrome"
+          repeat with w in windows
+            if (id of w as string) is "\(windowID)" then
+              set index of w to 1
+              exit repeat
+            end if
+          end repeat
+        end tell
+        """
+    }
+
+    /// Mirrors `SpacesTestHost.isRunningUnderXCTest()`, which this target cannot call: `systembridge`
+    /// is declared with no dependencies. Xcode sets the environment variable, but `swift test` runs out
+    /// of the toolchain without it, so the linked-in `XCTestCase` class is the only signal on that lane.
+    private static let isRunningUnderXCTest: Bool = {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return true }
+        #if canImport(ObjectiveC)
+            if NSClassFromString("XCTestCase") != nil { return true }
+        #endif
+        return false
+    }()
 
     private func runChromeScript(_ script: String) throws -> String { try AppleScript.run(script, timeoutSeconds: appleScriptTimeoutSeconds) }
 }

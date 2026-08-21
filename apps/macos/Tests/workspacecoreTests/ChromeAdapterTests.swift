@@ -1,42 +1,12 @@
 import Foundation
 import XCTest
-import systembridge
+
+@testable import systembridge
 
 final class ChromeAdapterTests: XCTestCase {
     // Mocked-osascript tests aren't exercising the AppleScript timeout itself; widen it so
     // process-spawn latency on a loaded machine can't trip the production 10s default (#196).
     private func makeAdapter() -> ChromeAdapter { ChromeAdapter(appleScriptTimeoutSeconds: 30) }
-
-    func testTabsInWindowIDsParsesRowsAndScopesAppleScriptToRequestedWindows() throws {
-        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
-        let mock = """
-            #!/bin/sh
-            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
-            printf '101\t1\tDocs\thttp://localhost:3000/docs\\n'
-            printf '202\t2\tAdmin\thttp://localhost:4000/admin\\n'
-            """
-
-        try withMockCommands(["osascript": mock]) {
-            let tabs = try makeAdapter().tabs(inWindowIDs: [202, 101, 101, -1, 0])
-
-            XCTAssertEqual(tabs.map(\.windowID), [101, 202])
-            XCTAssertEqual(tabs.map(\.tabIndex), [1, 2])
-            XCTAssertEqual(tabs.map(\.url), ["http://localhost:3000/docs", "http://localhost:4000/admin"])
-
-            let script = try String(contentsOf: scriptLog, encoding: .utf8)
-            XCTAssertTrue(script.contains("set requestedWindowIDs to {\"101\", \"202\"}"))
-            XCTAssertTrue(script.contains("if requestedWindowIDs contains (wid as string) then"))
-        }
-    }
-
-    func testTabsInWindowIDsReturnsEmptyWithoutAppleScriptForEmptyInput() throws {
-        let mock = """
-            #!/bin/sh
-            exit 99
-            """
-
-        try withMockCommands(["osascript": mock]) { XCTAssertTrue(try makeAdapter().tabs(inWindowIDs: []).isEmpty) }
-    }
 
     func testTabSnapshotInWindowIDsParsesFrontmostURLAndScopedRows() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
@@ -127,6 +97,97 @@ final class ChromeAdapterTests: XCTestCase {
         }
     }
 
+    // Focusing a browser session must raise only that Chrome window, not every Chrome window.
+    // AppleScript's `activate` lifts an app's whole window stack, so the generated script must
+    // reorder the target window (`set index of w to 1`) and leave the actual activation to Swift
+    // (ChromeAdapter.bringChromeForward), which always calls NSRunningApplication.activate(options: [])
+    // rather than .activateAllWindows.
+    func testFocusFirstMatchingTabMatchRaisesOnlyTargetWindowNotAllChromeWindows() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '303\t4\tMoved Docs\thttp://localhost:3000/docs\\n'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set index of w to 1"))
+            let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
+            XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
+        }
+    }
+
+    // A minimized target window sits in the Dock and shows on no Space, so raising it has to
+    // un-minimize it first. Doing that inside the script, before `set index of w to 1`, puts the
+    // window back on the Space it belongs to so the raise can cross to that Space.
+    func testFocusFirstMatchingTabMatchUnminimizesTargetWindowBeforeRaisingIt() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '303\t4\tMoved Docs\thttp://localhost:3000/docs\\n'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            assertUnminimizesBeforeRaising(script)
+        }
+    }
+
+    // Same rule as focusFirstMatchingTabMatch above, scoped to a known window id.
+    func testFocusMatchingTabInWindowUnminimizesTargetWindowBeforeRaisingIt() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '1'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().focusMatchingTabInWindow(windowID: 202, urlPrefix: "http://localhost:3000")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            assertUnminimizesBeforeRaising(script)
+        }
+    }
+
+    // Adding a session tab to an already-tracked window raises that existing window, which the user
+    // may have minimized, so this path un-minimizes it too.
+    func testOpenTabInFirstAvailableWindowUnminimizesTargetWindowBeforeRaisingIt() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '202'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().openTabInFirstAvailableWindow(
+                windowIDs: [202], containingAnyURLPrefix: ["http://localhost:3000"], url: "http://localhost:4000/admin")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            assertUnminimizesBeforeRaising(script)
+        }
+    }
+
+    /// Every window raise in `script` must be immediately preceded by un-minimizing that same window,
+    /// so a target the user minimized is back on the Space it belongs to before the raise crosses to it.
+    private func assertUnminimizesBeforeRaising(_ script: String, file: StaticString = #filePath, line: UInt = #line) {
+        let lines = script.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let raiseIndexes = lines.indices.filter { lines[$0] == "set index of w to 1" }
+        XCTAssertFalse(raiseIndexes.isEmpty, "script is expected to raise the target window", file: file, line: line)
+        for raiseIndex in raiseIndexes {
+            XCTAssertEqual(
+                raiseIndex > 0 ? lines[raiseIndex - 1] : "", "set minimized of w to false",
+                "each `set index of w to 1` must follow un-minimizing that window", file: file, line: line)
+        }
+    }
+
     func testFocusMatchingTabInWindowUsesExactPassBeforePrefixFallback() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
         let mock = """
@@ -150,6 +211,40 @@ final class ChromeAdapterTests: XCTestCase {
                 script.distance(from: script.startIndex, to: exactRange.lowerBound),
                 script.distance(from: script.startIndex, to: prefixRange.lowerBound))
         }
+    }
+
+    // Same rule as focusFirstMatchingTabMatch above, scoped to a known window id: raise only the
+    // target Chrome window, never every Chrome window.
+    func testFocusMatchingTabInWindowRaisesOnlyTargetWindowNotAllChromeWindows() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '1'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().focusMatchingTabInWindow(windowID: 202, urlPrefix: "http://localhost:3000")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set index of w to 1"))
+            let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
+            XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
+        }
+    }
+
+    // The post-activation re-raise is what crosses to the Space holding the target window. It runs with
+    // Chrome already active, so it only has to reorder the target: an AppleScript `activate` would lift
+    // Chrome's whole window stack over the Spaces window, and a `delay` would stall the focus path for
+    // a settle the raise does not need.
+    func testRaiseWindowScriptReordersTargetWindowWithoutActivatingOrDelaying() {
+        let script = ChromeAdapter.raiseWindowScript(windowID: 303)
+
+        XCTAssertTrue(script.contains("set index of w to 1"))
+        XCTAssertTrue(script.contains("\"303\""))
+        let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
+        XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
+        XCTAssertFalse(script.contains("delay"), "the re-raise needs no settle delay after activation")
     }
 
     func testCloseMatchingTabsInWindowExcludesSiblingPrefixes() throws {
