@@ -27,6 +27,11 @@ public final class ChromeAdapter {
         #endif
     }
 
+    /// Creating the window is itself the raise, so this path needs no raise before the mutation the way
+    /// `openTabInFirstAvailableWindow` does. `make new window` makes Chrome activate itself, and that
+    /// activation raises whichever window Chrome has in front, which here is the window just created.
+    /// Measured with an unrelated Chrome window as Chrome's front window and the Spaces window above
+    /// all of them: exactly one Chrome window, the new one, ends up above Spaces.
     public func openWindow(url: String, background: Bool = false) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
@@ -53,13 +58,15 @@ public final class ChromeAdapter {
         let requestedIDs = uniqueWindowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
         let requiredURLPrefixes = uniqueURLPrefixes.map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ", ")
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let focusLines =
+        // The raise must precede `make new tab` deliberately: creating a tab makes Chrome activate
+        // itself, which raises whichever window Chrome currently has in front. See
+        // `raiseWindowLines` for why the raise is expressed this way.
+        let raiseLines = background ? "" : Self.raiseWindowLines(windowIDExpression: "wid")
+        let activeTabLine =
             background
             ? ""
             : """
-                  set active tab index of w to count of tabs of w
-                  set minimized of w to false
-                  set index of w to 1
+                  set active tab index of window id wid to count of tabs of window id wid
             """
         let script = """
             set requestedWindowIDs to {\(requestedIDs)}
@@ -82,9 +89,11 @@ public final class ChromeAdapter {
                       if hasWorkspaceTab then exit repeat
                     end repeat
                     if hasWorkspaceTab then
-                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
-            \(focusLines)
-                      return id of w as string
+                      set wid to id of w
+            \(raiseLines)
+                      make new tab at end of tabs of window id wid with properties {URL:"\(escaped)"}
+            \(activeTabLine)
+                      return wid as string
                     end if
                   end if
                 end repeat
@@ -222,8 +231,7 @@ public final class ChromeAdapter {
                       repeat with exactTargetURL in exactTargetURLs
                         if u is (exactTargetURL as string) then
                           set active tab index of w to i
-                          set minimized of w to false
-                          set index of w to 1
+            \(Self.raiseWindowLines(windowIDExpression: "\(windowID)"))
                           return "1"
                         end if
                       end repeat
@@ -242,8 +250,7 @@ public final class ChromeAdapter {
                         end repeat
                         if excludedMatch is false then
                           set active tab index of w to i
-                          set minimized of w to false
-                          set index of w to 1
+            \(Self.raiseWindowLines(windowIDExpression: "\(windowID)"))
                           return "1"
                         end if
                       end if
@@ -280,8 +287,7 @@ public final class ChromeAdapter {
                     repeat with exactTargetURL in exactTargetURLs
                       if u is (exactTargetURL as string) then
                         set active tab index of w to i
-                        set minimized of w to false
-                        set index of w to 1
+            \(Self.raiseWindowLines(windowIDExpression: "wid"))
                         return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
                       end if
                     end repeat
@@ -305,8 +311,7 @@ public final class ChromeAdapter {
                       end repeat
                       if excludedMatch is false then
                         set active tab index of w to i
-                        set minimized of w to false
-                        set index of w to 1
+            \(Self.raiseWindowLines(windowIDExpression: "wid"))
                         return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
                       end if
                     end if
@@ -385,8 +390,8 @@ public final class ChromeAdapter {
     /// that window sits on a desktop Space other than the one being displayed.
     ///
     /// The activation never crosses Spaces; the raise does. `NSRunningApplication.activate(options: [])`
-    /// is front-window-only and leaves the displayed Space exactly as it was. Sending
-    /// `set index of w to 1` to an off-Space window while Chrome is *already* the active app is what
+    /// is front-window-only and leaves the displayed Space exactly as it was. Sending a raise (see
+    /// `raiseWindowLines`) to an off-Space window while Chrome is *already* the active app is what
     /// switches the desktop to that window's Space and raises it there.
     ///
     /// Which is why the order matters: the same `set index` issued while another app (Spaces) is still
@@ -396,12 +401,12 @@ public final class ChromeAdapter {
     /// delay for the Space-switch animation itself, but the activation must be confirmed to have landed
     /// before the raise is issued; see `waitForChromeActivation`.
     ///
-    /// The caller's own in-script `set index of w to 1` stays, and is not redundant with the re-raise
-    /// here. For a target already on the displayed Space the window is reachable, so that `set index`
-    /// applies immediately rather than to the next activation, and the activation raises the target
-    /// directly with no flash of an unrelated Chrome window. The re-raise below is what lands the
-    /// off-Space case. The callers also un-minimize the target (`set minimized of w to false`) right
-    /// before their raise, so the window is already restored by the time this runs.
+    /// The caller's own in-script raise stays, and is not redundant with the re-raise here. For a target
+    /// already on the displayed Space the window is reachable, so that raise applies immediately rather
+    /// than to the next activation; it is also what decides which window Chrome's own activation lands
+    /// on when the script goes on to create a tab. The re-raise below is what lands the off-Space case.
+    /// The callers un-minimize the target as part of that same raise, so the window is already restored
+    /// by the time this runs. `raiseWindowLines` carries both rules.
     ///
     /// AppleScript's own `activate` is never used, in either case: it behaves like `.activateAllWindows`
     /// and lifts every Chrome window above the app that was frontmost, burying the Spaces window.
@@ -447,18 +452,42 @@ public final class ChromeAdapter {
         }
     #endif
 
+    /// The AppleScript that raises one Chrome window, and the only place that sequence is written.
+    ///
+    /// - Parameter windowIDExpression: an AppleScript expression evaluating to the target window's
+    ///   id: a literal id, or a variable captured before any reorder.
+    ///
+    /// Three rules are load-bearing here, which is why call sites compose this instead of spelling
+    /// the raise out again:
+    ///
+    /// The window is addressed by id, never through the `w` of `repeat with w in windows`. `w` is an
+    /// index-based reference into that list, so it aliases a different window as soon as the reorder
+    /// below renumbers the list. Measured: creating a tab through `w` after the raise put the tab in
+    /// the wrong window. Capture `set wid to id of w` before the raise and address `window id wid`
+    /// after it.
+    ///
+    /// Un-minimizing immediately precedes the reorder. A minimized window lives in the Dock and shows
+    /// on no Space, so `set index` alone leaves it there. Chrome's property is `minimized`, not the
+    /// Cocoa-standard `miniaturized`.
+    ///
+    /// Anything that makes Chrome activate itself, which creating a tab or a window does, must come
+    /// after these lines. That activation raises whichever window Chrome currently has in front, so
+    /// creating a tab first lifts an unrelated window the user had in front above the Spaces window
+    /// alongside the target, leaving two Chrome windows covering Spaces.
+    static func raiseWindowLines(windowIDExpression: String) -> String {
+        """
+        set minimized of window id \(windowIDExpression) to false
+        set index of window id \(windowIDExpression) to 1
+        """
+    }
+
     /// Raises the Chrome window with the given AppleScript id, crossing to the Space that window lives on
     /// when it is not the displayed one. Only valid once Chrome is the active app, which is what makes
     /// the reorder apply to the current state instead of to Chrome's next activation.
     static func raiseWindowScript(windowID: Int) -> String {
         """
         tell application "Google Chrome"
-          repeat with w in windows
-            if (id of w as string) is "\(windowID)" then
-              set index of w to 1
-              exit repeat
-            end if
-          end repeat
+          \(raiseWindowLines(windowIDExpression: "\(windowID)"))
         end tell
         """
     }

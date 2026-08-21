@@ -99,7 +99,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     // Focusing a browser session must raise only that Chrome window, not every Chrome window.
     // AppleScript's `activate` lifts an app's whole window stack, so the generated script must
-    // reorder the target window (`set index of w to 1`) and leave the actual activation to Swift
+    // reorder the target window (`set index of window id … to 1`) and leave the actual activation to Swift
     // (ChromeAdapter.bringChromeForward), which always calls NSRunningApplication.activate(options: [])
     // rather than .activateAllWindows.
     func testFocusFirstMatchingTabMatchRaisesOnlyTargetWindowNotAllChromeWindows() throws {
@@ -114,14 +114,14 @@ final class ChromeAdapterTests: XCTestCase {
             _ = try makeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
 
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
-            XCTAssertTrue(script.contains("set index of w to 1"))
+            XCTAssertTrue(script.contains("set index of window id wid to 1"))
             let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
             XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
         }
     }
 
     // A minimized target window sits in the Dock and shows on no Space, so raising it has to
-    // un-minimize it first. Doing that inside the script, before `set index of w to 1`, puts the
+    // un-minimize it first. Doing that inside the script, immediately before the reorder, puts the
     // window back on the Space it belongs to so the raise can cross to that Space.
     func testFocusFirstMatchingTabMatchUnminimizesTargetWindowBeforeRaisingIt() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
@@ -175,16 +175,49 @@ final class ChromeAdapterTests: XCTestCase {
         }
     }
 
+    // Chrome activates itself when a tab is created, and that activation raises whichever window
+    // Chrome currently has in front, so a tab created before the raise lifts an unrelated Chrome
+    // window above Spaces too. The raise must happen first, and everything after it must address
+    // the window by id (`window id wid`) rather than through `w`, which aliases another window once
+    // the raise renumbers the window list.
+    func testOpenTabInFirstAvailableWindowRaisesTargetWindowBeforeCreatingTheTab() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '202'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            _ = try makeAdapter().openTabInFirstAvailableWindow(
+                windowIDs: [202], containingAnyURLPrefix: ["http://localhost:3000"], url: "http://localhost:4000/admin")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            let raiseRange = try XCTUnwrap(script.range(of: "set index of window id wid to 1"))
+            let makeTabRange = try XCTUnwrap(script.range(of: "make new tab"))
+            XCTAssertLessThan(
+                script.distance(from: script.startIndex, to: raiseRange.lowerBound),
+                script.distance(from: script.startIndex, to: makeTabRange.lowerBound), "the raise must happen before the tab is created")
+            XCTAssertTrue(script.contains("make new tab at end of tabs of window id wid"), "the tab must be created in window id wid, not w")
+            XCTAssertTrue(script.contains("return wid as string"), "the returned window id must be the one captured before the raise")
+        }
+    }
+
     /// Every window raise in `script` must be immediately preceded by un-minimizing that same window,
     /// so a target the user minimized is back on the Space it belongs to before the raise crosses to it.
+    /// A raise line reads `set index of <ref> to 1` for some window reference `<ref>` (`window id wid`,
+    /// or `window id` with a literal), and the un-minimize line must reference that same `<ref>`.
     private func assertUnminimizesBeforeRaising(_ script: String, file: StaticString = #filePath, line: UInt = #line) {
         let lines = script.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        let raiseIndexes = lines.indices.filter { lines[$0] == "set index of w to 1" }
+        let raisePrefix = "set index of "
+        let raiseSuffix = " to 1"
+        let raiseIndexes = lines.indices.filter { lines[$0].hasPrefix(raisePrefix) && lines[$0].hasSuffix(raiseSuffix) }
         XCTAssertFalse(raiseIndexes.isEmpty, "script is expected to raise the target window", file: file, line: line)
         for raiseIndex in raiseIndexes {
+            let ref = lines[raiseIndex].dropFirst(raisePrefix.count).dropLast(raiseSuffix.count)
             XCTAssertEqual(
-                raiseIndex > 0 ? lines[raiseIndex - 1] : "", "set minimized of w to false",
-                "each `set index of w to 1` must follow un-minimizing that window", file: file, line: line)
+                raiseIndex > 0 ? lines[raiseIndex - 1] : "", "set minimized of \(ref) to false",
+                "each `set index of \(ref) to 1` must follow un-minimizing that window", file: file, line: line)
         }
     }
 
@@ -227,7 +260,7 @@ final class ChromeAdapterTests: XCTestCase {
             _ = try makeAdapter().focusMatchingTabInWindow(windowID: 202, urlPrefix: "http://localhost:3000")
 
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
-            XCTAssertTrue(script.contains("set index of w to 1"))
+            XCTAssertTrue(script.contains("set index of window id 202 to 1"))
             let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
             XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
         }
@@ -240,11 +273,63 @@ final class ChromeAdapterTests: XCTestCase {
     func testRaiseWindowScriptReordersTargetWindowWithoutActivatingOrDelaying() {
         let script = ChromeAdapter.raiseWindowScript(windowID: 303)
 
-        XCTAssertTrue(script.contains("set index of w to 1"))
-        XCTAssertTrue(script.contains("\"303\""))
+        XCTAssertTrue(script.contains("set index of window id 303 to 1"))
+        XCTAssertTrue(script.contains("set minimized of window id 303 to false"))
         let hasBareActivateCommand = script.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "activate" }
         XCTAssertFalse(hasBareActivateCommand, "script must not call AppleScript activate, which would raise every Chrome window")
         XCTAssertFalse(script.contains("delay"), "the re-raise needs no settle delay after activation")
+    }
+
+    // `w` is an index-based reference into `windows`, so it aliases a different window once a raise
+    // renumbers the window list: a raise expressed through `w` is a latent wrong-window bug. Every
+    // raise site must address the window by id instead.
+    func testEveryWindowRaiseAddressesTheWindowByID() throws {
+        var scripts: [String] = []
+
+        let focusMatchingTabInWindowLog = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chrome-adapter-\(UUID().uuidString).applescript")
+        let focusMatchingTabInWindowMock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(focusMatchingTabInWindowLog.path))
+            printf '1'
+            """
+        try withMockCommands(["osascript": focusMatchingTabInWindowMock]) {
+            _ = try makeAdapter().focusMatchingTabInWindow(windowID: 202, urlPrefix: "http://localhost:3000")
+        }
+        scripts.append(try String(contentsOf: focusMatchingTabInWindowLog, encoding: .utf8))
+
+        let focusFirstMatchingTabMatchLog = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chrome-adapter-\(UUID().uuidString).applescript")
+        let focusFirstMatchingTabMatchMock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(focusFirstMatchingTabMatchLog.path))
+            printf '303\t4\tMoved Docs\thttp://localhost:3000/docs\\n'
+            """
+        try withMockCommands(["osascript": focusFirstMatchingTabMatchMock]) {
+            _ = try makeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
+        }
+        scripts.append(try String(contentsOf: focusFirstMatchingTabMatchLog, encoding: .utf8))
+
+        let openTabInFirstAvailableWindowLog = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chrome-adapter-\(UUID().uuidString).applescript")
+        let openTabInFirstAvailableWindowMock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(openTabInFirstAvailableWindowLog.path))
+            printf '202'
+            """
+        try withMockCommands(["osascript": openTabInFirstAvailableWindowMock]) {
+            _ = try makeAdapter().openTabInFirstAvailableWindow(
+                windowIDs: [202], containingAnyURLPrefix: ["http://localhost:3000"], url: "http://localhost:4000/admin")
+        }
+        scripts.append(try String(contentsOf: openTabInFirstAvailableWindowLog, encoding: .utf8))
+
+        scripts.append(ChromeAdapter.raiseWindowScript(windowID: 303))
+
+        for script in scripts {
+            XCTAssertFalse(
+                script.contains("set index of w to 1"), "a raise through `w` aliases a different window once the raise renumbers the window list")
+            XCTAssertTrue(script.contains("set index of window id"), "expected a raise addressing the window by id")
+        }
     }
 
     func testCloseMatchingTabsInWindowExcludesSiblingPrefixes() throws {
@@ -287,8 +372,8 @@ final class ChromeAdapterTests: XCTestCase {
             XCTAssertTrue(script.contains("set requestedWindowIDs to {\"202\", \"101\"}"))
             XCTAssertTrue(script.contains("set workspaceURLPrefixes to {\"http://localhost:3000\"}"))
             XCTAssertTrue(script.contains("if existingURL starts with (workspaceURLPrefix as string) then"))
-            XCTAssertTrue(script.contains("make new tab at end of tabs of w"))
-            XCTAssertTrue(script.contains("set active tab index of w to count of tabs of w"))
+            XCTAssertTrue(script.contains("make new tab at end of tabs of window id wid"))
+            XCTAssertTrue(script.contains("set active tab index of window id wid to count of tabs of window id wid"))
         }
     }
 

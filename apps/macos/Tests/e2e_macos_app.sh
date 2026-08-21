@@ -2473,7 +2473,10 @@ APPLESCRIPT
 }
 
 # Brings the Chrome window with the given AppleScript window id to the front (Chrome window
-# ids are Chrome-level ids, not desktop window ids). A no-op when no id is supplied.
+# ids are Chrome-level ids, not desktop window ids). A no-op when no id is supplied, and the
+# whole script is best-effort: an id whose window has already closed just fails silently.
+# The window is addressed by id rather than through a `repeat with w in windows` reference,
+# matching the rule ChromeAdapter's raises follow.
 chrome_focus_window_if_present() {
   local window_id="${1:-}"
   [[ -n "$window_id" ]] || return 0
@@ -2481,12 +2484,7 @@ chrome_focus_window_if_present() {
 on run argv
   set targetId to (item 1 of argv) as integer
   tell application "Google Chrome"
-    repeat with w in windows
-      if (id of w) is targetId then
-        set index of w to 1
-        exit repeat
-      end if
-    end repeat
+    set index of window id targetId to 1
     activate
   end tell
 end run
