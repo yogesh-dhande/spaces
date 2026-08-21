@@ -39,7 +39,7 @@ import spacesdevicecore
         // owner contributes no scope, leaving only the workspace-agnostic "New terminal session"
         // row — no other device's targets leak in through a substituted local overview.
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace", newTerminalOverview: nil, scopedWorkspaces: [], openSessionIDs: [])
+            newTerminalWorkspaceID: "workspace", newTerminalDeviceID: "", newTerminalOverview: nil, scopedWorkspaces: [], openSessionIDs: [])
 
         #expect(presentation.items.map(\.id) == ["picker:new"])
         #expect(presentation.items.map(\.workspaceTitle) == ["workspace"])

@@ -230,11 +230,32 @@ extension ProcessProfileEnvironmentSuites {
         @Test func commandPaletteDismissRestoresOnlyItsCapturedReturnTarget() {
             #expect(AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: "session-1"))
             #expect(!AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: nil))
-            #expect(AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: 123))
+            #expect(
+                AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
+                    returnTerminalSessionID: nil, returnCodePaneID: nil, returnApplicationProcessID: 123))
             #expect(
                 !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
-                    returnTerminalSessionID: "session-1", returnApplicationProcessID: 123))
-            #expect(!AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: nil))
+                    returnTerminalSessionID: "session-1", returnCodePaneID: nil, returnApplicationProcessID: 123))
+            #expect(
+                !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
+                    returnTerminalSessionID: nil, returnCodePaneID: nil, returnApplicationProcessID: nil))
+        }
+
+        /// A code pane has no session id, so `presentCommandPalette` captures a return target of its own
+        /// (`commandPaletteReturnCodePaneID`), and dismissal restores it via `focusPane(forCodePaneID:)`
+        /// the same way a terminal session's id restores through `focusPane(forSessionID:)`. Terminal
+        /// focus still wins if both are somehow present, and either one beats falling back to the
+        /// return application or a main-window reveal.
+        @Test func commandPaletteDismissRestoresACodePaneOverTheReturnApplication() {
+            #expect(AppKitController.shouldRestoreCodePaneFocusAfterPaletteHide(returnTerminalSessionID: nil, returnCodePaneID: "pane-1"))
+            #expect(!AppKitController.shouldRestoreCodePaneFocusAfterPaletteHide(returnTerminalSessionID: nil, returnCodePaneID: nil))
+            #expect(
+                !AppKitController.shouldRestoreCodePaneFocusAfterPaletteHide(returnTerminalSessionID: "session-1", returnCodePaneID: "pane-1"),
+                "terminal focus wins over a code pane if both are somehow present")
+            #expect(
+                !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
+                    returnTerminalSessionID: nil, returnCodePaneID: "pane-1", returnApplicationProcessID: 123),
+                "a captured code pane beats falling back to the return application")
         }
 
         @Test func toggleHotkeyHidesOnlyWhenMainWindowIsFocused() {

@@ -300,6 +300,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
+    private var reviewChangesShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var newTabShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
@@ -4307,7 +4308,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The terminal pane owning the key window's first responder — the target of the
     /// Edit menu's Find actions.
     private func focusedTerminalPaneContentForMenuAction() -> (any TerminalPaneContentHosting)? {
-        panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+        panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder) as? any TerminalPaneContentHosting
     }
 
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
@@ -5372,6 +5373,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // what makes a skipped prune self-heal rather than need a retry of its own.
         if epoch == panelCoordinator.paneReplacementEpoch {
             panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview))
+            // Same authoritative-overview gate as the terminal prune above, for code panes: a workspace
+            // absent from `overview.workspaces` was deleted, not merely hidden (a hidden workspace stays
+            // listed with `isHidden` set), so its code panes are safe to close.
+            panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id)))
         }
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
@@ -9682,7 +9687,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // client-side Chrome browser-session tabs, so close them here too for a clean
             // restarted state (a later browser focus then opens fresh tabs).
             self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }
@@ -9713,7 +9718,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch result {
         case .success(let response):
             self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }
@@ -9736,11 +9741,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Closes the workspace's open terminal panes after the owning daemon confirms a workspace
-    /// stop/restart/delete. The terminal sessions are already being stopped by that mutation, so
-    /// pane teardown skips the client-detach cleanup path.
-    private func closeWorkspaceTerminalPanes(workspaceID: String) {
+    /// Closes the workspace's open terminal and code panes after the owning daemon confirms a
+    /// workspace stop/restart/delete. The terminal sessions are already being stopped by that
+    /// mutation, so pane teardown skips the client-detach cleanup path; a code pane has no session to
+    /// stop, so it is a pure layout edit either way.
+    private func closeWorkspacePanes(workspaceID: String) {
         panelCoordinator.closeTerminalPanes(workspaceID: workspaceID, sessionIsTerminating: true)
+        panelCoordinator.closeCodePanes(workspaceID: workspaceID)
     }
 
     private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
@@ -9814,7 +9821,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .success(let response):
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                    self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    self.closeWorkspacePanes(workspaceID: id)
                     // Install the post-delete overview first, then clear the marking: the workspace is
                     // already absent from that overview, so its row leaves the sidebar exactly once.
                     //
@@ -9890,7 +9897,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // indefinitely.
                         self.endPendingWorkspaceDeletion(workspaceID: id)
                         self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                        self.closeWorkspaceTerminalPanes(workspaceID: id)
+                        self.closeWorkspacePanes(workspaceID: id)
                         if deleteLocalBranch || deleteRemoteBranch {
                             // The delete landed, but the branch-deletion report existed only in the response
                             // that was lost — reconciliation can prove the workspace is gone, not what
@@ -10404,7 +10411,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // otherwise a deferred-but-confirmed delete would leave this workspace's browser windows
                 // and terminal panes open indefinitely.
                 closeLocalBrowserSessionWindows(workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
-                closeWorkspaceTerminalPanes(workspaceID: workspaceID)
+                closeWorkspacePanes(workspaceID: workspaceID)
                 if showsBranchOutcomeNotice {
                     showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
                 }
@@ -10454,6 +10461,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
         }
+        if let reviewChangesShortcutSpec {
+            registerHotkey(spec: reviewChangesShortcutSpec, id: GlobalHotkey.reviewChanges.rawValue, signature: signature, target: target)
+        }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(
@@ -10497,7 +10507,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
                 let disposition = Self.shortcutMonitorDisposition(
-                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: focusedPaneContent is any TerminalPaneContentHosting,
+                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
                 focusedTerminalDisposition = disposition
                 if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
@@ -10928,12 +10939,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .next: focusGlobalWindowNavigation(direction: 1)
         case .previous: focusGlobalWindowNavigation(direction: -1)
         case .openEditor: openGlobalEditorFromHotkey()
+        case .reviewChanges: openGlobalReviewChangesFromHotkey()
         }
     }
 
     private func openGlobalEditorFromHotkey() {
         guard let workspaceID = globalEditorWorkspaceID() else { return }
         openWorkspaceEditor(workspaceID: workspaceID)
+    }
+
+    /// Focuses the target workspace's existing code pane (diff mode) or opens one, resolving "which
+    /// workspace" via `globalEditorWorkspaceID()`: a focused tracked Chrome window, else the app's
+    /// selected workspace, else the daemon's last-active workspace. Deliberately reuses that resolution
+    /// unchanged for parity with the "Open editor" hotkey, which has the same limitation — a key global
+    /// panel window's focused pane is not consulted; accepted so the two shortcuts always agree on
+    /// "which workspace".
+    private func openGlobalReviewChangesFromHotkey() {
+        guard let workspaceID = globalEditorWorkspaceID(), let deviceID = deviceID(forWorkspaceID: workspaceID) else { return }
+        panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: workspaceID, mode: .diff)
     }
 
     private func globalEditorWorkspaceID() -> String? {
@@ -10994,6 +11017,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
         sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
+        reviewChangesShortcutSpec = loadShortcutSpec(resolver, setting: .guiReviewChangesShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenTerminalShortcut)
         newTabShortcutSpec = loadShortcutSpec(resolver, setting: .guiNewTabShortcut)
         openFinderShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenFinderShortcut)
@@ -11055,6 +11079,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
+        case .guiReviewChangesShortcut: return reviewChangesShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiNewTabShortcut: return newTabShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
@@ -11856,9 +11881,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: String?) -> Bool { returnTerminalSessionID != nil }
 
-    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?)
-        -> Bool
-    { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
+    /// A code pane has no session id, so it only wins the return-focus decision when the palette
+    /// captured no terminal session either — terminal focus always takes precedence when both are
+    /// somehow present (a focus request landing mid-selection could otherwise race the capture).
+    nonisolated static func shouldRestoreCodePaneFocusAfterPaletteHide(returnTerminalSessionID: String?, returnCodePaneID: String?) -> Bool {
+        returnTerminalSessionID == nil && returnCodePaneID != nil
+    }
+
+    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(
+        returnTerminalSessionID: String?, returnCodePaneID: String?, returnApplicationProcessID: pid_t?
+    ) -> Bool { return returnTerminalSessionID == nil && returnCodePaneID == nil && returnApplicationProcessID != nil }
 
     nonisolated static func commandPaletteDismissShortcutMatches(
         charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, selectedItemIsAlert: Bool, searchEditorCanCutSelectedText: Bool = false

@@ -19,6 +19,12 @@ import spacesterminalcore
     /// Resolves a pane's live content controller; nil renders the pane empty (e.g. a
     /// persisted pane whose session is still reattaching).
     var paneContentProvider: ((Pane) -> (any PaneContentHosting)?)?
+    /// Fires whenever this view joins or leaves a window — including a workspace switch, which
+    /// detaches the panel from the main window's detail container while keeping it alive (see the
+    /// class docstring). A terminal pane's Ghostty surface is meant to survive that detachment
+    /// untouched; a code pane's `WKWebView` is not, so `PanelCoordinator` uses this to hibernate
+    /// only code-pane content while the panel has no window and rebuild it when the panel rejoins one.
+    var onWindowMembershipChanged: ((_ isInWindow: Bool) -> Void)?
 
     private let tabBar = PanelTabBarView()
     private let paneTree = PaneTreeView()
@@ -58,6 +64,8 @@ import spacesterminalcore
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() { onWindowMembershipChanged?(window != nil) }
 
     private func wire(_ bar: PanelTabBarView) {
         bar.onSelectTab = { [weak self] tabID in self?.onSelectTab?(tabID) }

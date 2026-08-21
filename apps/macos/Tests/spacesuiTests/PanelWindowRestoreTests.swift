@@ -15,37 +15,58 @@ import Testing
         layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b", deviceID: "remote"), to: layout)
         let json = try layoutJSON(layout)
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: json, loadedDeviceIDs: ["local"], retainedSessionIDs: ["sess-a", "sess-b"])
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: json, loadedDeviceIDs: ["local"], retainedSessionIDs: ["sess-a", "sess-b"], retainedWorkspaceKeys: [])
                 == .waitForDevices)
         #expect(
             AppKitController.panelWindowRestoreDecision(
-                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], retainedSessionIDs: ["sess-a", "sess-b"]) == .open(layout))
+                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], retainedSessionIDs: ["sess-a", "sess-b"], retainedWorkspaceKeys: [])
+                == .open(layout))
     }
 
     @Test func skipsUnreadableAndFutureVersionRows() {
-        #expect(AppKitController.panelWindowRestoreDecision(layoutJSON: "not json", loadedDeviceIDs: ["local"], retainedSessionIDs: []) == .skip)
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: #"{"version":999,"tabs":[]}"#, loadedDeviceIDs: ["local"], retainedSessionIDs: [])
-                == .skip)
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: "not json", loadedDeviceIDs: ["local"], retainedSessionIDs: [], retainedWorkspaceKeys: []) == .skip)
+        #expect(
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: #"{"version":999,"tabs":[]}"#, loadedDeviceIDs: ["local"], retainedSessionIDs: [], retainedWorkspaceKeys: []) == .skip)
     }
 
     @Test func discardsWhenNoSessionSurvivesPruning() throws {
         let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: pane("a"), to: PanelLayout())
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [])
-                == .discard)
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [], retainedWorkspaceKeys: []) == .discard)
     }
 
     @Test func opensWithDeadSessionsPruned() throws {
         var layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: pane("a"), to: PanelLayout())
         layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
         let decision = AppKitController.panelWindowRestoreDecision(
-            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: ["sess-b"])
+            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: ["sess-b"], retainedWorkspaceKeys: [])
         guard case .open(let restored) = decision else {
             Issue.record("expected open, got \(decision)")
             return
         }
         #expect(restored.tabs.map(\.id) == ["tab-2"])
         #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: restored) == ["sess-b"])
+    }
+
+    @Test func discardsCodePaneWhoseWorkspaceIsGone() throws {
+        let codePane = Pane(id: "a", content: .codePane(deviceID: "device", workspaceID: "ws-gone"))
+        let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: codePane, to: PanelLayout())
+        #expect(
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [], retainedWorkspaceKeys: []) == .discard)
+    }
+
+    @Test func opensCodePaneWhoseWorkspaceSurvives() throws {
+        let codePane = Pane(id: "a", content: .codePane(deviceID: "device", workspaceID: "ws-live"))
+        let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: codePane, to: PanelLayout())
+        let decision = AppKitController.panelWindowRestoreDecision(
+            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [],
+            retainedWorkspaceKeys: [PanelLayoutEngine.WorkspaceKey(deviceID: "device", workspaceID: "ws-live")])
+        #expect(decision == .open(layout))
     }
 }

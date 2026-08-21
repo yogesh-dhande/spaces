@@ -43,11 +43,15 @@ final class CommandPalettePanel: NSPanel {
     var commandPaletteMainWindowVisibility: Bool?
     var recentCommandPaletteFocusIdentities: [String] = []
     var commandPaletteReturnTerminalSessionID: String?
+    /// The code-pane counterpart of `commandPaletteReturnTerminalSessionID`, captured when a focused
+    /// code pane has no session id of its own to remember. See `restoreCommandPaletteReturnFocus`.
+    var commandPaletteReturnCodePaneID: String?
     var commandPaletteReturnApplicationProcessID: pid_t?
 
     private struct PendingSelectionExecution {
         let id = UUID()
         let returnTerminalSessionID: String?
+        let returnCodePaneID: String?
         let returnApplicationProcessID: pid_t?
     }
 
@@ -139,6 +143,7 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteContextWorkspaceID = nil
             commandPaletteMainWindowVisibility = nil
             commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnCodePaneID = nil
             commandPaletteReturnApplicationProcessID = nil
         }
     }
@@ -270,11 +275,15 @@ final class CommandPalettePanel: NSPanel {
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
         let focusedTerminalSessionID = host.panelCoordinator.focusedSessionID()
+        // A focused code pane has no session id, so it needs its own capture; only checked when no
+        // terminal session was focused, mirroring the precedence the restore side gives terminal focus.
+        let focusedCodePaneID = focusedTerminalSessionID == nil ? host.panelCoordinator.focusedCodePaneID() : nil
         let returnApplicationProcessID = AppKitController.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
         commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
-        commandPaletteReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
+        commandPaletteReturnCodePaneID = focusedCodePaneID
+        commandPaletteReturnApplicationProcessID = (focusedTerminalSessionID == nil && focusedCodePaneID == nil) ? returnApplicationProcessID : nil
         let contextLookupStartedAt = Date()
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
         host.logPerfMetric(
@@ -319,12 +328,14 @@ final class CommandPalettePanel: NSPanel {
         // key while focus is in flight dismisses the panel without racing either outcome.
         if pendingSelectionExecution == nil {
             restoreCommandPaletteReturnFocus(
-                terminalSessionID: commandPaletteReturnTerminalSessionID, applicationProcessID: commandPaletteReturnApplicationProcessID)
+                terminalSessionID: commandPaletteReturnTerminalSessionID, codePaneID: commandPaletteReturnCodePaneID,
+                applicationProcessID: commandPaletteReturnApplicationProcessID)
         }
         isDismissingCommandPalette = false
         host.logHotkeyDebug("dismiss_palette end \(host.hotkeyWindowStateSummary())")
         commandPaletteMainWindowVisibility = nil
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         if let perfContext { host.logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
         // Dismissing while picking (esc, click-away) resolves the picker as cancelled;
@@ -332,11 +343,20 @@ final class CommandPalettePanel: NSPanel {
         takeSessionPickerContext()?.completion(nil)
     }
 
-    private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, applicationProcessID: pid_t?) {
+    /// Restores the palette's captured return focus in priority order: the terminal session it was
+    /// focused on, else the code pane it was focused on (a code pane has no session id, so it needs its
+    /// own field — see `commandPaletteReturnCodePaneID`), else the application that was frontmost before
+    /// the palette, else revealing the main window if it was visible.
+    private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, codePaneID: String?, applicationProcessID: pid_t?) {
         if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: terminalSessionID), let terminalSessionID {
             host.panelCoordinator.focusPane(forSessionID: terminalSessionID)
+        } else if AppKitController.shouldRestoreCodePaneFocusAfterPaletteHide(
+            returnTerminalSessionID: terminalSessionID, returnCodePaneID: codePaneID), let codePaneID
+        {
+            host.panelCoordinator.focusPane(forCodePaneID: codePaneID)
         } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
-            returnTerminalSessionID: terminalSessionID, returnApplicationProcessID: applicationProcessID), let applicationProcessID
+            returnTerminalSessionID: terminalSessionID, returnCodePaneID: codePaneID, returnApplicationProcessID: applicationProcessID),
+            let applicationProcessID
         {
             host.activateReturnApplication(processIdentifier: applicationProcessID)
         } else if host.rawMainWindowVisibility(), let window = host.window {
@@ -595,6 +615,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteItems = items
         commandPaletteContextWorkspaceID = newTerminalWorkspaceID
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         setCommandPaletteLoading(false)
         panel.center()
@@ -723,9 +744,11 @@ final class CommandPalettePanel: NSPanel {
         // failed execution can still restore it, while the dismissal callback cannot race
         // a successful target focus.
         let execution = PendingSelectionExecution(
-            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnCodePaneID: commandPaletteReturnCodePaneID,
+            returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
         pendingSelectionExecution = execution
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -735,10 +758,12 @@ final class CommandPalettePanel: NSPanel {
             guard let action else {
                 if self.commandPalettePanel?.isVisible == true {
                     self.commandPaletteReturnTerminalSessionID = execution.returnTerminalSessionID
+                    self.commandPaletteReturnCodePaneID = execution.returnCodePaneID
                     self.commandPaletteReturnApplicationProcessID = execution.returnApplicationProcessID
                 } else {
                     self.restoreCommandPaletteReturnFocus(
-                        terminalSessionID: execution.returnTerminalSessionID, applicationProcessID: execution.returnApplicationProcessID)
+                        terminalSessionID: execution.returnTerminalSessionID, codePaneID: execution.returnCodePaneID,
+                        applicationProcessID: execution.returnApplicationProcessID)
                 }
                 return
             }

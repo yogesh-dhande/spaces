@@ -174,6 +174,40 @@ import Testing
         #expect(pruned.focusedPaneID == "a")
     }
 
+    /// A code pane has no terminal session to go dead, so it is never a candidate for the prune's
+    /// dead-session filter — it survives alongside a terminal pane that does, whenever the caller does
+    /// not opt into workspace-liveness pruning (`keepingWorkspaceKeys` left at its default nil), the
+    /// contract a workspace-scoped panel's own restore relies on (its code panes are always for its own
+    /// still-live workspace, so it never needs to ask).
+    @Test func prunedLayoutLeavesCodePanesUntouchedWithoutWorkspaceKeys() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(
+            tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: "device", workspaceID: "workspace-1")), to: layout)
+
+        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: [])
+
+        #expect(pruned.tabs.map(\.id) == ["tab-2"], "the terminal pane's dead session drops its tab, the code pane's tab survives")
+        #expect(PanelLayoutEngine.allPanes(in: pruned).map(\.id) == ["code"])
+    }
+
+    /// Once a caller supplies `keepingWorkspaceKeys` (a global panel window's restore, which can
+    /// reference any workspace), a code pane is pruned exactly like a terminal pane: it survives only
+    /// while its `(deviceID, workspaceID)` is in the keep-set.
+    @Test func prunedLayoutDropsCodePanesForGoneWorkspacesWhenWorkspaceKeysSupplied() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(
+            tabID: "tab-2", pane: Pane(id: "code-live", content: .codePane(deviceID: "device", workspaceID: "workspace-live")), to: layout)
+        layout = PanelLayoutEngine.appendTab(
+            tabID: "tab-3", pane: Pane(id: "code-gone", content: .codePane(deviceID: "device", workspaceID: "workspace-gone")), to: layout)
+
+        let pruned = PanelLayoutEngine.prunedLayout(
+            layout, keepingSessionIDs: ["sess-a"],
+            keepingWorkspaceKeys: [PanelLayoutEngine.WorkspaceKey(deviceID: "device", workspaceID: "workspace-live")])
+
+        #expect(pruned.tabs.map(\.id) == ["tab-1", "tab-2"])
+        #expect(PanelLayoutEngine.allPanes(in: pruned).map(\.id) == ["a", "code-live"])
+    }
+
     @Test func orderedSessionIDsWalkTabsDepthFirst() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))

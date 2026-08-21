@@ -444,6 +444,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.panelCoordinator.pruneOpenPanes(
                     deviceID: snapshot.localDeviceID,
                     catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
+                // Same authoritative-overview gate as the terminal prune above, for code panes: a
+                // workspace absent from `overview.workspaces` was deleted, not merely hidden (a hidden
+                // workspace stays listed with `isHidden` set), so its code panes are safe to close.
+                host.panelCoordinator.pruneOpenCodePanes(
+                    deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
             }
         }
         // Diff against the runtime map actually installed, not the raw snapshot. An unreachable local
@@ -453,6 +458,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
+        // Terminal panes close on an externally initiated stop via session pruning above (their sessions
+        // leave the overview's keep-set); a code pane has no session, so this same run-state transition is
+        // its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget` gate above, same as
+        // the browser teardown just above: a run-state transition is unrelated to pane replacement.
+        //
+        // The signal is the observed transition, never the stopped state itself, because a code pane may be
+        // legitimately opened on a workspace that is already stopped (its working tree is still there to
+        // review). Two limits of transition-observation are accepted rather than patched with state checks:
+        // a cross-client restart whose stopped moment the daemon's coalesced overview broadcast never
+        // surfaces keeps the pane open — matching terminal panes keeping their place across restarts, and
+        // harmless since the pane's content stays valid for the running workspace — and a stop completed
+        // while this app was not running is never observed, so a persisted pane restores alongside its
+        // stopped-but-existing workspace (see `PanelLayoutEngine.prunedLayout`).
+        if let previousLocalSection {
+            host.panelCoordinator.closeCodePanes(
+                deviceID: snapshot.localDeviceID,
+                workspaceIDs: Set(
+                    Self.workspaceIDsTransitionedToNotRunning(
+                        previous: previousLocalSection.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID)))
+        }
         // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
         // session's bell into that same set and writes it back, so a consume that ran against a not-yet
         // loaded (empty) set would persist itself over everything the user had dismissed.
@@ -1186,6 +1211,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // the difference between these two overviews is the only thing that names a session's
             // replacement on this client.
             let previousOverview = host.deviceSections[index].overview
+            // Same capture-before-overwrite as `previousOverview` above, for the code-pane close diff
+            // below: `workspaceRuntimeStatusByID` defaults to empty for a device section's first load (or
+            // one recovered from the reachable-but-incompatible placeholder, which clears it), so diffing
+            // against it seeds with no false transitions without needing a separate first-load guard.
+            let previousWorkspaceRuntimeStatusByID = host.deviceSections[index].workspaceRuntimeStatusByID
             let mapped = AppKitController.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -1230,7 +1260,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             if epochWasFreshBeforeRetarget {
                 host.panelCoordinator.pruneOpenPanes(
                     deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
+                // Same authoritative-overview gate as the terminal prune above, for code panes: a
+                // workspace absent from `overview.overview.workspaces` was deleted, not merely hidden (a
+                // hidden workspace stays listed with `isHidden` set), so its code panes are safe to close.
+                host.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
             }
+            // Terminal panes close on an externally initiated stop via session pruning above (their
+            // sessions leave the overview's keep-set); a code pane has no session, so this same run-state
+            // transition is its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget`
+            // gate above, mirroring the local-path close beside `tearDownBrowserSessionsForLocallyStoppedWorkspaces`:
+            // a run-state transition is unrelated to pane replacement. Only reached here, in the
+            // successfully-loaded-with-overview branch — never for the reachable-but-incompatible or
+            // offline `.failure` paths, whose overviews are not this device's authoritative state. The
+            // transition-observation limits accepted at the local-path close (coalesced restarts, stops
+            // completed while this app was not running) apply identically here.
+            host.panelCoordinator.closeCodePanes(
+                deviceID: deviceID,
+                workspaceIDs: Set(
+                    Self.workspaceIDsTransitionedToNotRunning(
+                        previous: previousWorkspaceRuntimeStatusByID, current: mapped.workspaceRuntimeStatusByID)))
         case .failure(let error):
             let reason = error.localizedDescription
             let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)

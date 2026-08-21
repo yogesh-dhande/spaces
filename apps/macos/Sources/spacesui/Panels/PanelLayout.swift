@@ -62,14 +62,19 @@ struct Pane: Codable, Sendable, Equatable, Identifiable {
     var content: PaneContentDescriptor
 }
 
-/// What a pane shows. Only terminal sessions exist today; future content kinds (editor,
-/// file preview) become new cases that older persisted layouts simply never contain.
+/// What a pane shows. Older persisted layouts contain only `.terminalSession` cases and
+/// decode unchanged as new cases are added.
 enum PaneContentDescriptor: Codable, Sendable, Hashable {
     case terminalSession(deviceID: String, sessionID: String)
+    /// A diff/editor pane for a workspace's working tree. Has no session of its own — the
+    /// device and workspace identify what it shows; the pane is recreated (not restarted)
+    /// on restore, so unlike a terminal it carries no daemon-side liveness to reconcile.
+    case codePane(deviceID: String, workspaceID: String)
 
     var terminalSessionID: String? {
         switch self {
         case .terminalSession(_, let sessionID): return sessionID
+        case .codePane: return nil
         }
     }
 }

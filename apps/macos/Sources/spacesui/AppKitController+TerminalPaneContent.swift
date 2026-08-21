@@ -14,8 +14,12 @@ extension AppKitController {
         switch scope {
         case .workspace(_, let scopeWorkspaceID): return scopeWorkspaceID
         case .globalWindow:
-            // A global panel's new tab targets the focused pane's workspace.
-            return panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
+            // A global panel's new tab targets the focused pane's workspace: a focused terminal
+            // session's workspace first, then a focused code pane's workspace (it has no session to
+            // resolve one from), else the selected workspace.
+            return panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) }
+                ?? panelCoordinator.focusedCodePaneWorkspaceID()
+                ?? selectedWorkspaceID
         }
     }
 
@@ -42,9 +46,13 @@ extension AppKitController {
     /// focuses its existing pane instead of duplicating it.
     func presentNewTabSessionPicker(scope: PanelScope) {
         guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
-        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
-            guard let self, let request else { return }
-            self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] result in
+            guard let self, let result else { return }
+            switch result {
+            case .terminal(let request): self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+            case .codePane(let deviceID, let paneWorkspaceID, let mode):
+                self.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: paneWorkspaceID, initialMode: mode, in: scope)
+            }
         }
     }
 
@@ -155,19 +163,26 @@ extension AppKitController {
         case open(PanelLayout)
     }
 
-    nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>)
-        -> PanelWindowRestoreDecision
-    {
+    /// - Parameter retainedWorkspaceKeys: The live `(deviceID, workspaceID)` pairs across every
+    ///   ready device's overview — a global panel window's code panes can reference any workspace, not
+    ///   only one belonging to the window's own scope, unlike a workspace panel's own restore, so this
+    ///   decision (unlike `restoredWorkspacePanelLayout`) prunes code panes against workspace liveness
+    ///   too. A workspace deleted while the app was closed must not reopen its code pane on relaunch.
+    nonisolated static func panelWindowRestoreDecision(
+        layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>,
+        retainedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>
+    ) -> PanelWindowRestoreDecision {
         guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
         else { return .skip }
         let referencedDeviceIDs = Set(
             PanelLayoutEngine.allPanes(in: layout).map { pane in
                 switch pane.content {
                 case .terminalSession(let deviceID, _): deviceID
+                case .codePane(let deviceID, _): deviceID
                 }
             })
         guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
-        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
+        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: retainedWorkspaceKeys)
         return pruned.isEmpty ? .discard : .open(pruned)
     }
 
@@ -210,10 +225,18 @@ extension AppKitController {
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
+        // Hidden workspaces stay listed in their device's overview with `isHidden` set, so this is a
+        // deletion-only keep-set exactly like the live overview-driven code-pane prune
+        // (`PanelCoordinator.pruneOpenCodePanes`).
+        let retainedWorkspaceKeys = Set(
+            readySections.flatMap { section in
+                (section.overview?.workspaces ?? []).map { PanelLayoutEngine.WorkspaceKey(deviceID: section.deviceID, workspaceID: $0.id) }
+            })
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
             switch Self.panelWindowRestoreDecision(
-                layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs)
+                layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs,
+                retainedWorkspaceKeys: retainedWorkspaceKeys)
             {
             case .waitForDevices: remaining.append(record)
             case .skip: break
@@ -238,19 +261,31 @@ extension AppKitController {
         /// picking it starts the process via the Device API and completes with the resulting
         /// session's open request. Mirrors `DeviceWindowShortcutResolution.runProcess`.
         case startProcess(workspaceID: String, processKey: String, processTemplateID: String?)
+        /// The "Diff" or "Open file…" row: creates a code pane instead of a terminal session.
+        case codePane(deviceID: String, workspaceID: String, mode: CodePaneMode)
+    }
+
+    /// What a pane-split/new-tab session picker resolved to: a terminal open request, or a code pane
+    /// to create. One result type covers both content kinds so the terminal-only call sites that
+    /// existed before code panes (`presentNewTabSessionPicker`, `PanelCoordinator.beginSplit`) gain
+    /// code-pane rows without a second, parallel picker plumbing.
+    enum PaneSessionPickerResult {
+        case terminal(DeviceTerminalOpenRequest)
+        case codePane(deviceID: String, workspaceID: String, mode: CodePaneMode)
     }
 
     /// Presents the command palette in session-picker mode for filling a pane split or
-    /// opening a new tab, and delivers the resulting open request (creating a fresh
-    /// session when "New terminal session" is chosen), or nil when dismissed.
-    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
+    /// opening a new tab, and delivers the resulting choice (creating a fresh session when
+    /// "New terminal session" is chosen), or nil when dismissed.
+    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (PaneSessionPickerResult?) -> Void) {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
             scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
         ) { [weak self] choice in
             switch choice {
             case nil: completion(nil)
-            case .existingSession(let request): completion(request)
+            case .existingSession(let request): completion(.terminal(request))
+            case .codePane(let deviceID, let workspaceID, let mode): completion(.codePane(deviceID: deviceID, workspaceID: workspaceID, mode: mode))
             case .newTerminalSession(let workspaceID):
                 guard let self else {
                     completion(nil)
@@ -263,7 +298,7 @@ extension AppKitController {
                 self.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
                     guard let self else { return }
                     defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
-                    completion(request)
+                    completion(request.map { .terminal($0) })
                 }
             case .startProcess(let workspaceID, let processKey, let processTemplateID):
                 guard let self else {
@@ -271,12 +306,12 @@ extension AppKitController {
                     return
                 }
                 Task { @MainActor in
-                    completion(
-                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
-                            try SpacesDeviceClient.runWorkspaceProcess(
-                                workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                        })
+                    let request = await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
+                        try SpacesDeviceClient.runWorkspaceProcess(
+                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    }
+                    completion(request.map { .terminal($0) })
                 }
             }
         }
@@ -319,8 +354,9 @@ extension AppKitController {
                 newTerminalOverview: invokingSectionIsLoaded ? overview(forWorkspaceID: newTerminalWorkspaceID) : nil)
         }
         return Self.sessionPickerPresentation(
-            newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID),
-            scopedWorkspaces: scopedWorkspaces, openSessionIDs: panelCoordinator.openSessionIDs())
+            newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalDeviceID: deviceID(forWorkspaceID: newTerminalWorkspaceID) ?? "",
+            newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID), scopedWorkspaces: scopedWorkspaces,
+            openSessionIDs: panelCoordinator.openSessionIDs())
     }
 
     /// Every loaded device's workspaces in sidebar order (the command palette's device →
@@ -373,8 +409,8 @@ extension AppKitController {
     /// processes carry a start choice and are always listed.
     /// `nonisolated static` so it's testable without a live `AppKitController`.
     nonisolated static func sessionPickerPresentation(
-        newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?, scopedWorkspaces: [SessionPickerWorkspaceContext],
-        openSessionIDs: Set<String>
+        newTerminalWorkspaceID: String, newTerminalDeviceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?,
+        scopedWorkspaces: [SessionPickerWorkspaceContext], openSessionIDs: Set<String>
     ) -> (items: [CommandPaletteItem], choices: [String: SessionPickerChoice]) {
         var items: [CommandPaletteItem] = []
         var choices: [String: SessionPickerChoice] = [:]
@@ -402,6 +438,24 @@ extension AppKitController {
             id: "picker:new", workspaceID: newTerminalWorkspaceID,
             workspace: newTerminalOverview?.workspaces.first { $0.id == newTerminalWorkspaceID }, kind: .window, label: "New terminal session",
             detail: "Start a fresh terminal", status: .none, choice: .newTerminalSession(workspaceID: newTerminalWorkspaceID))
+
+        // "Diff" and "Open file…" both produce a `.codePane` descriptor today — Phase 1 has no
+        // separate diff/editor rendering yet, so the two rows differ only in the runtime mode hint
+        // passed to the controller (see `CodePaneMode`). Listed only when the invoking workspace's
+        // device is known: a code pane always needs a concrete device ID, unlike the "New terminal
+        // session" row above which can defer device resolution to session creation.
+        if !newTerminalDeviceID.isEmpty {
+            appendItem(
+                id: "picker:diff", workspaceID: newTerminalWorkspaceID,
+                workspace: newTerminalOverview?.workspaces.first { $0.id == newTerminalWorkspaceID }, kind: .window, label: "Diff",
+                detail: "Review working tree changes", status: .none,
+                choice: .codePane(deviceID: newTerminalDeviceID, workspaceID: newTerminalWorkspaceID, mode: .diff))
+            appendItem(
+                id: "picker:openFile", workspaceID: newTerminalWorkspaceID,
+                workspace: newTerminalOverview?.workspaces.first { $0.id == newTerminalWorkspaceID }, kind: .window, label: "Open file…",
+                detail: "Edit a file in the working tree", status: .none,
+                choice: .codePane(deviceID: newTerminalDeviceID, workspaceID: newTerminalWorkspaceID, mode: .editor))
+        }
 
         for context in scopedWorkspaces {
             guard let deviceWorkspace = context.overview.workspaces.first(where: { $0.id == context.workspaceID }) else { continue }

@@ -261,14 +261,36 @@ enum PanelLayoutEngine {
         return layout
     }
 
-    /// Drops panes whose terminal session no longer exists (used at launch against the
-    /// overview's session catalog). Non-terminal content is untouched. Splits collapse
-    /// and empty tabs disappear exactly as explicit closes do.
-    static func prunedLayout(_ layout: PanelLayout, keepingSessionIDs: Set<String>) -> PanelLayout {
+    /// Identifies a workspace a code pane belongs to, for pruning a persisted layout against a set of
+    /// still-live workspaces.
+    struct WorkspaceKey: Hashable {
+        let deviceID: String
+        let workspaceID: String
+    }
+
+    /// Drops panes whose content no longer exists: a terminal pane whose session id is not in
+    /// `keepingSessionIDs`, and — only when `keepingWorkspaceKeys` is supplied — a code pane whose
+    /// `(deviceID, workspaceID)` is not in it. `keepingWorkspaceKeys` defaults to nil rather than an
+    /// empty set so a caller that only tracks session liveness (a workspace-scoped panel's own
+    /// restore, whose code panes are always for that panel's own workspace) leaves code panes
+    /// untouched, exactly as before this parameter existed, instead of having to pass the panel's
+    /// single workspace back in. Splits collapse and empty tabs disappear exactly as explicit closes do.
+    ///
+    /// A code pane is kept for any workspace that still exists, running or not: a stopped workspace's
+    /// working tree is still there to review, and a pane may have been legitimately opened after the
+    /// stop, so restore cannot tell "stopped while this app was closed" apart from "opened on a stopped
+    /// workspace" and deliberately keeps both. Live clients close code panes by observing the
+    /// running→not-running transition instead (see the `closeCodePanes(deviceID:workspaceIDs:)` call
+    /// sites in `SidebarController`).
+    static func prunedLayout(_ layout: PanelLayout, keepingSessionIDs: Set<String>, keepingWorkspaceKeys: Set<WorkspaceKey>? = nil) -> PanelLayout {
         var layout = layout
         let deadPaneIDs = allPanes(in: layout).filter { pane in
-            guard let sessionID = pane.content.terminalSessionID else { return false }
-            return !keepingSessionIDs.contains(sessionID)
+            switch pane.content {
+            case .terminalSession(_, let sessionID): return !keepingSessionIDs.contains(sessionID)
+            case .codePane(let deviceID, let workspaceID):
+                guard let keepingWorkspaceKeys else { return false }
+                return !keepingWorkspaceKeys.contains(WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID))
+            }
         }.map(\.id)
         for paneID in deadPaneIDs { layout = removePane(paneID: paneID, from: layout) }
         return layout
