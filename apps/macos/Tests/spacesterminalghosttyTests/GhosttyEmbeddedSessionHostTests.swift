@@ -4772,6 +4772,62 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// Broadcasts carry the live-row projection of the attachment snapshot, and that projection is
+    /// memoized so the session's attach history is not rescanned on every output tick. The memo is
+    /// invalidated by the snapshot's own `didSet`, so every attachment change — attach, the ownership
+    /// handover a second owner attach performs, and detach — must be visible in the very next export.
+    func testExportedAttachmentSnapshotCarriesOnlyLiveRowsAndTracksEveryChange() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-live-wire-projection", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            @TerminalEngineActor func exportedSnapshot() -> TerminalSessionAttachmentSnapshot? {
+                host.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot
+            }
+            // The overview's live-session merge reads the same attachment state through a path that must
+            // not touch the database, so it is asserted alongside every export below.
+            @TerminalEngineActor func catalogSnapshot() -> TerminalSessionAttachmentSnapshot? {
+                host.inMemoryCatalogEntry()?.attachmentSnapshot
+            }
+
+            let first = TerminalClient(
+                id: "window-a", kind: .localWindow, identity: .init(label: "Spaces window A"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: first, attachmentMode: .owner)).ok)
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(exportedSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
+            XCTAssertEqual(exportedSnapshot()?.clients.map { $0.id }, ["window-a"])
+            XCTAssertEqual(catalogSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
+
+            let second = TerminalClient(
+                id: "window-b", kind: .localWindow, identity: .init(label: "Spaces window B"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: second, attachmentMode: .owner)).ok)
+            host.debugDrainPersistenceQueue()
+            let afterHandover = try XCTUnwrap(exportedSnapshot())
+            XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: afterHandover), "window-b")
+            XCTAssertTrue(afterHandover.attachments.allSatisfy { $0.detachedAt == nil }, "a detached row must never reach the wire")
+            XCTAssertEqual(Set(afterHandover.clients.map { $0.id }), Set(afterHandover.attachments.map { $0.clientID }))
+            XCTAssertEqual(catalogSnapshot()?.attachments.map { $0.clientID }, ["window-b"])
+
+            try host.detach(clientID: second.id)
+            host.debugDrainPersistenceQueue()
+            let afterDetach = try XCTUnwrap(exportedSnapshot())
+            XCTAssertTrue(afterDetach.attachments.isEmpty, "the detach must be visible in the next export, not hidden behind a stale memo")
+            XCTAssertTrue(afterDetach.clients.isEmpty, "a client no active attachment names must not ride along")
+            XCTAssertEqual(catalogSnapshot()?.attachments.isEmpty, true)
+        }
+    }
+
     /// A `SessionStart` hook can fire while a just-spawned session's launch-configuration row is still
     /// queued behind the persistence queue (`TerminalSessionPendingLaunchRegistry` holds it in the
     /// meantime). `enqueueAgentSignalAppend` must land the signal only after that row exists, which FIFO

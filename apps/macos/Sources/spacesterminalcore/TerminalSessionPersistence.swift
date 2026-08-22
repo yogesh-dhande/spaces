@@ -212,6 +212,31 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
             return true
         }
     }
+
+    /// The projection of this snapshot that a subscriber is sent: still-attached attachments, and the
+    /// clients those attachments name.
+    ///
+    /// The rows this drops are pure history. A client row and an attachment row are appended on every
+    /// attach and neither is ever pruned, so a session that has been attached to N times over its life
+    /// carries N of each in every payload it broadcasts — at output cadence, to every subscriber. An
+    /// hour of a phone opening and closing a terminal is enough to make the history dominate the
+    /// payload; the live rows it conveys stay at one or two.
+    ///
+    /// Dropping them changes no answer an off-device consumer can compute. `liveAttachments` is the
+    /// single liveness rule and it only ever inspects non-detached attachments and the clients they
+    /// reference; every other off-device read — resolving the active owner, its display name, and
+    /// whether this client's own attachment is still active — filters on `detachedAt == nil` first for
+    /// the same reason. A disconnected or lease-expired client that still holds an undetached
+    /// attachment is deliberately retained, because that is a row `liveAttachments` must still judge.
+    ///
+    /// Applied where the snapshot crosses onto the wire, never to the snapshot a session core holds:
+    /// the core gates ownership against the full history and stays the authority for it.
+    public func liveWireProjection() -> TerminalSessionAttachmentSnapshot {
+        let attachedAttachments = attachments.filter { $0.detachedAt == nil }
+        let attachedClientIDs = Set(attachedAttachments.map(\.clientID))
+        return TerminalSessionAttachmentSnapshot(
+            clients: clients.filter { attachedClientIDs.contains($0.id) }, attachments: attachedAttachments)
+    }
 }
 
 public enum TerminalSessionPersistence {
@@ -475,7 +500,10 @@ public enum TerminalSessionPersistence {
         }
         guard let payloadJSON else { throw TerminalSessionPersistenceError.unknownSession(root) }
         guard let data = payloadJSON.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>") }
-        return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
+        // Projected on read, not just on write: this row can have been written by a build that stored
+        // the session's whole attachment history, and it is replayed to every reader for as long as the
+        // ended session is retained.
+        return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data).withLiveWireAttachmentProjection()
     }
 
     public static func appendPendingAgentSignal(

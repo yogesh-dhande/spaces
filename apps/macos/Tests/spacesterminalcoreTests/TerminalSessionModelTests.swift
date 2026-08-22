@@ -449,6 +449,47 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), payload)
     }
 
+    /// A final payload stored by a build that kept the session's whole attachment history is projected
+    /// on the way out, so a retained ended session does not keep replaying those rows to every reader.
+    func testStoredFinalPayloadIsProjectedToLiveRowsOnRead() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-historical-clients"
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, servicePID: 123, childPID: 456, state: .exited, updatedAt: "2026-05-08T00:00:05Z", exitedAt: "2026-05-08T00:00:05Z",
+            title: "final-target", workingDirectory: root.path, columns: 80, rows: 24)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let history = TerminalSessionAttachmentSnapshot(
+            clients: (0..<20).map { index in
+                TerminalClient(
+                    id: "client-\(index)", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"),
+                    connectedAt: "2026-05-08T00:00:00Z", disconnectedAt: "2026-05-08T00:00:01Z")
+            },
+            attachments: (0..<20).map { index in
+                TerminalAttachment(
+                    id: "attachment-\(index)", sessionID: sessionID, clientID: "client-\(index)", mode: .viewer,
+                    attachedAt: "2026-05-08T00:00:00Z", detachedAt: "2026-05-08T00:00:01Z")
+            })
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,
+            sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: history, title: "final-target",
+            workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
+
+        try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
+
+        let read = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
+        XCTAssertEqual(read.attachmentSnapshot?.clients.count, 0)
+        XCTAssertEqual(read.attachmentSnapshot?.attachments.count, 0)
+        XCTAssertEqual(read, payload.withLiveWireAttachmentProjection())
+        XCTAssertEqual(read.renderUpdate, Data([1, 2, 3]))
+        XCTAssertEqual(read.title, payload.title)
+        XCTAssertEqual(read.sessionStateRevision, payload.sessionStateRevision)
+    }
+
     /// Whether an ended pane can replay its final frame is answered from the stored flag, so a reader does
     /// not decode the whole payload to test one field. A payload carrying a full frame reports available;
     /// one without a replayable frame reports unavailable.

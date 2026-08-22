@@ -2797,7 +2797,8 @@ enum SpacesDaemonErrorClassification {
             lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
             childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
             launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-            attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
+            attachmentSnapshot: ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+                .liveWireProjection(),
             hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
     }
 
@@ -2889,7 +2890,8 @@ enum SpacesDaemonErrorClassification {
         -> GhosttyRemoteSessionStatePayload
     {
         let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+            .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,

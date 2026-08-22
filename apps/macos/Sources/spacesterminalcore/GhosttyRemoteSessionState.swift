@@ -178,6 +178,21 @@ extension GhosttyRemoteSessionStatePayload {
         replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update), screenStateRevision: nil)
     }
 
+    /// The payload with its attachment snapshot reduced to what a subscriber needs, per
+    /// `TerminalSessionAttachmentSnapshot.liveWireProjection`. Producers project before building a
+    /// payload; this exists for the one payload that is not built on demand — a terminated session's
+    /// final state, which is stored once and replayed to every later reader — so a payload written by
+    /// an older build is projected on the way out rather than kept oversized for the session's retention.
+    public func withLiveWireAttachmentProjection() -> Self {
+        guard let attachmentSnapshot else { return self }
+        return .init(
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
+            sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision, runtimeState: runtimeState,
+            attachmentSnapshot: attachmentSnapshot.liveWireProjection(), title: title, workingDirectory: workingDirectory,
+            outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, renderUpdateBody: renderUpdateBody,
+            clipboardWrite: clipboardWrite)
+    }
+
     private func replacingRenderUpdateBody(_ body: GhosttyRenderUpdateBody?, screenStateRevision: UInt64?) -> Self {
         .init(
             sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
