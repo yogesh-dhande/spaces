@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import ArgumentParser
 import Carbon
+import CoreGraphics
 import Dispatch
 import Foundation
 import Network
@@ -37,7 +38,7 @@ struct SpacesE2ECommand: ParsableCommand {
             ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
             DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
             AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
-            AutomationEndAgentsCommand.self,
+            AutomationEndAgentsCommand.self, WindowStackingCommand.self,
         ])
 }
 
@@ -498,6 +499,29 @@ private struct MacClientInstallationIDCommand: ParsableCommand {
         commandName: "mac-client-installation-id", abstract: "Show this profile's macOS Device API client installation id.")
 
     func run() throws { print(SpacesDevicePairingClient.localMacClientInstallationID()) }
+}
+
+private struct WindowStackingCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "window-stacking", abstract: "Print the on-screen window stack, front to back.")
+
+    /// Cross-application z-order (which app's window is above which) is not something any app can observe
+    /// about itself; it is only visible through the window server. `CGWindowListCopyWindowInfo` already
+    /// returns on-screen windows front-to-back, so this just filters to ordinary application windows
+    /// (layer 0, which excludes menu bars, the dock, and other system chrome) and prints one line per
+    /// window so a harness can assert on stacking order across applications, e.g. that focusing a
+    /// workspace browser session raises only its Chrome window and not every Chrome window.
+    func run() throws {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] ?? []
+        for window in info {
+            guard (window[kCGWindowLayer as String] as? Int) == 0 else { continue }
+            let ownerPID = window[kCGWindowOwnerPID as String] as? Int ?? 0
+            let ownerName = window[kCGWindowOwnerName as String] as? String ?? ""
+            let windowNumber = window[kCGWindowNumber as String] as? Int ?? 0
+            let windowTitle = window[kCGWindowName as String] as? String ?? ""
+            print("\(ownerPID)\t\(ownerName)\t\(windowNumber)\t\(windowTitle)")
+        }
+    }
 }
 
 private struct ProfileSocketPathsCommand: ParsableCommand {

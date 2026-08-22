@@ -85,6 +85,7 @@ MOCK_AGENT_LABEL="Coding Agent"
 SPACES_PID=""
 CAFFEINATE_PID=""
 RECORDER_PID=""
+UNRELATED_CHROME_WINDOW_ID=""
 RECORDER_READY_FILE=""
 FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
@@ -160,6 +161,7 @@ cleanup() {
   stop_desktop_awake_assertion
   "$SPACES_E2E_CLI" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
+  close_unrelated_chrome_window || true
   if [[ -n "${SPACES_PID}" ]]; then
     kill "${SPACES_PID}" >/dev/null 2>&1 || true
     wait "${SPACES_PID}" >/dev/null 2>&1 || true
@@ -1332,6 +1334,8 @@ run_remote_device_ui_parity() {
   local_browser_url="$(remote_device_local_browser_url "$REMOTE_DEVICE_WEB_BROWSER_URL")"
   wait_for_http_body_contains "$local_browser_url" "remote device api sentinel"
   wait_for_condition "chrome_front_url" "$local_browser_url"
+  # Focusing a browser session must leave Spaces on screen so it stays usable on another display.
+  assert_spaces_stays_visible "after focusing a remote browser session"
   pass_case
 }
 
@@ -2469,7 +2473,10 @@ APPLESCRIPT
 }
 
 # Brings the Chrome window with the given AppleScript window id to the front (Chrome window
-# ids are Chrome-level ids, not desktop window ids). A no-op when no id is supplied.
+# ids are Chrome-level ids, not desktop window ids). A no-op when no id is supplied, and the
+# whole script is best-effort: an id whose window has already closed just fails silently.
+# The window is addressed by id rather than through a `repeat with w in windows` reference,
+# matching the rule ChromeAdapter's raises follow.
 chrome_focus_window_if_present() {
   local window_id="${1:-}"
   [[ -n "$window_id" ]] || return 0
@@ -2477,12 +2484,7 @@ chrome_focus_window_if_present() {
 on run argv
   set targetId to (item 1 of argv) as integer
   tell application "Google Chrome"
-    repeat with w in windows
-      if (id of w) is targetId then
-        set index of w to 1
-        exit repeat
-      end if
-    end repeat
+    set index of window id targetId to 1
     activate
   end tell
 end run
@@ -3076,6 +3078,104 @@ if result.returncode != 0:
     sys.exit(0)
 sys.stdout.write(result.stdout)
 PY
+}
+
+# Echoes "1" when the Spaces process is visible (System Events "visible of proc"; a hidden app
+# reports false) and "0" otherwise. Focusing or opening an external window must never hide Spaces,
+# so callers assert on this rather than on frontmost-ness, which a browser stealing focus changes
+# on its own.
+spaces_app_visible() {
+  local pid="${1:-$SPACES_PID}"
+  osascript - "$pid" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if visible of proc is false then
+        return "0"
+      else
+        return "1"
+      end if
+    end repeat
+  end tell
+  return "0"
+end run
+APPLESCRIPT
+}
+
+# Fails unless Spaces stays visible for a couple of seconds. A hide triggered by the action under
+# test does not have to be synchronous with it, so a single sample taken the moment Chrome comes
+# forward can pass while a delayed hide is still pending; this samples past any such delay.
+assert_spaces_stays_visible() {
+  local context="$1"
+  local deadline=$((SECONDS + 2))
+  while true; do
+    [[ "$(spaces_app_visible)" == "1" ]] || fail "Spaces hid itself $context"
+    (( SECONDS < deadline )) || break
+    sleep 0.25
+  done
+}
+
+# Opens a new Chrome window at about:blank that has nothing to do with any workspace-tracked
+# browser session. It stands in for a Chrome window the user already has open for unrelated
+# reasons, so a stacking assertion can tell "only the target window rose" from "every Chrome
+# window rose" (the latter is what AppleScript `activate` does by default). Records the new
+# window's AppleScript id in UNRELATED_CHROME_WINDOW_ID so the exit cleanup closes it even when
+# an assertion between open and close fails.
+open_unrelated_chrome_window() {
+  UNRELATED_CHROME_WINDOW_ID="$(osascript <<'APPLESCRIPT'
+tell application "Google Chrome"
+  set newWindow to make new window
+  set URL of active tab of newWindow to "about:blank"
+  return id of newWindow as string
+end tell
+APPLESCRIPT
+)"
+  UNRELATED_CHROME_WINDOW_ID="$(printf '%s' "$UNRELATED_CHROME_WINDOW_ID" | tr -d '[:space:]')"
+}
+
+# Closes the unrelated Chrome window if one is open. Safe to call twice: the id is cleared, so
+# the exit cleanup is a no-op after the normal in-line close.
+close_unrelated_chrome_window() {
+  [[ -n "$UNRELATED_CHROME_WINDOW_ID" ]] || return 0
+  chrome_close_window_id "$UNRELATED_CHROME_WINDOW_ID"
+  UNRELATED_CHROME_WINDOW_ID=""
+}
+
+# Fails unless exactly one Chrome window sits above the Spaces window in the on-screen window
+# stack. Focusing a browser session must raise only that session's Chrome window; if it raised
+# every Chrome window (the `activate` regression this guards against), an unrelated Chrome
+# window would sit above the target and this count would exceed 1. Polls briefly because window
+# server ordering can lag the action that triggered it by a beat.
+assert_only_target_chrome_window_above_spaces() {
+  local context="$1"
+  local deadline=$((SECONDS + 2))
+  local stack owner_pid owner_name window_number window_title
+  local chrome_windows_above spaces_row_found
+  while true; do
+    stack="$("$SPACES_E2E_CLI" window-stacking)"
+    chrome_windows_above=0
+    spaces_row_found=0
+    while IFS=$'\t' read -r owner_pid owner_name window_number window_title; do
+      [[ -n "$owner_pid" ]] || continue
+      if [[ "$owner_pid" == "$SPACES_PID" ]]; then
+        spaces_row_found=1
+        break
+      fi
+      [[ "$owner_name" == "Google Chrome" ]] && chrome_windows_above=$((chrome_windows_above + 1))
+    done <<< "$stack"
+    if [[ "$spaces_row_found" == "1" && "$chrome_windows_above" == "1" ]]; then
+      return 0
+    fi
+    (( SECONDS < deadline )) || break
+    sleep 0.2
+  done
+  if [[ "$spaces_row_found" != "1" ]]; then
+    fail "Spaces window is not in the on-screen window stack $context, so it is not on the current desktop Space:
+$stack"
+  fi
+  fail "expected exactly 1 Chrome window above Spaces $context, got $chrome_windows_above:
+$stack"
 }
 
 activate_google_chrome() {
@@ -5709,11 +5809,20 @@ PY
         ;;
     esac
 
+    open_unrelated_chrome_window
     ui_show_workspace_detail "$workspace_dir" "$workspace_title"
     sleep 0.5
     send_spaces_window_shortcut_with_ack "$admin_shortcut_index"
     transition_pause "$host cmd+number opens admin browser session"
     wait_for_condition "chrome_front_url" "$browser_admin_url"
+    # A GUI browser-session focus hands the front to Chrome without hiding Spaces, so Spaces stays
+    # usable on another display. Chrome being frontmost above is the hand-off; this is the other half.
+    assert_spaces_stays_visible "after cmd+number focused a browser session"
+    # Focusing a browser session must raise only that session's Chrome window, not every Chrome
+    # window (AppleScript `activate` raises all of an app's windows by default), so an unrelated
+    # Chrome window the user already had open cannot end up covering the Spaces window.
+    assert_only_target_chrome_window_above_spaces "after cmd+number focused a browser session"
+    close_unrelated_chrome_window
     admin_window_id="$(wait_for_chrome_window_id_for_url "$browser_admin_url" "admin")"
     wait_for_condition "chrome_window_active_url $admin_window_id" "$browser_admin_url"
     [[ "$admin_window_id" == "$docs_window_id" ]] \
