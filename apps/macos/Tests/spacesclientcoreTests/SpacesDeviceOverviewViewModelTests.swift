@@ -19,11 +19,25 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                 for: .restartWorkspaceProcess(.init(workspaceID: "workspace-1", processID: nil, processKey: "web", processTemplateID: nil))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         // A transcript response can carry the full 10MB scrollback budget, which a slow remote link
-        // cannot deliver within the default timeout.
+        // cannot deliver within the default timeout. Workspace file reads/writes and diffs share this
+        // same large-payload bucket for the same reason.
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 1))),
-            SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds)
-        XCTAssertGreaterThan(SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
+            SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceFileRead(.init(workspaceID: "workspace-1", relativePath: "README.md"))),
+            SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(
+                for: .workspaceFileWrite(.init(workspaceID: "workspace-1", relativePath: "README.md", base64Data: "", expectedSHA256: nil))),
+            SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceDiff(.init(workspaceID: "workspace-1"))),
+            SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .subscribeWorkspaceDiffSignature(.init(workspaceID: "workspace-1"))),
+            SpacesDeviceClient.defaultRequestTimeoutSeconds)
+        XCTAssertGreaterThan(SpacesDeviceClient.largePayloadRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(for: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1"))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)

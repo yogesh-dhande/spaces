@@ -79,9 +79,11 @@ public enum SpacesDeviceClient {
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
     static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
-    /// A transcript response can carry up to the full scrollback budget (10MB, ~13MB as base64 JSON),
-    /// which needs more than the default timeout on slow remote links.
-    static let terminalTranscriptRequestTimeoutSeconds: TimeInterval = 60
+    /// A response carrying a large embedded payload — a transcript up to the full scrollback budget
+    /// (10MB, ~13MB as base64 JSON), a workspace file read/write (`workspaceFileMaxBytes`, also base64),
+    /// or a `workspaceDiff` (patches capped at 8MB total) — needs more than the default timeout on slow
+    /// remote links.
+    static let largePayloadRequestTimeoutSeconds: TimeInterval = 60
 
     public static func macOSClientApp(
         installationID: String = SpacesDevicePairingClient.localMacClientInstallationID(), deviceName: String = Host.current().localizedName ?? "Mac",
@@ -617,6 +619,76 @@ public enum SpacesDeviceClient {
                         isHidden: isHidden, updatesHidden: updatesHidden))), device: device, clientApp: clientApp, profile: profile)
     }
 
+    /// Reads one file inside a workspace's checkout on a paired device (capped at 10 MiB on the daemon
+    /// side; see `SpacesDeviceAPIServer.workspaceFileMaxBytes`).
+    public static func workspaceFileRead(
+        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceFileReadResult {
+        let response = try request(
+            .init(command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: relativePath))), device: device, clientApp: clientApp,
+            profile: profile)
+        guard let result = response.workspaceFileRead else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Compare-and-swap write to one file inside a workspace's checkout on a paired device. `expectedSHA256`
+    /// should be the hash last read via `workspaceFileRead`, or `nil` to assert the file must not exist yet.
+    /// A mismatch is not thrown as an error: `didWrite` is `false` and the result carries the disk content
+    /// the caller can merge against.
+    public static func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceFileWriteResult {
+        let response = try request(
+            .init(
+                command: .workspaceFileWrite(
+                    .init(workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256))),
+            device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceFileWrite else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Fetches a workspace's diff on a paired device. `refName == nil` diffs uncommitted changes against
+    /// `HEAD`; a non-nil `refName` diffs the merge-base of `refName` and `HEAD` against the working tree
+    /// (see `SpacesDeviceWorkspaceDiffRequest`).
+    public static func workspaceDiff(
+        workspaceID: String, refName: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceDiffResult {
+        let response = try request(
+            .init(command: .workspaceDiff(.init(workspaceID: workspaceID, refName: refName))), device: device, clientApp: clientApp,
+            profile: profile)
+        guard let result = response.workspaceDiff else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Opens a live per-(workspace, ref)-scope diff-signature subscription: the paired daemon pushes a frame
+    /// whenever the scope's `scopeSignature` changes (notify-then-pull; the daemon polls, see
+    /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiff` (with the same `refName`)
+    /// on delivery rather than trust any payload carried on the frame. `refName` selects the same scope
+    /// `workspaceDiff` would (`nil` for uncommitted changes); pass the same value to both so their
+    /// subscription and results agree. The returned client must be retained and `stop()`ped.
+    public static func subscribeWorkspaceDiffSignature(
+        workspaceID: String, refName: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws -> SpacesDeviceWorkspaceDiffSignatureStreamClient {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let client = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
+            workspaceID: workspaceID, refName: refName, authToken: authToken, clientApp: clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            onDisconnect: onDisconnect)
+        try client.start()
+        return client
+    }
+
     public static func openWorkspaceTerminal(
         workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
@@ -1046,12 +1118,12 @@ public enum SpacesDeviceClient {
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
+        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession,
-            .listAutomations, .listAutomationRuns:
+            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .openServiceTunnel,
+            .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
         }
     }

@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import spacesdevicecore
+import spacesruntimecore
 import spacesterminalcore
 import workspacecore
 
@@ -137,6 +138,21 @@ extension SpacesDeviceAPICommand {
     fileprivate var runsOnTerminalControlQueue: Bool {
         switch self {
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
+        default: false
+        }
+    }
+
+    /// File read/write/diff commands all shell out to `git` and touch the filesystem, so like the
+    /// other seconds-scale families above they would stall every other connection's requests (including
+    /// the corroboration `.ping`) if left on the serial state queue. Both transports divert them to a
+    /// serial queue scoped to the request's own workspace (`workspaceGitQueue(for:)`), so a slow diff on one
+    /// workspace stalls only that workspace's other requests, not another workspace's or the state queue's.
+    /// `.subscribeWorkspaceDiffSignature` is not included here: it hijacks the connection
+    /// (`hijacksConnection`) before either transport's dispatch chain reaches this check, so it never needs
+    /// a worker-queue divert of its own.
+    fileprivate var runsOnWorkspaceGitQueue: Bool {
+        switch self {
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: true
         default: false
         }
     }
@@ -283,6 +299,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let heartbeatTimer: DispatchSourceTimer?
             let connection: NWConnection
             let sendSequencer: StreamSendSequencer
+            /// Set only for a `subscribeWorkspaceDiffSignature` relay; `closeStreamRelay` uses it to
+            /// release that scope's poll-subscriber slot when this relay's connection closes.
+            var diffSignatureScope: WorkspaceDiffScope? = nil
         }
 
         private final class StreamSendSequencer: @unchecked Sendable {
@@ -427,6 +446,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnTerminalControlQueue {
                         server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnWorkspaceGitQueue {
+                        server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else {
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
@@ -470,6 +491,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let subscriptionSocketPath: String
             let controlSocketPath: String
             let clientID: String?
+            /// Set only for a `subscribeWorkspaceDiffSignature` relay; `relayLinuxSubscription` uses it to
+            /// release that scope's poll-subscriber slot once the relay loop returns.
+            var diffSignatureScope: WorkspaceDiffScope? = nil
         }
 
         private enum LinuxSubscribeAction: Sendable {
@@ -662,6 +686,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         } else if request.command.runsOnTerminalControlQueue {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleTerminalControlRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnWorkspaceGitQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleWorkspaceGitRequestOnWorkerQueue(request)
                         } else {
                             response = try server.syncOnQueue {
                                 try server.authorize(request)
@@ -932,6 +959,68 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `runsOnTerminalControlQueue`). Serialize them here so a stalled engine holds up only other
     /// terminal controls and never the state queue that answers pings, overviews, and state reads.
     private let terminalControlQueue = DispatchQueue(label: "spaces.device.api.terminal-control", qos: .userInitiated)
+    /// File read/write/diff commands (see `runsOnWorkspaceGitQueue`) shell out to `git` and touch the
+    /// filesystem, which can take seconds for a large diff. Serialized per workspace (see
+    /// `workspaceGitQueue(for:)`) rather than on one shared queue, so a slow diff on one workspace stalls
+    /// only that workspace's other requests, never the state queue's pings/overviews or a different
+    /// workspace's file read; same-workspace requests still serialize to preserve write ordering.
+    /// Not `private`, only so `@testable` tests can assert an entry was (or was not) minted for a given
+    /// workspace id; still module-internal, never part of the public API.
+    var workspaceGitQueuesByWorkspaceID: [String: DispatchQueue] = [:]
+
+    /// Returns the serial queue for `workspaceID`'s file read/write/diff commands, creating it on first use.
+    /// `queue`-confined (see the property doc above). Workspaces are few and long-lived for the life of a
+    /// daemon process, so entries are never evicted — the routing chokepoints below (`handleWorkspaceGitRequestAsync`
+    /// / `handleWorkspaceGitRequestOnWorkerQueue`) reject an unresolvable workspace id before it ever reaches
+    /// here, which is what keeps this dictionary bounded. Once a real workspace is later deleted, its entry
+    /// here still persists for the rest of the daemon's process lifetime: eviction would need plumbing into
+    /// the deletion path for a payoff that is not product-visible, since real workspaces over a daemon's
+    /// life are bounded by actual usage (hundreds at most, each entry just a label and an idle queue). That
+    /// remainder is accepted; the check below closes the unbounded case (arbitrary/spoofed ids), which is
+    /// the one with no natural bound.
+    private func workspaceGitQueue(for workspaceID: String) -> DispatchQueue {
+        if let existing = workspaceGitQueuesByWorkspaceID[workspaceID] { return existing }
+        let created = DispatchQueue(label: "spaces.device.api.workspace-git.\(workspaceID)", qos: .userInitiated)
+        workspaceGitQueuesByWorkspaceID[workspaceID] = created
+        return created
+    }
+
+    /// Whether `workspaceID` resolves to a real workspace — the same lookup `resolveWorkspaceDirectory`
+    /// makes (`store.workspace(id:)`) — checked once at each git-queue routing chokepoint before that
+    /// chokepoint mints or looks up `workspaceID`'s entry in `workspaceGitQueuesByWorkspaceID`. A genuine
+    /// store-open/query failure propagates normally (this is not a fallback path); only a clean "no such
+    /// row" answers `false`.
+    private func workspaceExistsForGitQueueRouting(workspaceID: String) throws -> Bool {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        return try store.workspace(id: workspaceID) != nil
+    }
+
+    /// The typed not-found error both `resolveWorkspaceDirectory` (inside the handler) and the git-queue
+    /// routing chokepoints (before the handler runs) throw/return for the same condition, so the two stay
+    /// worded identically.
+    private static func workspaceNotFoundError(workspaceID: String) -> NSError {
+        NSError(domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
+    }
+
+    /// The workspace id a workspace file-read/write/diff request targets, used to route it to its
+    /// per-workspace serial queue (`workspaceGitQueue(for:)`). `preconditionFailure`s mirror
+    /// `handleWorkspaceGitRequest`'s: only these three commands ever reach this accessor.
+    private func workspaceGitQueueWorkspaceID(for request: SpacesDeviceAPIRequest) -> String {
+        switch request.command {
+        case .workspaceFileRead(let payload): return payload.workspaceID
+        case .workspaceFileWrite(let payload): return payload.workspaceID
+        case .workspaceDiff(let payload): return payload.workspaceID
+        default: preconditionFailure("Only workspace file-read/write/diff commands run on a workspace-git queue.")
+        }
+    }
+    /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
+    /// polling, both of which run off the serial state queue.
+    private let workspaceGitClient = RemoteWorkspaceGitClient()
+    /// Producer + 2s poll timer per subscribed (workspace, ref) scope for `subscribeWorkspaceDiffSignature`,
+    /// keyed by `WorkspaceDiffScope`. Entries are `queue`-confined: created on a scope's first subscriber
+    /// and removed when its last relay closes (see
+    /// `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`).
+    private var workspaceDiffSignatureSubscriptions: [WorkspaceDiffScope: WorkspaceDiffSignatureSubscription] = [:]
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1231,6 +1320,252 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Identifies one (workspace, ref) diff-signature subscription scope. `refName == nil` (or empty,
+    /// normalized to `nil` below) is the uncommitted-changes scope; a non-nil `refName` is a base-branch
+    /// review scope whose signature additionally tracks that ref's merge-base with `HEAD` (see
+    /// `SpacesDeviceWorkspaceDiffEngine.scopeSignature`). Two subscriptions to the same workspace but
+    /// different refs get independent producers, poll timers, and socket paths, so a base-branch review
+    /// pane and an uncommitted-changes pane on the same workspace never share a signature or a socket.
+    struct WorkspaceDiffScope: Hashable, Sendable {
+        let workspaceID: String
+        let refName: String?
+
+        init(workspaceID: String, refName: String?) {
+            self.workspaceID = workspaceID
+            // Shares `SpacesDeviceWorkspaceDiffEngine.normalizedRefName` (same target) rather than
+            // duplicating the empty/whitespace-to-nil rule: this scope's identity must normalize a ref
+            // exactly the way `buildDiff`/`scopeSignature` do, or a blank-ref subscription could resolve to
+            // the uncommitted scope here while every pull against that same blank ref fails on the engine
+            // side with a merge-base error on an empty argument.
+            self.refName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(refName)
+        }
+    }
+
+    /// Pure decision for whether the diff-signature poll timer's `tick`th invocation (1-indexed, one per
+    /// 2s fire) should broadcast a frame: whenever the computed signature changed, or unconditionally every
+    /// 10th tick (~20s) as a keepalive. The keepalive is disconnect detection, not a convenience: the Linux
+    /// relay loop (`relayLinuxSubscription`) blocks on a plain `read()` of this scope's producer socket, and
+    /// a TLS client disconnecting does not wake that read — only a subsequent write failing does. Forcing a
+    /// frame at least every ~20s guarantees `writeTLSResponse` runs often enough to notice a dead peer and
+    /// unwind the loop, which is what actually releases the subscriber slot, poll timer, and relay thread
+    /// (see `WorkspaceDiffSignatureSubscription`). Extracted as a free function, free of that class's
+    /// mutable state, so the cadence is testable without a TLS harness.
+    static func workspaceDiffSignatureKeepaliveShouldBroadcast(tick: Int, changed: Bool) -> Bool { changed || tick % 10 == 0 }
+
+    /// Substituted for `signatureProvider`'s result whenever it returns `nil` (most commonly: the workspace
+    /// was deleted while a pane stayed subscribed to it), so the poll timer's cadence logic always has a
+    /// signature to compare rather than treating "the provider failed" as "stop broadcasting altogether."
+    /// Without this, a provider failure would silently stop even the keepalive, reintroducing the Linux
+    /// relay leak the keepalive exists to prevent: a relay blocked reading a producer that has gone
+    /// permanently silent never gets the write that would surface its dead TLS peer. This sentinel can never
+    /// collide with a real signature, which is always a sha256 hex digest; its one broadcast on the
+    /// transition into "unavailable" is also the correct signal for a live client, whose re-pull of
+    /// `workspaceDiff` then surfaces the workspace's actual 404.
+    static let workspaceDiffSignatureUnavailableSentinel = "unavailable"
+
+    /// Producer + 2s poll timer for one (workspace, ref) scope's `subscribeWorkspaceDiffSignature` stream.
+    /// The producer (a reused `DeviceOverviewStreamServer`) and the poll timer both run on `streamQueue`,
+    /// never on the shared serial state `queue`, so a slow `git status` during polling can never stall
+    /// request dispatch. `streamQueue` is a dedicated serial queue created per scope (see
+    /// `addWorkspaceDiffSignatureSubscriber`), never shared across scopes: a wedged repository's git calls
+    /// (bounded by the 30s per-command timeout, not instant) degrade only that scope's own poll/keepalive/
+    /// socket-accept cadence, never another subscribed scope's — mirroring the per-workspace git queue
+    /// (`workspaceGitQueue`) used for `workspaceFileRead`/`Write`/`Diff` requests. `subscriberCount` is the
+    /// one exception: it is read/written only from
+    /// `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`, both confined to
+    /// `queue`.
+    ///
+    /// Signature polling, not filesystem watching: `FileSystemWatcher`'s inotify backend is non-recursive,
+    /// so a recursive worktree watch on Linux would mean enumerating every directory within a real
+    /// watch-descriptor budget. A subscription-gated 2s poll is one code path on both platforms, computes
+    /// nothing while no pane is subscribed, and needs no directory enumeration.
+    ///
+    /// `signatureProvider` returning nil (the subscribed workspace was deleted) never stops this producer:
+    /// the timer handler substitutes `workspaceDiffSignatureUnavailableSentinel` and runs the same
+    /// cadence/broadcast logic against it, so the transition into unavailability still broadcasts once and
+    /// the keepalive still fires every ~20s afterward, exactly as if the workspace still existed and its
+    /// signature had simply changed. `lineProvider` reads that same already-substituted value back out of
+    /// `latestSignatureBox` rather than substituting independently (see that box's doc comment); the one
+    /// exception is the connect-before-first-tick frame, which has no tick's value to read yet and computes
+    /// its own substitution fresh.
+    final class WorkspaceDiffSignatureSubscription: @unchecked Sendable {
+        /// Shares one poll tick's computed signature between the timer handler (which computes and records
+        /// it) and `lineProvider` (which builds the broadcast frame from it), so a broadcast for a tick
+        /// never carries a signature more recently recomputed against a filesystem that moved between the
+        /// two — the compared value and the broadcast value are the exact same read. A plain class rather
+        /// than a tuple/closure-captured var so `lineProvider` (owned by `server`, in turn owned by `self`)
+        /// can hold a reference to it directly instead of through `self`: capturing `self` here would create
+        /// `self` → `server` → `lineProvider` → `self`, a retain cycle this box exists to avoid.
+        ///
+        /// Confined to `streamQueue`: the timer handler's write, `lineProvider`'s broadcast-time read, and
+        /// `lineProvider`'s connect-time read all run there (see the type doc above), so a plain var needs
+        /// no lock.
+        private final class LatestSignatureBox: @unchecked Sendable {
+            var signature: String?
+        }
+
+        let socketPath: String
+        let server: DeviceOverviewStreamServer
+        private let pollTimer: DispatchSourceTimer
+        private let latestSignatureBox = LatestSignatureBox()
+        /// Last signature broadcast by the poll timer. Compared only from the timer's own handler (always
+        /// on `streamQueue`), so it needs no lock. Starts nil, so the first tick after a scope's producer
+        /// starts always "changes" and broadcasts once even if nothing moved; a harmless redundant
+        /// broadcast the client resolves by re-pulling the same diff.
+        private var lastBroadcastSignature: String?
+        /// Ticks since this producer started, incremented on every poll timer fire regardless of whether it
+        /// broadcasts; feeds `workspaceDiffSignatureKeepaliveShouldBroadcast`. Read/written only from the
+        /// timer's own handler.
+        private var tick = 0
+        /// `queue`-confined; see the type doc above.
+        var subscriberCount = 0
+
+        init(
+            scope: WorkspaceDiffScope, socketPath: String, streamQueue: DispatchQueue,
+            signatureProvider: @escaping @Sendable (WorkspaceDiffScope) -> String?
+        ) {
+            self.socketPath = socketPath
+            let latestSignatureBox = latestSignatureBox
+            server = DeviceOverviewStreamServer(
+                socketPath: socketPath, queue: streamQueue,
+                lineProvider: {
+                    // Ordinarily just reads the value the timer handler already computed and recorded this
+                    // tick (never recomputes independently — see `LatestSignatureBox`'s doc comment). The one
+                    // exception is a client connecting before the first tick fires (+2s after start): the box
+                    // is still nil then, so this computes fresh for that one initial frame only, and does NOT
+                    // write the result into the box or `lastBroadcastSignature` — the first tick's own
+                    // nil-compare still broadcasts a corrective frame regardless, which is the existing
+                    // intended behavior `lastBroadcastSignature`'s doc comment describes.
+                    let signature =
+                        latestSignatureBox.signature
+                        ?? signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
+                    return try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.encodeLine(
+                        SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: scope.workspaceID, refName: scope.refName, scopeSignature: signature))
+                })
+            let timer = DispatchSource.makeTimerSource(queue: streamQueue)
+            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
+            pollTimer = timer
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.tick += 1
+                // Substitute the sentinel rather than returning early on a nil provider result: a permanent
+                // provider failure (workspace deleted) must still participate in the keepalive cadence below,
+                // or a blocked Linux relay's dead TLS peer is never surfaced. See the sentinel's doc comment.
+                let signature = signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
+                // Recorded before the broadcast decision below, and unconditionally on every tick (not only
+                // on a broadcasting one), so a client connecting between ticks always reads the most recent
+                // computation instead of a stale one — see `LatestSignatureBox`'s doc comment for why this
+                // is a plain, unrouted-through-`self` reference rather than reaching through `self.server`.
+                latestSignatureBox.signature = signature
+                let changed = signature != self.lastBroadcastSignature
+                guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: self.tick, changed: changed) else { return }
+                self.lastBroadcastSignature = signature
+                self.server.broadcast()
+            }
+        }
+
+        func start() throws {
+            do {
+                try server.start()
+            } catch {
+                // A dispatch source must never be released while suspended (`pollTimer` is created
+                // suspended above and only resumed on success) — releasing one traps in libdispatch. Arm
+                // then immediately cancel it so this subscription can be discarded safely after an ordinary
+                // setup error (e.g. the socket path could not be unlinked/bound).
+                pollTimer.resume()
+                pollTimer.cancel()
+                throw error
+            }
+            pollTimer.resume()
+        }
+
+        func stop() {
+            pollTimer.cancel()
+            server.stop()
+        }
+    }
+
+    /// Registers one subscriber for `scope`'s diff-signature stream, creating its producer + 2s poll timer
+    /// on the first subscriber and returning its socket path either way. Must run on `queue`.
+    private func addWorkspaceDiffSignatureSubscriber(scope: WorkspaceDiffScope) throws -> String {
+        if let existing = workspaceDiffSignatureSubscriptions[scope] {
+            existing.subscriberCount += 1
+            return existing.socketPath
+        }
+        let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+        // Dedicated per-scope queue, never shared with any other scope's subscription: a wedged repository's
+        // git calls (now up to 30s, per the git-command timeout) must degrade only this scope's poll,
+        // keepalive, and producer-socket accept, never another scope's. See the type doc on
+        // `WorkspaceDiffSignatureSubscription`.
+        let streamQueue = DispatchQueue(
+            label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.refName ?? "uncommitted")")
+        let subscription = WorkspaceDiffSignatureSubscription(
+            scope: scope, socketPath: socketPath, streamQueue: streamQueue,
+            signatureProvider: { [weak self] scope in try? self?.computeWorkspaceDiffScopeSignature(scope: scope) })
+        try subscription.start()
+        subscription.subscriberCount = 1
+        workspaceDiffSignatureSubscriptions[scope] = subscription
+        return socketPath
+    }
+
+    /// Releases one subscriber for `scope`, tearing its producer + poll timer down once the count reaches
+    /// zero. There is no explicit unsubscribe command by design; a relay's connection closing is the only
+    /// unsubscribe. Must run on `queue`.
+    private func removeWorkspaceDiffSignatureSubscriber(scope: WorkspaceDiffScope) {
+        guard let subscription = workspaceDiffSignatureSubscriptions[scope] else { return }
+        subscription.subscriberCount -= 1
+        guard subscription.subscriberCount <= 0 else { return }
+        subscription.stop()
+        workspaceDiffSignatureSubscriptions.removeValue(forKey: scope)
+    }
+
+    /// Resolves `scope`'s workspace to its checkout directory and computes its `scopeSignature`
+    /// (`SpacesDeviceWorkspaceDiffEngine.scopeSignature`), folding in `scope.refName`'s merge-base when
+    /// present. Used both by `handleWorkspaceDiffRequest` and by the diff-signature poll timer's
+    /// `signatureProvider`, which calls this on that scope's own dedicated `streamQueue` (see
+    /// `addWorkspaceDiffSignatureSubscriber`) — a queue with no `RequestContext` of its own — so this opens
+    /// its own `SQLiteStore` rather than sharing one, per the confinement rule: a store belongs to the queue
+    /// that opened it.
+    private func computeWorkspaceDiffScopeSignature(scope: WorkspaceDiffScope) throws -> String {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: scope.workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
+        }
+        return try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: workspace.dir, refName: scope.refName, gitClient: workspaceGitClient)
+    }
+
+    /// Refuses `scope` before either subscribe transport (macOS `NWConnection` relay, Linux TLS relay)
+    /// registers a diff-signature subscription for it, when its workspace directory is not a git
+    /// repository. Without this, subscribing against a non-git workspace would sit in
+    /// `WorkspaceDiffSignatureSubscription`'s poll loop silently producing nothing (`signatureProvider`
+    /// swallows its own errors via `try?`), leaving the client to read "unavailable" with no renderable
+    /// reason instead of the same typed refusal `handleWorkspaceDiffRequest` gives for the same case. Opens
+    /// its own `SQLiteStore`, matching `computeWorkspaceDiffScopeSignature`'s confinement rule, since callers
+    /// run on `queue` before any per-scope `streamQueue` (and thus any `RequestContext`) exists yet.
+    ///
+    /// This runs synchronously on `queue` — the server's single serial state queue, shared by pings and
+    /// every other client's requests — rather than hopping to the per-workspace git queue the way
+    /// `handleWorkspaceDiffRequest` and the diff-signature poll loop do for their own git work. That is a
+    /// deliberate, bounded exception: `isRepo`'s `rev-parse --is-inside-work-tree` probe runs on
+    /// `metadataCommandTimeout` (2s), and if that expires against a stalled workspace filesystem,
+    /// `runGitAndCapture` still bounds its post-timeout pipe drain to `drainGrace` (2s) rather than blocking
+    /// on a lingering descendant — so the worst-case hold on `queue` is ~4s, only while the workspace's
+    /// filesystem is actually hung at subscribe time. A healthy local worktree answers in milliseconds, and
+    /// the stall self-heals the moment the timeout fires; it does not compound across subscribe calls.
+    /// Fixing this properly would mean async-ifying subscription registration on both transports (the
+    /// macOS `NWConnection` relay and the Linux `handleClient` return shape) so it can hop to the
+    /// per-workspace queue and back before registering — a shape change to both transports to shave a
+    /// bounded, self-healing ~4s edge case, which is disproportionate to the risk.
+    private func assertWorkspaceDiffScopeIsGitRepository(scope: WorkspaceDiffScope) throws {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: scope.workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
+        }
+        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
+    }
+
     public func stop() { queue.async { self.stopOnQueue() } }
 
     func listPairedDevices() throws -> [SpacesDevicePairedClient] { try syncOnQueue { try self.pairingStore.listDevices() } }
@@ -1359,6 +1694,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert `.runWorkspaceSetup` to `workspaceSetupQueue` before they reach here (see
         // `runsOnWorkspaceSetupQueue`), so this case only keeps the switch exhaustive.
         case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
+        // Both transports divert workspace file-read/write/diff commands to `workspaceGitQueue` before they
+        // reach here (see `runsOnWorkspaceGitQueue`), so this case only keeps the switch exhaustive.
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
@@ -1387,7 +1725,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe, .subscribeDeviceOverview:
+        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
@@ -1476,6 +1814,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Runs one workspace file-read/write/diff command (see `runsOnWorkspaceGitQueue`) on
+    /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
+    /// a request handled on one queue must not touch a `SQLiteStore` opened on another.
+    private func handleWorkspaceGitRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .workspaceFileRead(let payload): return try handleWorkspaceFileReadRequest(payload, context: context)
+        case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
+        case .workspaceDiff(let payload): return try handleWorkspaceDiffRequest(payload, context: context)
+        default: preconditionFailure("Only workspace file-read/write/diff commands run on the workspace-git queue.")
+        }
+    }
+
     /// Publishes `workspaceIDs` as being torn down for the duration of `teardown`, so an overview built
     /// while it runs reports them (see `SpacesDeviceOverviewPayload.workspaceIDsWithTeardownInFlight`).
     /// Registered before any teardown work starts and released in a `defer`, so a teardown that throws
@@ -1523,6 +1874,35 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 self.queue.async { completion(result) }
             }
         }
+
+        private func handleWorkspaceGitRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            let workspaceID = workspaceGitQueueWorkspaceID(for: request)
+            let exists: Bool
+            do {
+                exists = try workspaceExistsForGitQueueRouting(workspaceID: workspaceID)
+            } catch {
+                completion(.failure(error))
+                return
+            }
+            guard exists else {
+                // Answered here, before `workspaceGitQueue(for:)` runs, so a nonexistent/spoofed workspace
+                // id never mints an entry in `workspaceGitQueuesByWorkspaceID` (see that dictionary's doc
+                // comment for the accepted remainder this still leaves for a genuinely-deleted workspace).
+                completion(.success(SpacesDeviceAPIServer.failureResponse(for: Self.workspaceNotFoundError(workspaceID: workspaceID))))
+                return
+            }
+            // Called already confined to `queue` (see `processBufferedLines`), so resolving (and, on first
+            // use, creating) the per-workspace queue here is safe before hopping off `queue` to run the git
+            // work itself.
+            let targetQueue = workspaceGitQueue(for: workspaceID)
+            targetQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleWorkspaceGitRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
     #endif
 
     #if os(Linux) && canImport(OpenSSL)
@@ -1536,6 +1916,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         private func handleWorkspaceSetupRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try workspaceSetupQueue.sync { try handleWorkspaceSetupRequest(request) }
+        }
+
+        private func handleWorkspaceGitRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            let workspaceID = workspaceGitQueueWorkspaceID(for: request)
+            guard try workspaceExistsForGitQueueRouting(workspaceID: workspaceID) else {
+                // Answered here, before `workspaceGitQueue(for:)` runs, so a nonexistent/spoofed workspace
+                // id never mints an entry in `workspaceGitQueuesByWorkspaceID` (see that dictionary's doc
+                // comment for the accepted remainder this still leaves for a genuinely-deleted workspace).
+                return SpacesDeviceAPIServer.failureResponse(for: Self.workspaceNotFoundError(workspaceID: workspaceID))
+            }
+            // Unlike the macOS path above, this runs off `queue` (see the caller), so resolving the
+            // per-workspace queue must itself hop onto `queue` rather than touching the dictionary directly.
+            let targetQueue = try syncOnQueue { workspaceGitQueue(for: workspaceID) }
+            return try targetQueue.sync { try handleWorkspaceGitRequest(request) }
         }
     #endif
 
@@ -1637,7 +2031,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     static func failureResponse(for error: any Error) -> SpacesDeviceAPIResponse {
-        let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        let nsError = error as NSError
+        // The "SpacesDeviceAPIServer" domain is this file's own typed-error convention (see
+        // `errorCode(for:)`): every throw site in that domain sets `NSLocalizedDescriptionKey` to the exact
+        // client-facing string it wants surfaced. Read that directly rather than falling through to
+        // `String(describing:)`, whose default `NSError` rendering wraps the message in
+        // `Error Domain=... Code=... "message" UserInfo={...}` instead of returning it bare. This only
+        // narrows the fallback for our own domain — other error types (`LocalizedError` conformers, plain
+        // Swift errors with no domain-specific convention) are unaffected and keep their existing rendering.
+        let message: String
+        if nsError.domain == "SpacesDeviceAPIServer", let explicit = nsError.userInfo[NSLocalizedDescriptionKey] as? String {
+            message = explicit
+        } else {
+            message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        }
         return SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode(for: error))
     }
 
@@ -2578,6 +2985,217 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(context: context, message: "Ran workspace setup.", workspaceID: request.workspaceID)
     }
 
+    /// Read/write cap for one file in `workspaceFileRead`/`workspaceFileWrite`, matching the existing
+    /// `terminalPasteImageMaxBytes` precedent for a single-response (non-chunked) payload cap.
+    static let workspaceFileMaxBytes = 10 * 1024 * 1024
+
+    /// Reads `path`'s content for `workspaceFileRead`/`workspaceFileWrite`'s CAS, in place of
+    /// `FileManager.contents(atPath:)`. Callers must reject a non-regular existing path (via
+    /// `attributes[.type]` from the same `attributesOfItem` stat used for the size pre-check) before calling
+    /// this: `attributesOfItem` never blocks, even against a FIFO or socket, but opening one of those for
+    /// read does — a FIFO blocks until a writer appears, with no timeout, wedging this workspace's serial
+    /// queue forever. That type guard is what keeps the blocking open from happening at all; this function
+    /// only ever runs against a path already confirmed regular. The read is still bounded to `cap + 1` bytes
+    /// rather than trusting the stat's size: the stat and this read are not atomic, so a file replaced or
+    /// grown in between would otherwise let an unbounded read-to-EOF materialize an arbitrarily large
+    /// payload despite the size guard having passed. Returns `nil` exactly where `contents(atPath:)` would
+    /// have (path does not exist, or exists but could not be opened/read), so callers keep their existing
+    /// not-found/unreadable distinctions unchanged.
+    private static func boundedReadWorkspaceFile(atPath path: String, cap: Int) -> Data? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: cap + 1)
+    }
+
+    /// Resolves `workspaceID` to its checkout directory, or throws the same `NSError(domain:
+    /// "SpacesDeviceAPIServer", code: 404)` the rest of this file uses for a not-found target (mapped to
+    /// `.notFound` by `errorCode(for:)`).
+    private func resolveWorkspaceDirectory(workspaceID: String, context: RequestContext) throws -> String {
+        guard let workspace = try context.store().workspace(id: workspaceID) else {
+            throw Self.workspaceNotFoundError(workspaceID: workspaceID)
+        }
+        return workspace.dir
+    }
+
+    private func handleWorkspaceFileReadRequest(_ request: SpacesDeviceWorkspaceFileReadRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let resolvedPath: String
+        do {
+            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+        } catch {
+            return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument)
+        }
+
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath), let size = attributes[.size] as? Int else {
+            return SpacesDeviceAPIResponse(ok: false, message: "File '\(request.relativePath)' was not found.", errorCode: .notFound)
+        }
+        // `attributesOfItem` (the stat above) never blocks, even against a FIFO or socket, but opening one of
+        // those for read does — a FIFO in particular blocks until a writer appears, with no timeout, wedging
+        // this workspace's serial queue forever. Refusing a non-regular path here means the blocking open in
+        // `boundedReadWorkspaceFile` below never happens; this guard is the fix, not a timeout around the
+        // read. Stat-then-read is also an inherent TOCTOU pair (the file could change between the two), which
+        // is why the read below is bounded to `cap + 1` bytes rather than trusting this stat's size — see
+        // `boundedReadWorkspaceFile`'s doc comment.
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Path is not a regular file.", errorCode: .invalidArgument)
+        }
+        guard size <= Self.workspaceFileMaxBytes else {
+            return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
+        }
+        guard let data = Self.boundedReadWorkspaceFile(atPath: resolvedPath, cap: Self.workspaceFileMaxBytes) else {
+            // `attributesOfItem` above already succeeded (a plain `stat`, which only needs directory
+            // search/execute permission), so the file is confirmed to exist; a nil bounded read here means it
+            // could not be opened/read (e.g. permissions), never that it is missing. Reporting `.notFound`
+            // would be a silent conflation an automated retry could misinterpret as "safe to create".
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "File '\(request.relativePath)' exists but could not be read.", errorCode: .internalError)
+        }
+        guard data.count <= Self.workspaceFileMaxBytes else {
+            // The stat-based check above is the cheap fast path; this is the guard that cannot be raced — the
+            // file grew between the stat and this read.
+            return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
+        }
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Read workspace file.",
+            result: .workspaceFileRead(
+                .init(
+                    base64Data: data.base64EncodedString(), sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(data), size: data.count,
+                    isBinaryGuess: SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(data))))
+    }
+
+    /// Compare-and-swap write. `expectedSHA256` is compared against the current disk content's hash
+    /// (`nil` on both sides only when the file does not exist yet); a mismatch is reported as a typed
+    /// `SpacesDeviceWorkspaceFileWriteResult` conflict (`ok: true`, `didWrite: false`), not a transport
+    /// error, per the spec: the client runs its own three-way merge and retries rather than treating this
+    /// as a failure.
+    private func handleWorkspaceFileWriteRequest(_ request: SpacesDeviceWorkspaceFileWriteRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let resolvedPath: String
+        do {
+            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+        } catch {
+            return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument)
+        }
+        guard let newData = Data(base64Encoded: request.base64Data) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "File content is not valid base64.", errorCode: .invalidArgument)
+        }
+        guard newData.count <= Self.workspaceFileMaxBytes else {
+            return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB write limit.", errorCode: .payloadTooLarge)
+        }
+        // Mirror the read handler's size guard before touching the current on-disk content: an oversized
+        // file makes the whole save flow unusable regardless of what the client sent (the read path refuses
+        // it too), so this is a hard error, not a CAS conflict result. Checking size first also avoids
+        // hashing a huge file just to compare it against `expectedSHA256`.
+        let existingAttributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
+        if let existingAttributes, let size = existingAttributes[.size] as? Int, size > Self.workspaceFileMaxBytes {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "File on disk exceeds the 10 MiB limit and cannot be read for a compare-and-swap write.",
+                errorCode: .payloadTooLarge)
+        }
+        // See `handleWorkspaceFileReadRequest`'s guard for the FIFO-wedge/TOCTOU rationale — the same
+        // `attributesOfItem`-never-blocks-but-open-does hazard applies to this handler's CAS read of the
+        // current content below. A nonexistent path (`existingAttributes == nil`) keeps its current create
+        // semantics; only an EXISTING non-regular path (a directory, socket, FIFO) is refused here, since a
+        // CAS write over one is never meaningful.
+        if let existingAttributes, existingAttributes[.type] as? FileAttributeType != .typeRegular {
+            return SpacesDeviceAPIResponse(ok: false, message: "Path is not a regular file.", errorCode: .invalidArgument)
+        }
+
+        let currentData = Self.boundedReadWorkspaceFile(atPath: resolvedPath, cap: Self.workspaceFileMaxBytes)
+        if currentData == nil, existingAttributes != nil {
+            // A bounded read returning nil despite the path existing (per the stat above) means it could not
+            // be opened/read (e.g. permissions). Left unguarded, an unreadable existing file would present as
+            // `expectedSHA256 == nil` (create), let a create-write pass the CAS guard below, and silently
+            // overwrite content nobody could compare against — no compare-and-swap decision is actually
+            // possible here, so this must be a hard error rather than either CAS branch.
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "File '\(request.relativePath)' exists but could not be read for a compare-and-swap write.",
+                errorCode: .internalError)
+        }
+        if let currentData, currentData.count > Self.workspaceFileMaxBytes {
+            // The stat-based check above is the cheap fast path; this is the guard that cannot be raced — the
+            // file grew between the stat and this read.
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "File on disk exceeds the 10 MiB limit and cannot be read for a compare-and-swap write.",
+                errorCode: .payloadTooLarge)
+        }
+        let currentSHA256 = currentData.map { SpacesDeviceWorkspaceGitHashing.sha256Hex($0) }
+        // This compare-and-swap is advisory, not a lock: nothing stops an external writer (an editor, a
+        // coding agent, `git checkout`) from touching `resolvedPath` in the window between the hash above and
+        // `atomicallyWriteWorkspaceFile`'s rename below, since none of those participate in any lock this
+        // handler could take. The coarse case this guards — the file changed since the client last read it,
+        // e.g. a save from a stale tab — is caught here every time; only the sub-millisecond hash-to-rename
+        // window against a concurrent external writer is not, and closing that would require every external
+        // writer to honor a lock this process cannot impose. Accepted: a write lost to that window is
+        // recoverable via git, and the window this narrow is unlikely to matter in practice.
+        guard currentSHA256 == request.expectedSHA256 else {
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Workspace file changed since it was last read.",
+                result: .workspaceFileWrite(.init(didWrite: false, currentBase64Data: currentData?.base64EncodedString(), currentSHA256: currentSHA256)))
+        }
+
+        do { try Self.atomicallyWriteWorkspaceFile(newData, to: resolvedPath) } catch {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Failed to write workspace file: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))",
+                errorCode: .internalError)
+        }
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Wrote workspace file.",
+            result: .workspaceFileWrite(.init(didWrite: true, sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(newData))))
+    }
+
+    /// Writes `data` to `path` via `Data.write(options: .atomic)`, which writes an auxiliary file in the
+    /// same directory and renames it into place — the temp-file-plus-rename atomicity the spec asks for,
+    /// without hand-rolling it. Creates any missing intermediate directories first, since `expectedSHA256
+    /// == nil` (create) is the one case `path`'s parent might not exist yet.
+    ///
+    /// This runs on the request's per-workspace `workspaceGitQueue(for:)`, which is not gated against
+    /// `workspaceTeardownQueue` (archive/delete). A write racing a workspace's archive or its project's
+    /// deletion can therefore recreate part of a just-removed worktree directory via `createDirectory`
+    /// above, or report a successful write for content that is deleted moments later. Accepted rather than
+    /// gated: deleting a workspace closes its panes first, so hitting this requires a save landing in the
+    /// same instant as a delete, and the recreated directory is inert (nothing paired with it) once the
+    /// deletion has actually completed.
+    ///
+    /// The rename-into-place this performs replaces the target file's inode, which drops any custom
+    /// extended attributes an existing file carried (Finder tags, quarantine flags, etc.) — empirically
+    /// confirmed on macOS. Accepted, with no preservation code: every file here lives in a git worktree,
+    /// and git neither tracks nor restores xattrs on checkout or branch switch, so any xattr on one of
+    /// these files is already ephemeral regardless of this endpoint — preserving it would mean
+    /// platform-divergent copy code in service of metadata with no durability in this domain. POSIX
+    /// permissions are a different matter: git does track the exec bit, so this captures an existing
+    /// file's mode before the write and restores it after. That restore is required on Linux: Foundation's
+    /// atomic write preserves the replaced file's mode on macOS, but swift-corelibs-foundation's atomic
+    /// write is a separate implementation that does not — it recreates the file at a default mode instead
+    /// (confirmed empirically; see `WorkspaceFileWriteModePreservationTests`, which runs on both platforms).
+    /// A newly created file has no prior mode to restore, so it keeps whatever the write gives it.
+    ///
+    /// `internal` rather than `private`: the existing `workspaceFileWrite` coverage in
+    /// `WorkspaceGitServerTests` drives this through the real TLS request/response path, but that harness
+    /// needs `Network`/`Security`, which the Linux daemon build does not have — so the mode-preservation
+    /// regression test calls this directly instead, the only way to exercise the real write path (not a
+    /// reimplementation of it) on both platforms.
+    static func atomicallyWriteWorkspaceFile(_ data: Data, to path: String) throws {
+        let directory = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let existingPermissions = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? NSNumber
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        if let existingPermissions {
+            try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path)
+        }
+    }
+
+    private func handleWorkspaceDiffRequest(_ request: SpacesDeviceWorkspaceDiffRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+        let diff = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspaceDir, refName: request.refName, gitClient: workspaceGitClient)
+        return SpacesDeviceAPIResponse(ok: true, message: "Loaded workspace diff.", result: .workspaceDiff(diff))
+    }
+
     private func handleUpdateProjectConfigRequest(_ request: SpacesDeviceProjectConfigUpdateRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -3187,6 +3805,33 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         sessionID: "device-overview", installationID: request.clientApp?.installationID ?? "",
                         subscriptionSocketPath: try TerminalServicePaths.deviceOverviewSocketPath(), controlSocketPath: "", clientID: nil))
             }
+            if let scopePayload = request.command.workspaceDiffSignatureScope {
+                // Same shape as the device-overview relay above, but the producer socket is per (workspace,
+                // ref) scope and created (or subscriber-counted) on demand; see
+                // `addWorkspaceDiffSignatureSubscriber`. `relayLinuxSubscription` releases the subscriber
+                // slot once this relay loop returns.
+                let scope = WorkspaceDiffScope(workspaceID: scopePayload.workspaceID, refName: scopePayload.refName)
+                // A thrown error here would propagate out of `handleClient` uncaught (its only catch just
+                // traces and drops the connection, unlike the macOS `NWConnection` path's `finishRequest`),
+                // so refuse via `.response(...)` the same way the other validation failures below do,
+                // instead of `try`ing straight into `assertWorkspaceDiffScopeIsGitRepository` or
+                // `addWorkspaceDiffSignatureSubscriber`. Both calls share this one do/catch: a git-repository
+                // refusal and a producer-socket setup failure (path occupied, bind/unlink error) are both
+                // ordinary request-level failures the client should see as a typed response, not a dropped
+                // connection that reads as a transport outage on an otherwise healthy daemon.
+                let socketPath: String
+                do {
+                    try assertWorkspaceDiffScopeIsGitRepository(scope: scope)
+                    socketPath = try addWorkspaceDiffSignatureSubscriber(scope: scope)
+                } catch {
+                    return .response(SpacesDeviceAPIServer.failureResponse(for: error))
+                }
+                return .relay(
+                    LinuxSubscription(
+                        sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.refName ?? "")",
+                        installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
+                        clientID: nil, diffSignatureScope: scope))
+            }
             guard let sessionID = request.sessionID else {
                 return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument))
             }
@@ -3214,6 +3859,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
 
         private func relayLinuxSubscription(_ subscription: LinuxSubscription, ssl: OpaquePointer) throws {
+            // Placed first (ahead of the connect below, which can itself throw) so a workspace-diff-signature
+            // subscriber slot taken in `prepareLinuxSubscribe` is always released once this relay ends,
+            // regardless of where it ends. There is no explicit unsubscribe command; this relay loop
+            // returning (EOF, error, or an early throw) is what "unsubscribe" means.
+            defer {
+                if let scope = subscription.diffSignatureScope {
+                    performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) }
+                }
+            }
             let relaySocketFD = try connectUnixSocket(path: subscription.subscriptionSocketPath)
             defer {
                 Self.shutdownSocket(relaySocketFD, how: Self.shutdownReadWrite)
@@ -3334,6 +3988,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try relayOverviewSubscription(connection: connection, installationID: request.clientApp?.installationID ?? "")
                 return
             }
+            if let scopePayload = request.command.workspaceDiffSignatureScope {
+                try relayWorkspaceDiffSignatureSubscription(
+                    connection: connection, scope: WorkspaceDiffScope(workspaceID: scopePayload.workspaceID, refName: scopePayload.refName),
+                    installationID: request.clientApp?.installationID ?? "")
+                return
+            }
             guard let sessionID = request.sessionID else {
                 sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument), to: connection) { _ in
                     connection.cancel()
@@ -3428,6 +4088,41 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 sessionID: "device-overview", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
                 relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
             relaySource.resume()
+        }
+
+        /// Relays one (workspace, ref) scope's diff-signature producer socket to a subscribing connection,
+        /// reusing the same stream-relay machinery as the device-overview and terminal-session relays
+        /// above. Takes a subscriber slot for `scope` (creating its producer + poll timer on the first
+        /// subscriber) before connecting; `closeStreamRelay` releases that slot once this relay's connection
+        /// closes, using the scope recorded on the `StreamRelay`. There is no explicit unsubscribe command,
+        /// so the connection closing (client disconnect, revoke, or daemon stop) is the only unsubscribe.
+        private func relayWorkspaceDiffSignatureSubscription(connection: NWConnection, scope: WorkspaceDiffScope, installationID: String) throws {
+            // Refuse before taking a subscriber slot: a non-git workspace's poll loop would otherwise sit
+            // silently producing nothing, leaving the client to read "unavailable" forever instead of the
+            // same typed refusal `workspaceDiff` gives for the same case.
+            try assertWorkspaceDiffScopeIsGitRepository(scope: scope)
+            let socketPath = try addWorkspaceDiffSignatureSubscriber(scope: scope)
+            do {
+                let relaySocketFD = try connectUnixSocket(path: socketPath)
+                try setNonBlocking(relaySocketFD)
+                let relayQueue = DispatchQueue(label: "spaces.device.api.workspace-diff.\(ObjectIdentifier(connection))")
+                let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
+                relaySource.setEventHandler { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.relayStateData(from: relaySocketFD, to: connection)
+                }
+                relaySource.setCancelHandler { close(relaySocketFD) }
+                streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+                    sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.refName ?? "")", installationID: installationID,
+                    relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: nil, connection: connection,
+                    sendSequencer: StreamSendSequencer(queueKey: queueKey), diffSignatureScope: scope)
+                relaySource.resume()
+            } catch {
+                // The relay never made it into `streamRelays`, so `closeStreamRelay` will never see this
+                // subscriber's scope and release its slot; release it here instead.
+                removeWorkspaceDiffSignatureSubscriber(scope: scope)
+                throw error
+            }
         }
 
     #endif
@@ -3571,6 +4266,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 relay.relaySource.cancel()
                 shutdown(relay.relaySocketFD, SHUT_RDWR)
             }
+            if let scope = relay.diffSignatureScope { removeWorkspaceDiffSignatureSubscriber(scope: scope) }
             if cancelNetworkConnection { connection.cancel() }
         }
 

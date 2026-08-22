@@ -28,6 +28,24 @@ public enum TerminalServicePaths {
         return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
     }
 
+    /// Profile-scoped unix socket the daemon streams one workspace/ref scope's diff-signature changes on
+    /// (see `subscribeWorkspaceDiffSignature`). One socket per subscribed (workspace, ref) scope, hashed by
+    /// workspace id and ref name rather than the profile root so sibling workspaces and sibling scopes of
+    /// the same workspace never collide; created on first subscriber and removed when the last relay for
+    /// that scope closes. `refName` is hashed rather than embedded raw both because a ref name is arbitrary
+    /// client-supplied text (a raw path could exceed the ~104-char unix socket path limit or need
+    /// filesystem-unsafe-character escaping) and to keep every socket name a uniform fixed length; `nil`
+    /// (the uncommitted-changes scope) hashes an empty string so it stays distinct from any real ref name.
+    public static func workspaceDiffSignatureSocketPath(workspaceID: String, refName: String? = nil, fileManager: FileManager = .default) throws
+        -> String
+    {
+        let root = try terminalRootDirectory(fileManager: fileManager)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let name =
+            "workspace-diff-\(socketPathComponent(for: root.path))-\(socketPathComponent(for: workspaceID))-\(socketPathComponent(for: refName ?? ""))"
+        return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
+    }
+
     public static func instanceLockPath(fileManager: FileManager = .default) throws -> String {
         let root = try terminalRootDirectory(fileManager: fileManager)
         let socketRoot = try SpacesSocketPaths.secureSocketRoot()
