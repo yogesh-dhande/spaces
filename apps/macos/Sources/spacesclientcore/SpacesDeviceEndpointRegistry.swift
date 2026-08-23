@@ -51,7 +51,13 @@ public enum SpacesDeviceEndpointRegistry {
     /// both facts were learned on a network this client may have just left, and nothing else invalidates
     /// them until a connection actually breaks, which on a silently dead path costs a full connect
     /// timeout first.
-    public static func resetAllForNetworkChange() { storage.resetAllForNetworkChange() }
+    /// Also drops every connection the request path has parked warm: those were established over the
+    /// network this client just left, so the first request to take one would spend a full timeout
+    /// discovering that on a path that blackholes rather than refuses.
+    public static func resetAllForNetworkChange() {
+        storage.resetAllForNetworkChange()
+        SpacesDeviceAPIWarmConnectionStore.shared.discardAll()
+    }
 
     /// Drops every resolver, so one test's proven addresses and candidate lists cannot leak into the
     /// next. Never called from product code.
