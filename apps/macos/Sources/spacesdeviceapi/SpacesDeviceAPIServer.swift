@@ -2270,7 +2270,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         else { return nil }
         guard !runtimeState.state.isInteractive || TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) else { return nil }
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()).liveWireProjection()
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
             isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
@@ -3725,7 +3725,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         -> GhosttyRemoteSessionStatePayload
     {
         let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+            .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,

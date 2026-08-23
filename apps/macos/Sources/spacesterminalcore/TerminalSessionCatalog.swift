@@ -53,7 +53,10 @@ public enum TerminalSessionCatalog {
         try TerminalSessionPersistence.listInteractiveSessionRuntimeStates().filter { isInteractiveServiceAlive(for: $0.runtimeState) }.map {
             session in
             let paths = try TerminalSessionPaths.forStoredSession(id: session.sessionID, rootDirectory: session.rootDirectory)
-            let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
+            // Catalog entries exist to be reported off-device (the Device API overview rebuilds this
+            // several times a second), so they carry live rows only. See
+            // `TerminalSessionAttachmentSnapshot.liveWireProjection`.
+            let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()).liveWireProjection()
             return TerminalSessionCatalogEntry(
                 launchConfiguration: session.launchConfiguration, runtimeState: session.runtimeState, attachmentSnapshot: attachmentSnapshot,
                 paths: paths, isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),

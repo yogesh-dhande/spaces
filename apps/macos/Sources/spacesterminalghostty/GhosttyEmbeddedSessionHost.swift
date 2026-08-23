@@ -434,7 +434,17 @@
         /// `Orchestrator.markReservedWorkspaceTerminalLaunchFailed` — act exclusively on sessions with NO live
         /// core (crashed-prior-daemon sessions, never-started reservations), so they can never race one. A
         /// fresh core (daemon restart, exec-in-place handoff) reseeds from the mirror.
-        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot? {
+            didSet { cachedLiveWireAttachmentSnapshot = nil }
+        }
+        /// `cachedAttachmentSnapshot` reduced to what a subscriber is sent, memoized so a session's attach
+        /// history is scanned once per attachment change instead of once per broadcast. The broadcast path
+        /// runs on the shared `TerminalEngineActor`, where the scan would otherwise grow with the session's
+        /// lifetime attach count on every output tick — the very growth this projection exists to keep off
+        /// the wire. Invalidated by `cachedAttachmentSnapshot`'s `didSet` rather than by each of its writers,
+        /// so no mutation path can forget to.
+        private var cachedLiveWireAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+
         /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
         /// apply them to (cache empty AND the reseeding disk read also failed). The caller's durable mirror
         /// write is enqueued regardless of whether the transform could be applied here, so the mutation is
@@ -1212,7 +1222,7 @@
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
                 launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+                attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(), hasFinalRender: false)
         }
 
         /// The catalog entry built entirely from this core's in-memory state, with no DB read. Serves the
@@ -1226,7 +1236,7 @@
             guard let runtimeState = latestRuntimeState else { return nil }
             return TerminalSessionCatalogEntry(
                 launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), paths: paths,
+                attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(), paths: paths,
                 isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
                 isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
@@ -2486,6 +2496,35 @@
         /// reseeded from disk on a miss. Every owner-gating enforcement read (`isOwner`, `activeOwnerClientID`,
         /// `hasActiveAttachments`, attach/detach mode-change checks) resolves through this so gating agrees with
         /// the cache the broadcasts advertise. See `cachedAttachmentSnapshot`.
+        /// The attachment snapshot a broadcast carries: `currentAttachmentSnapshot()` reduced by
+        /// `TerminalSessionAttachmentSnapshot.liveWireProjection`, served from `cachedLiveWireAttachmentSnapshot`.
+        private func currentLiveWireAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
+            if let cachedLiveWireAttachmentSnapshot { return cachedLiveWireAttachmentSnapshot }
+            // Read the full snapshot first: a cache miss there assigns `cachedAttachmentSnapshot`, whose
+            // `didSet` clears the derived cache, so the projection must be stored after that call returns.
+            guard let snapshot = currentAttachmentSnapshot() else { return nil }
+            let projection = snapshot.liveWireProjection()
+            cachedLiveWireAttachmentSnapshot = projection
+            return projection
+        }
+
+        /// The broadcast projection of whatever attachment state is already in memory, WITHOUT the disk
+        /// reseed `currentLiveWireAttachmentSnapshot()` performs. The in-memory summary and catalog entry
+        /// exist to describe a session whose lifecycle writes have not committed yet, so a DB read there
+        /// would both defeat their purpose and put a SQLite open on the overview's per-session rebuild.
+        private func inMemoryLiveWireAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot {
+            if let cachedLiveWireAttachmentSnapshot { return cachedLiveWireAttachmentSnapshot }
+            // An empty snapshot for a nil cache is deliberately NOT memoized: storing it would make
+            // `currentLiveWireAttachmentSnapshot()` serve "nobody is attached" from the derived cache and
+            // skip the disk reseed that would have told it otherwise. Populating from a real snapshot is
+            // safe and is what keeps a lease touch (every keystroke clears the derived cache) from making
+            // each later overview rebuild re-filter the session's whole attach history.
+            guard let cachedAttachmentSnapshot else { return TerminalSessionAttachmentSnapshot() }
+            let projection = cachedAttachmentSnapshot.liveWireProjection()
+            cachedLiveWireAttachmentSnapshot = projection
+            return projection
+        }
+
         private func currentActiveAttachments() -> [TerminalAttachment] {
             (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
         }
@@ -2719,7 +2758,9 @@
             // disk only covers the brief pre-first-compute window. This removes a per-output-chunk SQLite open
             // that otherwise saturated the serial terminal-engine executor and starved input.
             let runtimeState = latestRuntimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
-            let attachmentSnapshot = currentAttachmentSnapshot()
+            // Broadcasts carry live rows only; the core keeps the full history for its own gating.
+            // See `TerminalSessionAttachmentSnapshot.liveWireProjection`.
+            let attachmentSnapshot = currentLiveWireAttachmentSnapshot()
             let ownerClient = activeOwnerClient()
             let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
             let bootstrapOutputByteCount = outputByteCount
