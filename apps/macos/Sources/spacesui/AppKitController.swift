@@ -5373,11 +5373,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // what makes a skipped prune self-heal rather than need a retry of its own.
         if epoch == panelCoordinator.paneReplacementEpoch {
             panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview))
-            // Same authoritative-overview gate as the terminal prune above, for code panes: a workspace
-            // absent from `overview.workspaces` was deleted, not merely hidden (a hidden workspace stays
-            // listed with `isHidden` set), so its code panes are safe to close.
-            panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id)))
         }
+        // Unlike the terminal prune above, this runs unconditionally (see the local/remote apply sites
+        // in `SidebarController` for the full reasoning): a code pane has no session for a
+        // pane-replacement race to protect, so gating this on the same epoch would let a workspace
+        // deletion this mutation response reports go unpruned indefinitely whenever it lands mid-race —
+        // there is no guaranteed follow-up overview the way the terminal prune's self-heal relies on.
+        // The keep-set is workspace ids from this overview: a workspace absent from `overview.workspaces`
+        // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set).
+        panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id)))
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }

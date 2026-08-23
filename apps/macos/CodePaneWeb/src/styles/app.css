@@ -1,0 +1,343 @@
+/*
+ * Component styles, matching the class vocabulary of the picked Variant A
+ * ("Toolbar") mockup so the pane reads as native Spaces chrome rather than a
+ * web page loaded in a WKWebView. Structural layout only lives here — actual
+ * diff/editor content painting is `@pierre/diffs`' own concern (see
+ * diffView.ts/editorView.ts), styled through the `--shiki-*` variables in
+ * tokens.css instead of hand-written line/token CSS.
+ */
+
+.pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* The code pane's own toolbar: one 30pt strip (see docs/design.md's rule
+   against ad hoc chrome heights — this matches the app's existing pane
+   toolbar metric). */
+.pane-hdr {
+  height: 30px;
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface2);
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+.pane-hdr .sp {
+  flex: 1;
+}
+
+/* Reserved for Phase 4 (assigned-agent dropdown + "Send batch" button).
+   Intentionally empty in Phase 3. */
+.pane-hdr .agent-slot {
+  flex: 0 0 auto;
+  min-width: 1px;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  height: 22px;
+  flex: 0 0 auto;
+}
+
+.seg button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg2);
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.seg button:last-child {
+  border-right: none;
+}
+
+.seg button.on {
+  background: var(--chip);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ref-input {
+  display: none;
+  align-items: center;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 7px;
+  flex: 0 0 auto;
+}
+
+.ref-input.open {
+  display: flex;
+}
+
+.ref-input input {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  width: 120px;
+  outline: none;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg2);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+/*
+ * File-list sidebar. Not part of the Variant A mockup markup (that variant
+ * shows files inline, one after another, with no file-picking chrome) — it
+ * is added here because Phase 3 explicitly requires "a file list sidebar"
+ * as product behavior (jumping to a file, seeing its status/stat at a
+ * glance) independent of which toolbar variant was picked for the toolbar
+ * itself. Visually it borrows the mockup's Variant B `.rail` tokens/metrics
+ * since that is the mockup's only other file-list treatment.
+ */
+.code-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.file-list {
+  width: 212px;
+  flex: 0 0 212px;
+  background: var(--surface2);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.file-list .row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--fg2);
+}
+
+.file-list .row.on {
+  background: var(--row-sel);
+  color: var(--fg);
+}
+
+.file-list .row .status {
+  flex: 0 0 14px;
+  text-align: center;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.file-list .row .status.added,
+.file-list .row .status.untracked {
+  color: var(--add-fg);
+}
+
+.file-list .row .status.deleted {
+  color: var(--del-fg);
+}
+
+.file-list .row .status.renamed,
+.file-list .row .status.modified {
+  color: var(--fg3);
+}
+
+.file-list .row .fn {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.file-list .row .st {
+  margin-left: auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+.file-list .row .st .p {
+  color: var(--add-fg);
+}
+
+.file-list .row .st .m {
+  color: var(--del-fg);
+}
+
+.file-list .empty {
+  padding: 10px;
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.diff-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* Host for @pierre/diffs' CodeView: it owns its own internal scroll and
+   virtualization, so it needs a bounded-height flex child rather than an
+   auto-growing element inside a taller scrolling ancestor. */
+.diff-view-root {
+  flex: 1;
+  min-height: 0;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg3);
+  font-size: 13px;
+}
+
+/* Editor mode */
+.editor-open-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface2);
+}
+
+.editor-open-bar input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12px;
+  padding: 0 8px;
+  outline: none;
+}
+
+.editor-results {
+  position: relative;
+}
+
+.editor-results .list {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.editor-results .list .opt {
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--fg2);
+}
+
+.editor-results .list .opt:hover {
+  background: var(--row-hover);
+  color: var(--fg);
+}
+
+.editor-results .list .msg {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.editor-results .list .msg.hint {
+  color: var(--fg3);
+}
+
+.editor-results .list .msg.error {
+  color: var(--orange);
+}
+
+/* Non-blocking conflict/status banner, per docs/design.md's rule: a
+   single-line overlay, top-trailing. */
+.banner {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg2);
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
+}
+
+.banner.conflict {
+  border-color: var(--orange);
+  color: var(--orange);
+}

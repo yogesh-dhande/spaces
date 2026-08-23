@@ -1,0 +1,138 @@
+/*
+ * App-wide color tokens, copied from the Variant A mockup's `.mac`/`.mac.light`
+ * blocks (Spaces' own ThemeRegistry:spacesBrand values), which is the
+ * artifact the user picked as the source of truth for this pane's design
+ * language (see docs/design.md for the general rules these follow).
+ *
+ * Unlike the mockup page, this bundle has no "page shell" to theme against
+ * system preference: the Swift host reports the theme explicitly in
+ * `CodePaneInitPayload.theme`, and `app/root.ts` stamps it onto
+ * `<html data-theme>` before anything renders. So theme selection here is
+ * driven only by `[data-theme]`, never `prefers-color-scheme`.
+ */
+
+:root[data-theme="dark"] {
+  --bg: #0f1517;
+  --surface: #1d2a2d;
+  --surface2: #172124;
+  --sidebar: #0f1517;
+  --fg: #eaf0ef;
+  --fg2: #adc0c4;
+  --fg3: #7a8a8d;
+  --line: #304346;
+  --line-strong: #3f5458;
+  --accent: #59dbcd;
+  --accent-strong: #3dc6b8;
+  --accent-tint: rgba(89, 219, 205, 0.16);
+  --on-accent: #0f1517;
+  --green: #4cd07a;
+  --orange: #f5a742;
+  --blue: #7aa2d2;
+  --red: #ff6b60;
+  --row-hover: rgba(234, 240, 239, 0.06);
+  --row-sel: rgba(89, 219, 205, 0.18);
+  --chip: rgba(234, 240, 239, 0.08);
+  --add-bg: rgba(76, 208, 122, 0.12);
+  --add-gutter: rgba(76, 208, 122, 0.22);
+  --add-fg: #6ae092;
+  --del-bg: rgba(255, 107, 96, 0.11);
+  --del-gutter: rgba(255, 107, 96, 0.2);
+  --del-fg: #ff8a80;
+  --sy-key: #bb80cc;
+  --sy-str: #6ae092;
+  --sy-type: #79e6db;
+  --sy-fn: #96b9e1;
+  --sy-num: #fabe66;
+  --sy-com: #7a8a8d;
+}
+
+:root[data-theme="light"] {
+  --bg: #f8f7f1;
+  --surface: #ffffff;
+  --surface2: #f1efe6;
+  --sidebar: #f1efe6;
+  --fg: #102028;
+  --fg2: #3a4d57;
+  --fg3: #6f848d;
+  --line: #d5d8d3;
+  --line-strong: #b8bdb5;
+  --accent: #0f7a76;
+  --accent-strong: #0d5f5d;
+  --accent-tint: rgba(15, 122, 118, 0.12);
+  --on-accent: #ffffff;
+  --green: #3a9e5f;
+  --orange: #d07a1a;
+  --blue: #3465a4;
+  --red: #c63a2f;
+  --row-hover: rgba(15, 32, 40, 0.04);
+  --row-sel: rgba(15, 122, 118, 0.14);
+  --chip: rgba(15, 32, 40, 0.06);
+  --add-bg: rgba(58, 158, 95, 0.11);
+  --add-gutter: rgba(58, 158, 95, 0.2);
+  --add-fg: #2f8a51;
+  --del-bg: rgba(198, 58, 47, 0.09);
+  --del-gutter: rgba(198, 58, 47, 0.18);
+  --del-fg: #b83428;
+  --sy-key: #8854a0;
+  --sy-str: #2f8a51;
+  --sy-type: #0d5f5d;
+  --sy-fn: #3465a4;
+  --sy-num: #b56d12;
+  --sy-com: #6f848d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/*
+ * `@pierre/diffs`' CSS-variables Shiki theme (registered by
+ * `theme/index.ts` via `registerCustomCSSVariableTheme`) reads these exact
+ * variable names — see the shiki `createCssVariablesTheme` implementation.
+ * Mapping them onto the app tokens above, instead of passing
+ * `variableDefaults`, means syntax colors repaint automatically whenever
+ * `data-theme` changes, with no separate light/dark theme registration.
+ */
+:root {
+  --shiki-foreground: var(--fg);
+  --shiki-background: var(--bg);
+  --shiki-token-keyword: var(--sy-key);
+  --shiki-token-string: var(--sy-str);
+  --shiki-token-string-expression: var(--sy-str);
+  --shiki-token-comment: var(--sy-com);
+  --shiki-token-constant: var(--sy-num);
+  --shiki-token-parameter: var(--fg2);
+  --shiki-token-function: var(--sy-fn);
+  --shiki-token-link: var(--sy-type);
+  --shiki-token-punctuation: var(--fg2);
+  --shiki-token-inserted: var(--add-fg);
+  --shiki-token-deleted: var(--del-fg);
+  --shiki-token-changed: var(--orange);
+}

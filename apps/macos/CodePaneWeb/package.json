@@ -1,0 +1,24 @@
+{
+  "name": "codepaneweb",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Spaces code pane plugin: a self-contained web bundle (Diff review + Editor modes) hosted in a WKWebView, talking to the app only through window.spaces.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.3.5",
+    "shiki": "4.4.3"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

@@ -226,7 +226,10 @@ import spacesterminalcore
 
     /// Closes every open code pane for a workspace. Called from the same workspace-teardown
     /// chokepoint as `closeTerminalPanes` so a workspace's code pane never outlives the workspace it
-    /// displays (stop, restart, and every delete path).
+    /// displays (stop, restart, and every delete path). Workspace ids are globally unique UUIDs, so
+    /// an id-only match here can never touch another device's pane; the device-scoped overloads
+    /// below take a device id for a different reason — they're driven by one device's overview or
+    /// status stream, which says nothing about other devices' panes — not because ids could collide.
     func closeCodePanes(workspaceID: String) {
         closeCodePanes { _, paneWorkspaceID in paneWorkspaceID == workspaceID }
     }
@@ -242,9 +245,10 @@ import spacesterminalcore
 
     /// Cross-client lifecycle close: a workspace observed transitioning to not-running in a device's
     /// overview closes its code panes, the overview-driven counterpart of the direct-mutation
-    /// `closeWorkspacePanes` path. A workspace's runtime status is per-device, so both the device id and
-    /// the workspace id must match a `.codePane` descriptor's — a workspace id alone is not unique across
-    /// devices.
+    /// `closeWorkspacePanes` path. A workspace's runtime status arrives per device, so the device id
+    /// match scopes this lifecycle close to the device whose overview actually reported the
+    /// transition — workspace ids are already globally unique UUIDs, so the device id isn't needed
+    /// to disambiguate the workspace itself.
     func closeCodePanes(deviceID: String, workspaceIDs: Set<String>) {
         closeCodePanes { paneDeviceID, workspaceID in paneDeviceID == deviceID && workspaceIDs.contains(workspaceID) }
     }
@@ -879,7 +883,22 @@ import spacesterminalcore
         let layout = layout(for: scope)
         let isInSelectedTab =
             layout.tabs.first { $0.id == layout.selectedTabID }.map { PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id } } ?? false
-        if isInSelectedTab { content.activate(focus: false) } else { content.deactivate() }
+        guard isInSelectedTab else {
+            content.deactivate()
+            return
+        }
+        // A code pane hibernates when its panel detaches from a window (see
+        // `handlePanelViewWindowMembershipChanged`'s `isInWindow == false` branch, which deactivates
+        // exactly this content). Without this guard, a *background* layout mutation that changes the
+        // selected tab while the panel stays detached (e.g. `mutateLayout` reacting to a background
+        // terminal close) would undo that by recreating the WKWebView behind a window nobody can see,
+        // and nothing would tear it down again until the next explicit detach. Terminals intentionally
+        // stay alive while detached, so this only gates code panes, mirroring the deactivate-on-detach
+        // precedent above. When the panel rejoins a window,
+        // `handlePanelViewWindowMembershipChanged`'s `isInWindow == true` branch re-scans every pane
+        // via this same function and activates whatever this skipped.
+        if case .codePane = pane.content, panels[scope]?.view?.window == nil { return }
+        content.activate(focus: false)
     }
 
     // MARK: - Tabs and panes
@@ -982,7 +1001,14 @@ import spacesterminalcore
     /// app appearance changes (`AppKitController.applyAppAppearance`) so open terminals — local and remote —
     /// recolor within a frame or two. Each pane dedupes against its own last-applied appearance, so a session
     /// already on `appearance` sends nothing.
-    func broadcastAppearance(_ appearance: ThemeAppearance) { for content in contentControllers.values { content.applyAppearance(appearance) } }
+    ///
+    /// Code panes are reached the same way: `applyAppearance` isn't part of `PaneContentHosting` (it lives on
+    /// `TerminalPaneContentHosting`, whose other requirements don't apply to a web-view pane), so this
+    /// downcasts rather than widening the base protocol for one method only `CodePaneContentController` uses.
+    func broadcastAppearance(_ appearance: ThemeAppearance) {
+        for content in contentControllers.values { content.applyAppearance(appearance) }
+        for content in codePaneControllers.values { (content as? CodePaneContentController)?.applyAppearance(appearance) }
+    }
 
     /// Re-renders every open pane's terminal content at the app-wide terminal text size. One value is
     /// shared by every pane, so a zoom in the focused pane resizes the text in all of them, not only
@@ -1154,7 +1180,8 @@ import spacesterminalcore
         paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode = .diff
     ) -> any PaneContentHosting {
         if let existing = codePaneControllers[paneID] { return existing }
-        let content = CodePaneContentController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode)
+        let content = CodePaneContentController(
+            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, hosting: host)
         codePaneControllers[paneID] = content
         return content
     }

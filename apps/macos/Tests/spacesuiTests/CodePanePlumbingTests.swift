@@ -343,6 +343,14 @@ extension ProcessProfileEnvironmentSuites {
 
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
             let panelView = controller.panelCoordinator.panelView(for: scope)
+            // Joins a window before `restoreSelection`, matching production order (AppKitController
+            // attaches the panel view to the detail container before calling `restoreSelection`): a
+            // code pane only activates while its panel view is windowed (Fix 4's window-membership
+            // gate in `activateContentIfVisible`), so restoring selection first would leave it
+            // inactive and falsify this test's own precondition below.
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView?.addSubview(panelView)
+            #expect(panelView.window === window, "precondition: the panel view joined a window")
             controller.panelCoordinator.restoreSelection(scope: scope)
 
             let terminalContentBefore = controller.panelCoordinator.content(forSessionID: "sess-1")
@@ -351,10 +359,6 @@ extension ProcessProfileEnvironmentSuites {
                 controller.panelCoordinator.codePaneContent(forPaneID: "code") as? CodePaneContentController,
                 "precondition: the code pane's controller exists")
             #expect(codeContent.contentView.subviews.contains { $0 is WKWebView }, "precondition: the selected tab's code pane is activated")
-
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
-            window.contentView?.addSubview(panelView)
-            #expect(panelView.window === window, "precondition: the panel view joined a window")
 
             panelView.removeFromSuperview()
 
@@ -367,6 +371,62 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(
                 codeContent.contentView.subviews.contains { $0 is WKWebView }, "rejoining the window rebuilds the code pane's web view")
+        }
+
+        /// Fix 4 regression: a *background* layout mutation reached while the panel is detached must not
+        /// undo the hibernation the detach just performed. `closePane(sessionIsTerminating: true)` (an
+        /// externally-driven close, e.g. overview pruning — see
+        /// `AppKitController.terminalPaneCloseMovesKeyboardFocus`) removes tab-1's only pane, which
+        /// removes the whole tab and falls back to selecting tab-2 — the code pane's tab — entirely
+        /// through `mutateLayout`'s internal `activateContentIfVisible` scan, never through
+        /// `activateFocusedPane` (which would bypass the window-membership gate this test exercises).
+        /// Rejoining the window afterward must still activate the code pane the detached scan correctly
+        /// skipped.
+        @Test func detachedPanelDoesNotReactivateACodePaneSelectedByABackgroundMutation() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            // tab-1 (selected, terminal-only) and tab-2 (unselected, code pane) — closing tab-1's only
+            // pane removes the tab and falls back to tab-2.
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendUnselectedTab(
+                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            let panelView = controller.panelCoordinator.panelView(for: scope)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView?.addSubview(panelView)
+            controller.panelCoordinator.restoreSelection(scope: scope)
+
+            let codeContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "code") as? CodePaneContentController,
+                "precondition: the code pane's controller exists")
+            #expect(
+                !codeContent.contentView.subviews.contains { $0 is WKWebView },
+                "precondition: the code pane's unselected tab is not activated")
+
+            panelView.removeFromSuperview()
+            #expect(panelView.window == nil, "precondition: the panel view left the window")
+
+            controller.panelCoordinator.closePane(forSessionID: "sess-1", sessionIsTerminating: true)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code"],
+                "precondition: closing tab-1's only pane removed the tab, leaving tab-2 as the sole (and now selected) tab")
+            #expect(
+                !codeContent.contentView.subviews.contains { $0 is WKWebView },
+                "a background mutation selecting the code pane's tab while detached must not activate it")
+
+            window.contentView?.addSubview(panelView)
+
+            #expect(
+                codeContent.contentView.subviews.contains { $0 is WKWebView },
+                "rejoining the window activates the code pane the detached scan correctly skipped")
         }
     }
 }

@@ -444,12 +444,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.panelCoordinator.pruneOpenPanes(
                     deviceID: snapshot.localDeviceID,
                     catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
-                // Same authoritative-overview gate as the terminal prune above, for code panes: a
-                // workspace absent from `overview.workspaces` was deleted, not merely hidden (a hidden
-                // workspace stays listed with `isHidden` set), so its code panes are safe to close.
-                host.panelCoordinator.pruneOpenCodePanes(
-                    deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
             }
+            // Unlike the terminal prune above, this runs unconditionally (not gated on
+            // `epochWasFreshBeforeRetarget`): a code pane has no session for a pane-replacement race to
+            // protect, so workspace liveness here is unrelated to terminal-session epoch/replacement
+            // concerns. Gating this too would mean a workspace deletion arriving while the epoch is
+            // stale skips the prune, and it never gets retried — the next identical overview
+            // early-returns above before pruning could run again, unlike the terminal prune's
+            // self-heal (a fresher overview follows the epoch-bumping activity). The keep-set is
+            // workspace ids from this just-installed authoritative overview, which no pane-replacement
+            // race can invalidate: a workspace absent from `overview.workspaces` was deleted, not
+            // merely hidden (a hidden workspace stays listed with `isHidden` set).
+            host.panelCoordinator.pruneOpenCodePanes(
+                deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
         }
         // Diff against the runtime map actually installed, not the raw snapshot. An unreachable local
         // daemon answers with the offline placeholder, whose empty map reads as every running workspace
@@ -1260,11 +1267,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             if epochWasFreshBeforeRetarget {
                 host.panelCoordinator.pruneOpenPanes(
                     deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
-                // Same authoritative-overview gate as the terminal prune above, for code panes: a
-                // workspace absent from `overview.overview.workspaces` was deleted, not merely hidden (a
-                // hidden workspace stays listed with `isHidden` set), so its code panes are safe to close.
-                host.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
             }
+            // Unlike the terminal prune above, this runs unconditionally (see the local-path sibling in
+            // `applySidebarDataSnapshot` above for the full rationale): a code pane has no session for
+            // a pane-replacement race to protect, so skipping it here for a stale epoch would let a
+            // remote workspace deletion that arrives mid-race go unpruned indefinitely — the next
+            // identical overview early-returns above before it could retry.
+            host.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
             // Terminal panes close on an externally initiated stop via session pruning above (their
             // sessions leave the overview's keep-set); a code pane has no session, so this same run-state
             // transition is its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget`

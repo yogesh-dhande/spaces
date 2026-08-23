@@ -71,7 +71,10 @@ let macAppTargets: [Target] = [
             "spacesterminalcore",
             "spacesterminalui",
             .product(name: "Sparkle", package: "Sparkle"),
-        ]
+        ],
+        // The code pane's web app (CodePaneWeb), built with `npm run build` into this directory
+        // and checked in; Swift builds never need node. See CodePaneWeb/README.md.
+        resources: [.copy("Resources/CodePane")]
     )
 ]
 let macExecutableTargets: [Target] = [

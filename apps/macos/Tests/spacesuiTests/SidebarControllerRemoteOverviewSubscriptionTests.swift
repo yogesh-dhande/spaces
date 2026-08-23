@@ -763,6 +763,50 @@ extension ProcessProfileEnvironmentSuites {
                 "the stale overview's prune was skipped, so the already-claimed pane stayed put")
         }
 
+        /// Round-4 Fix 2: the terminal-session retarget/prune above is deliberately skipped for a stale
+        /// epoch (previous test), because retargeting or pruning against data older than a just-claimed
+        /// replacement could steal or close the pane that claim installed. A code pane has no session for
+        /// a replacement race to protect, so its own liveness prune (`pruneOpenCodePanes`) must keep
+        /// running against the very same stale-epoch overview rather than being caught by that same fence
+        /// — otherwise a workspace deletion this overview reports would never close its code pane, since
+        /// there is no follow-up prune the way a terminal pane's self-heals via a later fresh overview.
+        @Test func aStaleEpochStillPrunesACodePaneForAGoneWorkspace() throws {
+            let controller = makeController()
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the terminal pane is placed")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "precondition: the code pane's controller exists")
+            let epochBeforeClaim = controller.panelCoordinator.paneReplacementEpoch
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+            #expect(claimed, "precondition: the claim succeeded")
+            #expect(controller.panelCoordinator.paneReplacementEpoch != epochBeforeClaim, "precondition: the epoch moved")
+
+            let staleOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: staleOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: epochBeforeClaim)
+
+            #expect(
+                controller.panelCoordinator.placement(forSessionID: "replacement") != nil,
+                "the stale overview's terminal prune was skipped, so the already-claimed pane stayed put (unchanged behavior)")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "code") == nil,
+                "the code pane's liveness prune ran despite the stale epoch, since it has no session for a replacement race to protect")
+        }
+
         /// The ordinary case: nothing bumped the epoch between this overview's data being read and it
         /// being applied, so its prune runs and a pane the fresh keep-set no longer retains is closed —
         /// here, the replacement's own session having genuinely ended in the time since the claim.
