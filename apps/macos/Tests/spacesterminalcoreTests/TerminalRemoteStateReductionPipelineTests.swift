@@ -601,6 +601,149 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertNil(weakTarget, "the pipeline held its apply target strongly")
     }
 
+    // MARK: - Off-screen panes hold their screen updates
+
+    /// A pane that is off screen applies no screen updates while it is there, and what it repaints from
+    /// when it comes back is the session's CURRENT screen: the reduction never stopped, so the one
+    /// output it held is a materialized full frame of the newest state, not the picture the pane left on.
+    func testHeldScreenUpdatesApplyAsOneCurrentFrameWhenThePaneStopsHolding() async throws {
+        let series = try streamingSeries(sessionID: "pipeline-held", frameCount: 30, fetchIndex: 400, clipboardIndex: 400)
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
+
+        // The pane is on screen for the first frame: a pane holds nothing until it has something to show.
+        pipeline.submit(series[0].payload)
+        try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
+
+        pipeline.setHoldsScreenUpdates(true)
+        for entry in series.dropFirst() { pipeline.submit(entry.payload) }
+        try await waitUntil("every payload reduced") { probe.submissions == series.count }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "an off-screen pane applied a screen update")
+
+        pipeline.setHoldsScreenUpdates(false)
+        try await waitUntil("the pane repainted when it came back") { collector.recorded.count == 2 }
+        try await settle()
+        let outputs = collector.recorded
+        XCTAssertEqual(outputs.count, 2, "the held run applied as more than one frame")
+        XCTAssertEqual(outputs[1].frameText, "frame-\(series.count - 1)", "the pane repainted an older screen than the session's current one")
+        XCTAssertEqual(outputs[1].coalescedAwayCount, series.count - 2, "the held run did not collapse into one apply")
+        XCTAssertNil(outputs[1].dropReason, "every delta still reduced in order while the pane was off screen")
+        XCTAssertFalse(outputs[1].requestsResync, "the chain stayed intact, so nothing had to be re-fetched from the device")
+    }
+
+    /// Everything that is not just a newer picture still applies as it arrives while the pane is off
+    /// screen: that is what keeps an unselected tab's title, ownership, runtime state and ended state
+    /// current. The screen it was holding applies with it, in order, and holding resumes afterwards.
+    func testHeldPaneAppliesStateTransitionsAsTheyArrive() async throws {
+        let sessionID = "pipeline-held-barrier"
+        let series = try streamingSeries(sessionID: sessionID, frameCount: 6, fetchIndex: 400, clipboardIndex: 400)
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
+
+        pipeline.submit(series[0].payload)
+        try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
+
+        pipeline.setHoldsScreenUpdates(true)
+        for entry in series.dropFirst(1).prefix(3) { pipeline.submit(entry.payload) }
+        try await waitUntil("the screen updates reduced") { probe.submissions == 4 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1)
+
+        pipeline.submit(sessionMetadataPayload(sessionID: sessionID, sequence: series.count))
+        try await waitUntil("the title change applied") { collector.recorded.count == 3 }
+        try await settle()
+        XCTAssertEqual(
+            collector.recorded.map(\.reason),
+            [TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.sessionMetadata],
+            "the held screen must apply before the transition that followed it, and both exactly once")
+        XCTAssertEqual(collector.recorded[1].frameText, "frame-3", "the transition dragged in an older frame than the one being held")
+
+        // The barrier's drain must not leave the pane applying at output cadence again.
+        for entry in series.dropFirst(4) { pipeline.submit(entry.payload) }
+        try await waitUntil("the rest of the series reduced") { probe.submissions == series.count + 1 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 3, "the pane resumed applying screen updates while still off screen")
+    }
+
+    /// A screen update whose delta could not reduce applies even while the pane is off screen: its
+    /// resync request is the only thing that makes the device re-send a full frame, and holding it would
+    /// leave every later delta failing against a baseline nothing repairs.
+    func testHeldPaneAppliesAScreenUpdateThatRequestsAResync() async throws {
+        let sessionID = "pipeline-held-resync"
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) })
+
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)))
+        try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
+
+        pipeline.setHoldsScreenUpdates(true)
+        pipeline.submit(corruptPayload(sessionID: sessionID, sequence: 1))
+        try await waitUntil("the failed reduction applied") { collector.recorded.count == 2 }
+        XCTAssertTrue(collector.recorded[1].requestsResync, "the off-screen pane swallowed the request that repairs its chain")
+    }
+
+    /// A remote owner (the phone, say) driving a session whose Mac pane is off screen alternates
+    /// frameless `input` payloads with frame-carrying output. `ApplyMailbox.mayCollapse` on its own
+    /// cannot fold a frameless output onto a frame-carrying entry, so every cycle would append one more
+    /// materialized full frame to the held queue: unbounded while the pane stays away, and a redisplay
+    /// that walks every stale frame instead of painting the current one. Holding folds the tail in both
+    /// directions instead, since neither entry is going to be applied until the pane returns, so what
+    /// waits is one entry carrying the newest frame and the merged effects of everything folded into it.
+    func testAlternatingInputAndOutputHoldsAsOneEntryWhileThePaneIsOffScreen() async throws {
+        let sessionID = "pipeline-held-input-cycles"
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
+
+        let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)))
+        try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
+
+        pipeline.setHoldsScreenUpdates(true)
+        let cycles = 6
+        var sequence = 1
+        for cycle in 1...cycles {
+            pipeline.submit(inputPayload(sessionID: sessionID, sequence: sequence))
+            sequence += 1
+            let frame = GhosttyRenderFrame(sessionRevision: UInt64(cycle + 1), ownerEpoch: 4, snapshot: snapshot(text: "frame-\(cycle)"))
+            pipeline.submit(payload(sessionID: sessionID, sequence: sequence, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)))
+            sequence += 1
+        }
+        // A trailing keystroke, so the surviving entry is the frameless one: the fold has to keep the
+        // newest frame under it rather than leaving the pane nothing to repaint from.
+        pipeline.submit(inputPayload(sessionID: sessionID, sequence: sequence))
+        sequence += 1
+        let expectedSubmissions = sequence
+        try await waitUntil("every payload reduced") { probe.submissions == expectedSubmissions }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "an off-screen pane applied a screen update")
+
+        pipeline.setHoldsScreenUpdates(false)
+        try await waitUntil("the pane repainted when it came back") { collector.recorded.count == 2 }
+        try await settle()
+        let outputs = collector.recorded
+        XCTAssertEqual(outputs.count, 2, "the held input/output cycles applied as more than one entry")
+        XCTAssertEqual(outputs[1].reason, TerminalRemoteSessionStateReason.input, "the newest held payload must survive the fold")
+        XCTAssertEqual(outputs[1].frameText, "frame-\(cycles)", "the fold dropped the newest frame")
+        XCTAssertEqual(outputs[1].coalescedAwayCount, cycles * 2, "the held cycles did not fold into a single entry")
+        XCTAssertFalse(outputs[1].requestsResync, "the chain stayed intact, so nothing had to be re-fetched from the device")
+    }
+
     // MARK: - Test control
 
     /// Occupies the main actor until the returned semaphore is signalled. The mailbox drains on the

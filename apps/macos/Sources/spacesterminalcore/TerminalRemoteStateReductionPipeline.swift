@@ -63,13 +63,21 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// under-reports how far the content moved and lands on the wrong rows. So when both this output and
     /// the skipped one carry a frame, the surviving frame is rebuilt with the skipped frame's rects
     /// (older) ahead of this frame's own rects (newer), and `scrollRectsOverflowed` ORed across both.
-    /// When the skipped output carries no frame there is nothing to merge: `ApplyMailbox.mayCollapse`
-    /// already forbids collapsing a frameless newer output onto a pending frame-carrying one, so the
-    /// reverse (frame-carrying newer output, frameless skipped one) is the only case that reaches here,
-    /// and it needs no rect merge.
+    /// When the skipped output carries no frame there is nothing to merge, and when this one carries none
+    /// the skipped frame is adopted whole rather than merged: the surviving output always leaves with the
+    /// newest frame either of them had. Only a held pane reaches that adoption
+    /// (`ApplyMailbox.mayCollapseWhileHolding`) — a displayed pane's `mayCollapse` refuses to collapse a
+    /// frameless newer output onto a pending frame-carrying one, since there the pending entry is about to
+    /// be applied on its own. Adopting is what makes the frame outlive the fold: the apply paints
+    /// `frameToApply` whatever the surviving output's reason says, so the older screen still reaches the
+    /// pane, while the newer output's own state, drop reason, and resync request ride through untouched.
     func inheritingEffects(ofCoalesced skipped: TerminalRemoteStateReductionOutput) -> TerminalRemoteStateReductionOutput {
         var mergedReduction = reduction
-        if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
+        if let base = reduction, base.frameToApply == nil, let skippedFrame = skipped.reduction?.frameToApply {
+            mergedReduction = TerminalRemoteStateReductionResult(
+                payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: skippedFrame,
+                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedOutOfBandPayload: base.isRefusedOutOfBandPayload)
+        } else if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
             // Bounded like the mirror's own carry buffer: repeated collapses onto one stalled pending
             // output would otherwise grow the merged array (and re-copy it per collapse) without limit.
             // Past the cap the rects are dropped and the frame reports overflowed, which the consumer
@@ -131,6 +139,13 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 /// skipped payload, and the one-shot effects (`requestsResync`) of the outputs that were dropped. Their
 /// per-payload metrics do not survive; the surviving apply reports how many were folded into it
 /// (`coalescedAwayCount`).
+///
+/// **A pane that is off screen holds its screen updates.** `setHoldsScreenUpdates(true)` stops the
+/// mailbox waking the main actor for an output that is nothing but a newer picture, so those outputs
+/// collapse into a single held entry, carrying the newest frame and the merged effects of everything
+/// folded into it, that is applied when the pane comes back. Reduction is untouched, so that entry is a
+/// materialized full frame of the current screen and the pane repaints from it with no round trip.
+/// Outputs that carry a state transition stay barriers and apply as they arrive.
 public final class TerminalRemoteStateReductionPipeline: Sendable {
     /// One queued payload and where it came from: the session's stream, or a direct `.state` read whose
     /// response has to prove it is not stale when it reaches the reducer (see `TerminalRemoteStateReducer`).
@@ -141,6 +156,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
 
     private let continuation: AsyncStream<QueuedPayload>.Continuation
     private let consumer: Task<Void, Never>
+    private let mailbox: ApplyMailbox
 
     /// - Parameters:
     ///   - shouldUseFrame: Decides whether a materialized frame may be rendered. Pure, so it runs in
@@ -164,6 +180,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
         let (stream, continuation) = AsyncStream<QueuedPayload>.makeStream(bufferingPolicy: .unbounded)
         self.continuation = continuation
         let mailbox = ApplyMailbox(apply: apply)
+        self.mailbox = mailbox
         consumer = Task.detached(priority: .userInitiated) {
             var reducer = TerminalRemoteStateReducer()
             var previousPayload: GhosttyRemoteSessionStatePayload?
@@ -208,6 +225,22 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
     public func submit(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool = false) {
         continuation.yield(QueuedPayload(payload: payload, isOutOfBand: isOutOfBand))
     }
+
+    /// Whether an output that carries nothing but screen content may wait in the apply mailbox for a
+    /// newer one instead of being applied as it reduces.
+    ///
+    /// Set while the pane this pipeline feeds is off screen and already holds a frame (see
+    /// `RemoteGhosttySessionHost.updateHeldScreenUpdates`). Nothing about the reduction changes: every
+    /// payload still reduces, in order, so the delta chain and the reducer's baseline stay exactly where
+    /// a displayed pane's would be, and the newest held output carries a materialized FULL frame of the
+    /// whole grid. Clearing this applies that one frame, which is the current screen, with no round trip to
+    /// the device, and no delta applied onto a baseline the pane never received.
+    ///
+    /// Only screen content waits. Every reason that carries a state transition (runtime state,
+    /// attachment, session metadata, termination, an out-of-band response, a clipboard write) is a
+    /// barrier that applies on arrival, so an off-screen pane's title, ownership, ended state and
+    /// clipboard keep up with the session.
+    public func setHoldsScreenUpdates(_ holds: Bool) { mailbox.setHoldsScreenUpdates(holds) }
 }
 
 /// The ordered, coalescing hand-off from the reduce loop to the main actor.
@@ -220,6 +253,10 @@ private final class ApplyMailbox: @unchecked Sendable {
     /// True while a drain task exists that has not yet found the queue empty. It is the slot that keeps
     /// exactly one drain in flight, so a burst of submissions schedules one task rather than one each.
     private var isDrainScheduled = false
+    /// While true, a submission that carries nothing but screen content leaves the queue undrained, so
+    /// the next such submission collapses onto it (`mayCollapseWhileHolding`) instead of the main actor
+    /// applying each one. See `TerminalRemoteStateReductionPipeline.setHoldsScreenUpdates`.
+    private var holdsScreenUpdates = false
     private let apply: @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void
 
     init(apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void) { self.apply = apply }
@@ -241,15 +278,63 @@ private final class ApplyMailbox: @unchecked Sendable {
             && (output.reduction?.frameToApply != nil || pending.reduction?.frameToApply == nil)
     }
 
+    /// Whether this submission may leave the queue undrained rather than waking the main actor.
+    ///
+    /// Only while the pane holds its screen updates, and only for an output that is nothing but a newer
+    /// picture of the screen. A resync request is excluded even though its reason is screen-shaped: the
+    /// reduction that asks for one has broken the delta chain, and only the applied request makes the
+    /// device re-send a full frame. Holding it would leave every later delta failing to reduce against a
+    /// baseline nothing repairs, and each of those failures appends its own frameless entry rather than
+    /// collapsing onto a frame-carrying one, so the queue would grow for as long as the pane stays off
+    /// screen.
+    private static func defersDrain(for output: TerminalRemoteStateReductionOutput, whileHoldingScreenUpdates holds: Bool) -> Bool {
+        holds && output.isCoalescibleOnApply && !output.requestsResync
+    }
+
+    /// The collapse rule a held pane adds: while holding, the queue's tail is at most ONE screen-only
+    /// entry, whichever of the two carries a frame.
+    ///
+    /// `mayCollapse` alone would let the held tail grow one entry per input/output cycle, because a
+    /// frameless `input` (coalescible by reason, never carrying a render update) cannot collapse onto a
+    /// frame-carrying entry and appends instead, and the frame that follows it then replaces only that
+    /// input. A session driven by a remote owner alternates exactly that way, so an off-screen pane would
+    /// accumulate a materialized full frame per cycle and, on redisplay, apply every stale one of them.
+    /// Here the fold is safe in both directions precisely because neither entry is going to be applied
+    /// until the pane comes back: nothing is lost by folding them, as long as the survivor leaves with
+    /// the newest frame either of them had (`inheritingEffects` adopts it).
+    ///
+    /// Both entries must be ones the hold actually defers: an output that requests a resync applies on
+    /// arrival and stays a barrier, which is what bounds the queue when the delta chain breaks.
+    private static func mayCollapseWhileHolding(_ output: TerminalRemoteStateReductionOutput, onto pending: TerminalRemoteStateReductionOutput)
+        -> Bool
+    { defersDrain(for: output, whileHoldingScreenUpdates: true) && defersDrain(for: pending, whileHoldingScreenUpdates: true) }
+
     func submit(_ output: TerminalRemoteStateReductionOutput) {
         lock.lock()
-        if let pending = queued.last, Self.mayCollapse(output, onto: pending) {
+        if let pending = queued.last,
+            Self.mayCollapse(output, onto: pending) || (holdsScreenUpdates && Self.mayCollapseWhileHolding(output, onto: pending))
+        {
             queued[queued.count - 1] = output.inheritingEffects(ofCoalesced: pending)
         } else {
             queued.append(output)
         }
-        let needsDrain = !isDrainScheduled
-        isDrainScheduled = true
+        // The slot is claimed only when this submission actually schedules a drain: a held submission
+        // that claimed it would leave the queue with no drain in flight and the slot saying otherwise,
+        // so nothing would ever wake it again.
+        let needsDrain = !isDrainScheduled && !Self.defersDrain(for: output, whileHoldingScreenUpdates: holdsScreenUpdates)
+        if needsDrain { isDrainScheduled = true }
+        lock.unlock()
+        guard needsDrain else { return }
+        Task { @MainActor [weak self] in self?.drain() }
+    }
+
+    /// Applies whatever was held as soon as the pane stops holding. A drain already in flight picks the
+    /// queue up on its own, so this only schedules one when the slot is free.
+    func setHoldsScreenUpdates(_ holds: Bool) {
+        lock.lock()
+        holdsScreenUpdates = holds
+        let needsDrain = !holds && !isDrainScheduled && !queued.isEmpty
+        if needsDrain { isDrainScheduled = true }
         lock.unlock()
         guard needsDrain else { return }
         Task { @MainActor [weak self] in self?.drain() }
@@ -268,8 +353,18 @@ private final class ApplyMailbox: @unchecked Sendable {
     private func takeQueuedSegment() -> [TerminalRemoteStateReductionOutput] {
         lock.lock()
         defer { lock.unlock() }
-        let segment = queued
-        queued.removeAll(keepingCapacity: true)
+        var segment = queued
+        // A held pane's newest entry stays queued when it is nothing but a newer picture of the screen;
+        // everything ahead of it still applies, in order. Leaving it behind is what makes the hold hold:
+        // a drain that took it would apply it, reschedule itself, and be handed the next collapsed frame
+        // by the session's next flush, applying screen updates at output cadence for a pane nobody can
+        // see. What stays behind is one entry, because every screen-only submission collapses onto it.
+        if holdsScreenUpdates, let newest = segment.last, Self.defersDrain(for: newest, whileHoldingScreenUpdates: true) {
+            segment.removeLast()
+            queued = [newest]
+        } else {
+            queued.removeAll(keepingCapacity: true)
+        }
         // The drain slot is released only on an empty take, so a submission that lands while a segment
         // is being applied is picked up by the drain this one schedules rather than by a second one.
         if segment.isEmpty { isDrainScheduled = false }
