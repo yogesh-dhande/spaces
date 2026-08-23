@@ -2215,6 +2215,52 @@ final class StoreTests: XCTestCase {
         return columns
     }
 
+    /// A connection keeps its prepared statements, so the second run of a query must not replay the
+    /// first run's results: an insert, an update, and a delete made between two runs all have to show up.
+    func testRepeatedQueriesOnOneConnectionSeeWritesMadeBetweenThem() throws {
+        let store = try makeTemporaryStore()
+        try store.upsert(project: makeProjectRecord(id: "project-a", dir: "/projects/a"))
+
+        XCTAssertEqual(try store.projects().map(\.id), ["project-a"])
+        XCTAssertEqual(try store.project(id: "project-a")?.dir, "/projects/a")
+
+        try store.upsert(project: makeProjectRecord(id: "project-b", dir: "/projects/b"))
+        var renamedProject = try XCTUnwrap(try store.project(id: "project-a"))
+        renamedProject = ProjectRecord(
+            id: renamedProject.id, name: "Renamed", dir: renamedProject.dir, isGitRepo: renamedProject.isGitRepo,
+            defaultBranch: renamedProject.defaultBranch, setupScript: renamedProject.setupScript, stopScript: renamedProject.stopScript, ports: [],
+            processes: [], browserSessions: [])
+        try store.upsert(project: renamedProject)
+
+        XCTAssertEqual(try store.projects().map(\.id).sorted(), ["project-a", "project-b"])
+        XCTAssertEqual(try store.project(id: "project-a")?.name, "Renamed")
+
+        try store.deleteProject(id: "project-a")
+
+        XCTAssertEqual(try store.projects().map(\.id), ["project-b"])
+        XCTAssertNil(try store.project(id: "project-a"))
+    }
+
+    /// A single-row read stops stepping as soon as it has its row, and must still release the read it
+    /// took: the connection has to be able to write to the table it just read, and another connection's
+    /// write to that table must not be held off either.
+    func testSingleRowReadLeavesTheTableWritableByBothConnections() throws {
+        let directory = try makeTempDirectory()
+        let databasePath = directory.appendingPathComponent("spaces.db").path
+        bindSpacesProfileForTest(databasePath: databasePath)
+        let store = try SQLiteStore(path: databasePath)
+        let otherConnection = try SQLiteStore(path: databasePath)
+        try store.upsert(project: makeProjectRecord(id: "project-a", dir: "/projects/a"))
+
+        XCTAssertEqual(try store.project(id: "project-a")?.id, "project-a")
+
+        try store.upsert(project: makeProjectRecord(id: "project-b", dir: "/projects/b"))
+        try otherConnection.upsert(project: makeProjectRecord(id: "project-c", dir: "/projects/c"))
+
+        XCTAssertEqual(try store.projects().map(\.id).sorted(), ["project-a", "project-b", "project-c"])
+        XCTAssertEqual(try otherConnection.projects().map(\.id).sorted(), ["project-a", "project-b", "project-c"])
+    }
+
     private func readRows(dbURL: URL, sql: String) throws -> [[String?]] {
         var db: OpaquePointer?
         guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {

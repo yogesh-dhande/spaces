@@ -19,9 +19,14 @@
     /// The reconcile builds a plain `WorkspaceOrchestrator`, so restart and notify
     /// resolve through the process-wide overrides the daemon installs (its in-process
     /// terminal launcher, and a notification deliverer that forwards to the client).
+    ///
+    /// Exit events and runtime-state changes arrive as fast as terminal output does, so both kinds of
+    /// database work this does (the status reconcile, and the running-pid read that reattaches observers)
+    /// share one long-lived connection owned by `DaemonReconcileStore` (see its doc comment for why a
+    /// connection per pass is not used, and why the passes are serialized onto its queue).
     @MainActor public final class ProcessExitMonitorService {
-        private let databasePath: String
         private let onError: (@Sendable (any Error) -> Void)?
+        private let reconcileStore: DaemonReconcileStore
         private var observers: [Int: DispatchSourceProcess] = [:]
         private var runtimeStateObserver: NSObjectProtocol?
         private var reconcileInFlight = false
@@ -33,8 +38,8 @@
         private var started = false
 
         public init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil) {
-            self.databasePath = databasePath
             self.onError = onError
+            reconcileStore = DaemonReconcileStore(label: "spaces.daemon.process-exit-reconcile", databasePath: databasePath)
         }
 
         /// Reconciles once on startup (catching exits that happened while the daemon
@@ -48,6 +53,11 @@
             requestReconcileThenRefresh(ignoreStartupGracePeriod: false)
             refreshObservers()
         }
+
+        /// Awaited half of the stop: releases the database connection and takes its final WAL checkpoint,
+        /// and does not return until that has happened. Call it only after `stop()`, which is what makes
+        /// the close the last thing this monitor's store ever does.
+        public func releaseStore() async { await reconcileStore.close() }
 
         public func stop() {
             started = false
@@ -69,13 +79,16 @@
             guard started else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.started else { return }
-                guard let runningPIDs = await Self.runningOwnedProcessPIDs(databasePath: self.databasePath) else {
+                let runningPIDs = await self.runningOwnedProcessPIDs()
+                // Checked before the read is judged: a stop that landed during the read has released the
+                // store, and its nil is the service ending, not a failed read.
+                guard self.started else { return }
+                guard let runningPIDs else {
                     // Transient read failure: keep existing observers rather than
                     // dropping them all, which would leave exits undetected.
                     self.onError?(ProcessExitMonitorError.couldNotReadRunningProcesses)
                     return
                 }
-                guard self.started else { return }
                 for (pid, source) in self.observers where !runningPIDs.contains(pid) {
                     source.cancel()
                     self.observers[pid] = nil
@@ -128,13 +141,12 @@
                 return
             }
             reconcileInFlight = true
-            let databasePath = databasePath
-            let onError = onError
             Task { @MainActor [weak self] in
                 var ignoresStartupGrace = ignoreStartupGracePeriod
                 while true {
-                    await Self.reconcile(databasePath: databasePath, onError: onError, ignoreStartupGracePeriod: ignoresStartupGrace)
-                    guard let self, self.started else { return }
+                    guard let self else { return }
+                    await self.reconcile(ignoreStartupGracePeriod: ignoresStartupGrace)
+                    guard self.started else { return }
                     guard let pendingIgnoresStartupGrace = self.pendingReconcileIgnoresStartupGrace else {
                         self.reconcileInFlight = false
                         // The reconcile may have applied restart/exit policies that changed the
@@ -148,26 +160,20 @@
             }
         }
 
-        private nonisolated static func reconcile(databasePath: String, onError: (@Sendable (any Error) -> Void)?, ignoreStartupGracePeriod: Bool)
-            async
-        {
-            await Task.detached(priority: .utility) {
-                do {
-                    let store = try SQLiteStore(path: databasePath)
-                    let orchestrator = WorkspaceOrchestrator(store: store)
-                    _ = try orchestrator.checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: ignoreStartupGracePeriod)
-                } catch { onError?(error) }
-            }.value
+        private func reconcile(ignoreStartupGracePeriod: Bool) async {
+            do {
+                _ = try await reconcileStore.run { store in
+                    try WorkspaceOrchestrator(store: store).checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: ignoreStartupGracePeriod)
+                }
+            } catch { onError?(error) }
         }
 
         /// Returns nil on a transient store error so the caller can distinguish "no
         /// processes are running" from "could not read" and avoid tearing down live
-        /// observers on a failed read.
-        private nonisolated static func runningOwnedProcessPIDs(databasePath: String) async -> Set<Int>? {
-            await Task.detached(priority: .utility) {
-                guard let store = try? SQLiteStore(path: databasePath) else { return nil }
-                return try? WorkspaceOrchestrator(store: store).runningOwnedProcessPIDs()
-            }.value
+        /// observers on a failed read. A read after the store is released reads nil for
+        /// the same reason: there is nothing to observe once this service has stopped.
+        private func runningOwnedProcessPIDs() async -> Set<Int>? {
+            do { return try await reconcileStore.run { try WorkspaceOrchestrator(store: $0).runningOwnedProcessPIDs() } } catch { return nil }
         }
 
         private nonisolated static func isProcessAlive(pid: Int) -> Bool {

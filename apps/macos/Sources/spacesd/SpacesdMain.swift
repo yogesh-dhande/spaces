@@ -905,7 +905,6 @@ enum SpacesDaemonErrorClassification {
         portReservationService?.beginStop()
         #if os(macOS)
             processExitMonitor?.stop()
-            processExitMonitor = nil
             caddyRouterService?.beginStop()
         #endif
     }
@@ -920,6 +919,8 @@ enum SpacesDaemonErrorClassification {
         await portReservationService?.releaseStore()
         portReservationService = nil
         #if os(macOS)
+            await processExitMonitor?.releaseStore()
+            processExitMonitor = nil
             await caddyRouterService?.releaseStore()
             caddyRouterService = nil
         #endif

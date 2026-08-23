@@ -22,17 +22,21 @@
         private let onError: @Sendable (String) -> Void
         private let lifecycle = CaddyRouterLifecycle()
         private let reconcileStore: DaemonReconcileStore
+        /// Built once so it captures `lifecycle` alone: the body runs on the store's own queue, and this
+        /// service is main-actor isolated, so it must never capture `self`.
+        private let reconcilePass: @Sendable (SQLiteStore) throws -> Void
         private var reconcileTask: Task<Void, Never>?
         private var pending = false
         /// Latched by `beginStop()`. A reconcile task created just before the stop has not necessarily
-        /// begun its first pass, and `runPass` is not cancellable, so clearing the task handle alone
+        /// begun its first pass, and `run` is not cancellable, so clearing the task handle alone
         /// would not stop it from submitting one.
         private var stopped = false
 
         init(databasePath: String, onError: @escaping @Sendable (String) -> Void) {
             self.onError = onError
             let lifecycle = lifecycle
-            reconcileStore = DaemonReconcileStore(label: "spaces.daemon.caddy-router-reconcile", databasePath: databasePath) { store in
+            reconcileStore = DaemonReconcileStore(label: "spaces.daemon.caddy-router-reconcile", databasePath: databasePath)
+            reconcilePass = { store in
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 let routes = CaddyRouteRegistry.mergedRoutes(
                     localRoutes: try orchestrator.caddyRouteTable(),
@@ -56,7 +60,7 @@
                 guard let self else { return }
                 while !self.stopped {
                     self.pending = false
-                    do { try await self.reconcileStore.runPass() } catch { self.onError("\(error)") }
+                    do { _ = try await self.reconcileStore.run(self.reconcilePass) } catch { self.onError("\(error)") }
                     guard self.pending else { break }
                 }
                 self.reconcileTask = nil

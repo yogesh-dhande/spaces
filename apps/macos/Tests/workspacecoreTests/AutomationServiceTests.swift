@@ -2015,6 +2015,7 @@ import spacesterminalcore
     let now: () -> Date
     private let timeZone: @Sendable () -> TimeZone
     private let retentionLimit: Int
+    private let realCommands: Bool
 
     init(
         _ testCase: XCTestCase, realCommands: Bool = false, now: @escaping () -> Date = Date.init,
@@ -2029,6 +2030,7 @@ import spacesterminalcore
         try store.upsert(workspace: makeWorkspaceRecord(id: "workspace-1", projectID: project.id, dir: workspaceDirectory.path))
         let host = FakeAutomationTerminalHost(realCommands: realCommands)
         self.host = host
+        self.realCommands = realCommands
         host.install()
         testCase.addTeardownBlock { host.uninstall() }
         orchestrator = WorkspaceOrchestrator(store: store)
@@ -2185,11 +2187,25 @@ import spacesterminalcore
 
     /// Drives `tick()` until a run reaches a terminal status, waiting for the fake host's background waiter
     /// to publish the command's ended runtime state. Fails if the run does not settle within the deadline.
+    ///
+    /// The terminal status and the ended runtime state are two independently timed signals: the status
+    /// comes from the exit-code sentinel the wrapped script writes, the runtime state from the host's
+    /// detached `waitpid` thread. A real-command harness therefore keeps ticking until that thread has
+    /// published, and ticks once more so the tick-driven cleanup that keys on the ended state (detaching
+    /// the run's runtime target) has applied. A fake-command host never publishes an ended state, so the
+    /// wait is scoped to real commands; waiting there would block until the deadline.
     func runUntilTerminal(runID: String, timeout: TimeInterval = 5) throws -> AutomationRun {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             service.tick()
-            if let run = try store.automationRun(id: runID), run.status.isTerminal { return run }
+            if let run = try store.automationRun(id: runID), run.status.isTerminal {
+                guard realCommands, let sessionID = run.terminalSessionID else { return run }
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+                    service.tick()
+                    return run
+                }
+            }
             usleep(30_000)
         }
         throw XCTSkip("run \(runID) did not reach a terminal status within \(timeout)s")

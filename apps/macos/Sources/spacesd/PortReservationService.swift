@@ -27,9 +27,7 @@ import workspacecore
 
     init(databasePath: String, onError: @escaping @Sendable (String) -> Void) {
         self.onError = onError
-        reconcileStore = DaemonReconcileStore(label: "spaces.daemon.port-reservation-reconcile", databasePath: databasePath) { store in
-            try PortReservationReconciler(store: store).reconcile()
-        }
+        reconcileStore = DaemonReconcileStore(label: "spaces.daemon.port-reservation-reconcile", databasePath: databasePath)
     }
 
     func start() { reconcile() }
@@ -44,7 +42,9 @@ import workspacecore
             guard let self else { return }
             while !self.stopped {
                 self.pending = false
-                do { try await self.reconcileStore.runPass() } catch { self.onError("\(error)") }
+                do {
+                    _ = try await self.reconcileStore.run { try PortReservationReconciler(store: $0).reconcile() }
+                } catch { self.onError("\(error)") }
                 guard self.pending else { break }
             }
             self.reconcileTask = nil

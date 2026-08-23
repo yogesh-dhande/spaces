@@ -36,6 +36,21 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         databasePath = nil
     }
 
+    /// Starting runs a pass without waiting for a notification. Sessions that died while the daemon was
+    /// down post no runtime-state change on the way back up, so their agent rows are finalized by this
+    /// startup pass or not at all.
+    @MainActor func testStartRunsAPassWithoutWaitingForANotification() async throws {
+        let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
+        reconciler.start()
+        addTeardownBlock { @MainActor in
+            reconciler.beginStop()
+            await reconciler.releaseStore()
+        }
+
+        try await settle()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: databasePath), "Starting must run a pass, which opens the database.")
+    }
+
     /// A runtime-state notification posted just before the stop is delivered after it — removing the
     /// observer does not unqueue a delivery already on its way — and the reconcile it triggers has
     /// certainly not run a pass yet. Nothing it triggers may reach the database: one this reconciler
