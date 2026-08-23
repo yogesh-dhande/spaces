@@ -892,12 +892,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The workspace's ordered focusable window names. The app owns this ordering, so the
     /// dump IPC lets harnesses read it instead of recomputing it from daemon data.
-    func focusableWindowNames(workspaceID: String) -> [String] {
+    func focusableWindowNames(workspaceID: String) -> [String] { focusableWindowEntries(workspaceID: workspaceID).map(\.name) }
+
+    /// Each focusable name with the kind of target behind it. A configured process lists under the same
+    /// name whether or not the app's snapshot has its running row yet, so a harness about to focus a
+    /// process needs the kind to know the snapshot has caught up (`process`, not `missingConfiguredProcess`).
+    func focusableWindowEntries(workspaceID: String) -> [(name: String, kind: WorkspaceRunShortcutTarget.Kind)] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
-        return context.targets.compactMap { Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions) }
+        return context.targets.compactMap { target in
+            Self.focusableWindowName(for: target, detail: context.detail, browserSessions: context.browserSessions).map { (name: $0, kind: target.kind) }
+        }
     }
 
-    private struct FocusableWindowNamesDump: Codable { let names: [String] }
+    private struct FocusableWindowNamesDump: Codable {
+        let names: [String]
+        let kinds: [String]
+    }
 
     private func writeFocusableWindowNames(workspaceID: String, to outputPath: String) {
         let url = URL(fileURLWithPath: outputPath)
@@ -905,7 +915,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(FocusableWindowNamesDump(names: focusableWindowNames(workspaceID: workspaceID)))
+            let entries = focusableWindowEntries(workspaceID: workspaceID)
+            let data = try encoder.encode(FocusableWindowNamesDump(names: entries.map(\.name), kinds: entries.map(\.kind.rawValue)))
             try data.write(to: url, options: [.atomic])
         } catch {}
     }
