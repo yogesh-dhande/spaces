@@ -58,7 +58,7 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
     @MainActor func testAReconcileTriggeredAcrossTheStopDoesNoDatabaseWork() async throws {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
-        NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil)
+        TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: "session-1")
         reconciler.beginStop()
         await reconciler.releaseStore()
 
@@ -74,7 +74,7 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         reconciler.beginStop()
         await reconciler.releaseStore()
 
-        for _ in 0..<50 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
+        for _ in 0..<50 { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: "session-1") }
         try await settle()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "A notification after stop must not open the database.")
@@ -87,9 +87,9 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
 
-        for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
+        for _ in 0..<200 { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: "session-1") }
         try await Task.sleep(nanoseconds: 20_000_000)
-        for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
+        for _ in 0..<200 { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: "session-1") }
         reconciler.beginStop()
         await reconciler.releaseStore()
 

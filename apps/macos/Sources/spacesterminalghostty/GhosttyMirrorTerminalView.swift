@@ -138,6 +138,12 @@
         /// Left nil in contexts with no coordinator (tests, non-device hosts), where the legacy opener
         /// and its `debugOpenURLHandler` test seam still apply.
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// Called whenever this pane goes on or off screen (see `isDisplayed`). `RemoteGhosttySessionHost`
+        /// uses it to stop paying for screen updates nobody can see; nothing else observes it.
+        var onDisplayStateChanged: (@MainActor (Bool) -> Void)?
+        /// What `onDisplayStateChanged` last reported, so a display update that changes nothing (AppKit
+        /// sends several per structural change) costs nothing.
+        private var lastReportedDisplayState: Bool?
         var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
@@ -252,6 +258,7 @@
         }
 
         private func applyDisplayState() {
+            reportDisplayStateIfChanged()
             guard isDisplayed else {
                 lastGeometry = nil
                 updateSurfaceFocus()
@@ -268,6 +275,16 @@
             // frame it has already applied, so nothing on the frame path will present it. The session
             // may stay idle indefinitely, so this transition is the pane's only chance to paint.
             scheduleSurfacePresentationRefresh()
+        }
+
+        /// Reports the pane's on-screen state to `onDisplayStateChanged`, once per actual change. Every
+        /// path that can move a pane on or off screen already funnels through `applyDisplayState`, which
+        /// is the only caller.
+        private func reportDisplayStateIfChanged() {
+            let displayed = isDisplayed
+            guard displayed != lastReportedDisplayState else { return }
+            lastReportedDisplayState = displayed
+            onDisplayStateChanged?(displayed)
         }
 
         override func setFrameSize(_ newSize: NSSize) {

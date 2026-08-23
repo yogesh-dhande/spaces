@@ -1025,7 +1025,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer,
             sessionHostProvider: { _, _ in
                 providerCallCount += 1
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
                 return host
             })
         await Task.yield()
@@ -1054,7 +1054,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
             sessionHostProvider: { _, _ in
                 providerCallCount += 1
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
                 return host
             })
         let owner = TerminalClient(

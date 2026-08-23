@@ -106,6 +106,9 @@
         /// the one it was collapsed into — clearing on any apply cannot leave this stuck set, and clearing
         /// it early (on an apply for an older payload) costs at most the one resync it exists to avoid.
         private let pendingFullFrameSubmission = PendingFullFrameSubmission()
+        /// What `updateHeldScreenUpdates` last told the pipeline, so the reads that answer the question
+        /// do not take the mailbox's lock on every apply.
+        private var lastHeldScreenUpdates = false
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
@@ -200,6 +203,7 @@
             self.inputFailureHandler = inputFailureHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             terminalView.onOpenLink = linkOpenHandler
+            terminalView.onDisplayStateChanged = { [weak self] _ in self?.updateHeldScreenUpdates() }
             ensureStateStreamStartedIfNeeded()
         }
 
@@ -713,6 +717,33 @@
             statePipeline.submit(payload, isOutOfBand: isOutOfBand)
         }
 
+        /// Tells the pipeline whether this pane's screen updates may wait for the pane to come back on
+        /// screen (see `TerminalRemoteStateReductionPipeline.setHoldsScreenUpdates`).
+        ///
+        /// They may once the pane is off screen AND already holds a frame. The second half is what keeps
+        /// a pane from stranding itself: a pane opens with its terminal container hidden, so it is off
+        /// screen from the start, and the pane controller unhides that container only once the pane
+        /// reports it has content to show (`hasRenderableSurface`), which it can only report after a
+        /// frame has been applied. Holding that first frame would leave the pane hidden forever, waiting
+        /// to be displayed so it could apply the frame that is what would let it be displayed.
+        ///
+        /// Called on every display transition and at the end of every apply, so both halves are read
+        /// where they change. The compare keeps a displayed pane's per-apply call free of the mailbox
+        /// lock.
+        ///
+        /// `releaseRendererSurface` drops the retained frame, so a pane whose surface is released while
+        /// it is off screen keeps holding with nothing left to show. That cannot strand the pane: the
+        /// pane controller strips the container on release and re-attaches when the pane is next shown,
+        /// and that attach both puts the view back in a window (releasing the hold) and asks for a
+        /// resync when it finds no frame. Falling past the warm-surface cap does not reach this case at
+        /// all, since the MRU frees the mirror through `evictMirrorSurface` and keeps the frame.
+        private func updateHeldScreenUpdates() {
+            let holds = !terminalView.isDisplayed && terminalView.hasRenderedSurfaceContent
+            guard holds != lastHeldScreenUpdates else { return }
+            lastHeldScreenUpdates = holds
+            statePipeline.setHoldsScreenUpdates(holds)
+        }
+
         private func isInteractiveRuntimeStateForControl() -> Bool {
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
@@ -793,6 +824,9 @@
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
+            // An off-screen pane starts holding its screen updates as soon as it has a frame to show, and
+            // this apply is what can have given it one.
+            updateHeldScreenUpdates()
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
             // The attribute dictionary below is ~20 string conversions per payload on a path that runs
             // at the session's flush rate, so it is built only when something is listening. `emittedAt`
