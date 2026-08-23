@@ -863,13 +863,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// A workspace's focusable targets read out of the app's current sidebar snapshot, with the data
+    /// needed to name and resolve them.
+    typealias FocusableWindowContext = (
+        detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
+        targets: [WorkspaceRunShortcutTarget]
+    )
+
     /// The workspace's focusable targets plus the context needed to name and resolve them,
     /// using the same ordering and (all configured) browser sessions as the numbered
     /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
-    func focusableWindowContext(workspaceID: String) -> (
-        detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
-        targets: [WorkspaceRunShortcutTarget]
-    )? {
+    func focusableWindowContext(workspaceID: String) -> FocusableWindowContext? {
         guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else { return nil }
         let browserSessions = detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
         let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
@@ -892,22 +896,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The workspace's ordered focusable window names. The app owns this ordering, so the
     /// dump IPC lets harnesses read it instead of recomputing it from daemon data.
-    func focusableWindowNames(workspaceID: String) -> [String] { focusableWindowEntries(workspaceID: workspaceID).map(\.name) }
-
-    /// Each focusable name with the kind of target behind it. A configured process lists under the same
-    /// name whether or not the app's snapshot has its running row yet, so a harness about to focus a
-    /// process needs the kind to know the snapshot has caught up (`process`, not `missingConfiguredProcess`).
-    func focusableWindowEntries(workspaceID: String) -> [(name: String, kind: WorkspaceRunShortcutTarget.Kind)] {
+    func focusableWindowNames(workspaceID: String) -> [String] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
-        return context.targets.compactMap { target in
-            Self.focusableWindowName(for: target, detail: context.detail, browserSessions: context.browserSessions).map { (name: $0, kind: target.kind) }
-        }
+        return context.targets.compactMap { Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions) }
     }
 
-    private struct FocusableWindowNamesDump: Codable {
-        let names: [String]
-        let kinds: [String]
-    }
+    private struct FocusableWindowNamesDump: Codable { let names: [String] }
 
     private func writeFocusableWindowNames(workspaceID: String, to outputPath: String) {
         let url = URL(fileURLWithPath: outputPath)
@@ -915,8 +909,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let entries = focusableWindowEntries(workspaceID: workspaceID)
-            let data = try encoder.encode(FocusableWindowNamesDump(names: entries.map(\.name), kinds: entries.map(\.kind.rawValue)))
+            let data = try encoder.encode(FocusableWindowNamesDump(names: focusableWindowNames(workspaceID: workspaceID)))
             try data.write(to: url, options: [.atomic])
         } catch {}
     }
@@ -928,24 +921,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let startedAt = Date()
         var targetResolutionMS = 0
         var routeMS = 0
+        var retriedAfterReload = false
         func logResult(_ success: Bool, reason: String = "") {
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
-                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)")
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)\(retryDetail)")
         }
         let resolutionStartedAt = Date()
-        guard let context = focusableWindowContext(workspaceID: workspaceID),
-            let target = context.targets.first(where: {
-                Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
-                    Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name)
-                } ?? false
-            })
-        else {
+        let resolved = await resolvingAfterFreshSidebarSnapshot { () -> (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)? in
+            guard let context = self.focusableWindowContext(workspaceID: workspaceID),
+                let target = context.targets.first(where: {
+                    Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
+                        Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name)
+                    } ?? false
+                })
+            else { return nil }
+            return (context, target)
+        }
+        retriedAfterReload = resolved.retried
+        guard let match = resolved.value else {
             targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
             logResult(false, reason: "no_match")
             return
         }
+        let (context, target) = match
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
@@ -958,6 +959,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logResult(true)
     }
 
+    /// Resolves `resolve` against the app's current sidebar snapshot and, when it finds nothing, once
+    /// more after the next snapshot lands.
+    ///
+    /// A focus or open request can arrive in the window between the daemon writing a just-started
+    /// process (or a just-created workspace) and the app's paced reload applying the snapshot that
+    /// carries it. In that window a miss says nothing about whether the target exists, so the request
+    /// waits for the app to catch up instead of being refused. Exactly one fresh snapshot and exactly
+    /// one retry: the second answer is about the target, not about the app being behind.
+    ///
+    /// - Returns: what the resolution found, and whether it took the retry, which the caller's log line
+    ///   reports so a stale snapshot can be told from a genuinely missing target.
+    private func resolvingAfterFreshSidebarSnapshot<T>(_ resolve: @MainActor () -> T?) async -> (value: T?, retried: Bool) {
+        if let value = resolve() { return (value, false) }
+        await sidebar.reloadAwaitingFreshSnapshot()
+        return (resolve(), true)
+    }
+
+    /// The focusable target for a workspace's running process, by template name, waiting once for a
+    /// fresh sidebar snapshot when the current one has no running row for that name yet (it lists the
+    /// process as a `.missingConfiguredProcess` target until the reload carrying the row lands).
+    func processFocusMatch(workspaceID: String, processName: String) async -> (
+        value: (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)?, retried: Bool
+    ) {
+        await resolvingAfterFreshSidebarSnapshot { () -> (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)? in
+            guard let context = self.focusableWindowContext(workspaceID: workspaceID),
+                let target = context.targets.first(where: { target in
+                    guard target.kind == .process, let id = target.processID,
+                        let rowName = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name
+                    else { return false }
+                    return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
+                })
+            else { return nil }
+            return (context, target)
+        }
+    }
+
     /// Focuses a workspace's running process window by template name. Threads `requestID`
     /// to the terminal focus so the `terminal_window_focus_ipc` line carries it, which the
     /// real-system E2E correlates; also emits `process_focus` for the non-correlated path.
@@ -965,33 +1002,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let startedAt = Date()
         var targetResolutionMS = 0
         var routeMS = 0
+        var retriedAfterReload = false
         func logResult(_ success: Bool, reason: String = "") {
             let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
-                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)")
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)\(retryDetail)")
         }
         let resolutionStartedAt = Date()
-        guard let context = focusableWindowContext(workspaceID: workspaceID),
-            let target = context.targets.first(where: { target in
-                guard target.kind == .process, let id = target.processID,
-                    let rowName = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name
-                else { return false }
-                return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
-            })
-        else {
+        let resolved = await processFocusMatch(workspaceID: workspaceID, processName: processName)
+        retriedAfterReload = resolved.retried
+        guard let match = resolved.value else {
             targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
             logResult(false, reason: "no_match")
             return
         }
+        let (context, target) = match
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
-        guard
-            await executeWindowFocusResolution(
-                resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail)
-        else {
+        guard await executeWindowFocusResolution(resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail) else {
             routeMS = windowShortcutElapsedMS(since: routeStartedAt)
             logResult(false, reason: "focus_failed")
             return
@@ -1703,10 +1735,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sessionID: sessionID, requestedMode: requestedMode, found: content != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
             visibleSurfaceOutput: debugState?.visibleSurfaceOutput, surfaceSelectionText: debugState?.surfaceSelectionText,
-            summary: debugState?.summary, state: debugState?.state,
-            showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
-            didClose: debugState?.didCloseWindow, windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
-            surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            summary: debugState?.summary, state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface,
+            showsTextRenderer: debugState?.showsTextRenderer, didClose: debugState?.didCloseWindow,
+            windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
             searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
             takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
@@ -1977,7 +2009,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// deep-link open resolves the request against the link's explicitly named device (so it never
     /// falls back to the local device the way the session-id-only resolve does) and hands it in here,
     /// reusing this one open/focus + owner-reclaim + metric path.
-    @discardableResult private func openTerminalSessionPane(
+    ///
+    /// Internal (not private) so a test can drive the `retried_after_reload` gate directly with a
+    /// non-focusing `openIntent`: every production caller opens focused, and a focusing refusal here
+    /// shows a real modal alert, which a unit test process must never trigger.
+    @discardableResult func openTerminalSessionPane(
         sessionID: String, mode: TerminalAttachmentMode, openIntent: TerminalPaneOpenIntent, requestID: String? = nil,
         resolvedRequest: DeviceTerminalOpenRequest? = nil
     ) async -> Bool {
@@ -2020,17 +2056,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 detail: "\(modeDetail) route=pane reason=resolve_nil\(requestDetail)")
             return false
         }
-        guard let action = panelCoordinator.openOrFocusTerminalPane(request, openIntent: openIntent) else {
+        // The open resolves the workspace's scope through the sidebar's index. A request for a
+        // just-created workspace whose index entry has not landed yet is refused for exactly that reason
+        // (`workspaceScope(forWorkspaceID:)` nil), so wait for the app's next snapshot and try once more;
+        // the miss can equally be in the request's own resolution, so a request this function resolved is
+        // resolved again (one handed in by the caller is already pinned to its device and is reused as
+        // is). A request whose scope is already present was refused for something else entirely: an
+        // unreachable or incompatible device (which already showed its own modal for a focusing intent)
+        // or a content-construction failure. Retrying either would only repeat the same refusal, and for
+        // the device case, its modal a second time.
+        var attempt = panelCoordinator.openOrFocusTerminalPane(request, openIntent: openIntent)
+        var retriedAfterReload = false
+        if attempt == nil, panelCoordinator.workspaceScope(forWorkspaceID: request.workspaceID) == nil {
+            retriedAfterReload = true
+            await sidebar.reloadAwaitingFreshSnapshot()
+            var retryRequest = request
+            if resolvedRequest == nil, let reresolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) {
+                retryRequest = reresolved
+            }
+            attempt = panelCoordinator.openOrFocusTerminalPane(retryRequest, openIntent: openIntent)
+        }
+        let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
+        guard let action = attempt else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "\(modeDetail) route=pane reason=pane_open_failed\(requestDetail)")
+                detail: "\(modeDetail) route=pane reason=pane_open_failed\(requestDetail)\(retryDetail)")
             return false
         }
         openAction = action
         if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "\(modeDetail) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "\(modeDetail) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)\(retryDetail)")
         return true
     }
 
@@ -10119,7 +10176,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Reports a browser-session focus that Chrome refused. The permission is read at
     /// failure time so the message matches the current grant.
     private func showBrowserSessionFocusFailureError() {
-        showError(WorkspaceError.invalidArgument(message: Self.browserSessionFocusFailureMessage(automationStatus: ChromeAutomationPermission.status())))
+        showError(
+            WorkspaceError.invalidArgument(message: Self.browserSessionFocusFailureMessage(automationStatus: ChromeAutomationPermission.status())))
     }
 
     /// The configured editor resolved to a launchable CLI, carrying the per-family data a
@@ -11489,12 +11547,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var ownershipRequestMS = 0
         var focusObservationMS = 0
         var focusObserved = false
+        var retriedAfterReload = false
         func logTerminalPaneFocus(success: Bool, reason: String = "") {
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
                 detail:
-                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)"
+                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)\(retryDetail)"
             )
         }
         // Window-focus terminal targets are always workspace-backed (they come from a
@@ -11516,8 +11576,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // already-open pane already has its state model and can focus entirely client-side.
         let existingPaneBeforeResolution = panelCoordinator.placement(forSessionID: request.sessionID) != nil
         let requestResolveStartedAt = Date()
-        let openRequest: DeviceTerminalOpenRequest
-        if Self.terminalOpenRequestNeedsColdResolution(request, hasExistingPane: existingPaneBeforeResolution) {
+        var openRequest: DeviceTerminalOpenRequest
+        let needsColdResolution = Self.terminalOpenRequestNeedsColdResolution(request, hasExistingPane: existingPaneBeforeResolution)
+        if needsColdResolution {
             openRequest = await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request
         } else {
             openRequest = request
@@ -11525,7 +11586,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
         let reusedExistingPane = existingPaneBeforeResolution || panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
         let paneFocusStartedAt = Date()
-        guard panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil else {
+        // The open resolves the workspace's scope through the sidebar's index. A request for a
+        // just-created workspace whose index entry has not landed yet is refused for exactly that reason
+        // (`workspaceScope(forWorkspaceID:)` nil), so wait for the app's next snapshot and try once more,
+        // redoing the cold resolution when this request needed one, since the miss can be in either. A
+        // request whose scope is already present was refused for something else entirely: an unreachable
+        // or incompatible device (which already showed its own modal, since this focusing entry point is
+        // always a focusing intent) or a content-construction failure. Retrying either would only repeat
+        // the same refusal and its modal a second time.
+        var openedPane = panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
+        if !openedPane, panelCoordinator.workspaceScope(forWorkspaceID: openRequest.workspaceID) == nil {
+            retriedAfterReload = true
+            await sidebar.reloadAwaitingFreshSnapshot()
+            if needsColdResolution { openRequest = await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? openRequest }
+            openedPane = panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
+        }
+        guard openedPane else {
             if reusedExistingPane {
                 existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
             } else {

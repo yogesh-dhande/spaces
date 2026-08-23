@@ -223,6 +223,95 @@ import Testing
         #expect(loads == 1)
     }
 
+    /// A caller whose lookup missed against the sidebar it can see asks for a snapshot at least as fresh
+    /// as its own request. With nothing running, that is a reload started right here.
+    @Test func awaitingTheNextRunFromIdleReturnsOnceThatRunHasApplied() async {
+        var applied: [Int] = []
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: { .success(1) }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in },
+            minimumStartInterval: .zero)
+
+        await coordinator.requestAndAwaitNextRun()
+
+        #expect(applied == [1])
+        #expect(coordinator.state == .idle)
+    }
+
+    /// The regression this exists for: a reload already in flight read its data before the caller asked,
+    /// so it can be carrying exactly the snapshot the caller already missed against. The wait has to
+    /// outlast it and return only once the run that started afterwards has applied.
+    @Test func awaitingTheNextRunSkipsTheRunAlreadyInFlight() async {
+        var continuations: [CheckedContinuation<Result<Int, any Error>, Never>] = []
+        var applied: [Int] = []
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
+            applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
+
+        coordinator.request()
+        #expect(await eventually { continuations.count == 1 })
+
+        let returned = ReturnFlag()
+        let waiter = Task { @MainActor in
+            await coordinator.requestAndAwaitNextRun()
+            returned.value = true
+        }
+        #expect(await eventually { coordinator.state == .queued })
+
+        continuations.removeFirst().resume(returning: .success(1))
+        #expect(await eventually { applied == [1] })
+        #expect(!returned.value, "the in-flight run's snapshot predates the request, so it cannot answer it")
+
+        #expect(await eventually { continuations.count == 1 })
+        continuations.removeFirst().resume(returning: .success(2))
+        #expect(await eventually { returned.value })
+        #expect(applied == [1, 2])
+        await waiter.value
+    }
+
+    /// A request inside the spacing interval is held back rather than run, and the wait follows it: it
+    /// returns when the scheduled start's run applies, not when the request is accepted.
+    @Test func awaitingTheNextRunFollowsAStartHeldBackByTheSpacingInterval() async {
+        var loads = 0
+        var applied: [Int] = []
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .milliseconds(60))
+
+        coordinator.request()
+        await coordinator.drainCurrentReloadForTesting()
+        #expect(loads == 1)
+
+        await coordinator.requestAndAwaitNextRun()
+
+        #expect(loads == 2)
+        #expect(applied == [1, 2], "the wait ended on the scheduled run, after it applied")
+    }
+
+    /// Teardown leaves nothing that could finish a run, so a waiter is released instead of hanging on a
+    /// reload that will never happen.
+    @Test func stopReleasesAWaiter() async {
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: { .success(1) }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
+
+        coordinator.request()
+        await coordinator.drainCurrentReloadForTesting()
+
+        let returned = ReturnFlag()
+        let waiter = Task { @MainActor in
+            await coordinator.requestAndAwaitNextRun()
+            returned.value = true
+        }
+        #expect(await eventually { coordinator.state == .queued })
+        #expect(!returned.value)
+
+        coordinator.stop()
+
+        #expect(await eventually { returned.value })
+        await waiter.value
+    }
+
     private func eventually(maxYields: Int = 1_000, _ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0..<maxYields {
             if condition() { return true }
@@ -243,3 +332,7 @@ import Testing
         return condition()
     }
 }
+
+/// A `Task`'s closure is `@Sendable` and cannot capture a mutable local, so a test observes whether the
+/// task it spawned has come back through a main-actor box.
+@MainActor private final class ReturnFlag { var value = false }

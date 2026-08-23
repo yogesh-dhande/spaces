@@ -128,33 +128,6 @@ else:
 PY
 }
 
-# The app resolves a process focus against its own sidebar snapshot, which it refreshes from the daemon on
-# a paced reload (at most one start per 250 ms). Right after `workspace start` that snapshot can still
-# list the process as configured-but-not-running, and a focus request sent before it catches up fails
-# `no_match` with no retry (issue #357). A configured process keeps the same focusable name either way, so
-# this waits on the target's kind, which only becomes `process` once the running row has landed.
-wait_for_focusable_process() {
-  local workspace_dir="$1"
-  local process_name="$2"
-  local timeout="${3:-30}"
-  local start
-  start="$(date +%s)"
-  while true; do
-    if env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" focusable-window-names --workspace-dir "$workspace_dir" 2>/dev/null \
-      | python3 -c 'import json, sys
-target = sys.argv[1]
-dump = json.load(sys.stdin)
-sys.exit(0 if any(name == target and kind == "process" for name, kind in zip(dump["names"], dump["kinds"])) else 1)' "$process_name"; then
-      return 0
-    fi
-    if (( "$(date +%s)" - start >= timeout )); then
-      echo "Timed out waiting for the app to list $process_name as a running process target" >&2
-      return 1
-    fi
-    sleep 0.1
-  done
-}
-
 wait_for_process_session_id() {
   local workspace_dir="$1"
   local process_name="$2"
@@ -242,7 +215,6 @@ PY
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" close-workspace-process-window --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null
 CLOSE_MS="$(ms_since "$close_started_at")"
 
-wait_for_focusable_process "$WORKSPACE_DIR" backend 30
 focus_started_at="$(python3 - <<'PY'
 import time
 print(time.time())
