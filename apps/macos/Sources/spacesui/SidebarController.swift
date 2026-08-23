@@ -457,6 +457,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // merely hidden (a hidden workspace stays listed with `isHidden` set).
             host.panelCoordinator.pruneOpenCodePanes(
                 deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
+            // Same just-installed overview carries this device's agent rows too, so a code pane's
+            // assigned-agent dropdown stays current with whatever just spawned/exited.
+            host.panelCoordinator.updateCodePaneAgents(deviceID: snapshot.localDeviceID, hosting: host)
         }
         // Diff against the runtime map actually installed, not the raw snapshot. An unreachable local
         // daemon answers with the offline placeholder, whose empty map reads as every running workspace
@@ -1274,6 +1277,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // remote workspace deletion that arrives mid-race go unpruned indefinitely — the next
             // identical overview early-returns above before it could retry.
             host.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
+            // Same just-installed overview carries this device's agent rows too, so a code pane's
+            // assigned-agent dropdown stays current with whatever just spawned/exited.
+            host.panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: host)
             // Terminal panes close on an externally initiated stop via session pruning above (their
             // sessions leave the overview's keep-set); a code pane has no session, so this same run-state
             // transition is its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget`

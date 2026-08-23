@@ -52,6 +52,26 @@ production build.
 - `subscribeDiffSignature(scope, listener)` — returns an unsubscribe function. Only one scope
   is observed at a time; calling it again is expected to replace the previous subscription's
   effective scope rather than layer another live one.
+- `reviewCommentList()` — every draft comment in the workspace, called once from `root.ts` after
+  mount to rehydrate `CommentsController`'s in-memory mirror; never called again afterward (see
+  "Comments" below for why).
+- `reviewCommentUpsert({id?, filePath, side, lineNumber, lineText, body})` — creates a draft when
+  `id` is omitted, updates one in place when present. Rejects `notFound` for an `id` with no
+  matching draft.
+- `reviewCommentDelete(id)` — deletes one draft.
+- `reviewCommentsSend(sessionId, text, comments)` — sends `text` to the agent session, then, only
+  once that write succeeds, archives every draft named in `comments` (each entry an `{id,
+  revision}` pair; the daemon rejects `conflict` if a draft's current `revision` no longer
+  matches, before sending anything). A rejection leaves every named draft exactly as it was; the
+  caller must not remove them from its own state before this resolves. The guarantee is
+  send-then-archive ordering, not two-way atomicity — see "Send failure leaves drafts untouched"
+  below.
+
+`SpacesReviewComment` (a draft, as returned by `reviewCommentList`/`reviewCommentUpsert`):
+`{id, filePath, side, lineNumber, lineText, body, createdAt, revision}`. `revision` is a monotonic
+counter the daemon bumps on every update, used as the send-concurrency token in place of a
+timestamp (see docs/implementation.md for why a timestamp can't distinguish two edits inside the
+same second).
 
 Every rejected call is a `SpacesBridgeError` with a `code` (`notFound` / `invalidArgument` /
 `conflict` / `internalError` / `unavailable`), never a bare string or generic `Error` — callers
@@ -88,15 +108,32 @@ branch on `.code`.
   ~500ms window when the page is torn down. Returns the `CodePaneEditorState` JSON-stringified,
   or `null` when no file is open — see `EditorView.collectStateForFlush` and
   docs/implementation.md's hibernation section.
+  - `window.__spacesCollectReviewCommentState` mirrors the mechanism exactly, for comment drafts:
+    there is no continuous push for draft text (unlike `editorStateChanged` above), so this
+    synchronous teardown pull is the only way a not-yet-blurred keystroke reaches the host at all.
+    Returns a JSON-stringified `PendingReviewCommentEntry[]` (one entry per draft with unsaved
+    live text — a still-provisional card with non-empty text, or a persisted draft whose live text
+    differs from its last save), or `null` when nothing qualifies — see
+    `CommentsController.collectStateForFlush` and docs/implementation.md's hibernation section.
 - **Push events (Swift -> JS):** `window.dispatchEvent(new CustomEvent(name, {detail}))` for:
   - `spaces:init` (once, at startup, listened for with `{once: true}`): detail is
     `CodePaneInitPayload` — `workspaceId`, `workspaceName`, `initialMode` (`"diff"` \|
     `"editor"`, the pane's live mode — see `modeChanged` above), `initialScope` (a `DiffScope`),
     `theme` (`"light"` \| `"dark"`, the appearance in effect at startup; nothing here reads
     `prefers-color-scheme`), `baseBranch` (the workspace's configured base branch name, omitted
-    for a workspace with none), and `editorState` (a `CodePaneEditorState`, omitted when the host
-    holds no snapshot for this pane — see `editorStateChanged` above). The toolbar's "vs base
-    branch" scope option is disabled, rather than hidden, when `baseBranch` is absent.
+    for a workspace with none), `editorState` (a `CodePaneEditorState`, omitted when the host
+    holds no snapshot for this pane — see `editorStateChanged` above), and `pendingReviewComments`
+    (a `PendingReviewCommentEntry[]`, omitted when the host holds no such snapshot — see
+    `__spacesCollectReviewCommentState` above; seeded into `CommentsController` via
+    `restorePendingState` before `loadInitial()`'s network call, so a teardown racing that call
+    can't discard the seeded text). The toolbar's "vs base
+    branch" scope option is disabled, rather than hidden, when `baseBranch` is absent. `agents`
+    is the array of currently running agents in the workspace (`CodePaneAgentSummary`:
+    `{id, label, sessionId}`), seeding the toolbar's assigned-agent picker at startup.
+  - `spaces:agents` (any time the workspace's set of running agents changes thereafter): detail is
+    `{agents}`, the full replacement list (no web-side dedupe). If the currently selected agent id
+    is no longer present, `CommentsController` re-runs the same auto-default rule used at init
+    (`selectDefaultAgentId`); if it is still present, the selection is left alone.
   - `spaces:theme` (any time the host's effective appearance changes thereafter): detail is
     `{theme}` (`"light"` \| `"dark"`). A separate event from `spaces:init` because the plugin's
     `spaces:init` listener is one-shot; a later appearance change re-dispatching `spaces:init`
@@ -104,9 +141,27 @@ branch on `.code`.
   - `spaces:diffSignature` (any time the active scope's git state changes): detail is
     `{scopeSignature}`. The host dedupes this end-to-end (it never re-announces a signature it
     already delivered for the current scope), so a `workspaceDiff` pull that fails after one of
-    these events is never retried by anything upstream — `refreshDiff` in `root.ts` retries it
-    itself, with a bounded exponential backoff (1s floor, doubling, 30s cap, reset on the next
-    success) guarded by the same latest-wins request token the stale-response guard uses.
+    these events is never retried by anything upstream unless `refreshDiff` in `root.ts` decides to
+    retry it itself. It classifies the rejection first: a typed `SpacesBridgeError` means the
+    daemon decoded the request and rejected it for a durable reason (a bad/deleted ref, a gone
+    workspace, ...), so the identical request would fail the identical way on every retry —
+    `refreshDiff` renders that message in place of the file list instead, and does not retry. The
+    two exceptions within that typed set are the `unavailable` and `internalError` codes. The Swift
+    host's `CodePaneBridge.mapClientError` collapses every not-reachable/not-ready client failure
+    (device offline, daemon mid-restart, connection not yet established) into `unavailable`; the
+    daemon returns `internalError` for its own transient git trouble (a wedged or timed-out git
+    subprocess) while a caller-supplied ref that simply does not resolve is validated separately and
+    rejected as `invalidArgument` instead (see `assertRefIsResolvable` in
+    `SpacesDeviceWorkspaceGit.swift`), so `internalError` is never used for a bad ref. Unlike every
+    other typed code, both describe a transient condition rather than a durable rejection of this
+    request — `refreshDiff` renders either one (so the user sees why the pane is empty) but also
+    retries it with the same bounded backoff as an untyped failure. Any other (untyped) rejection is
+    treated as a transport-level hiccup that retrying might resolve, and gets the bounded exponential
+    backoff (1s floor, doubling, 30s cap, reset on the next success or on a rendered permanent error)
+    guarded by the same latest-wins request token the stale-response guard uses. Either way, a later
+    scope switch or `spaces:diffSignature` event calls `refreshDiff` fresh on its own, which is what
+    recovers a pane out of the rendered-error state — for the retried `unavailable`/`internalError`
+    cases, the background retry loop can also recover it without waiting for either of those.
 
 ## Diff mode
 
@@ -116,8 +171,10 @@ Diffable files become `CodeViewDiffItem`s via `processFile()`; binary, truncated
 unparseable files become synthetic plaintext placeholder items instead, so every sidebar row
 (diffable or not) can jump to its file the same way. Untracked files arrive from the bridge as
 git's own synthetic "new file" patches, so they render as pure additions with no `oldFile`
-side. A scope switch replaces the file set outright; a `spaces:diffSignature` event re-fetches
-and re-renders while preserving scroll position. Split/unified is `diffStyle` on `CodeView`, not
+side. A scope switch clears the file list and diff area to a loading state synchronously (comments
+collapse to the tray, re-anchoring once the new files land) before its `refreshDiff` fetch
+replaces the file set outright; a `spaces:diffSignature` event re-fetches and re-renders while
+preserving scroll position. Split/unified is `diffStyle` on `CodeView`, not
 the `layout` option (that one only controls padding/gap).
 
 ## Editor mode
@@ -145,8 +202,94 @@ snapshot is memory-only on the host side, with no disk persistence.
 One 30pt strip (`src/app/toolbar.ts`), Variant A from the picked mockup: a Diff|Editor toggle
 visible in both modes; in Diff mode, a scope segmented control (Uncommitted / vs base branch /
 vs ref…, the last opening an inline ref/SHA input) and a Split|Unified toggle. The trailing
-region renders an empty placeholder (`.agent-slot`) reserved for Phase 4's assigned-agent
-dropdown and "Send batch" button — nothing is drawn there yet.
+region (`.agent-slot`, empty in Editor mode — comments are diff-mode only) renders the
+assigned-agent picker and "Send batch · n" button: a static label when exactly one agent runs, a
+`<select>` (with a disabled placeholder option) when more than one runs, and nothing sendable when
+zero run. "Send batch" is disabled, with an explanatory `title`, whenever there is no running
+agent, no agent selected, or zero drafts with a non-empty body; otherwise it sends every current
+draft via `CommentsController.sendBatch()`.
+
+## Comments
+
+Diff-mode-only line comments (`src/app/commentsController.ts`, `src/app/reviewComments.ts`), owned
+end to end by `CommentsController`:
+
+- **Draft = the unit.** A draft attaches to a `(filePath, side, lineNumber, lineText)` and renders
+  as an inline card under that line, via `@pierre/diffs`' `renderAnnotation`/`onGutterUtilityClick`
+  hooks (`DiffCommentHooks` in `src/app/diffView.ts`). Every draft is always part of the batch —
+  there is no separate batched/unbatched data state. "Send to `<agent>`" on a card sends that one
+  draft immediately; "Add to batch" only hides the card (tracked in `collapsedIds`, UI-only) and
+  moves it into the tray; clicking its tray row un-hides it. "Send batch · n" in the toolbar sends
+  every current draft with a non-empty body in one call.
+- **Creation and persistence.** The gutter's hover affordance opens a new card immediately with no
+  RPC — the daemon rejects an empty-body `reviewCommentUpsert` outright, so a just-opened card is
+  *provisional*: rendered under a local id, sendable/batchable state stays off, and nothing exists
+  server-side yet. The body is saved via `reviewCommentUpsert` on the textarea's `blur` only (no
+  per-keystroke save, no debounce timer); the first successful save for a provisional card omits
+  `id` to create it and adopts the response's server-assigned id as the card's key from then on,
+  every save after that updates by that id. A draft emptied back out (or never typed into) is
+  discarded silently on blur — deleted server-side if it had already been persisted, or just dropped
+  from the local mirror with no RPC at all if it was still provisional. Clicking a card's Send or
+  Delete button fires *after* that same click's `mousedown` has already blurred the textarea, so a
+  card action always waits for that blur's in-flight persist to resolve before acting, then resolves
+  its own (possibly now-stale, pre-re-keying) id through `CommentsController.resolveId` — this is
+  what makes a provisional card's persist-then-immediately-send or persist-then-immediately-delete
+  behave as one operation on the server-assigned id rather than racing it.
+- **In-progress text and focus survive a live diff refresh.** A diff refresh
+  (`CommentsController.setFiles`/`refresh`) rebuilds every card's DOM node from scratch, but a
+  card's not-yet-blurred keystrokes are tracked separately (`liveBodies`) and taken over
+  `comment.body` when a card is rebuilt, and the focused card's id and caret position are captured
+  before the rebuild and restored after it — so typing through a refresh (or a refresh landing
+  mid-keystroke) never drops what was typed or moves focus.
+- **Rehydration vs. re-anchoring.** `reviewCommentList()` is called exactly once, from `root.ts`
+  after mount (workspace-scoped, independent of the active scope/mode). Its response is merged into
+  the in-memory mirror rather than replacing it outright: response rows first, then any current
+  local draft whose (alias-resolved) id isn't already in the response — so a draft created, or a
+  persist that completes and re-keys a provisional id, while that one `reviewCommentList` call is
+  still in flight is kept rather than clobbered, without being duplicated once the response catches
+  up to it. Every subsequent create/edit/delete/send updates the in-memory mirror directly; a live diff refresh
+  (`CommentsController.setFiles`) only re-anchors the existing drafts against the new file set via
+  `reanchorComments` (`src/app/reviewComments.ts`, DOM-free and unit-tested in isolation) — it never
+  re-fetches, since a slow `reviewCommentList` reply racing a local mutation could otherwise revert
+  it. Re-anchoring rule: an exact `(filePath, side, lineNumber, lineText)` match stays put; else the
+  nearest same-file/same-side line whose text still matches floats there (ties break toward the
+  smaller line number); else the comment is `outdated` and pins near its file's header (or is
+  tray-only if the file itself is gone).
+- **Send failure leaves drafts untouched.** `reviewCommentsSend` archives its named drafts only
+  after its terminal write succeeds (send-then-archive ordering, not two-way atomicity — see the
+  Bridge contract section above); `CommentsController` never removes a draft from its local mirror
+  before the call resolves, so a rejection surfaces an error banner with every draft exactly as it
+  was. A rejection typed `conflict`, `invalidArgument`, or `notFound` specifically proves the
+  mirror is stale — a `conflict` means one or more entries' `revision` no longer matched the
+  daemon's, `invalidArgument`/`notFound` mean a named comment was already sent, deleted, or never
+  existed the way the mirror thought — so `CommentsController` also re-fetches every draft from
+  `reviewCommentList()` before re-rendering (see `CommentsController.reconcileMirrorAfterRejection`,
+  called from both `handleSendFailure` and `deleteDraft`'s failure path). Every other rejection —
+  a non-typed transport failure, or a `SpacesBridgeError` coded `internalError`/`unavailable` —
+  proves nothing about staleness and skips the re-fetch.
+- **Drafts survive a pane hibernating or closing, not just a live diff refresh.** On top of the
+  in-progress-text/focus survival above (which only covers a refresh while the page stays alive),
+  a not-yet-blurred keystroke also survives the page itself being torn down: the host's teardown
+  pull (`__spacesCollectReviewCommentState`, see the wire protocol section above) asks
+  `CommentsController.collectStateForFlush` for a snapshot right before the `WKWebView` goes away,
+  and the replacement page's `root.ts` seeds it back via `restorePendingState` before its own
+  `loadInitial()` call. A still-provisional card is recreated as a fresh local draft under a new id
+  (the pre-teardown id is never reused); a persisted draft's live text is seeded into `liveBodies`
+  ahead of the list response, so the card renders the in-progress text immediately and the next
+  blur persists it through the normal path. Mirrors `editorState`'s own hibernation-survival model
+  in Editor mode above — see docs/implementation.md's hibernation section for the full mechanism
+  (generation-guarded flush, the three-way sentinel decode, and the mutation-RPC counter that also
+  defers `ready` behind an in-flight send/upsert/delete).
+- **A context-line click always anchors to the new side.** Split layout's gutter reports a
+  context row's click as the old (deletions) side even though the line is unchanged;
+  `reviewComments.ts`'s `canonicalizeContextAnchor` (used by `diffView.ts`'s `requestNewComment`)
+  rewrites such a click to its new-side `(side, lineNumber)` before it ever becomes a stored
+  anchor, so `formatReviewCommentsText`'s "(removed line)" suffix only ever labels a genuine
+  deletion, never a still-present context line whose old-side line number could also have drifted
+  from the current file's own numbering.
+- **`sendBatch` reads last-saved bodies, not live keystrokes** — see the doc comment on
+  `CommentsController.sendBatch` for why a card mid-edit that has not yet blurred is accepted to
+  send its last-saved body rather than in-progress typing.
 
 ## Language set and bundle size
 
@@ -194,11 +337,30 @@ write result's own hash as the next CAS baseline with no intervening file read, 
 from `path`, and `collectStateForFlush` returning the latest buffer (including an edit still
 inside the debounce window) or `null` with no file open. `test/root.test.ts` covers `refreshDiff`'s
 stale-response guard (a slower, superseded scope's reply, success or error, never overwrites a
-newer scope's already-applied result), its bounded-backoff retry on a failed pull (floor, doubling,
-cap, reset-on-success, and a scope switch superseding a pending retry), and the `modeChanged` push
-firing on every toolbar toggle. `test/toolbar.test.ts` covers
-the "vs base branch" option's disabled/enabled state and label based on whether `baseBranch` is
-present, and that a click reaching a disabled button never fires `onScopeChange`.
+newer scope's already-applied result); its permanent-vs-transient failure classification (a typed
+`SpacesBridgeError` renders in place of the file list with no retry scheduled, an untyped rejection
+keeps retrying, a scope switch out of a rendered permanent error fetches the new scope normally,
+and the typed `unavailable` and `internalError` codes are the exceptions that both render and
+retry, while a typed `invalidArgument` — e.g. a ref the daemon could not resolve — still renders
+with no retry scheduled); its
+bounded-backoff retry on a transient failure (floor, doubling, cap, reset-on-success, and a scope
+switch superseding a pending retry); the `modeChanged` push
+firing on every toolbar toggle, and the `spaces:agents` listener re-running the auto-default rule
+and updating the toolbar. `test/toolbar.test.ts` covers the "vs base branch" option's
+disabled/enabled state and label based on whether `baseBranch` is present, that a click reaching a
+disabled button never fires `onScopeChange`, and the agent slot's three renderings (single-agent
+label, multi-agent select with a disabled placeholder, empty in Editor mode) plus "Send batch"'s
+three disabled-reason states and its enabled click-through. `test/reviewComments.test.ts` covers
+the pure logic in `src/app/reviewComments.ts` in isolation: `extractDiffLines`'s per-side line
+extraction from a raw patch, `reanchorComments`'s exact-match/nearest-match/tie-break/outdated/
+file-gone cases, `selectDefaultAgentId`'s every branch (auto-select-one, none-when-zero-or-many,
+keep-a-manual-pick, re-default-when-it-disappears), `formatReviewCommentsText`'s exact send-text
+shape (single comment, removed-line suffix, multi-comment join), and the `toAnnotationSide`/
+`fromAnnotationSide` round trip. `test/commentsController.test.ts` covers `CommentsController`
+against a hand-built fake `SpacesBridge`: card create/edit/delete RPC round-trips (including
+blur-only persistence and silent discard of an empty draft), send-one and send-batch (including a
+rejected send leaving drafts unchanged and surfacing the error banner), the no-running-agent
+disabled state, and `onAgentsChanged` re-running the auto-default rule.
 
 ## Open items (Swift-host integration)
 
@@ -206,9 +368,8 @@ present, and that a click reaching a disabled button never fires `onScopeChange`
   mode's search are built against the shape in `src/bridge/types.ts`; real usage rejects
   `unavailable` until that endpoint lands, and the picker degrades to a quiet hint pointing at
   the direct-path Return-to-open flow instead.
-- **Phase 4** (assigned-agent dropdown, "Send batch" button, comment surface) and **Phase 5**
-  (merge conflict resolution UI) are out of scope here; the toolbar's `.agent-slot` and the
-  editor's conflict banner are the only hooks left for them.
+- **Phase 5** (merge conflict resolution UI) is out of scope here; the editor's conflict banner
+  is the only hook left for it.
 - **The file-list sidebar is not in Variant A's literal mockup markup** — Variant A's own
   markup has no file-picker chrome, so this bundle borrows Variant B's `.rail`/`.rr` token and
   metric vocabulary for it (see comments in `src/styles/app.css`), since a file list is a hard

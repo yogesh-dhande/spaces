@@ -99,6 +99,9 @@ extension SQLiteStore {
             try execute(
                 sql: "DELETE FROM workspace_service_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_services WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql: "DELETE FROM workspace_review_comments WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+                bindings: [id])
             try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])

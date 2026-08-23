@@ -228,6 +228,30 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         for request in requests { XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
     }
 
+    /// round-14 Fix 4: `.workspaceReviewCommentList` is a pure read (its handler only SELECTs from the
+    /// review-comment store), so it joins `.workspaceFileRead`/`.workspaceDiff` as safe to replay after a
+    /// dropped/stale persistent socket. The sibling mutation commands must stay excluded: an upsert/delete/
+    /// send is not idempotent on the wire, so a blind replay could double-create or double-send.
+    func testWorkspaceReviewCommentListIsReplaySafeButItsMutationsAreNot() throws {
+        let listRequest = SpacesDeviceAPIRequest(command: .workspaceReviewCommentList(.init(workspaceID: "workspace-1")), authToken: "SECRET")
+        XCTAssertTrue(listRequest.isSafeToReplayAfterConnectionFailure)
+
+        let upsertRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentUpsert(
+                .init(workspaceID: "workspace-1", filePath: "a.swift", side: .new, lineNumber: 1, lineText: "let x = 1", body: "comment")),
+            authToken: "SECRET")
+        XCTAssertFalse(upsertRequest.isSafeToReplayAfterConnectionFailure)
+
+        let deleteRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentDelete(.init(workspaceID: "workspace-1", id: "comment-1")), authToken: "SECRET")
+        XCTAssertFalse(deleteRequest.isSafeToReplayAfterConnectionFailure)
+
+        let sendRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentsSend(.init(workspaceID: "workspace-1", sessionID: "session-1", text: "please address", comments: [])),
+            authToken: "SECRET")
+        XCTAssertFalse(sendRequest.isSafeToReplayAfterConnectionFailure)
+    }
+
     func testMutatingRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let requests = [
             SpacesDeviceAPIRequest(command: .openWorkspaceTerminal(.init(workspaceID: "workspace-1")), authToken: "SECRET"),

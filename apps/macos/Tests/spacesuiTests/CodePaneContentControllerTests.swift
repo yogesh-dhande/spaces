@@ -13,6 +13,7 @@ import spacesterminalcore
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { nil }
     func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { nil }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
+    func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
 }
 
 /// A `CodePaneHosting` double that resolves to a real (fake-populated) device, for the RPC-dispatch
@@ -24,6 +25,7 @@ import spacesterminalcore
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { device }
     func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { (name: "workspace", baseBranch: nil) }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
+    func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
 }
 
 /// A `CodePaneHosting` double whose `codePaneDevice` lookup fails (returns `nil`) for a configurable
@@ -51,6 +53,7 @@ import spacesterminalcore
     }
     func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { (name: "workspace", baseBranch: nil) }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
+    func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
 }
 
 /// Records every script it's asked to evaluate, standing in for the live `WKWebView` so a test can
@@ -116,6 +119,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var subscribeFailuresRemaining = 0
     private var subscribeAttempts = 0
     private var subscribeAttemptWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Held `subscribeWorkspaceDiffSignature` calls (Fix 5's stale-generation tests): keyed by the same
+    /// kind of stable arrival index `pendingDiffCalls` uses, so a test can let later attempts resolve
+    /// (or fail) while an earlier one stays outstanding, then choose when the earlier one finally
+    /// settles — reproducing an A→B→A scope sequence where the FIRST A's attempt resolves LAST.
+    private var pendingSubscribeCalls:
+        [(arrivalIndex: Int, refName: String?, onFrame: @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
+            onDisconnect: @Sendable ((any Error)?) -> Void, continuation: CheckedContinuation<any CodePaneDiffSignatureStreamHandle, any Error>)] = []
+    private var subscribeCallArrivalCount = 0
+    /// `subscribeWorkspaceDiffSignature` calls to hold open (not resolve immediately) rather than
+    /// answering right away, counted down on each arrival — mirrors `subscribeFailuresRemaining`'s
+    /// shape but for "hold" instead of "fail".
+    private var holdNextSubscribeAttempts = 0
 
     /// Thrown by `subscribeWorkspaceDiffSignature` while `subscribeFailuresRemaining > 0`, so a test
     /// can force `resubscribeDiffSignature`'s failure arm (Fix 2's backoff retry) deterministically
@@ -138,6 +153,15 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> any CodePaneDiffSignatureStreamHandle {
         subscribeAttempts += 1
         drainSubscribeAttemptWaiters()
+        if holdNextSubscribeAttempts > 0 {
+            holdNextSubscribeAttempts -= 1
+            let arrivalIndex = subscribeCallArrivalCount
+            subscribeCallArrivalCount += 1
+            return try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<any CodePaneDiffSignatureStreamHandle, any Error>) in
+                pendingSubscribeCalls.append((arrivalIndex, refName, onFrame, onDisconnect, continuation))
+            }
+        }
         if subscribeFailuresRemaining > 0 {
             subscribeFailuresRemaining -= 1
             throw InjectedSubscribeFailure()
@@ -152,6 +176,45 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     /// Makes the next `count` `subscribeWorkspaceDiffSignature` calls throw, so a test can exercise
     /// `resubscribeDiffSignature`'s failure arm (Fix 2's backoff retry) without a real failure.
     func failNextSubscribeAttempts(_ count: Int) { subscribeFailuresRemaining = count }
+
+    /// Makes the next `count` `subscribeWorkspaceDiffSignature` calls suspend instead of resolving
+    /// immediately, so a test can start a later attempt (or two) while an earlier one is still
+    /// outstanding, then complete the held one(s) out of arrival order via `completeHeldSubscribeCall`
+    /// or `failHeldSubscribeCall` below — mirrors `failNextSubscribeAttempts`'s counted-remaining shape.
+    func holdNextSubscribeAttempts(_ count: Int) { holdNextSubscribeAttempts = count }
+
+    /// Resolves the held `subscribeWorkspaceDiffSignature` call at `index` (0-based, arrival order among
+    /// held calls only — stable even once another held call has already been completed and removed,
+    /// same convention as `completeDiffCall`) with a fresh `FakeDiffSignatureStreamHandle`, returning it
+    /// so a test can assert on its `stopCount` — this is how a test proves a stale attempt's client got
+    /// `.stop()`'d rather than installed.
+    @discardableResult func completeHeldSubscribeCall(at index: Int) -> FakeDiffSignatureStreamHandle {
+        guard let position = pendingSubscribeCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held subscribeWorkspaceDiffSignature call at arrival index \(index)")
+        }
+        let held = pendingSubscribeCalls.remove(at: position)
+        let handle = FakeDiffSignatureStreamHandle()
+        // Only recorded as a live subscription once it actually resolves, matching the immediate-path's
+        // own bookkeeping above — a test asserting `subscribedRefName(at:)`/`subscribeCallCount()` sees
+        // this the same way it would see any other successful subscribe, regardless of whether the
+        // controller's own completion guard then keeps or discards the returned handle: the low-level
+        // subscribe genuinely succeeded, exactly as a real daemon RPC would have.
+        subscribedRefNames.append(held.refName)
+        subscribedDisconnectHandlers.append(held.onDisconnect)
+        subscribedFrameHandlers.append(held.onFrame)
+        drainSubscribeArrivalWaiters()
+        held.continuation.resume(returning: handle)
+        return handle
+    }
+
+    /// Resolves the held `subscribeWorkspaceDiffSignature` call at `index` with a thrown failure instead
+    /// of a success, so a test can drive the STALE-attempt-fails variant of the round-4 Fix 5 tests.
+    func failHeldSubscribeCall(at index: Int) {
+        guard let position = pendingSubscribeCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held subscribeWorkspaceDiffSignature call at arrival index \(index)")
+        }
+        pendingSubscribeCalls.remove(at: position).continuation.resume(throwing: InjectedSubscribeFailure())
+    }
 
     /// Every `subscribeWorkspaceDiffSignature` call, successful or injected-failure alike — unlike
     /// `subscribeCallCount()`, which counts only the ones that actually opened a subscription.
@@ -193,6 +256,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func subscribeCallCount() -> Int { subscribedRefNames.count }
 
+    /// Every `workspaceDiff` call that has arrived so far, successful or still pending — a direct
+    /// (non-waiting) read, mirroring `subscribeCallCount()`'s shape, for a "this must never happen"
+    /// test that settles a fixed duration and then checks the count stayed at zero.
+    func diffCallCount() -> Int { diffCallArrivalCount }
+
     func triggerDisconnect(at index: Int) { subscribedDisconnectHandlers[index](nil) }
 
     /// Delivers a `spaces:diffSignature`-worthy frame on the subscription opened at `index` (0-based,
@@ -218,6 +286,101 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let waiters = subscribeAttemptWaiters
         subscribeAttemptWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+    }
+
+    // MARK: - Review comments
+    //
+    // Simple record-and-answer stubs (no arrival ordering/waiters needed): unlike `workspaceDiff` and
+    // `subscribeWorkspaceDiffSignature`, nothing in `CodePaneContentController` races these calls against
+    // hibernation or a resubscribe, so a canned `Result` answered synchronously is enough to dispatch-test
+    // RPC → gateway-args wiring.
+
+    private(set) var reviewCommentListCalls: [String] = []
+    private var reviewCommentListResult: Result<[SpacesDeviceReviewComment], any Error> = .success([])
+
+    private(set) var reviewCommentUpsertCalls:
+        [(workspaceID: String, id: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String)] =
+        []
+    private var reviewCommentUpsertResult: Result<SpacesDeviceReviewComment, any Error>?
+    /// round-16 Fix 1b: `workspaceReviewCommentUpsert` calls to hold open rather than answering right
+    /// away, counted down on each arrival — mirrors `holdNextSubscribeAttempts`'s shape, simplified
+    /// (no ref names/handlers to track) since nothing here needs arrival-order bookkeeping beyond a
+    /// single held call at a time for the "resumes even after teardown" test.
+    private var holdNextUpsertAttempts = 0
+    private var pendingUpsertCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceReviewComment, any Error>)] = []
+    private var upsertCallArrivalCount = 0
+
+    private(set) var reviewCommentDeleteCalls: [(workspaceID: String, id: String)] = []
+    private var reviewCommentDeleteResult: Result<SpacesDeviceAPIResponse, any Error> = .success(SpacesDeviceAPIResponse(ok: true, message: "Deleted."))
+
+    private(set) var reviewCommentsSendCalls: [(workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry])] = []
+    private var reviewCommentsSendResult: Result<SpacesDeviceAPIResponse, any Error> = .success(SpacesDeviceAPIResponse(ok: true, message: "Sent."))
+
+    func setReviewCommentListResult(_ result: Result<[SpacesDeviceReviewComment], any Error>) { reviewCommentListResult = result }
+    func setReviewCommentUpsertResult(_ result: Result<SpacesDeviceReviewComment, any Error>) { reviewCommentUpsertResult = result }
+    func setReviewCommentDeleteResult(_ result: Result<SpacesDeviceAPIResponse, any Error>) { reviewCommentDeleteResult = result }
+    func setReviewCommentsSendResult(_ result: Result<SpacesDeviceAPIResponse, any Error>) { reviewCommentsSendResult = result }
+
+    func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment] {
+        reviewCommentListCalls.append(workspaceID)
+        return try reviewCommentListResult.get()
+    }
+
+    func workspaceReviewCommentUpsert(
+        workspaceID: String, id: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String,
+        device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceReviewComment {
+        reviewCommentUpsertCalls.append((workspaceID, id, filePath, side, lineNumber, lineText, body))
+        if holdNextUpsertAttempts > 0 {
+            holdNextUpsertAttempts -= 1
+            let arrivalIndex = upsertCallArrivalCount
+            upsertCallArrivalCount += 1
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceReviewComment, any Error>) in
+                pendingUpsertCalls.append((arrivalIndex, continuation))
+            }
+        }
+        guard let reviewCommentUpsertResult else {
+            return SpacesDeviceReviewComment(
+                id: id ?? "generated-id", filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body,
+                createdAt: "2026-01-01T00:00:00Z", revision: 0)
+        }
+        return try reviewCommentUpsertResult.get()
+    }
+
+    /// round-16 Fix 1b: makes the next `count` `workspaceReviewCommentUpsert` calls suspend instead of
+    /// resolving immediately, so a test can observe the RPC still in flight (e.g. across a teardown)
+    /// before completing it via `completeHeldUpsertCall`.
+    func holdNextUpsertAttempts(_ count: Int) { holdNextUpsertAttempts = count }
+
+    /// Resolves the held `workspaceReviewCommentUpsert` call at `index` (0-based, arrival order among
+    /// held calls only) with `result`.
+    func completeHeldUpsertCall(at index: Int, result: SpacesDeviceReviewComment) {
+        guard let position = pendingUpsertCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceReviewCommentUpsert call at arrival index \(index)")
+        }
+        pendingUpsertCalls.remove(at: position).continuation.resume(returning: result)
+    }
+
+    /// Fails the held `workspaceReviewCommentUpsert` call at `index`, mirroring
+    /// `completeHeldUpsertCall(at:result:)` for the reconcile mechanism's "the CREATE never committed"
+    /// test — the reconcile must not run at all on this path.
+    func failHeldUpsertCall(at index: Int, error: any Error) {
+        guard let position = pendingUpsertCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceReviewCommentUpsert call at arrival index \(index)")
+        }
+        pendingUpsertCalls.remove(at: position).continuation.resume(throwing: error)
+    }
+
+    func workspaceReviewCommentDelete(workspaceID: String, id: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
+        reviewCommentDeleteCalls.append((workspaceID, id))
+        return try reviewCommentDeleteResult.get()
+    }
+
+    func workspaceReviewCommentsSend(
+        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceAPIResponse {
+        reviewCommentsSendCalls.append((workspaceID, sessionID, text, comments))
+        return try reviewCommentsSendResult.get()
     }
 }
 
@@ -503,6 +666,111 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         let count = await gateway.subscribeCallCount()
         #expect(count == 2, "the stale (already-superseded) subscription's disconnect must not force a third resubscribe for the still-current scope")
+    }
+
+    // MARK: - A stale subscription ATTEMPT (not just a stale disconnect) survives an A→B→A sequence (round-4 Fix 5)
+    //
+    // Fix 4 above (`staleDisconnectDoesNotClearANewerSubscriptionsState`) covers a stale DISCONNECT
+    // landing late. These two cover the sibling bug: a stale in-flight SUBSCRIBE ATTEMPT'S OWN
+    // completion (success or failure) landing late. `resubscribeDiffSignature`'s completion guards
+    // originally checked only `subscribedScope`, which is keyed purely by ref name — so after an
+    // A→B→A scope sequence, the FIRST A's already-superseded attempt and the SECOND (current) A's
+    // attempt share the exact same `DiffSignatureScope` value, and a scope-only guard cannot tell them
+    // apart. `diffSignatureSubscriptionGeneration` is what distinguishes one subscription ATTEMPT from
+    // another sharing the same scope.
+
+    @Test func aStaleFirstAAttemptThatSucceedsLastIsStoppedNotInstalled() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.diffSignatureReconnectFloor = .milliseconds(20)
+        content.diffSignatureReconnectCap = .milliseconds(20)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // First A: hold its subscribe attempt open so it's still outstanding when B's and the second
+        // A's attempts start and resolve.
+        await gateway.holdNextSubscribeAttempts(1)
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a1", files: []))
+        await gateway.waitForSubscribeAttemptCount(1) // the first A's subscribe attempt has arrived and is now held
+
+        // B: a genuine scope change, subscribes and succeeds normally.
+        content.dispatch(diffRequest(id: "req-2", scopeKind: "ref", refName: "feature-branch"))
+        await gateway.waitForDiffCallCount(2)
+        await gateway.completeDiffCall(at: 1, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-b", files: []))
+        await gateway.waitForSubscribeCallCount(1) // B's subscription opened
+
+        // Second A: back on the SAME scope the still-outstanding first attempt targets; subscribes and
+        // succeeds normally, becoming the CURRENT subscription.
+        content.dispatch(diffRequest(id: "req-3", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(3)
+        await gateway.completeDiffCall(at: 2, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a2", files: []))
+        await gateway.waitForSubscribeCallCount(2) // second A's subscription opened (now current)
+
+        // Finally, the FIRST A's held attempt resolves — LAST, and for the SAME scope the current
+        // (second A) subscription already holds.
+        let staleHandle = await gateway.completeHeldSubscribeCall(at: 0)
+        await settle()
+
+        #expect(staleHandle.stopCount == 1, "a stale attempt's client must be stopped, not bare-assigned over the current live client")
+
+        // Prove the CURRENT (second A) subscription — not the stale attempt — is the one actually
+        // live: trigger ITS disconnect (subscribedDisconnectHandlers index 1, recorded right after B's
+        // at index 0) and confirm the reconnect logic reacts to it by resubscribing the same scope.
+        await gateway.triggerDisconnect(at: 1)
+        await gateway.waitForSubscribeCallCount(4) // B, second A, the stale attempt's belated success, and now this reconnect
+
+        let refName = await gateway.subscribedRefName(at: 3)
+        #expect(refName == nil, "the reconnect must retarget the current (second A) scope, proving it — not the stale attempt — was the live subscription")
+    }
+
+    /// Companion to the success-resolves-last test above: the FIRST A's held attempt instead FAILS
+    /// last. The catch arm's guard must reject it the same way, leaving the current (second A)
+    /// subscription's `subscribedScope` untouched — a scope-only guard would incorrectly clear it
+    /// (both attempts share the same scope value), forcing a wasteful, unnecessary resubscribe on the
+    /// very next same-scope diff even though the current subscription is alive and healthy.
+    @Test func aStaleFirstAAttemptThatFailsLastDoesNotDisturbTheCurrentSubscription() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.diffSignatureReconnectFloor = .milliseconds(20)
+        content.diffSignatureReconnectCap = .milliseconds(20)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        await gateway.holdNextSubscribeAttempts(1)
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a1", files: []))
+        await gateway.waitForSubscribeAttemptCount(1)
+
+        content.dispatch(diffRequest(id: "req-2", scopeKind: "ref", refName: "feature-branch"))
+        await gateway.waitForDiffCallCount(2)
+        await gateway.completeDiffCall(at: 1, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-b", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        content.dispatch(diffRequest(id: "req-3", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(3)
+        await gateway.completeDiffCall(at: 2, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a2", files: []))
+        await gateway.waitForSubscribeCallCount(2)
+
+        // The FIRST A's held attempt fails, last, for the SAME scope the current subscription holds.
+        await gateway.failHeldSubscribeCall(at: 0)
+        await settle()
+
+        // A subsequent same-scope-A diff must stay a no-op for the subscription: if the stale failure
+        // had wrongly cleared `subscribedScope`, this would force an unnecessary third subscribe call.
+        content.dispatch(diffRequest(id: "req-4", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(4)
+        await gateway.completeDiffCall(at: 3, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a2", files: []))
+        await settle()
+
+        let subscribeCount = await gateway.subscribeCallCount()
+        #expect(
+            subscribeCount == 2,
+            "the stale attempt's late failure must not clear the current subscription's scope and force a needless resubscribe")
     }
 
     // MARK: - Diff-signature frame dedupe (round-4 Fix 3)
@@ -884,6 +1152,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.activate(focus: false)
         content.handleEditorStateChanged(fakeEditorState(), senderWebView: liveWebView(content))
 
+        // A recording double, answering synchronously, stands in for the real WKWebView here so the
+        // teardown flush (round-6 Fix 1) settles within this synchronous test body — otherwise
+        // `handleReady()` below would defer behind it forever (round-7 Fix 1) waiting on real WebKit's
+        // async round trip, which nothing in this test pumps to completion.
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: teardownWebView() also flushes review-comment state now — this test isn't
+        // about that surface, so answer its collect call with "nothing pending" to let both flushes
+        // settle.
+        teardownEvaluator.enqueueCollectResult("__none__")
+
         // Hibernate for real, like the round-2 stale-generation tests above.
         content.deactivate()
         content.activate(focus: false)
@@ -920,6 +1200,16 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.activate(focus: false)
         content.handleEditorStateChanged(fakeEditorState(), senderWebView: liveWebView(content))
 
+        // See `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload` above for why a
+        // synchronous double is needed here: without it, `handleReady()` below would defer behind the
+        // teardown flush forever, which would make this test's negative assertion pass for the wrong
+        // reason (no init sent at all, rather than an init correctly omitting the cleared state).
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
+
         content.close()
         content.activate(focus: false)
         let evaluator = RecordingCodePaneScriptEvaluator()
@@ -946,6 +1236,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let content = makeController() // initialMode: .diff
         content.activate(focus: false)
         content.handleModeChanged(.editor, senderWebView: liveWebView(content))
+
+        // See `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload` above for why a
+        // synchronous double is needed here (no open file for this test, hence `nil`).
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult(nil)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
 
         content.deactivate()
         content.activate(focus: false)
@@ -977,6 +1275,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.activate(focus: false)
         content.handleModeChanged(.editor, senderWebView: liveWebView(content))
 
+        // See `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload` above for why a
+        // synchronous double is needed here (no open file for this test, hence `nil`).
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult(nil)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
+
         content.close()
         content.activate(focus: false)
         let evaluator = RecordingCodePaneScriptEvaluator()
@@ -986,6 +1292,93 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(
             evaluator.evaluatedScripts.contains { $0.contains(#""initialMode":"diff""#) },
             "close() must reset the live mode back to initialMode, not carry a toggled mode forward")
+    }
+
+    // MARK: - Sender-identity guard at the message-handler boundary (round-8 Fix 3)
+
+    /// The wire body for an RPC request — the same shape `diffRequest(id:scopeKind:refName:)` builds
+    /// as a `CodePaneBridge.Request`, but as the raw `[String: Any]` dictionary `handleScriptMessage`
+    /// takes directly (mirroring `WKScriptMessage.body`), since that method — not `dispatch(_:)` — is
+    /// what's under test here.
+    private func diffRequestBody(id: String) -> [String: Any] {
+        ["id": id, "method": "workspaceDiff", "params": ["scope": ["kind": "uncommitted"]]]
+    }
+
+    @Test func handleScriptMessageDropsAReadyFromAStaleWebView() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        // Stands in for a torn-down page's own WKWebView instance still delivering its `ready`
+        // message after a reactivate has already installed a fresh one — see
+        // `handleScriptMessage`'s doc comment for why identity is the guard here.
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "ready"], senderWebView: WKWebView())
+
+        #expect(evaluator.evaluatedScripts.isEmpty, "a stale ready must never trigger spaces:init")
+    }
+
+    @Test func handleScriptMessageDropsAnEditorStateChangedPushFromAStaleWebView() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        let body: [String: Any] = [
+            "method": "editorStateChanged",
+            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "content": "let x = 1;", "dirty": true],
+        ]
+        content.handleScriptMessage(name: "spacesBridge", body: body, senderWebView: WKWebView())
+        content.handleReady()
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains(#""path":"foo.ts""#) },
+            "a stale editor-state push must never be stored, matching handleEditorStateChanged's own guard")
+    }
+
+    @Test func handleScriptMessageDropsAnRPCRequestFromAStaleWebView() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleScriptMessage(name: "spacesBridge", body: diffRequestBody(id: "req-1"), senderWebView: WKWebView())
+        await settle()
+
+        let callCount = await gateway.diffCallCount()
+        #expect(callCount == 0, "a stale RPC must never reach the device gateway")
+        #expect(evaluator.evaluatedScripts.isEmpty, "a stale RPC must never receive a reply either")
+    }
+
+    @Test func handleScriptMessageProcessesAllThreeKindsFromTheLiveWebView() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = liveWebView(content)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        // An RPC request, from the live page: still reaches the device gateway.
+        content.handleScriptMessage(name: "spacesBridge", body: diffRequestBody(id: "req-1"), senderWebView: webView)
+        await gateway.waitForDiffCallCount(1)
+
+        // An editor-state push, from the live page: gets stored, to be echoed back by the ready
+        // below's spaces:init (same round trip `editorStateChangedPushIsStoredAndReturnedInTheNextInitPayload`
+        // exercises, just routed through `handleScriptMessage` instead of `handleEditorStateChanged` directly).
+        let editorBody: [String: Any] = [
+            "method": "editorStateChanged",
+            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "content": "let x = 1;", "dirty": true],
+        ]
+        content.handleScriptMessage(name: "spacesBridge", body: editorBody, senderWebView: webView)
+
+        // ready, from the live page: triggers spaces:init, which must reflect the push above.
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "ready"], senderWebView: webView)
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains(#""path":"foo.ts""#) },
+            "every kind of message from the live webView must still process normally")
     }
 
     // MARK: - Teardown editor-state flush (round-6 Fix 1)
@@ -1002,6 +1395,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // issues the flush's collect script against `evaluator`, left pending
 
         evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -1031,6 +1426,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // The stale flush from generation 1 answers late, with different content than the live push.
         firstEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        firstEvaluator.completeOldestPending(with: "__none__")
 
         let evaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = evaluator
@@ -1044,10 +1441,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             "a flush from an already-superseded generation must not overwrite what a newer page already wrote")
     }
 
-    /// A `null` flush result (no file open on the flushed page) is authoritative for its own
-    /// generation, exactly like any other flush answer — it must clear a stale prior snapshot rather
-    /// than leaving it in place, since the collect script reads the editor's live state directly.
-    @Test func aNullFlushResultClearsAnExistingSnapshotForItsOwnGeneration() {
+    /// An installed collector's own explicit "nothing open" answer (the `'__no_file__'` sentinel) is
+    /// authoritative for its own generation, exactly like any other reported flush answer — it must
+    /// clear a stale prior snapshot rather than leaving it in place, since the collect script reads the
+    /// editor's live state directly.
+    @Test func aNoFileSentinelFlushResultClearsAnExistingSnapshotForItsOwnGeneration() {
         let content = makeController()
         content.activate(focus: false)
         content.handleEditorStateChanged(fakeEditorState(), senderWebView: liveWebView(content))
@@ -1057,7 +1455,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         content.deactivate() // flush reads the same generation's page, now reporting no open file
 
-        evaluator.completeOldestPending(with: nil)
+        evaluator.completeOldestPending(with: "__no_file__")
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -1066,7 +1466,73 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         #expect(
             !nextEvaluator.evaluatedScripts.contains { $0.contains("editorState") },
-            "a null flush from the same generation as the last push is authoritative and must clear the stored snapshot")
+            "a '__no_file__' flush from the same generation as the last push is authoritative and must clear the stored snapshot")
+    }
+
+    /// A `.notReported` flush result — the page hadn't finished bootstrapping when it was torn down
+    /// (the `'__uninstalled__'` sentinel), or the evaluate call itself failed (folds to `nil` — see
+    /// `CodePaneScriptEvaluator`'s doc comment) — carries no information and must NOT clear a snapshot
+    /// from a prior hibernation cycle (round-6 Fix 1: this is the exact race where a reactivate then a
+    /// fast re-hibernate tears the page down again before its JS finishes bootstrapping). It must still
+    /// count as "settled" for `outstandingTeardownFlushCount`/`deferredReadyGeneration` purposes, so a
+    /// `handleReady()` deferred behind it still goes out once it lands, carrying the untouched snapshot.
+    @Test func aNotReportedFlushResultLeavesAnExistingSnapshotUntouchedAndStillResumesADeferredReady() {
+        let content = makeController()
+        content.activate(focus: false)
+        content.handleEditorStateChanged(fakeEditorState(), senderWebView: liveWebView(content))
+
+        let staleEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = staleEvaluator
+
+        content.deactivate() // flush captures the same generation as the push above, left pending
+
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady() // defers: the teardown flush above is still outstanding
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must defer while the flush from the torn-down page is still outstanding")
+
+        // Either sentinel-shaped answer (or a nil evaluate failure) decodes to `.notReported` and must
+        // leave the seeded snapshot alone; `__uninstalled__` is what the real collect script emits for
+        // a page that hasn't bootstrapped far enough to define the collector global yet.
+        staleEvaluator.completeOldestPending(with: "__uninstalled__")
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") && $0.contains(#""path":"foo.ts""#) },
+            "a .notReported flush must not clear the prior snapshot, and must still let the deferred handleReady proceed")
+    }
+
+    /// Same as above, but exercising the `nil` evaluate-failure path instead of the `'__uninstalled__'`
+    /// sentinel — both decode to `.notReported` and must behave identically.
+    @Test func aNilFlushResultLeavesAnExistingSnapshotUntouchedAndStillResumesADeferredReady() {
+        let content = makeController()
+        content.activate(focus: false)
+        content.handleEditorStateChanged(fakeEditorState(), senderWebView: liveWebView(content))
+
+        let staleEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = staleEvaluator
+
+        content.deactivate() // flush captures the same generation as the push above, left pending
+
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady() // defers: the teardown flush above is still outstanding
+
+        staleEvaluator.completeOldestPending(with: nil)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") && $0.contains(#""path":"foo.ts""#) },
+            "a nil (evaluate-failure) flush result must not clear the prior snapshot, and must still let the deferred handleReady proceed")
     }
 
     /// `close()` discards the snapshot for good (see its doc comment); a flush it kicked off via
@@ -1084,6 +1550,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // The flush from before close() answers late, with the very state close() just discarded.
         evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -1093,5 +1561,488 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(
             !nextEvaluator.evaluatedScripts.contains { $0.contains(#""path":"foo.ts""#) },
             "close() must permanently discard the snapshot even if a flush it kicked off answers afterward")
+    }
+
+    // MARK: - handleReady defers behind an outstanding teardown flush (round-7 Fix 1)
+
+    /// The race Fix 1 closes: a teardown flush (round-6 Fix 1) is still in flight when the replacement
+    /// page's `ready` arrives. `handleReady()` must hold `spaces:init` back until the flush settles,
+    /// rather than sending it with whatever stale `editorState` happened to be on hand — and once the
+    /// flush does settle, the held `spaces:init` must reflect what it delivered.
+    @Test func handleReadyDefersInitUntilAnOutstandingTeardownFlushSettlesThenSendsTheFlushedContent() {
+        let content = makeController()
+        content.activate(focus: false)
+        let staleEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = staleEvaluator
+
+        content.deactivate() // issues the flush's collect script against `staleEvaluator`, left pending
+
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must not send spaces:init while a flush from the torn-down page is still outstanding")
+
+        staleEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") && $0.contains(#""path":"foo.ts""#) },
+            "once the outstanding flush settles, the deferred handleReady must send spaces:init carrying the flushed (newer) content")
+    }
+
+    /// The page that deferred `handleReady()` can itself be torn down again before the flush it was
+    /// waiting on ever answers (e.g. a fast second hibernation cycle). Once that flush finally settles,
+    /// the deferred continuation must recognize its page is stale and send nothing for it — the current
+    /// page gets its own `ready` → `handleReady()` call in due course instead.
+    @Test func aDeferredReadyForAPageTornDownAgainBeforeItsFlushSettlesSendsNoStaleInit() {
+        let content = makeController()
+
+        content.activate(focus: false) // generation 1
+        let evaluator1 = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator1
+        content.deactivate() // generation 1's flush starts against evaluator1, left pending
+
+        content.activate(focus: false) // generation 2
+        let evaluator2 = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator2
+
+        content.handleReady() // defers: generation 1's flush is still outstanding
+        #expect(!evaluator2.evaluatedScripts.contains { $0.contains("spaces:init") }, "generation 2's ready must defer, not send")
+
+        content.deactivate() // generation 2 tears down while still waiting; its OWN flush starts against evaluator2, left pending
+
+        content.activate(focus: false) // generation 3
+        let evaluator3 = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator3
+
+        // Generation 1's flush finally answers: one of two outstanding flushes settles, but generation
+        // 2's flush is still outstanding, so nothing may fire yet.
+        evaluator1.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        // round-16 Fix 1a: each deactivate() now also starts a comment-state flush against the same
+        // evaluator; resolve generation 1's before checking anything, so this assertion is really about
+        // generation 2's flushes (not a leftover generation-1 comment flush) still being outstanding.
+        evaluator1.completeOldestPending(with: "__none__")
+        #expect(!evaluator3.evaluatedScripts.contains { $0.contains("spaces:init") }, "generation 2's own flush is still outstanding")
+
+        // Generation 2's flush now answers too: the last outstanding flush settles, but the page the
+        // deferred ready was waiting for (generation 2) is no longer current (generation 3 is) — this
+        // must resolve to nothing, not a stale init for a page that's gone.
+        evaluator2.completeOldestPending(with: #"{"path":"bar.ts","baseSHA256":"sha-abc","content":"let y = 2;","dirty":true}"#)
+        // round-16 Fix 1a: resolve generation 2's comment flush too — only once BOTH of generation 2's
+        // flushes are settled does `outstandingTeardownFlushCount` reach zero and the deferred ready
+        // actually re-check `generation == pageGeneration` (which fails, since generation 3 is current).
+        evaluator2.completeOldestPending(with: "__none__")
+
+        for evaluator in [evaluator1, evaluator2, evaluator3] {
+            #expect(
+                !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+                "no spaces:init may go out for the now-stale generation 2 once its flush finally settles")
+        }
+    }
+
+    // MARK: - Comment-draft teardown flush and rehydrate (round-16 Fix 1a/1b)
+
+    @Test func teardownFlushStoresACommentSnapshotThatSurvivesRehydrate() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending
+
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush: nothing pending
+        evaluator.completeOldestPending(
+            with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains("pendingReviewComments") && $0.contains(#""id":"c1""#) },
+            "a comment snapshot captured at teardown must rehydrate through the next spaces:init")
+    }
+
+    @Test func aNotReportedCommentFlushResultLeavesAnExistingSnapshotUntouched() {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = firstEvaluator
+
+        content.deactivate() // first teardown: seed a snapshot
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        firstEvaluator.completeOldestPending(
+            with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let secondEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = secondEvaluator
+
+        content.deactivate() // second teardown: the page's comment surface never installed the collector
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        secondEvaluator.completeOldestPending(with: "__uninstalled__") // comment-state flush: not reported
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains("pendingReviewComments") && $0.contains(#""id":"c1""#) },
+            "a .notReported comment flush must not clear the prior snapshot")
+    }
+
+    @Test func aNoneSentinelCommentFlushClearsAnExistingSnapshot() {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = firstEvaluator
+
+        content.deactivate() // first teardown: seed a snapshot
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        firstEvaluator.completeOldestPending(
+            with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let secondEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = secondEvaluator
+
+        content.deactivate() // second teardown: the draft was withdrawn, nothing pending anymore
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        secondEvaluator.completeOldestPending(with: "__none__") // comment-state flush: nothing pending
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains("pendingReviewComments") },
+            "a '__none__' comment flush from a newer generation must clear the prior snapshot")
+    }
+
+    /// Mirrors `closeClearsTheStoredEditorState` above, for `pendingReviewCommentState` (round-16 Fix
+    /// 1a's correction to `close()`, which originally cleared `editorState` but not its comment-state
+    /// sibling): `close()` must discard the comment snapshot, not just hibernate it like `deactivate()`.
+    @Test func closeClearsTheStoredReviewCommentState() {
+        let content = makeController()
+        content.activate(focus: false)
+        let seedEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = seedEvaluator
+
+        // No direct push exists for comment state (unlike `handleEditorStateChanged`), so seeding a
+        // snapshot before `close()` goes through the normal teardown-flush path via `deactivate()`.
+        content.deactivate()
+        seedEvaluator.completeOldestPending(with: "__none__") // editor-state flush: nothing pending
+        seedEvaluator.completeOldestPending(
+            with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+
+        // See `closeClearsTheStoredEditorState` above for why a synchronous double is needed here:
+        // without it, `handleReady()` below would defer behind the teardown flush forever, which would
+        // make this test's negative assertion pass for the wrong reason (no init sent at all, rather
+        // than an init correctly omitting the cleared state).
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult("__none__") // editor-state flush: nothing pending
+        teardownEvaluator.enqueueCollectResult(
+            #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+
+        content.close()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("pendingReviewComments") },
+            "close() must discard the in-memory comment snapshot, not just hibernate it like deactivate()")
+    }
+
+    @Test func initPayloadOmitsPendingReviewCommentsKeyWhenNoSnapshotExists() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must send spaces:init immediately when no flush is outstanding")
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("pendingReviewComments") },
+            "with no teardown flush having ever captured anything, the init payload must omit the key entirely rather than send an empty array")
+    }
+
+    @Test func deferredReadyWaitsForBothTheEditorAndCommentTeardownFlushesBeforeFiring() {
+        let content = makeController()
+        content.activate(focus: false)
+        let staleEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = staleEvaluator
+
+        content.deactivate() // issues both flushes' collect scripts against `staleEvaluator`, left pending
+
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady() // defers: both teardown flushes above are still outstanding
+
+        staleEvaluator.completeOldestPending(with: "__none__") // only the editor-state flush settles
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must stay deferred while the comment-state flush is still outstanding, even once the editor-state flush has settled")
+
+        staleEvaluator.completeOldestPending(with: "__none__") // the comment-state flush now settles too
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "once both outstanding flushes settle, the deferred handleReady must proceed")
+    }
+
+    /// Round-16 Fix 1b's counter guards `ready` against an in-flight review-comment mutation RPC, not
+    /// just a teardown flush — this exercises that seam end to end: the RPC is still in flight when the
+    /// page tears down (its own teardown flushes settle immediately), and the deferred `ready` must
+    /// still wait on the RPC specifically before it may proceed.
+    @Test func aReadyDeferredBehindAnInFlightUpsertRPCResumesEvenAfterThePageWasTornDown() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextUpsertAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "reviewCommentUpsert",
+                params: ["filePath": "a.ts", "side": "new", "lineNumber": 1, "lineText": "x", "body": "hi"]))
+
+        while await gateway.reviewCommentUpsertCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // teardown flushes settle immediately; the upsert RPC above stays outstanding
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must stay deferred while the upsert RPC dispatched before teardown has not resolved")
+
+        await gateway.completeHeldUpsertCall(
+            at: 0,
+            result: SpacesDeviceReviewComment(
+                id: "c1", filePath: "a.ts", side: .new, lineNumber: 1, lineText: "x", body: "hi", createdAt: "2026-01-01T00:00:00Z",
+                revision: 0))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+    }
+
+    // MARK: - CREATE-success reconcile of a stale pendingReviewCommentState entry (round-11)
+    //
+    // These cover `reconcilePendingReviewCommentStateAfterCreate(comment:)`: a CREATE upsert
+    // (`commentID == nil`) whose RPC is still in flight when hibernation snapshots the still-provisional
+    // draft into `pendingReviewCommentState` must correct that snapshot once the CREATE resolves, rather
+    // than let the replacement page's `spaces:init` replay a stale duplicate of the row the replacement
+    // page's own `loadInitial()` already lists.
+
+    /// Body-equal case: the snapshot's provisional entry has the same body the CREATE's response
+    /// reports, so the reconcile must remove it outright — the listed server row already carries this
+    /// exact text, so nothing needs replaying for it.
+    @Test func aCreateThatMatchesAStaleProvisionalSnapshotEntryByBodyRemovesIt() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextUpsertAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "reviewCommentUpsert",
+                params: ["filePath": "a.ts", "side": "new", "lineNumber": 1, "lineText": "x", "body": "hi"]))
+
+        while await gateway.reviewCommentUpsertCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // teardown flushes settle immediately; the upsert RPC above stays outstanding
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady() // deferred: the upsert RPC dispatched before teardown has not resolved
+
+        await gateway.completeHeldUpsertCall(
+            at: 0,
+            result: SpacesDeviceReviewComment(
+                id: "c1", filePath: "a.ts", side: .new, lineNumber: 1, lineText: "x", body: "hi", createdAt: "2026-01-01T00:00:00Z",
+                revision: 0))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"provisional-1""#) },
+            "a body-equal CREATE completion must remove the stale provisional snapshot entry rather than replay it alongside the new server row")
+    }
+
+    /// Body-differs case: the user kept typing after the CREATE's RPC was already in flight, so the
+    /// snapshot entry's body has since diverged from what the CREATE just committed. The reconcile must
+    /// keep the entry (so the newer local text still overlays the listed row) but convert it to
+    /// non-provisional under the server-assigned id, leaving its own body and anchor fields untouched.
+    @Test func aCreateThatMatchesAStaleProvisionalSnapshotEntryOnlyByAnchorRewritesItNonProvisional() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextUpsertAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "reviewCommentUpsert",
+                params: ["filePath": "a.ts", "side": "new", "lineNumber": 1, "lineText": "x", "body": "hi"]))
+
+        while await gateway.reviewCommentUpsertCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with:
+                #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi, typed more"}]"#
+        )
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.completeHeldUpsertCall(
+            at: 0,
+            result: SpacesDeviceReviewComment(
+                id: "c1", filePath: "a.ts", side: .new, lineNumber: 1, lineText: "x", body: "hi", createdAt: "2026-01-01T00:00:00Z",
+                revision: 0))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("pendingReviewComments") }
+        #expect(initScript != nil, "the diverged entry must still be present in the init payload, just converted")
+        #expect(initScript?.contains(#""id":"c1""#) ?? false, "the converted entry must carry the server-assigned id")
+        #expect(initScript?.contains(#""provisional":false"#) ?? false, "the converted entry must no longer read as provisional")
+        #expect(
+            initScript?.contains(#""body":"hi, typed more""#) ?? false,
+            "the converted entry must keep its own (newer) body, not the server's just-committed body")
+    }
+
+    /// Upsert FAILURE across hibernation: nothing committed server-side, so the stored snapshot must be
+    /// left completely alone — the failure path runs no reconcile logic at all.
+    @Test func aFailedCreateAcrossHibernationLeavesTheStaleSnapshotUntouched() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextUpsertAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "reviewCommentUpsert",
+                params: ["filePath": "a.ts", "side": "new", "lineNumber": 1, "lineText": "x", "body": "hi"]))
+
+        while await gateway.reviewCommentUpsertCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        struct InjectedUpsertFailure: Error {}
+        await gateway.failHeldUpsertCall(at: 0, error: InjectedUpsertFailure())
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"provisional-1""#) && $0.contains(#""provisional":true"#) },
+            "a failed CREATE must leave the stale provisional snapshot entry exactly as the teardown flush wrote it")
+    }
+
+    /// An UPDATE (`commentID` non-nil) completing across hibernation, success case: the reconcile
+    /// mechanism applies only to CREATE successes, so an UPDATE's completion must leave any stored
+    /// snapshot untouched even when its anchor and body match a stored entry exactly.
+    @Test func anUpdateCompletionAcrossHibernationNeverReconciles() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextUpsertAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "reviewCommentUpsert",
+                params: ["id": "existing-id", "filePath": "a.ts", "side": "new", "lineNumber": 1, "lineText": "x", "body": "hi"]))
+
+        while await gateway.reviewCommentUpsertCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.completeHeldUpsertCall(
+            at: 0,
+            result: SpacesDeviceReviewComment(
+                id: "existing-id", filePath: "a.ts", side: .new, lineNumber: 1, lineText: "x", body: "hi", createdAt: "2026-01-01T00:00:00Z",
+                revision: 1))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"provisional-1""#) && $0.contains(#""provisional":true"#) },
+            "an UPDATE completion must never reconcile pendingReviewCommentState, even when its anchor and body match a stored entry exactly")
     }
 }

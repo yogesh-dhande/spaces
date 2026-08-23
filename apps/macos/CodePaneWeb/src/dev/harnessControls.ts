@@ -28,6 +28,21 @@ export function installHarnessControls(container: HTMLElement): void {
     getMockBridgeForHarness()?.simulateSignatureChange();
   });
 
+  const agentsButton = document.createElement("button");
+  agentsButton.type = "button";
+  agentsButton.textContent = "Cycle agents";
+  agentsButton.style.padding = "6px 10px";
+  agentsButton.style.marginLeft = "8px";
+  agentsButton.style.borderRadius = "6px";
+  agentsButton.style.border = "1px solid #888";
+  agentsButton.style.background = "#222";
+  agentsButton.style.color = "#fff";
+  agentsButton.style.cursor = "pointer";
+  agentsButton.addEventListener("click", () => {
+    getMockBridgeForHarness()?.simulateAgentsChange();
+  });
+
   bar.appendChild(button);
+  bar.appendChild(agentsButton);
   container.appendChild(bar);
 }

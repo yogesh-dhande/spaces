@@ -564,6 +564,67 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // The v17→v18 step only creates a brand-new table (nothing to carry forward), so this test's job is
+    // proving the migration leaves a genuinely usable table behind on a real pre-existing database — not
+    // just that `current_version` advances — by exercising an insert against an existing workspace row
+    // straight after opening. A store method (`upsertReviewComment`) rather than raw SQL, so the FK
+    // reference this table declares against `workspaces(id)` is exercised as production would use it.
+    func testUpgradeFromV17CreatesAUsableReviewCommentsTable() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let projectDir = root.appendingPathComponent("project", isDirectory: true).path
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (17);
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  setup_script TEXT,
+                  stop_script TEXT,
+                  is_hidden INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  base_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                INSERT INTO projects(id, name, dir, is_git) VALUES ('project', 'Project', '\(projectDir)', 1);
+                INSERT INTO workspaces(id, project_id, dir, is_default, is_running) VALUES ('workspace', 'project', '\(projectDir)', 1, 0);
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            let store = try SQLiteStore(path: dbURL.path)
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertNotNil(try store.workspace(id: "workspace"), "the pre-existing workspace survives the upgrade")
+
+            try store.upsertReviewComment(
+                WorkspaceReviewCommentRecord(
+                    id: "comment-1", workspaceID: "workspace", filePath: "src/foo.ts", side: .new, lineNumber: 1, lineText: "const x = 1",
+                    body: "why?", createdAt: "2026-08-22T00:00:00Z", updatedAt: "2026-08-22T00:00:00Z", revision: 0, sentAt: nil))
+            let drafts = try store.reviewCommentDrafts(workspaceID: "workspace")
+            XCTAssertEqual(drafts.map(\.id), ["comment-1"])
+            XCTAssertEqual(drafts.first?.body, "why?")
+            XCTAssertEqual(drafts.first?.revision, 0, "the v17->v18 migration's revision column defaults new/untouched rows to 0")
+        }
+    }
+
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
     func testOpeningCurrentVersionDoesNotCreateMigrationBackup() throws {
         let root = try makeTempDirectory()
@@ -1554,6 +1615,10 @@ final class StoreTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsertReviewComment(
+            WorkspaceReviewCommentRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, filePath: "src/foo.ts", side: .new, lineNumber: 1, lineText: "const x = 1",
+                body: "why?", createdAt: "now", updatedAt: "now", revision: 0, sentAt: nil))
 
         try store.deleteWorkspace(id: workspace.id)
 
@@ -1564,6 +1629,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.reviewCommentDrafts(workspaceID: workspace.id).isEmpty, "a deleted workspace's review comments go with it")
     }
 
     // Tests delete project removes project workspaces and dependents by arranging representative inputs and asserting the expected result.
@@ -1578,6 +1644,10 @@ final class StoreTests: XCTestCase {
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, role: "browser", orderIndex: 0, lastSeenAt: "now")
         )
+        try store.upsertReviewComment(
+            WorkspaceReviewCommentRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, filePath: "src/foo.ts", side: .new, lineNumber: 1, lineText: "const x = 1",
+                body: "why?", createdAt: "now", updatedAt: "now", revision: 0, sentAt: nil))
 
         try store.deleteProject(id: project.id)
 
@@ -1585,6 +1655,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(
+            try store.reviewCommentDrafts(workspaceID: workspace.id).isEmpty, "a deleted project's workspaces' review comments go with them")
     }
 
     // Tests workspace and setting state updates persist by arranging representative inputs and asserting the expected result.

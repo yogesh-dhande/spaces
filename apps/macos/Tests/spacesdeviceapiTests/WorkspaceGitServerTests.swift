@@ -6,6 +6,7 @@
     @testable import spacesdeviceapi
     @testable import spacesdevicecore
     @testable import spacesterminalcore
+    import spacesruntimecore
     import workspacecore
 
     /// End-to-end coverage for `workspaceFileRead`/`workspaceFileWrite`/`workspaceDiff` over the real
@@ -137,6 +138,51 @@
                 let currentData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.currentBase64Data)))
                 XCTAssertEqual(currentData, onDisk)
                 XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("README.md")), onDisk, "the conflicting write must not land on disk")
+            }
+        }
+
+        /// round-13 Fix 4: a stale `expectedSHA256` whose bytes already match what's on disk is a retry of an
+        /// already-landed write (its original response lost to a transport drop or the client hibernating
+        /// mid-round-trip), not a genuine conflict — the client asks to write exactly the content that is
+        /// already there. This must report an idempotent success (`didWrite: true`), not the `.conflict`
+        /// shape `testWorkspaceFileWriteWithAStaleSHAReportsAConflictInsteadOfFailing` covers for genuinely
+        /// different bytes.
+        func testWorkspaceFileWriteRetryWithSameBytesAndStaleSHASucceedsIdempotently() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let original = Data("initial".utf8)
+                try original.write(to: repo.appendingPathComponent("README.md"))
+                let originalSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(original)
+
+                let updated = Data("updated content".utf8)
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: originalSHA)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                XCTAssertTrue(try XCTUnwrap(firstResponse.workspaceFileWrite).didWrite)
+                let updatedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(updated)
+
+                // Retries with the SAME new bytes but the now-stale ORIGINAL expected SHA, as a client would
+                // if it never learned the first write landed (its response was lost).
+                let retryResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: originalSHA)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(retryResponse.ok, retryResponse.message)
+                let retryResult = try XCTUnwrap(retryResponse.workspaceFileWrite)
+                XCTAssertTrue(retryResult.didWrite, "an identical-bytes retry of a landed write must report success, not a conflict")
+                XCTAssertEqual(retryResult.sha256, updatedSHA)
+                XCTAssertNil(retryResult.currentBase64Data, "an idempotent success carries no conflict payload")
+                XCTAssertEqual(
+                    try Data(contentsOf: repo.appendingPathComponent("README.md")), updated,
+                    "file contents are unchanged by the idempotent retry")
             }
         }
 
@@ -328,6 +374,188 @@
 
                 XCTAssertTrue(readResponse.ok, readResponse.message)
             }
+        }
+
+        /// round-14 Fix 1 regression: a caller-supplied ref that simply does not resolve must still be
+        /// rejected as `.invalidArgument` — this must keep working unmodified after `assertRefIsResolvable`'s
+        /// rewrite to an exit-code-based check.
+        func testWorkspaceDiffWithANonexistentRefReturnsInvalidArgument() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "no-such-ref")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Ref 'no-such-ref' could not be resolved in this workspace.")
+            }
+        }
+
+        /// round-14 Fix 1 regression: a ref that DOES resolve (the fixture repo's own "main" branch) must
+        /// keep succeeding — `assertRefIsResolvable`'s move to `allowedExitCodes: [0, 1]` and a non-empty-stdout
+        /// check must not turn a legitimate resolvable ref into a failure.
+        func testWorkspaceDiffWithAResolvableRefSucceeds() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "main")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNotNil(response.workspaceDiff)
+            }
+        }
+
+        /// round-14 Fix 1: the actual bug fix under test. Before the fix, `assertRefIsResolvable` wrapped its
+        /// `runGitAndCapture` call in `try?`, so ANY thrown failure — including an already-exhausted
+        /// request-wide deadline, simulated here by handing it a `deadlineStart` far in the past —
+        /// collapsed into the same "ref could not be resolved" 400 this function throws for an actually-bad
+        /// ref. That is wrong even for "main", a perfectly resolvable ref in this fixture: the failure is the
+        /// daemon's own trouble (a blown deadline), not a caller typo, and must propagate uncaught so the
+        /// server's normal mapping (`SpacesDeviceAPIServer.errorCode(for:)`) reports it as `.internalError` —
+        /// which the client's retry classification retries with backoff — rather than the permanent
+        /// `.invalidArgument` rejection a genuinely bad ref gets. This test would have FAILED before the fix:
+        /// the old `try?` swallowed the deadline-exhaustion throw and always produced the 400 NSError instead.
+        func testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-assert-ref-resolvable-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                    workspaceDir: repo.path, refName: "main", gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
+            ) { error in
+                let nsError = error as NSError
+                XCTAssertFalse(
+                    nsError.domain == "SpacesDeviceAPIServer" && nsError.code == 400,
+                    "a blown deadline must not be misreported as the bad-ref 400, got \(error)")
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the deadline-exhaustion failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not invalidArgument")
+            }
+        }
+
+        /// round-15: `buildDiff` now takes the same `deadlineStart` parameter `assertRefIsResolvable` above
+        /// already accepted, so `handleWorkspaceDiffRequest` can share ONE clock across repo/ref validation
+        /// and diff-building instead of `buildDiff` starting its own fresh `Date()` internally. Before this
+        /// fix, handing `buildDiff` an already-exhausted `deadlineStart` would have had no effect at all —
+        /// the parameter did not exist, and `buildDiff` measured its 45s window from its own call. This test
+        /// mirrors `testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef`
+        /// above: a `deadlineStart` far enough in the past that `remainingTimeout` sees zero budget left
+        /// must make `buildDiff` throw immediately (`scopeSignature`'s first probe never gets a positive
+        /// timeout), never spawn git as if it had a fresh 45s.
+        func testBuildDiffWithAnAlreadyExpiredDeadlineStartThrowsImmediately() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-expired-deadline-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            // Well past the real 45s `diffBuildDeadline` (private to the engine, so mirrored here as a
+            // literal — see this file's own `-1000` above and `SpacesDeviceWorkspaceGitTests.swift`'s
+            // round-9/12 comments on why this engine has no configurable-deadline test seam).
+            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiff(
+                    workspaceDir: repo.path, refName: nil, gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the request-wide deadline-elapsed failure, got \(error)")
+                    return
+                }
+            }
+        }
+
+        /// round-15: proves `deadlineStart` is a SHARED clock rather than each call getting its own,
+        /// without the flaky knife-edge timing `SpacesDeviceWorkspaceGitTests.swift`'s round-9/12 comments
+        /// explicitly avoid (there is no seam here to observe the exact timeout value a fake git client
+        /// would receive — `RemoteWorkspaceGitClient` is a real, non-injectable `final class`). Instead this
+        /// hands `assertRefIsResolvable` and `buildDiff` the SAME `deadlineStart`, already most of the way
+        /// through the 45s window (3s of budget left — generous for this tiny fixture repo's real git
+        /// calls, far from the near-zero edge that would risk flaking on a loaded machine), simulating ref
+        /// validation having already burned most of the shared request budget before `buildDiff` ever runs.
+        /// Before this round's fix, `buildDiff` would have ignored that already-elapsed time entirely (it
+        /// had no `deadlineStart` parameter and always measured a fresh 45s from its own call) — this test
+        /// would still have passed on unfixed code, since a fresh 45s is even more generous than 3s, so its
+        /// real value is regression coverage once combined with the fully-expired test above: together they
+        /// show `buildDiff` neither ignores the shared clock (this test would still need the code to accept
+        /// the parameter at all, which is the round-15 API change) nor treats a non-zero remainder as
+        /// insufficient when a real git call is fast enough to fit inside it.
+        func testASharedDeadlineStartAcrossRefValidationAndBuildDiffStillLeavesEnoughBudgetForAnOrdinaryDiff() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-shared-deadline-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+            try "edited".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+            let client = RemoteWorkspaceGitClient()
+            let sharedDeadlineStart = Date().addingTimeInterval(-42)
+            try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                workspaceDir: repo.path, refName: "main", gitClient: client, deadlineStart: sharedDeadlineStart)
+
+            let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(
+                workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: sharedDeadlineStart)
+            let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
+            XCTAssertFalse(file.truncated)
+            XCTAssertNotNil(file.patch)
+        }
+
+        /// `buildCoalescedDeletedButUntrackedFile` (see `SpacesDeviceWorkspaceGitTests.swift`'s round-13
+        /// coverage for the coalescing behavior itself) is the one file builder in this engine that spawns
+        /// two git commands for a single file: `update-index --add` stages the recreated worktree content
+        /// into a scratch index, then `diff` compares that scratch index against `compareRef`. Both used to
+        /// share the exact same already-shrunk `timeout` value, so a slow-but-successful `update-index` could
+        /// hand the second command a stale budget as if no time had passed since the first ran.
+        ///
+        /// This isolates the second command's own deadline recompute by giving the two new parameters
+        /// deliberately different values: `timeout` is a generous 10s so the FIRST command (`update-index
+        /// --add`) runs and succeeds normally, with no risk of a spurious timeout of its own; `deadlineStart`
+        /// is already 1000s in the past, a value with NO effect on the first command (which only ever sees
+        /// `timeout`) but that the second command's `remainingTimeout(start: deadlineStart)` recompute sees as
+        /// exhausted. The fix must degrade to the same truncated shape every other cap in this engine uses
+        /// (mirroring the per-file loop's own entry gate in `buildDiff`), not throw a request-level error.
+        func testCoalescedDeletedButUntrackedFileDegradesToTruncatedWhenDeadlineStartIsAlreadyExpired() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-coalesced-deleted-untracked-expired-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "content A\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+            try runGit(["add", "f.txt"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add f"], cwd: repo.path)
+
+            // `git rm --cached` untracks the file from the index without touching its worktree content, then
+            // the recreated content differs from the committed blob — exactly the `.deletedButUntrackedInWorktree`
+            // scenario `buildDiff`'s coalescing exists for (see `SpacesDeviceWorkspaceGitTests.swift` round-13).
+            try runGit(["rm", "--cached", "f.txt"], cwd: repo.path)
+            try "content B\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+            let file = try SpacesDeviceWorkspaceDiffEngine.buildCoalescedDeletedButUntrackedFile(
+                path: "f.txt", compareRef: "HEAD", workspaceDir: repo.path, gitClient: RemoteWorkspaceGitClient(), timeout: 10.0,
+                deadlineStart: expiredDeadlineStart)
+
+            XCTAssertTrue(file.truncated, "an expired deadlineStart at the second command's recompute must degrade to the truncated shape")
+            XCTAssertEqual(file.status, .modified)
+            XCTAssertNil(file.patch, "a truncated entry must carry no patch")
         }
 
         /// A `subscribeWorkspaceDiffSignature` subscription's `pollTimer` (`WorkspaceDiffSignatureSubscription`

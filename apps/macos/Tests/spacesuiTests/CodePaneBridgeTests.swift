@@ -118,7 +118,8 @@ import spacesterminalcore
     @Test func initPayloadEncodesBaseBranchWhenPresent() throws {
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: "main", editorState: nil)
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: "main", editorState: nil,
+            pendingReviewComments: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -130,7 +131,8 @@ import spacesterminalcore
     @Test func initPayloadOmitsBaseBranchKeyWhenAbsent() throws {
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil)
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
+            pendingReviewComments: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -144,7 +146,8 @@ import spacesterminalcore
     @Test func initPayloadOmitsEditorStateKeyWhenAbsent() throws {
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil)
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
+            pendingReviewComments: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -155,7 +158,8 @@ import spacesterminalcore
         let state = CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", content: "let x = 1", dirty: true)
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: state)
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: state,
+            pendingReviewComments: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -273,6 +277,36 @@ import spacesterminalcore
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileList))
     }
 
+    @Test func planForReviewCommentsSendDecodesEachEntrysIdAndRevision() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "reviewCommentsSend",
+            params: [
+                "sessionId": "agent-1", "text": "please fix",
+                "comments": [["id": "c1", "revision": 0], ["id": "c2", "revision": 2]],
+            ])
+
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(
+                    .reviewCommentsSend(
+                        sessionID: "agent-1", text: "please fix",
+                        comments: [
+                            SpacesDeviceReviewCommentSendEntry(id: "c1", revision: 0),
+                            SpacesDeviceReviewCommentSendEntry(id: "c2", revision: 2),
+                        ])))
+    }
+
+    @Test func planForReviewCommentsSendRequiresANonEmptyComments() {
+        let request = CodePaneBridge.Request(id: "1", method: "reviewCommentsSend", params: ["sessionId": "agent-1", "text": "hi", "comments": []])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForReviewCommentsSendRequiresEveryEntrysRevision() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "reviewCommentsSend", params: ["sessionId": "agent-1", "text": "hi", "comments": [["id": "c1"]]])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
     @Test func planRejectsAnUnknownMethod() {
         let request = CodePaneBridge.Request(id: "1", method: "bogusMethod", params: [:])
 
@@ -293,6 +327,7 @@ import spacesterminalcore
         (.ownershipRejected, .invalidArgument),
         (.payloadTooLarge, .invalidArgument),
         (.unsupportedFormat, .invalidArgument),
+        (.conflict, .conflict),
         (.internalError, .internalError),
         (.unauthorized, .unavailable),
         (.sessionNotRunning, .unavailable),
@@ -480,19 +515,80 @@ import spacesterminalcore
                 == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", content: "let x = 1;", dirty: true)))
     }
 
-    @Test func decodeCollectedEditorStateTreatsNilAsNoFile() {
-        #expect(CodePaneBridge.decodeCollectedEditorState(nil) == .noFile)
+    @Test func decodeCollectedEditorStateTreatsTheNoFileSentinelAsNoFile() {
+        // `'__no_file__'` is an installed collector's own explicit "nothing open" answer — the only
+        // case that should clear a stored snapshot.
+        #expect(CodePaneBridge.decodeCollectedEditorState("__no_file__") == .noFile)
     }
 
-    @Test func decodeCollectedEditorStateTreatsAMalformedStringAsNoFile() {
-        #expect(CodePaneBridge.decodeCollectedEditorState("not json") == .noFile)
+    @Test func decodeCollectedEditorStateTreatsTheUninstalledSentinelAsNotReported() {
+        // `'__uninstalled__'` means the page hasn't finished bootstrapping yet (the collector global
+        // doesn't exist) — this must NOT be treated as "no file", or a teardown flush racing a
+        // reactivate-then-hibernate cycle would wipe a real stored snapshot.
+        #expect(CodePaneBridge.decodeCollectedEditorState("__uninstalled__") == .notReported)
     }
 
-    @Test func decodeCollectedEditorStateTreatsANonStringResultAsNoFile() {
+    @Test func decodeCollectedEditorStateTreatsNilAsNotReported() {
+        // A nil result is what a genuine `evaluateJavaScript` error folds into (see
+        // `CodePaneScriptEvaluator`'s doc comment) — indistinguishable from "didn't answer", so it must
+        // leave the stored snapshot untouched rather than being read as "no file".
+        #expect(CodePaneBridge.decodeCollectedEditorState(nil) == .notReported)
+    }
+
+    @Test func decodeCollectedEditorStateTreatsAMalformedStringAsNotReported() {
+        #expect(CodePaneBridge.decodeCollectedEditorState("not json") == .notReported)
+    }
+
+    @Test func decodeCollectedEditorStateTreatsANonStringResultAsNotReported() {
         // `evaluateJavaScript`'s completion can hand back other JS value types (numbers, booleans);
-        // the collect script's contract only ever produces a JSON string or null, so anything else is
-        // treated the same defensive way a malformed string is.
-        #expect(CodePaneBridge.decodeCollectedEditorState(42) == .noFile)
+        // the collect script's contract only ever produces one of the two sentinel strings or a JSON
+        // snapshot string, so anything else is treated the same defensive way a malformed string is.
+        #expect(CodePaneBridge.decodeCollectedEditorState(42) == .notReported)
+    }
+
+    // MARK: - Collected review-comment-state flush decode (round-16 Fix 1a)
+
+    /// Mirrors `decodeCollectedEditorStateParsesAJSONSnapshot` exactly, for the comment surface's
+    /// array-of-entries shape instead of a single file snapshot.
+    @Test func decodeCollectedReviewCommentStateParsesAJSONSnapshot() {
+        let json = #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#
+
+        #expect(
+            CodePaneBridge.decodeCollectedReviewCommentState(json)
+                == .entries([
+                    CodePaneBridge.ReviewCommentEntryPayload(
+                        id: "c1", provisional: false, filePath: "a.ts", side: .new, lineNumber: 3, lineText: "x", body: "hi")
+                ]))
+    }
+
+    @Test func decodeCollectedReviewCommentStateTreatsTheNoneSentinelAsNone() {
+        // `'__none__'` is an installed collector's own explicit "nothing pending" answer — the only
+        // case that should clear a stored snapshot. Mirrors `'__no_file__'` for the editor surface.
+        #expect(CodePaneBridge.decodeCollectedReviewCommentState("__none__") == .none)
+    }
+
+    @Test func decodeCollectedReviewCommentStateTreatsTheUninstalledSentinelAsNotReported() {
+        // Mirrors `decodeCollectedEditorStateTreatsTheUninstalledSentinelAsNotReported`: this must NOT
+        // be treated as "nothing pending", or a teardown flush racing a reactivate-then-hibernate cycle
+        // would wipe a real stored snapshot.
+        #expect(CodePaneBridge.decodeCollectedReviewCommentState("__uninstalled__") == .notReported)
+    }
+
+    @Test func decodeCollectedReviewCommentStateTreatsNilAsNotReported() {
+        // A nil result is what a genuine `evaluateJavaScript` error folds into (see
+        // `CodePaneScriptEvaluator`'s doc comment) — indistinguishable from "didn't answer", so it must
+        // leave the stored snapshot untouched rather than being read as "nothing pending".
+        #expect(CodePaneBridge.decodeCollectedReviewCommentState(nil) == .notReported)
+    }
+
+    @Test func decodeCollectedReviewCommentStateTreatsAMalformedStringAsNotReported() {
+        #expect(CodePaneBridge.decodeCollectedReviewCommentState("not json") == .notReported)
+    }
+
+    @Test func decodeCollectedReviewCommentStateTreatsANonStringResultAsNotReported() {
+        // Mirrors `decodeCollectedEditorStateTreatsANonStringResultAsNotReported`: anything other than
+        // a sentinel or a JSON array string is treated the same defensive way a malformed string is.
+        #expect(CodePaneBridge.decodeCollectedReviewCommentState(42) == .notReported)
     }
 }
 

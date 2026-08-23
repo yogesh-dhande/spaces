@@ -11,12 +11,12 @@ protocol CodePaneDiffSignatureStreamHandle: AnyObject, Sendable {
 
 extension SpacesDeviceWorkspaceDiffSignatureStreamClient: CodePaneDiffSignatureStreamHandle {}
 
-/// Seam over the two `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
+/// Seam over the `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
 /// staleness guards (page generation, diff-request token, diff-signature subscription generation)
-/// protect against races with hibernation and scope changes. `workspaceFileRead`/`workspaceFileWrite`
-/// call `SpacesDeviceClient` directly (see the controller) because they share the same `reply`
-/// plumbing without exercising any of those guards themselves — only diff fetch/subscribe do, so
-/// only those two are worth a test seam.
+/// protect against races with hibernation and scope changes, plus the review-comment CRUD/send
+/// calls (kept here too, rather than called directly like `workspaceFileRead`/`workspaceFileWrite`
+/// are, so `CodePaneContentControllerTests` can assert exactly which comment/args a dispatched RPC
+/// resolves to without a live device).
 protocol CodePaneDeviceGateway: Sendable {
     func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult
 
@@ -25,6 +25,19 @@ protocol CodePaneDeviceGateway: Sendable {
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
         onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneDiffSignatureStreamHandle
+
+    func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment]
+
+    func workspaceReviewCommentUpsert(
+        workspaceID: String, id: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String,
+        device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceReviewComment
+
+    func workspaceReviewCommentDelete(workspaceID: String, id: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse
+
+    func workspaceReviewCommentsSend(
+        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceAPIResponse
 }
 
 /// Forwards to `SpacesDeviceClient`'s real, network-performing static methods, off the caller's task
@@ -45,6 +58,38 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceDiffSignature(
                 workspaceID: workspaceID, refName: refName, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+        }.value
+    }
+
+    func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment] {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceReviewCommentList(workspaceID: workspaceID, device: device)
+        }.value
+    }
+
+    func workspaceReviewCommentUpsert(
+        workspaceID: String, id: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String,
+        device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceReviewComment {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceReviewCommentUpsert(
+                workspaceID: workspaceID, id: id, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body,
+                device: device)
+        }.value
+    }
+
+    func workspaceReviewCommentDelete(workspaceID: String, id: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceReviewCommentDelete(workspaceID: workspaceID, id: id, device: device)
+        }.value
+    }
+
+    func workspaceReviewCommentsSend(
+        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceReviewCommentsSend(
+                workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments, device: device)
         }.value
     }
 }

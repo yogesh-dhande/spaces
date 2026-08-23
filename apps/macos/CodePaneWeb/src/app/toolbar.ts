@@ -1,17 +1,19 @@
-import { CodePaneMode, DiffScope } from "../bridge/types";
+import { CodePaneAgentSummary, CodePaneMode, DiffScope } from "../bridge/types";
 import { DiffLayout } from "./state";
 
 /**
  * The code pane's toolbar: Variant A ("Toolbar") from the picked mockup.
  * One 30pt `.pane-hdr` strip. The mode toggle stays visible in both modes;
- * the scope and layout segmented controls apply only to Diff mode and are
- * omitted in Editor mode. The trailing region is reserved for Phase 4's
- * assigned-agent dropdown and "Send batch" button — it renders nothing here.
+ * the scope and layout segmented controls, and the assigned-agent picker
+ * plus "Send batch" button, apply only to Diff mode and are omitted in
+ * Editor mode (comments are diff-mode only — see reviewComments.ts).
  */
 export interface ToolbarCallbacks {
   onModeChange(mode: CodePaneMode): void;
   onScopeChange(scope: DiffScope): void;
   onLayoutChange(layout: DiffLayout): void;
+  onAgentSelect(id: string): void;
+  onSendBatch(): void;
 }
 
 export interface ToolbarState {
@@ -23,6 +25,13 @@ export interface ToolbarState {
    *  scope outright when the workspace has no base branch configured, so leaving the option enabled
    *  would offer a guaranteed-to-fail choice. */
   baseBranch: string | undefined;
+  /** Agents running in this workspace, for the assigned-agent picker. */
+  agents: CodePaneAgentSummary[];
+  /** `undefined` when zero agents run, or when more than one runs and none has been picked yet
+   *  (see `reviewComments.ts`'s `selectDefaultAgentId`). */
+  selectedAgentId: string | undefined;
+  /** Count of drafts with non-empty body — what "Send batch · n" sends and shows. */
+  draftCount: number;
 }
 
 function scopeSegmentKind(scope: DiffScope): "uncommitted" | "baseBranch" | "ref" {
@@ -52,6 +61,65 @@ function segButton(label: string, isOn: boolean, onClick: () => void, options?: 
 }
 
 /**
+ * The `.agent-slot` region's content: exactly one agent is a static label (no picking to do); more
+ * than one is a `<select>`, defaulting to a disabled placeholder option until a pick is made (a
+ * native `<select>` otherwise silently shows its first real option as "selected" without the
+ * controller's own state agreeing one was actually chosen). "Send batch · n" is disabled, with a
+ * `title` explaining why, whenever there is no agent to send to or nothing to send — the same rule
+ * `commentsController.ts` applies to each card's own "Send to <label>" button.
+ */
+function buildAgentSlot(agentSlot: HTMLElement, state: ToolbarState, callbacks: ToolbarCallbacks): void {
+  if (state.agents.length === 1) {
+    const label = document.createElement("span");
+    label.className = "agent-label";
+    label.textContent = state.agents[0]!.label;
+    agentSlot.appendChild(label);
+  } else if (state.agents.length > 1) {
+    const select = document.createElement("select");
+    select.className = "agent-select";
+    if (state.selectedAgentId === undefined) {
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Select an agent…";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      select.appendChild(placeholder);
+    }
+    for (const agent of state.agents) {
+      const opt = document.createElement("option");
+      opt.value = agent.id;
+      opt.textContent = agent.label;
+      opt.selected = agent.id === state.selectedAgentId;
+      select.appendChild(opt);
+    }
+    select.addEventListener("change", () => callbacks.onAgentSelect(select.value));
+    agentSlot.appendChild(select);
+  }
+
+  const sendBatchBtn = document.createElement("button");
+  sendBatchBtn.type = "button";
+  sendBatchBtn.className = "btn primary";
+  sendBatchBtn.textContent = `Send batch · ${state.draftCount}`;
+  const disabledReason =
+    state.agents.length === 0
+      ? "No agent is running in this workspace."
+      : state.selectedAgentId === undefined
+        ? "Pick an agent to send to."
+        : state.draftCount === 0
+          ? "No comments to send."
+          : undefined;
+  if (disabledReason !== undefined) {
+    sendBatchBtn.disabled = true;
+    sendBatchBtn.title = disabledReason;
+  }
+  sendBatchBtn.addEventListener("click", () => {
+    if (sendBatchBtn.disabled) return;
+    callbacks.onSendBatch();
+  });
+  agentSlot.appendChild(sendBatchBtn);
+}
+
+/**
  * Renders the toolbar into `container` and returns an `update` function to
  * re-render when state changes (mode/scope/layout can all change from
  * outside the toolbar too, e.g. a future keyboard shortcut).
@@ -66,8 +134,21 @@ export function renderToolbar(
   container.appendChild(el);
 
   let refInputOpen = false;
+  /** round-14 Fix 2: `update()` rebuilds the toolbar wholesale on every agent-status/draft-count
+   *  change (which arrive mid-typing), and replacing a focused input fires no `blur` event — these
+   *  two closure vars are what carries the user's in-progress ref text and caret position across
+   *  that rebuild, mirroring `commentsController.ts`'s `liveBodies` + `pendingFocus`/
+   *  `captureFocusedCard` pattern for the ref input specifically. */
+  let pendingRefText: string | undefined;
 
   function build(state: ToolbarState): void {
+    // Captured before the DOM is wiped below: a focused input loses focus with no `blur` event once
+    // `replaceChildren()` detaches it, so this is the only chance to notice it was mid-typing.
+    const previousInput = el.querySelector("input");
+    const wasRefInputFocused = previousInput !== null && previousInput === document.activeElement;
+    const priorSelectionStart = wasRefInputFocused ? previousInput.selectionStart : null;
+    const priorSelectionEnd = wasRefInputFocused ? previousInput.selectionEnd : null;
+
     el.replaceChildren();
 
     // Diff | Editor — visible in both modes.
@@ -96,8 +177,16 @@ export function renderToolbar(
       scopeSeg.appendChild(
         segButton("vs ref…", kind === "ref", () => {
           refInputOpen = true;
+          // round-14 Fix 2: clear any leftover text from a previous open — opening the input fresh
+          // should never seed it with stale in-progress text from an unrelated prior session.
+          pendingRefText = undefined;
           build(state);
-          refInput.querySelector("input")?.focus();
+          // Not `refInput.querySelector(...)`: that binding is this callback's own closure, captured
+          // at THIS build() invocation — build(state) above just replaced every child of `el`
+          // (including that exact node) with a fresh tree, so the closed-over `refInput` is already
+          // detached. `el` itself is stable across rebuilds, and build() only ever creates one
+          // `<input>`, so querying `el` fresh is the only way to reach the live, now-attached one.
+          el.querySelector("input")?.focus();
         }),
       );
       el.appendChild(scopeSeg);
@@ -107,21 +196,51 @@ export function renderToolbar(
       const input = document.createElement("input");
       input.type = "text";
       input.placeholder = "branch or SHA";
-      input.value = state.scope.kind === "ref" ? state.scope.refName : "";
+      // round-14 Fix 2: prefer any in-progress (not-yet-committed) text over the scope's own
+      // `refName` — see `pendingRefText`'s doc comment. Without this, every `update()` call while
+      // the user is mid-typing (an agent-status or draft-count change, unrelated to this input)
+      // would wipe whatever branch name they were typing.
+      input.value = pendingRefText ?? (state.scope.kind === "ref" ? state.scope.refName : "");
+      input.addEventListener("input", () => {
+        pendingRefText = input.value;
+      });
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           const refName = input.value.trim();
           if (refName.length > 0) {
             refInputOpen = false;
+            pendingRefText = undefined;
             callbacks.onScopeChange({ kind: "ref", refName });
           }
         } else if (event.key === "Escape") {
           refInputOpen = false;
+          pendingRefText = undefined;
           build(state);
         }
       });
       refInput.appendChild(input);
       el.appendChild(refInput);
+
+      if (wasRefInputFocused) {
+        // Restore focus/caret on the freshly created input — see `pendingRefText`'s doc comment for
+        // why a rebuild would otherwise silently kick the user out of this field. Tried synchronously
+        // first; `commentsController.ts`'s `renderCard` needs a deferred tick for the equivalent case
+        // because `@pierre/diffs` inserts its returned card DOM asynchronously relative to this
+        // call — this input is appended synchronously above, so the immediate attempt is expected to
+        // stick, but the deferred fallback below covers it if some environment's DOM timing differs.
+        input.focus();
+        if (priorSelectionStart !== null && priorSelectionEnd !== null) {
+          input.setSelectionRange(priorSelectionStart, priorSelectionEnd);
+        }
+        if (document.activeElement !== input) {
+          setTimeout(() => {
+            input.focus();
+            if (priorSelectionStart !== null && priorSelectionEnd !== null) {
+              input.setSelectionRange(priorSelectionStart, priorSelectionEnd);
+            }
+          }, 0);
+        }
+      }
 
       const layoutSeg = document.createElement("span");
       layoutSeg.className = "seg";
@@ -136,9 +255,11 @@ export function renderToolbar(
     spacer.className = "sp";
     el.appendChild(spacer);
 
-    // Reserved for Phase 4 (assigned-agent dropdown + "Send batch · n").
     const agentSlot = document.createElement("span");
     agentSlot.className = "agent-slot";
+    if (state.mode === "diff") {
+      buildAgentSlot(agentSlot, state, callbacks);
+    }
     el.appendChild(agentSlot);
   }
 

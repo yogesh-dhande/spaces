@@ -1,4 +1,5 @@
 import {
+  FIXTURE_AGENTS,
   FIXTURE_ALL_PATHS,
   FIXTURE_FILE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
@@ -6,12 +7,16 @@ import {
   fixtureHash,
 } from "./fixtures";
 import {
+  CodePaneAgentsChangedEvent,
   CodePaneEditorState,
   CodePaneMode,
   DiffScope,
   DiffSignatureListener,
+  ReviewCommentSendEntry,
+  ReviewCommentUpsertInput,
   SpacesBridge,
   SpacesBridgeError,
+  SpacesReviewComment,
   Unsubscribe,
   WorkspaceDiffResult,
   WorkspaceFileListResult,
@@ -22,6 +27,9 @@ import {
 
 const INIT_EVENT = "spaces:init";
 const DIFF_SIGNATURE_EVENT = "spaces:diffSignature";
+const AGENTS_EVENT = "spaces:agents";
+
+let nextCommentId = 0;
 
 /** Small fixed delay so the harness's loading states are visible, without making manual testing feel sluggish. */
 const MOCK_LATENCY_MS = 120;
@@ -47,6 +55,7 @@ export class MockSpacesBridge implements SpacesBridge {
   private readonly files = new Map<string, { content: string; sha256: string }>(
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
   );
+  private readonly comments = new Map<string, SpacesReviewComment>();
 
   notifyReady(): void {
     queueMicrotask(() => {
@@ -63,6 +72,20 @@ export class MockSpacesBridge implements SpacesBridge {
     }
     window.dispatchEvent(new CustomEvent(DIFF_SIGNATURE_EVENT, { detail: { scopeSignature } }));
   }
+
+  /** Dev-harness-only control, not part of `SpacesBridge`: cycles the running-agent set (two agents
+   *  -> one -> none -> two) and emits `spaces:agents`, so the assigned-agent dropdown's manual-pick,
+   *  auto-default, and no-agent-disables-sending states are all exercisable without a real daemon. */
+  simulateAgentsChange(): void {
+    const cycle = [FIXTURE_AGENTS, FIXTURE_AGENTS.slice(0, 1), []];
+    const currentIndex = cycle.findIndex((set) => set.length === this.lastAgentsLength);
+    const next = cycle[(currentIndex + 1) % cycle.length]!;
+    this.lastAgentsLength = next.length;
+    const detail: CodePaneAgentsChangedEvent = { agents: next };
+    window.dispatchEvent(new CustomEvent(AGENTS_EVENT, { detail }));
+  }
+
+  private lastAgentsLength = FIXTURE_AGENTS.length;
 
   async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {
     void scopeKey(scope);
@@ -104,6 +127,77 @@ export class MockSpacesBridge implements SpacesBridge {
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  async reviewCommentList(): Promise<SpacesReviewComment[]> {
+    const drafts = [...this.comments.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return delay(drafts);
+  }
+
+  async reviewCommentUpsert(input: ReviewCommentUpsertInput): Promise<SpacesReviewComment> {
+    if (input.filePath.length === 0 || input.side === undefined || input.lineNumber === undefined) {
+      throw new SpacesBridgeError("invalidArgument", "filePath, side, and lineNumber are required");
+    }
+    const now = new Date().toISOString();
+    if (input.id !== undefined) {
+      const existing = this.comments.get(input.id);
+      if (!existing) {
+        throw new SpacesBridgeError("notFound", `No such draft comment: ${input.id}`);
+      }
+      const updated: SpacesReviewComment = {
+        ...existing,
+        filePath: input.filePath,
+        side: input.side,
+        lineNumber: input.lineNumber,
+        lineText: input.lineText,
+        body: input.body,
+        // Mirrors the daemon's upsert: every update bumps `revision`, the send endpoint's concurrency
+        // token (see `SpacesReviewComment.revision`'s doc comment) — a fresh draft below starts at `0`.
+        revision: existing.revision + 1,
+      };
+      this.comments.set(updated.id, updated);
+      return delay(updated);
+    }
+    const created: SpacesReviewComment = {
+      id: `mock-comment-${++nextCommentId}`,
+      filePath: input.filePath,
+      side: input.side,
+      lineNumber: input.lineNumber,
+      lineText: input.lineText,
+      body: input.body,
+      createdAt: now,
+      revision: 0,
+    };
+    this.comments.set(created.id, created);
+    return delay(created);
+  }
+
+  async reviewCommentDelete(id: string): Promise<void> {
+    if (!this.comments.delete(id)) {
+      throw new SpacesBridgeError("notFound", `No such draft comment: ${id}`);
+    }
+    await delay(undefined);
+  }
+
+  async reviewCommentsSend(sessionId: string, _text: string, comments: ReviewCommentSendEntry[]): Promise<void> {
+    void sessionId; // the mock has no terminal-session registry to validate a session against
+    if (comments.length === 0) {
+      throw new SpacesBridgeError("invalidArgument", "comments must be non-empty");
+    }
+    const missing = comments.find((entry) => !this.comments.has(entry.id));
+    if (missing !== undefined) {
+      throw new SpacesBridgeError("notFound", `No such draft comment: ${missing.id}`);
+    }
+    // Mirrors the daemon's version-echo check: a stale `revision` means this client's view of the
+    // draft is behind another edit, so reject before touching anything rather than sending stale text.
+    const stale = comments.find((entry) => this.comments.get(entry.id)!.revision !== entry.revision);
+    if (stale !== undefined) {
+      throw new SpacesBridgeError("conflict", `Comment '${stale.id}' changed since it was last read.`);
+    }
+    // Both-or-neither: validated above before any mutation, so a rejection never leaves a partial
+    // send applied.
+    for (const entry of comments) this.comments.delete(entry.id);
+    await delay(undefined);
   }
 
   // The dev harness and unit tests never hibernate a real WKWebView, so there is nothing for the

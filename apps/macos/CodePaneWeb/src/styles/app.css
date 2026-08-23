@@ -35,11 +35,33 @@
   flex: 1;
 }
 
-/* Reserved for Phase 4 (assigned-agent dropdown + "Send batch" button).
-   Intentionally empty in Phase 3. */
+/* Holds the assigned-agent picker (static label or <select>, depending on how many agents are
+   running) and the "Send batch" button, visible only in Diff mode — see toolbar.ts's
+   buildAgentSlot. */
 .pane-hdr .agent-slot {
   flex: 0 0 auto;
   min-width: 1px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-label {
+  font-size: 11px;
+  color: var(--fg3);
+  white-space: nowrap;
+}
+
+.agent-select {
+  appearance: none;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg2);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 7px;
 }
 
 .seg {
@@ -250,6 +272,10 @@
   font-size: 13px;
 }
 
+.empty-state.error {
+  color: var(--orange);
+}
+
 /* Editor mode */
 .editor-open-bar {
   flex: 0 0 auto;
@@ -340,4 +366,130 @@
 .banner.conflict {
   border-color: var(--orange);
   color: var(--orange);
+}
+
+.banner.error {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+
+/* Diff-mode comment surface: an inline card rendered under its annotated line
+   (`@pierre/diffs`' renderAnnotation) plus the collapsible batch tray docked at the bottom of
+   `.diff-area`. See commentsController.ts. */
+.comment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.comment-card.outdated {
+  border-color: var(--orange);
+}
+
+.comment-card-body {
+  resize: vertical;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.comment-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.comment-tray {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--surface2);
+  max-height: 40%;
+}
+
+.comment-tray-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  cursor: default;
+}
+
+.comment-tray-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+
+.comment-tray-count {
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+.comment-tray-caret {
+  font-size: 10px;
+  color: var(--fg3);
+}
+
+.comment-tray-list {
+  flex-direction: column;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.comment-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--fg2);
+}
+
+.comment-tray-row:hover {
+  background: var(--row-hover);
+}
+
+.comment-tray-loc {
+  flex: 0 0 auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--fg3);
+}
+
+.comment-tray-excerpt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comment-tray-remove {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg3);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.comment-tray-remove:hover {
+  color: var(--fg);
 }

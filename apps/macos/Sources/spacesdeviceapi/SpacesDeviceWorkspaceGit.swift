@@ -121,14 +121,26 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// diff-signature poll queue. 30s is far above any healthy repo operation.
     private static let gitCommandTimeout: TimeInterval = 30
 
-    /// Upper bound on the wall-clock time `buildDiff` spends fetching per-file patches, measured from the
-    /// moment it starts. Each file spawns its own git process, and that per-file spawn's own timeout is
-    /// itself shrunk to whatever remains of this deadline (via `remainingTimeout`, never a flat
-    /// `gitCommandTimeout`) — otherwise a file whose git only starts near the end of the budget would still
-    /// get a fresh full timeout, and total runtime would scale with file count with no ceiling of its own.
-    /// Kept under the client's ~60s request timeout so the daemon always finishes and answers — with the
-    /// same truncated shape the per-file/total byte caps already use for whatever files did not fit — rather
-    /// than continuing to spawn git for a request the client has already abandoned while still holding the
+    /// Upper bound on the wall-clock time a `workspaceDiff` request spends validating and building its
+    /// diff, combined. round-15: this is a REQUEST-WIDE budget, not a `buildDiff`-only one — it is measured
+    /// from `deadlineStart`, a clock the caller (`SpacesDeviceAPIServer.handleWorkspaceDiffRequest`) starts
+    /// BEFORE repository/ref validation even runs, and threads through both `assertRefIsResolvable` and
+    /// `buildDiff` unchanged. Before this, `assertRefIsResolvable` and `buildDiff` each started their own
+    /// fresh `Date()`, so validation and patch-building silently stacked into a COMBINED wall-clock time
+    /// that could exceed this deadline several times over (repo probe + ref validation + a full fresh
+    /// `buildDiff` budget) while the client had already abandoned the request at its own ~60s timeout —
+    /// holding the workspace's serial git queue for work nobody would read the answer to, with the client's
+    /// retry then queued behind it. Sharing one clock across all three steps closes that gap: whatever
+    /// wall-clock time repo/ref validation already spent is deducted from what `buildDiff` gets, so the sum
+    /// of a request's git work can never outlive this single window.
+    ///
+    /// Each file spawns its own git process, and that per-file spawn's own timeout is itself shrunk to
+    /// whatever remains of this deadline (via `remainingTimeout`, never a flat `gitCommandTimeout`) —
+    /// otherwise a file whose git only starts near the end of the budget would still get a fresh full
+    /// timeout, and total runtime would scale with file count with no ceiling of its own. Kept under the
+    /// client's ~60s request timeout so the daemon always finishes and answers — with the same truncated
+    /// shape the per-file/total byte caps already use for whatever files did not fit — rather than
+    /// continuing to spawn git for a request the client has already abandoned while still holding the
     /// workspace's serial queue.
     private static let diffBuildDeadline: TimeInterval = 45
 
@@ -179,6 +191,40 @@ enum SpacesDeviceWorkspaceDiffEngine {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 400,
                 userInfo: [NSLocalizedDescriptionKey: "Workspace directory is not a git repository."])
+        }
+    }
+
+    /// Verifies a caller-supplied ref resolves to a real commit before `buildDiff` spends the rest of its
+    /// budget on it. `buildDiff`'s own ref-resolution step (`git merge-base <ref> HEAD`) throws the exact
+    /// same `.gitCommandFailed` shape for "no such ref" as it does for a transient git failure (a wedged
+    /// process, a timeout) — so without this separate, cheap probe up front, the wire-level `.internalError`
+    /// mapping (`SpacesDeviceAPIServer.errorCode(for:)`) cannot tell a caller's typo from the daemon's own
+    /// trouble, and the client's retry classification (`root.ts`'s `refreshDiff`) depends on exactly that
+    /// distinction: a bad ref must never be retried (it will fail identically forever), a transient failure
+    /// should be. `^{commit}` requires the ref to resolve to (or dereference to) a commit object, matching
+    /// what `merge-base` itself needs of it; `--quiet` suppresses git's own stderr chatter for a bad ref,
+    /// since this call's only signal to its caller is throw-vs-not-throw.
+    ///
+    /// round-14 Fix 1: exit code, not throw-vs-not-throw, is the signal that actually distinguishes "bad ref"
+    /// from "daemon trouble" here. `git rev-parse --verify --quiet <ref>^{commit}` exits 0 with the resolved
+    /// SHA on stdout when the ref resolves, and exits 1 with EMPTY stdout when it does not — that is exactly
+    /// what `--quiet` is for, a clean two-way signal instead of stderr text. Passing `allowedExitCodes: [0,
+    /// 1]` and letting this call throw normally (no `try?`) means exit 1 with empty output is the ONLY
+    /// outcome read as a bad ref below; every actually-thrown failure — a timeout, an exhausted request-wide
+    /// deadline (`remainingTimeout` itself throwing before the process even starts), or any other process
+    /// failure (an exit code outside `{0, 1}`, e.g. a corrupt repository) — propagates OUT of this function
+    /// uncaught. The server's normal error mapping then turns that into `.internalError`, which the client's
+    /// retry classification already retries with backoff — that is the whole point of not catching it here:
+    /// reclassifying a thrown failure back into this function's own 400 would silently re-fold transient
+    /// trouble into a permanent rejection, breaking the exact distinction this function exists to preserve.
+    static func assertRefIsResolvable(workspaceDir: String, refName: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws {
+        let resolved = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(refName)^{commit}"],
+            timeout: try remainingTimeout(start: deadlineStart), allowedExitCodes: [0, 1])
+        guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "Ref '\(refName)' could not be resolved in this workspace."])
         }
     }
 
@@ -308,8 +354,18 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// individually with a per-invocation byte cap, so an oversized file's patch is never materialized in
     /// the first place; once the running total across all files reaches the total cap, remaining files are
     /// reported `truncated = true` without spawning `git` for them at all.
-    static func buildDiff(workspaceDir: String, refName: String?, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceDiffResult {
-        let start = Date()
+    ///
+    /// round-15: `deadlineStart` defaults to `Date()` only so the ~30 existing call sites in
+    /// `SpacesDeviceWorkspaceGitTests.swift` (written before this parameter existed, with no deadline
+    /// concept of their own) keep compiling unchanged and keep measuring the deadline from their own call,
+    /// exactly as before. `handleWorkspaceDiffRequest`, the one production call site, MUST NOT rely on this
+    /// default — it passes its own shared `deadlineStart` explicitly, so this request-wide budget also
+    /// covers the repo/ref validation that ran before `buildDiff` was ever called (see `diffBuildDeadline`'s
+    /// doc comment).
+    static func buildDiff(workspaceDir: String, refName: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()) throws
+        -> SpacesDeviceWorkspaceDiffResult
+    {
+        let start = deadlineStart
         let signature = try scopeSignature(workspaceDir: workspaceDir, refName: refName, gitClient: gitClient, deadlineStart: start)
 
         let compareRef: String
@@ -469,7 +525,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 files.append(SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true))
                 continue
             }
-            let file = try buildFile(for: plan, workspaceDir: workspaceDir, gitClient: gitClient, timeout: fileTimeout)
+            let file = try buildFile(for: plan, workspaceDir: workspaceDir, gitClient: gitClient, timeout: fileTimeout, deadlineStart: start)
             if let patch = file.patch {
                 let patchBytes = patch.utf8.count
                 guard totalPatchBytes + patchBytes <= totalPatchByteCap else {
@@ -491,7 +547,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// which resolves it via `remainingTimeout` before calling in), never a flat `gitCommandTimeout` — a
     /// file whose git only starts near the end of `diffBuildDeadline` must not get a fresh full timeout, or
     /// the request can run well past the client's own abandonment horizon while still holding the
-    /// workspace's serial queue.
+    /// workspace's serial queue. `timeout` only budgets the FIRST git command a file builder issues: a
+    /// builder that spawns a second command (`buildCoalescedDeletedButUntrackedFile`'s `update-index` +
+    /// `diff` pair) re-derives that second command's own remaining budget from `deadlineStart` rather than
+    /// reusing `timeout` as-is, so a slow-but-successful first command cannot hand the second command a
+    /// stale budget as if no time had passed.
     ///
     /// `runGitAndCapture`'s `maxOutputBytes: perFilePatchByteCap + 1` caps RAW captured bytes, but every
     /// engine call site decodes that raw output with a lossy `String(decoding:as:)` (see the doc comment on
@@ -513,11 +573,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// without a message-string heuristic. Rather than guess, this keeps the pre-existing behavior for that
     /// case (propagate as a whole-request failure) and only fixes the timeout *value* passed in above; only
     /// the byte-cap overrun below degrades to a truncated file, exactly as before.
-    private static func buildFile(for plan: DiffFilePlan, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval) throws
-        -> SpacesDeviceWorkspaceDiffFile
-    {
+    private static func buildFile(
+        for plan: DiffFilePlan, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval, deadlineStart: Date
+    ) throws -> SpacesDeviceWorkspaceDiffFile {
         switch plan.source {
         case .tracked(let diffArguments):
+            // Exactly one git command, so there is nothing to re-derive a second budget from —
+            // `deadlineStart` is threaded through the switch uniformly but unused on this branch.
             do {
                 let patchText = try gitClient.runGitAndCapture(diffArguments, timeout: timeout, maxOutputBytes: perFilePatchByteCap + 1)
                 let metadata = parsePatchMetadata(patchText)
@@ -531,10 +593,12 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 return SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true)
             }
         case .untracked:
+            // Also exactly one git command (`diff --no-index`) — no second budget to re-derive here either.
             return try buildUntrackedFile(path: plan.path, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout)
         case .deletedButUntrackedInWorktree(let compareRef):
             return try buildCoalescedDeletedButUntrackedFile(
-                path: plan.path, compareRef: compareRef, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout)
+                path: plan.path, compareRef: compareRef, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout,
+                deadlineStart: deadlineStart)
         }
     }
 
@@ -560,8 +624,18 @@ enum SpacesDeviceWorkspaceDiffEngine {
     ///
     /// The scratch index is a bare per-call temp file (never a real index git would otherwise recognize),
     /// created empty by the first `update-index --add` and removed in `defer` regardless of outcome.
-    private static func buildCoalescedDeletedButUntrackedFile(
-        path: String, compareRef: String, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval
+    ///
+    /// This is the one file builder that spawns two git commands (`update-index --add`, then `diff` against
+    /// the scratch index), so it is the one builder that needs its own `deadlineStart` in addition to
+    /// `timeout`: `timeout` (the per-file loop's own `remainingTimeout` snapshot) budgets only the first
+    /// command, `update-index --add`, unchanged from before this parameter existed. The second command
+    /// re-derives its own remaining budget from `deadlineStart` immediately before it runs, so a
+    /// slow-but-successful `update-index` cannot hand `diff` the same stale `timeout` value as if the first
+    /// command had taken no time. Internal (not `private`) access, like `buildDiff` and
+    /// `assertRefIsResolvable` in this same type, exists solely so `WorkspaceGitServerTests.swift` can call
+    /// this directly with a manufactured `deadlineStart`.
+    static func buildCoalescedDeletedButUntrackedFile(
+        path: String, compareRef: String, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval, deadlineStart: Date
     ) throws -> SpacesDeviceWorkspaceDiffFile {
         // Mirrors `buildUntrackedFile`'s pre-stat gate (lstat via `attributesOfItem`, never `open`), run
         // BEFORE any git invocation — this builder has none of that guard otherwise, and `update-index --add`
@@ -629,6 +703,15 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
         _ = try gitClient.runGitAndCapture(
             ["-C", workspaceDir, "update-index", "--add", "--", path], timeout: timeout, environmentOverrides: scratchIndexEnvironment)
+        // The first command above just spent an unknown share of `timeout`'s already-shrunk budget, so this
+        // second command must not reuse that same (now stale) value as though no time had passed — it
+        // re-derives its own remaining budget from the shared `deadlineStart` instead. See the per-file
+        // loop's identical rule above `buildDiff`'s per-file loop (this file, ~line 514-522): expiry here
+        // maps to the same truncated shape every other cap in this engine uses, never a thrown request-level
+        // error, so `try?` deliberately discards the thrown case rather than propagating it.
+        guard let diffTimeout = try? remainingTimeout(start: deadlineStart) else {
+            return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
+        }
         do {
             // `--relative`: see `buildDiff`'s comment on the same flag — keeps this patch's own headers
             // workspace-relative for a subtree-rooted workspace, a no-op otherwise. `path` (from `plan.path`,
@@ -639,7 +722,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                     "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
                     compareRef, "--", ":(literal)\(path)",
                 ],
-                timeout: timeout, maxOutputBytes: perFilePatchByteCap + 1, environmentOverrides: scratchIndexEnvironment)
+                timeout: diffTimeout, maxOutputBytes: perFilePatchByteCap + 1, environmentOverrides: scratchIndexEnvironment)
             let metadata = parsePatchMetadata(patch)
             if exceedsPerFilePatchByteCapAfterDecode(patch, isBinary: metadata.isBinary) {
                 return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)

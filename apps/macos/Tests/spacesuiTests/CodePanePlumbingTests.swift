@@ -51,8 +51,14 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// One local device with a workspace whose overview retains `sessionID`'s terminal session —
-        /// enough to let a persisted terminal pane restore without being pruned.
-        private func section(deviceID: String, sessionID: String, workspaceID: String = "workspace-1") -> AppKitController.DeviceSection {
+        /// enough to let a persisted terminal pane restore without being pruned. `loadState` defaults to
+        /// `.loaded`; passing `.offline` builds a section for the "device went unreachable" tests without
+        /// disturbing the merged-sidebar row (an offline device keeps its rows, so `deviceID(forWorkspaceID:)`
+        /// still resolves).
+        private func section(
+            deviceID: String, sessionID: String, workspaceID: String = "workspace-1",
+            loadState: AppKitController.SidebarDeviceLoadState = .loaded
+        ) -> AppKitController.DeviceSection {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                 dir: "/tmp/\(workspaceID)", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [])
@@ -69,7 +75,7 @@ extension ProcessProfileEnvironmentSuites {
                 ], retainedTerminalSessionIDs: [sessionID])
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
             return AppKitController.DeviceSection(
-                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
+                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: loadState, device: nil, projects: mapped.projects,
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
@@ -252,6 +258,38 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == [paneID],
                 "the second call focuses the existing code pane instead of opening a second one")
+        }
+
+        /// Fix 6 (P2 review): an already-open code pane stays focusable while its device is offline,
+        /// mirroring the terminal-pane parity rule (`canOpenOrFocusTerminalPane`) — focusing a pane that
+        /// already exists is client-side, so an unreachable device never withholds it; only *creating* a
+        /// fresh one is refused (`PanelCoordinator.mayCreateCodePane`, gated on `.offline`, not merely "no
+        /// section yet"). `restoreLayoutIfNeeded` installs the persisted pane's controller unconditionally
+        /// (a code pane has no daemon-side session to reconcile), so restoring it is unaffected by the
+        /// device's load state, and `openOrFocusCodePane`'s existing-placement branch focuses it without
+        /// ever reaching the creation gate — this is deliberately not exercised through the *refused*
+        /// creation branch, since that branch's `host.showWorkspaceDeviceUnavailableError` presents a real
+        /// `NSAlert.runModal()` that would hang the suite (see `PanelReplacementHoldTests.swift`'s
+        /// identical caution); `AppKitControllerDeviceParityTests.aFreshCodePaneIsRefusedForADeviceThatCannotAct`
+        /// covers that refusal's pure decision logic instead.
+        @Test func openOrFocusCodePaneFocusesAnExistingPaneEvenWhileItsDeviceIsOffline() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1", loadState: .offline("Connection refused"))]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+
+            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
+
+            #expect(focused, "the existing pane focuses even though its device cannot service a fresh creation")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code"],
+                "no second pane is installed alongside the restored one")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "the restored pane's controller is live")
         }
 
         /// A code pane already open in a global panel window is the same pane `openOrFocusCodePane` must

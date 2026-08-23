@@ -72,6 +72,68 @@ describe("RealSpacesBridge", () => {
     bridge.notifyReady();
     expect(postMessage).toHaveBeenCalledWith({ method: "ready" });
   });
+
+  it("posts reviewCommentList with an id and no params, and resolves with the reply", async () => {
+    const bridge = createRealBridge();
+    const call = bridge.reviewCommentList();
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    expect(msg.method).toBe("reviewCommentList");
+    expect(msg.params).toEqual({});
+
+    const comment = {
+      id: "c1",
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "x",
+      body: "y",
+      createdAt: "t1",
+      revision: 0,
+    };
+    window.__spacesBridge!.resolve(msg.id, [comment]);
+    await expect(call).resolves.toEqual([comment]);
+  });
+
+  it("posts reviewCommentUpsert with the exact input as params", async () => {
+    const bridge = createRealBridge();
+    const input = { filePath: "src/foo.ts", side: "new" as const, lineNumber: 3, lineText: "x", body: "" };
+    bridge.reviewCommentUpsert(input);
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    expect(msg.method).toBe("reviewCommentUpsert");
+    expect(msg.params).toEqual(input);
+  });
+
+  it("posts reviewCommentDelete with { id }", async () => {
+    const bridge = createRealBridge();
+    const call = bridge.reviewCommentDelete("c1");
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    expect(msg.method).toBe("reviewCommentDelete");
+    expect(msg.params).toEqual({ id: "c1" });
+    window.__spacesBridge!.resolve(msg.id, { ok: true });
+    await expect(call).resolves.toBeUndefined();
+  });
+
+  it("posts reviewCommentsSend with { sessionId, text, comments }", async () => {
+    const bridge = createRealBridge();
+    const comments = [
+      { id: "c1", revision: 0 },
+      { id: "c2", revision: 2 },
+    ];
+    const call = bridge.reviewCommentsSend("s1", "Code review comments:\n\n...", comments);
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    expect(msg.method).toBe("reviewCommentsSend");
+    expect(msg.params).toEqual({ sessionId: "s1", text: "Code review comments:\n\n...", comments });
+    window.__spacesBridge!.resolve(msg.id, { ok: true });
+    await expect(call).resolves.toBeUndefined();
+  });
+
+  it("rejects reviewCommentsSend with the reported error, e.g. an unrunning session", async () => {
+    const bridge = createRealBridge();
+    const call = bridge.reviewCommentsSend("s1", "text", [{ id: "c1", revision: 0 }]);
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    window.__spacesBridge!.reject(msg.id, { code: "invalidArgument", message: "session s1 is not running" });
+    await expect(call).rejects.toMatchObject({ code: "invalidArgument", message: "session s1 is not running" });
+  });
 });
 
 describe("MockSpacesBridge", () => {
@@ -127,5 +189,136 @@ describe("MockSpacesBridge", () => {
     expect(b).toHaveBeenCalledTimes(2);
     const secondSignature = (b.mock.calls[1]![0] as { scopeSignature: string }).scopeSignature;
     expect(secondSignature).not.toBe(firstSignature); // each change carries a distinct signature
+  });
+
+  it("reviewCommentUpsert creates a draft (no id) and reviewCommentList returns it", async () => {
+    const bridge = createMockBridge();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "const x = 1;",
+      body: "",
+    });
+    expect(created.id).toEqual(expect.any(String));
+    expect(created.body).toBe("");
+
+    const drafts = await bridge.reviewCommentList();
+    expect(drafts).toEqual([created]);
+  });
+
+  it("reviewCommentUpsert with an id updates the existing draft in place", async () => {
+    const bridge = createMockBridge();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "const x = 1;",
+      body: "",
+    });
+    const updated = await bridge.reviewCommentUpsert({ ...created, body: "Why?" });
+    expect(updated.id).toBe(created.id);
+    expect(updated.body).toBe("Why?");
+
+    const drafts = await bridge.reviewCommentList();
+    expect(drafts).toEqual([updated]);
+  });
+
+  it("reviewCommentUpsert rejects notFound for an id with no matching draft", async () => {
+    const bridge = createMockBridge();
+    await expect(
+      bridge.reviewCommentUpsert({
+        id: "does-not-exist",
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 3,
+        lineText: "x",
+        body: "y",
+      }),
+    ).rejects.toMatchObject({ code: "notFound" });
+  });
+
+  it("reviewCommentDelete removes a draft; a second delete rejects notFound", async () => {
+    const bridge = createMockBridge();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "x",
+      body: "y",
+    });
+    await bridge.reviewCommentDelete(created.id);
+    await expect(bridge.reviewCommentList()).resolves.toEqual([]);
+    await expect(bridge.reviewCommentDelete(created.id)).rejects.toMatchObject({ code: "notFound" });
+  });
+
+  it("reviewCommentsSend rejects invalidArgument for an empty comments list", async () => {
+    const bridge = createMockBridge();
+    await expect(bridge.reviewCommentsSend("s1", "text", [])).rejects.toMatchObject({ code: "invalidArgument" });
+  });
+
+  it("reviewCommentsSend is atomic: a rejection for one unknown id leaves every named draft untouched", async () => {
+    const bridge = createMockBridge();
+    const c1 = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "x",
+      body: "keep me",
+    });
+
+    await expect(
+      bridge.reviewCommentsSend("s1", "text", [
+        { id: c1.id, revision: c1.revision },
+        { id: "unknown-id", revision: 0 },
+      ]),
+    ).rejects.toMatchObject({ code: "notFound" });
+
+    // Both-or-neither: c1 must still be a draft, not silently removed by the partial attempt.
+    const drafts = await bridge.reviewCommentList();
+    expect(drafts).toEqual([c1]);
+  });
+
+  it("reviewCommentsSend rejects conflict for a stale revision and leaves the draft untouched", async () => {
+    const bridge = createMockBridge();
+    const c1 = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "x",
+      body: "keep me",
+    });
+
+    await expect(
+      bridge.reviewCommentsSend("s1", "text", [{ id: c1.id, revision: c1.revision + 1 }]),
+    ).rejects.toMatchObject({ code: "conflict" });
+
+    const drafts = await bridge.reviewCommentList();
+    expect(drafts).toEqual([c1]);
+  });
+
+  it("reviewCommentsSend removes every named draft on success", async () => {
+    const bridge = createMockBridge();
+    const c1 = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "x",
+      body: "one",
+    });
+    const c2 = await bridge.reviewCommentUpsert({
+      filePath: "src/bar.ts",
+      side: "old",
+      lineNumber: 7,
+      lineText: "y",
+      body: "two",
+    });
+
+    await bridge.reviewCommentsSend("s1", "Code review comments:\n\n...", [
+      { id: c1.id, revision: c1.revision },
+      { id: c2.id, revision: c2.revision },
+    ]);
+
+    await expect(bridge.reviewCommentList()).resolves.toEqual([]);
   });
 });

@@ -138,6 +138,18 @@ extension SpacesDeviceAPICommand {
     fileprivate var runsOnTerminalControlQueue: Bool {
         switch self {
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
+        // round-13 Fix 3: all three review-comment mutations divert here, not just send.
+        // `.workspaceReviewCommentsSend` writes to a session's control socket exactly like
+        // `.sendTerminalInput` (see `handleWorkspaceReviewCommentsSendRequest`), so it shares that
+        // command's stall risk directly. `.workspaceReviewCommentUpsert`/`Delete` don't themselves touch a
+        // control socket, but each takes `reviewCommentQueue` for its whole body (see that queue's doc
+        // comment) to close a TOCTOU window against a concurrent send — and a send can hold that queue
+        // across its own control-socket round trip (up to the client's control-socket timeout, several
+        // seconds). Left on the state queue, an upsert/delete blocked behind a slow send would hold that
+        // queue's single serial executor for the same duration, stalling every unrelated request — pings,
+        // overview, everything — behind one comment save. Diverting them here means only other
+        // terminal-control traffic waits, never the state queue.
+        case .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend: true
         default: false
         }
     }
@@ -959,6 +971,23 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `runsOnTerminalControlQueue`). Serialize them here so a stalled engine holds up only other
     /// terminal controls and never the state queue that answers pings, overviews, and state reads.
     private let terminalControlQueue = DispatchQueue(label: "spaces.device.api.terminal-control", qos: .userInitiated)
+    /// Serializes every review-comment mutation — `.workspaceReviewCommentUpsert`, `.workspaceReviewCommentDelete`,
+    /// and `.workspaceReviewCommentsSend` — against each other, closing a TOCTOU window `revision` checks alone
+    /// cannot: a send validates each comment's `revision` and then, several steps later (session/runtime checks,
+    /// the terminal-control-socket write, `markReviewCommentsSent`), archives it. Without this queue an upsert
+    /// could land in that window — after the send's revision check reads fresh, before its archive runs — and
+    /// the send would still write and archive the text it validated, silently losing the concurrent edit even
+    /// though every individual `revision` compare was correct at the instant it ran. round-13 Fix 3: all three
+    /// operations also run on `terminalControlQueue` itself (see `runsOnTerminalControlQueue`) — send because it
+    /// shares `.sendTerminalInput`'s control-socket stall risk directly, upsert/delete because a mutation stuck
+    /// behind a send holding this queue across that same control-socket round trip must not also hold the
+    /// serial state queue hostage, stalling every unrelated request behind one comment save. Each handler
+    /// additionally takes this `reviewCommentQueue` for its entire body so nothing here can interleave with
+    /// another from validation through archive/write. Nesting `reviewCommentQueue.sync` inside
+    /// `terminalControlQueue.sync` is safe because they are distinct queue objects and nothing on either path
+    /// (`SQLiteStore`, `TerminalControlClient.send`, `TerminalSessionPersistence`) dispatches back onto either
+    /// queue.
+    private let reviewCommentQueue = DispatchQueue(label: "spaces.device.api.review-comments", qos: .userInitiated)
     /// File read/write/diff commands (see `runsOnWorkspaceGitQueue`) shell out to `git` and touch the
     /// filesystem, which can take seconds for a large diff. Serialized per workspace (see
     /// `workspaceGitQueue(for:)`) rather than on one shared queue, so a slow diff on one workspace stalls
@@ -1556,7 +1585,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Fixing this properly would mean async-ifying subscription registration on both transports (the
     /// macOS `NWConnection` relay and the Linux `handleClient` return shape) so it can hop to the
     /// per-workspace queue and back before registering — a shape change to both transports to shave a
-    /// bounded, self-healing ~4s edge case, which is disproportionate to the risk.
+    /// bounded, self-healing ~4s edge case, which is disproportionate to the risk. For the same reason,
+    /// this deliberately does NOT also probe `scope.refName`'s resolvability (see
+    /// `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable`) — that would add a second synchronous git
+    /// subprocess call to this same bounded blocking window; an unresolvable ref instead surfaces
+    /// correctly once `handleWorkspaceDiffRequest`'s own check runs, when the pane's `workspaceDiff` pull
+    /// fires from the resulting signature event, and this subscribe path already treats failures here as
+    /// best-effort/retry.
     private func assertWorkspaceDiffScopeIsGitRepository(scope: WorkspaceDiffScope) throws {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard let workspace = try store.workspace(id: scope.workspaceID) else {
@@ -1709,6 +1744,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .updateProjectMetadata(let payload): return try handleUpdateProjectMetadataRequest(payload, context: context)
         case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload, context: context)
         case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload, context: context)
+        // Plain SQLite CRUD against `workspace_review_comments` — no filesystem/git work, so unlike
+        // workspaceFileRead/Write/Diff this has no need for the per-workspace `workspaceGitQueue`
+        // serialization and runs inline on the main serial device-API queue like every other read: it's
+        // read-only and fast, unlike upsert/delete/send below, which all divert to `terminalControlQueue`
+        // instead (round-13 Fix 3; see `runsOnTerminalControlQueue`).
+        case .workspaceReviewCommentList(let payload): return try handleWorkspaceReviewCommentListRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
@@ -1718,9 +1759,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
-        // Both transports divert engine-blocking terminal commands to `terminalControlQueue` before they
-        // reach here (see `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
-        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: return try handleTerminalControlQueueRequest(request)
+        // Both transports divert engine-blocking terminal commands, and (round-13 Fix 3) the review-comment
+        // mutations that compose with them, to `terminalControlQueue` before they reach here (see
+        // `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentsSend,
+            .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete:
+            return try handleTerminalControlQueueRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
@@ -1933,18 +1977,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     #endif
 
-    /// Runs one engine-blocking terminal command (see `runsOnTerminalControlQueue`).
+    /// Runs one engine-blocking terminal command, or a review-comment mutation composed with one (see
+    /// `runsOnTerminalControlQueue`).
     ///
-    /// These handlers read session files and talk to the session's control socket, and `.state` reads the
-    /// live core through the immutable provider closure and emits a metric; they touch none of the server
-    /// state the Device API queue confines, so they need nothing hoisted out before the hop.
+    /// The terminal commands read session files and talk to the session's control socket, and `.state` reads
+    /// the live core through the immutable provider closure and emits a metric — none of that touches the
+    /// server state the Device API queue confines, so they need nothing hoisted out before the hop. round-13
+    /// Fix 3: the review-comment mutations diverted here DO touch server state (`SQLiteStore`), but — like
+    /// `handleWorkspaceReviewCommentsSendRequest` already did — each opens its own store directly rather than
+    /// depending on a `RequestContext`, since this function has none: `RequestContext` is confined to
+    /// whichever queue created it (see its doc comment), and a request routed here never passes through
+    /// `handleRequest` (where a context is created) at all — both transports call this function directly, off
+    /// their own dispatch, before `handleRequest` ever runs.
     private func handleTerminalControlQueueRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
         switch request.command {
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
         case .state(let payload): return try handleStateRequest(payload)
-        default: preconditionFailure("Only engine-blocking terminal commands run on the terminal-control queue.")
+        case .workspaceReviewCommentsSend(let payload): return try handleWorkspaceReviewCommentsSendRequest(payload)
+        case .workspaceReviewCommentUpsert(let payload): return try handleWorkspaceReviewCommentUpsertRequest(payload)
+        case .workspaceReviewCommentDelete(let payload): return try handleWorkspaceReviewCommentDeleteRequest(payload)
+        default: preconditionFailure("Only engine-blocking terminal commands and review-comment mutations run on the terminal-control queue.")
         }
     }
 
@@ -3069,7 +3123,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// (`nil` on both sides only when the file does not exist yet); a mismatch is reported as a typed
     /// `SpacesDeviceWorkspaceFileWriteResult` conflict (`ok: true`, `didWrite: false`), not a transport
     /// error, per the spec: the client runs its own three-way merge and retries rather than treating this
-    /// as a failure.
+    /// as a failure. round-13 Fix 4: a mismatch whose current bytes already equal the requested `newData` is
+    /// not a conflict — it is a retry of a write that already landed — and is reported as an idempotent
+    /// success (`didWrite: true`) instead; see the guard below.
     private func handleWorkspaceFileWriteRequest(_ request: SpacesDeviceWorkspaceFileWriteRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -3133,6 +3189,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // writer to honor a lock this process cannot impose. Accepted: a write lost to that window is
         // recoverable via git, and the window this narrow is unlikely to matter in practice.
         guard currentSHA256 == request.expectedSHA256 else {
+            // round-13 Fix 4: a stale `expectedSHA256` is only a genuine conflict when the bytes actually
+            // differ. A retry of an already-landed write — its original response lost to a transport drop or
+            // the client hibernating mid-round-trip — replays the same `newData` against a now-stale
+            // `expectedSHA256`, since the client never learned the first write succeeded. Reporting that as
+            // `.conflict` would be a false positive: nothing raced, the content on disk already matches what
+            // the caller is asking to write. Treat identical bytes as an idempotent success instead, and only
+            // fall through to the conflict report below for content that genuinely differs.
+            if let currentData, currentData == newData {
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Workspace file already matches the requested content.",
+                    result: .workspaceFileWrite(.init(didWrite: true, sha256: currentSHA256)))
+            }
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Workspace file changed since it was last read.",
                 result: .workspaceFileWrite(.init(didWrite: false, currentBase64Data: currentData?.base64EncodedString(), currentSHA256: currentSHA256)))
@@ -3190,9 +3258,26 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func handleWorkspaceDiffRequest(_ request: SpacesDeviceWorkspaceDiffRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        // round-15: captured BEFORE `assertIsGitRepository` runs, so this one clock is the request-wide
+        // budget shared by repo validation, ref validation, and `buildDiff` — see `diffBuildDeadline`'s doc
+        // comment. The repo probe's own elapsed time is deliberately burned from this same shared budget
+        // (it keeps its own internal timeout via `RemoteWorkspaceGitClient.isRepo`; nothing here bounds it
+        // further), rather than each validation step getting its own fresh clock, which is exactly the bug
+        // this round fixes: stacked fresh clocks could add up to more wall-clock time than the client's
+        // ~60s request timeout, holding the workspace's serial git queue for a request already abandoned.
+        let deadlineStart = Date()
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
-        let diff = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspaceDir, refName: request.refName, gitClient: workspaceGitClient)
+        // A caller-supplied ref that doesn't resolve must be rejected as `invalidArgument`, distinct from
+        // `buildDiff`'s own ambiguous `.gitCommandFailed` (which also covers a transient git hang/timeout)
+        // — see `assertRefIsResolvable`'s doc comment for why the client's retry classification depends on
+        // this split.
+        if let normalizedRefName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) {
+            try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                workspaceDir: workspaceDir, refName: normalizedRefName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
+        }
+        let diff = try SpacesDeviceWorkspaceDiffEngine.buildDiff(
+            workspaceDir: workspaceDir, refName: request.refName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
         return SpacesDeviceAPIResponse(ok: true, message: "Loaded workspace diff.", result: .workspaceDiff(diff))
     }
 
@@ -3251,6 +3336,242 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         return try refreshedMutationResponse(context: context, message: "Updated workspace metadata.", workspaceID: request.workspaceID)
+    }
+
+    private static func wireReviewCommentSide(_ side: WorkspaceReviewCommentSide) -> SpacesDeviceReviewCommentSide {
+        switch side {
+        case .old: .old
+        case .new: .new
+        }
+    }
+
+    private static func storeReviewCommentSide(_ side: SpacesDeviceReviewCommentSide) -> WorkspaceReviewCommentSide {
+        switch side {
+        case .old: .old
+        case .new: .new
+        }
+    }
+
+    private static func wireReviewComment(from record: WorkspaceReviewCommentRecord) -> SpacesDeviceReviewComment {
+        SpacesDeviceReviewComment(
+            id: record.id, filePath: record.filePath, side: wireReviewCommentSide(record.side), lineNumber: record.lineNumber,
+            lineText: record.lineText, body: record.body, createdAt: record.createdAt, revision: record.revision)
+    }
+
+    /// round-13 Fix 3: stays on the main serial device-API queue and does not take `reviewCommentQueue` — it
+    /// is a read-only draft list with no compare-then-write step to protect, unlike upsert/delete/send below
+    /// (all diverted to `terminalControlQueue`; see `runsOnTerminalControlQueue`).
+    private func handleWorkspaceReviewCommentListRequest(_ request: SpacesDeviceWorkspaceReviewCommentListRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        _ = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let drafts = try context.store().reviewCommentDrafts(workspaceID: request.workspaceID)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Listed review comments.",
+            result: .workspaceReviewCommentList(.init(comments: drafts.map(Self.wireReviewComment(from:)))))
+    }
+
+    /// Creates a draft when `request.id` is nil, or updates an existing one's body/anchor when it names a
+    /// draft this workspace owns. Rejects an `id` naming another workspace's comment or an already-sent
+    /// (archived) one, rather than silently creating an unrelated new draft under that id — and, the same
+    /// way, rejects an `id` that names no comment at all (`.notFound`, mirroring
+    /// `handleWorkspaceReviewCommentDeleteRequest`) rather than silently creating a fresh draft under a
+    /// caller-supplied id the store never issued. Only a nil `id` is a create.
+    ///
+    /// round-13 Fix 3: runs on `terminalControlQueue` (see `runsOnTerminalControlQueue`), which has no
+    /// `RequestContext` of its own, so — mirroring `handleWorkspaceReviewCommentsSendRequest` — this opens
+    /// its own `SQLiteStore` directly instead of depending on one. Its store read+write body still runs
+    /// inside `reviewCommentQueue.sync` (see that queue's doc comment) so it cannot interleave with a
+    /// `.workspaceReviewCommentsSend` mid-flight on the same draft.
+    private func handleWorkspaceReviewCommentUpsertRequest(_ request: SpacesDeviceWorkspaceReviewCommentUpsertRequest) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard !request.filePath.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "filePath is required.", errorCode: .invalidArgument)
+        }
+        guard !request.body.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "body is required.", errorCode: .invalidArgument)
+        }
+        return try reviewCommentQueue.sync {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            guard try store.workspace(id: request.workspaceID) != nil else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
+            }
+            // Accepted risk (round-12): no revision check on this read-modify-write, so a concurrent
+            // upsert of the same draft from another pane is last-write-wins — see the request struct's
+            // doc comment in SpacesDeviceAPIProtocol.swift. Only `reviewCommentsSend` enforces a revision.
+            var existing: WorkspaceReviewCommentRecord?
+            if let id = request.id {
+                guard let found = try store.reviewComment(id: id) else {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Comment '\(id)' was not found.", errorCode: .notFound)
+                }
+                if found.workspaceID != request.workspaceID {
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comment '\(id)' does not belong to this workspace.", errorCode: .invalidArgument)
+                }
+                if found.sentAt != nil {
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comment '\(id)' was already sent and cannot be edited.", errorCode: .invalidArgument)
+                }
+                existing = found
+            }
+            let now = TerminalSessionTimestamp.string(from: Date())
+            // `revision` is bound only for the case `upsertReviewComment` treats as a fresh INSERT (no
+            // `existing` row); its `ON CONFLICT` arm bumps the stored column itself (`revision =
+            // ...revision + 1`) and ignores this bound value, so `existing?.revision` here is never actually
+            // written on an update — it just satisfies the record's initializer.
+            //
+            // round-14 accepted risk: a create whose response is lost after `upsertReviewComment` below
+            // commits (e.g. the connection drops between commit and delivery) leaves the client's card
+            // stuck "provisional"; the client's natural retry-on-no-response then inserts a SECOND row
+            // (`request.id` is nil on that retry too, so `UUID().uuidString` mints a new id) for what the
+            // user perceives as one comment. Not fixed for v1: the window is narrow (response lost in that
+            // specific gap, then a retry landing), the symptom is just a duplicate draft card the user can
+            // delete like any other, and the real fix — client-selected ids with create-if-missing/upsert-
+            // by-client-id semantics — would weaken the already-sent guard just above, which currently trusts
+            // that an `id` naming an existing row is a real edit intent rather than a possibly-colliding
+            // client-chosen id.
+            let record = WorkspaceReviewCommentRecord(
+                id: request.id ?? UUID().uuidString, workspaceID: request.workspaceID, filePath: request.filePath,
+                side: Self.storeReviewCommentSide(request.side), lineNumber: request.lineNumber, lineText: request.lineText, body: request.body,
+                createdAt: existing?.createdAt ?? now, updatedAt: now, revision: existing?.revision ?? 0, sentAt: nil)
+            try store.upsertReviewComment(record)
+            // Re-read rather than echo `record`: on an update, the store computed the actual persisted
+            // `revision` itself (see above), so `record.revision` is not what's on disk — the client's local
+            // mirror must get the real value or its next send would compare against a stale one and fail
+            // `.conflict` on a draft it just saved successfully.
+            guard let persisted = try store.reviewComment(id: record.id) else {
+                preconditionFailure("Review comment '\(record.id)' vanished immediately after being upserted on the same request handler.")
+            }
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Saved review comment.",
+                result: .workspaceReviewCommentUpsert(.init(comment: Self.wireReviewComment(from: persisted))))
+        }
+    }
+
+    /// Runs its store read+write body on `reviewCommentQueue` for the same reason as the upsert handler above:
+    /// closes the window where a delete could remove a draft a concurrent send just validated against.
+    ///
+    /// Delete is a DRAFT-only operation: only a comment with `sentAt == nil` can be removed. The archive is
+    /// append-only from the client's perspective — once a comment is sent, no client request can erase that
+    /// durable record, matching the upsert handler's own already-sent protection against edits above.
+    ///
+    /// round-13 Fix 3: like the upsert handler above, this runs on `terminalControlQueue` and so has no
+    /// `RequestContext` — it opens its own `SQLiteStore` directly, mirroring `handleWorkspaceReviewCommentsSendRequest`.
+    private func handleWorkspaceReviewCommentDeleteRequest(_ request: SpacesDeviceWorkspaceReviewCommentDeleteRequest) throws
+        -> SpacesDeviceAPIResponse
+    {
+        return try reviewCommentQueue.sync {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            guard try store.workspace(id: request.workspaceID) != nil else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
+            }
+            guard let existing = try store.reviewComment(id: request.id), existing.workspaceID == request.workspaceID else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Comment '\(request.id)' was not found.", errorCode: .notFound)
+            }
+            guard existing.sentAt == nil else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Comment '\(request.id)' was already sent and cannot be deleted.", errorCode: .invalidArgument)
+            }
+            try store.deleteReviewComment(id: request.id)
+            return SpacesDeviceAPIResponse(ok: true, message: "Deleted review comment.")
+        }
+    }
+
+    /// Writes `request.text` to `request.sessionID`'s terminal input using the same control-socket path
+    /// `handleSendTerminalInputRequest` uses, then — only if that write succeeds — marks every entry in
+    /// `request.comments` sent. Composing send-then-archive here rather than as two client calls is what
+    /// guarantees a comment is never archived unless its text was actually sent (the daemon-side write and
+    /// archive can't be split by a client crash between them the way two separate calls could); the
+    /// converse — a comment that was sent always ends up archived — is not guaranteed (a daemon crash
+    /// between the write and `markReviewCommentsSent` below would leave it sent-but-still-draft), an
+    /// accepted low-probability gap since a client whose send timed out already has to reconcile by
+    /// re-reading the draft list. See docs/implementation.md for the fuller rationale.
+    ///
+    /// Each entry's `revision` is checked against the draft's current one before anything is written:
+    /// the client's local mirror was read at some point in the past and may be stale (another edit landed
+    /// on the same draft — this client or another surface entirely — since then), and sending its
+    /// possibly-outdated `text` composed from that stale body would silently discard the newer edit once
+    /// the comment is archived. A mismatch is a version conflict, not a missing-argument or ownership
+    /// problem, hence `.conflict` rather than `.invalidArgument` for that one check. `revision` (not
+    /// `updatedAt`) is the token: `updatedAt` has whole-second resolution, so two edits inside the same
+    /// second would leave it unchanged and this check would silently pass over genuinely stale text.
+    ///
+    /// Runs on `terminalControlQueue` (see `runsOnTerminalControlQueue`), which has no `RequestContext` of
+    /// its own — mirrors `computeWorkspaceDiffScopeSignature`'s "a store belongs to the queue that opened
+    /// it" confinement rule by opening its own `SQLiteStore` here rather than sharing one from `queue`.
+    ///
+    /// The entire body additionally runs inside `try reviewCommentQueue.sync` (see that queue's doc comment):
+    /// every comment's `revision` is checked up front, but the session/runtime validation, the terminal-control
+    /// write, and `markReviewCommentsSent` below all happen afterward — without this queue, an upsert could
+    /// still land in that gap and get silently overwritten by the stale text this handler already validated as
+    /// fresh. Blocking `reviewCommentQueue` for the control-socket round trip's duration is acceptable: it is a
+    /// local unix-domain-socket call (not network), bounded by `TerminalControlClient.send`'s own timeout, and
+    /// review-comment sends are always a direct user click, never a hot path — a few extra ms of queue
+    /// contention on the rare concurrent edit buys out the TOCTOU. This nests `reviewCommentQueue.sync` inside
+    /// the outer `terminalControlQueue.sync` that routed the request here; that is safe only because they are
+    /// distinct queue objects and nothing this body calls — `SQLiteStore`, `TerminalControlClient.send`,
+    /// `TerminalSessionPersistence` — dispatches back onto either queue (verified: none of the three uses
+    /// `DispatchQueue` at all).
+    private func handleWorkspaceReviewCommentsSendRequest(_ request: SpacesDeviceWorkspaceReviewCommentsSendRequest) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard !request.comments.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "comments is required.", errorCode: .invalidArgument)
+        }
+        return try reviewCommentQueue.sync {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            guard try store.workspace(id: request.workspaceID) != nil else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
+            }
+            for entry in request.comments {
+                guard let comment = try store.reviewComment(id: entry.id), comment.workspaceID == request.workspaceID, comment.sentAt == nil
+                else {
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comment '\(entry.id)' is not a draft belonging to this workspace.", errorCode: .invalidArgument)
+                }
+                guard comment.revision == entry.revision else {
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comment '\(entry.id)' changed since it was last read.", errorCode: .conflict)
+                }
+            }
+
+            // Validate the session belongs to this workspace and is running. `handleSendTerminalInputRequest`
+            // (the general-purpose terminal-send endpoint this reuses below) does neither check — its callers
+            // (agent tooling, client typing) already hold a session the caller is known to own — so this
+            // composes both checks fresh from the session's persisted launch configuration and runtime state.
+            let paths = try TerminalSessionPaths.forSession(id: request.sessionID)
+            guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+                launchConfiguration.workspaceID == request.workspaceID
+            else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Terminal session '\(request.sessionID)' does not belong to this workspace.", errorCode: .invalidArgument)
+            }
+            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.state.isInteractive else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Terminal session '\(request.sessionID)' is not running.", errorCode: .sessionNotRunning)
+            }
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Terminal session '\(request.sessionID)' is not available.", errorCode: .sessionNotAvailable)
+            }
+
+            // `appendNewline: true` is what makes `handleSendTerminalInputRequest`'s underlying PTY write
+            // submit a bracketed-paste write with a separate CR (0x0D) afterward (see
+            // `GhosttyEmbeddedSessionHost.controlResponseForSendRequest`) — embedded LFs inside a bracketed
+            // paste are literal content to a TUI's line editor, not an Enter keypress, so this always
+            // submits rather than leaving the comment sitting unsent in the agent's input buffer.
+            let sendResponse = try TerminalControlClient.send(
+                request: TerminalControlRequest(
+                    command: .send(TerminalControlSendPayload(text: request.text, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: true))),
+                socketPath: paths.controlSocketPath)
+            guard sendResponse.ok else {
+                return SpacesDeviceAPIResponse(ok: false, message: sendResponse.message, errorCode: sendResponse.errorCode)
+            }
+
+            try store.markReviewCommentsSent(ids: request.comments.map(\.id), sentAt: TerminalSessionTimestamp.string(from: Date()))
+            return SpacesDeviceAPIResponse(ok: true, message: "Sent review comments.")
+        }
     }
 
     private func handleOpenWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceReference, context: RequestContext) throws

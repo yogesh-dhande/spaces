@@ -1098,6 +1098,148 @@ public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equata
     }
 }
 
+/// Which side of a diff a review comment is anchored to, mirroring `workspacecore`'s
+/// `WorkspaceReviewCommentSide` without a cross-module dependency (the Device API wire types stand alone
+/// from the daemon's storage types, same as every other command's payload in this file).
+public enum SpacesDeviceReviewCommentSide: String, Codable, Sendable, Equatable {
+    case old
+    case new
+}
+
+/// One review-comment draft on the wire. Sent-and-archived comments are never returned to a client — v1
+/// has no archive-browsing UI (see docs/spec.md) — so unlike the store's record this carries no `sentAt`.
+/// Carries no `updatedAt` either: nothing in the code pane UI displays it, and the one thing it used to
+/// back — the send endpoint's concurrency check — reads `revision` instead (see
+/// `SpacesDeviceReviewCommentSendEntry`), so keeping a wire-level `updatedAt` around would just be unused
+/// surface. The store's own `WorkspaceReviewCommentRecord.updatedAt` still exists for
+/// display/debugging; it simply isn't echoed to clients.
+public struct SpacesDeviceReviewComment: Codable, Sendable, Equatable {
+    public let id: String
+    public let filePath: String
+    public let side: SpacesDeviceReviewCommentSide
+    public let lineNumber: Int
+    public let lineText: String
+    public let body: String
+    public let createdAt: String
+    public let revision: Int
+
+    public init(
+        id: String, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String, createdAt: String,
+        revision: Int
+    ) {
+        self.id = id
+        self.filePath = filePath
+        self.side = side
+        self.lineNumber = lineNumber
+        self.lineText = lineText
+        self.body = body
+        self.createdAt = createdAt
+        self.revision = revision
+    }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentListResult: Codable, Sendable, Equatable {
+    public let comments: [SpacesDeviceReviewComment]
+
+    public init(comments: [SpacesDeviceReviewComment]) { self.comments = comments }
+}
+
+/// Creates a draft when `id` is nil (the server mints a UUID) or updates an existing draft's body/anchor
+/// when `id` names one. The device-API layer rejects an `id` that already belongs to an archived
+/// (sent) comment, so this can never resurrect one as a draft.
+///
+/// Accepted risk (round-12): unlike `SpacesDeviceWorkspaceReviewCommentsSendRequest`'s per-comment
+/// revision CAS, this request carries no revision token, so two panes upserting the SAME draft
+/// concurrently resolve last-write-wins on whichever blur-persist lands last. The revision token guards
+/// `reviewCommentsSend` only. Deliberate: a single user editing the same draft in two panes at once is a
+/// rare edge case, last-write-wins is conventional draft semantics, and a CAS here would need a
+/// conflict-merge UX (what does a pane do with a rejected blur?) disproportionate to the risk.
+public struct SpacesDeviceWorkspaceReviewCommentUpsertRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let id: String?
+    public let filePath: String
+    public let side: SpacesDeviceReviewCommentSide
+    public let lineNumber: Int
+    public let lineText: String
+    public let body: String
+
+    public init(
+        workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String,
+        body: String
+    ) {
+        self.workspaceID = workspaceID
+        self.id = id
+        self.filePath = filePath
+        self.side = side
+        self.lineNumber = lineNumber
+        self.lineText = lineText
+        self.body = body
+    }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentUpsertResult: Codable, Sendable, Equatable {
+    public let comment: SpacesDeviceReviewComment
+
+    public init(comment: SpacesDeviceReviewComment) { self.comment = comment }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentDeleteRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let id: String
+
+    public init(workspaceID: String, id: String) {
+        self.workspaceID = workspaceID
+        self.id = id
+    }
+}
+
+/// One review comment named in a send request: its id plus the `revision` the caller last saw for it.
+/// The server compares this against the draft's current `revision` before sending anything — see
+/// `SpacesDeviceWorkspaceReviewCommentsSendRequest`'s doc comment — so a client that read a draft, let
+/// it go stale (another edit landed, from this client or another surface), and then sent it without
+/// re-reading first is told so instead of silently sending outdated text. `revision` (not `updatedAt`) is
+/// the token because `updatedAt` has whole-second resolution: two edits inside the same second would
+/// leave it unchanged and let a stale send through undetected, while `revision` increments on every edit.
+public struct SpacesDeviceReviewCommentSendEntry: Codable, Sendable, Equatable {
+    public let id: String
+    public let revision: Int
+
+    public init(id: String, revision: Int) {
+        self.id = id
+        self.revision = revision
+    }
+}
+
+/// Writes `text` to `sessionID`'s terminal input, then — only once that write succeeds — archives every
+/// comment in `comments` whose current `revision` still matches the entry's echoed `revision`. See
+/// `SpacesDeviceAPIServer.handleWorkspaceReviewCommentsSendRequest` for why this is one endpoint rather
+/// than a client-side send-then-archive: the ordering guarantee is that a comment is never archived
+/// unless the text carrying it was actually sent, not the reverse (a sent comment can still fail to
+/// archive if the daemon crashes between the write and `markReviewCommentsSent`, an accepted low-impact
+/// gap — see docs/implementation.md). `text` is pre-formatted by the caller (prompt formatting is a
+/// web-app UX concern, not a daemon one). `comments` must be non-empty; every id must be a draft
+/// belonging to `workspaceID` with a matching `revision`, or the request is rejected before anything is
+/// sent.
+public struct SpacesDeviceWorkspaceReviewCommentsSendRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let text: String
+    public let comments: [SpacesDeviceReviewCommentSendEntry]
+
+    public init(workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry]) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.text = text
+        self.comments = comments
+    }
+}
+
 public struct SpacesDeviceWorkspaceLifecycleRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
 
@@ -1797,6 +1939,13 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// (`refName == nil` scopes to uncommitted changes; a non-nil `refName` scopes to that ref's
     /// merge-base) since the two commands are subscribing to and fetching the same scope's diff.
     case subscribeWorkspaceDiffSignature(SpacesDeviceWorkspaceDiffRequest)
+    /// Draft review comments for the code pane's diff view (see `SpacesDeviceReviewComment`). Comments
+    /// are DB-backed per the locked v1 architecture decision (survive-restart and iOS/remote-Linux
+    /// parity fall out of daemon-side storage), not held client-side.
+    case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListRequest)
+    case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertRequest)
+    case workspaceReviewCommentDelete(SpacesDeviceWorkspaceReviewCommentDeleteRequest)
+    case workspaceReviewCommentsSend(SpacesDeviceWorkspaceReviewCommentsSendRequest)
 
     public var name: String {
         switch self {
@@ -1862,6 +2011,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceFileWrite: "workspaceFileWrite"
         case .workspaceDiff: "workspaceDiff"
         case .subscribeWorkspaceDiffSignature: "subscribeWorkspaceDiffSignature"
+        case .workspaceReviewCommentList: "workspaceReviewCommentList"
+        case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
+        case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
+        case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
         }
     }
 
@@ -1938,11 +2091,16 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// treat the connection as request/response after issuing the response.
     public var hijacksConnection: Bool { isSubscriptionCommand || isTunnelCommand }
 
+    // round-14 Fix 4: every case below is a pure read (its handler only ever SELECTs/reads state, never
+    // mutates it), so replaying it after a connection failure whose outcome is unknown can only ever repeat
+    // an identical read — never double-create, double-send, or otherwise duplicate an effect. A command
+    // whose handler mutates state must stay off this list even if it happens to be read-heavy (e.g. the
+    // review-comment upsert/delete/send commands, which are deliberately excluded below).
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceDiff:
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceDiff, .workspaceReviewCommentList:
             true
         default: false
         }
@@ -2013,6 +2171,10 @@ extension SpacesDeviceAPICommand: Codable {
         case workspaceFileWrite
         case workspaceDiff
         case subscribeWorkspaceDiffSignature
+        case workspaceReviewCommentList
+        case workspaceReviewCommentUpsert
+        case workspaceReviewCommentDelete
+        case workspaceReviewCommentsSend
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2103,6 +2265,14 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
         case .subscribeWorkspaceDiffSignature:
             self = .subscribeWorkspaceDiffSignature(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
+        case .workspaceReviewCommentList:
+            self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListRequest.self, forKey: key))
+        case .workspaceReviewCommentUpsert:
+            self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertRequest.self, forKey: key))
+        case .workspaceReviewCommentDelete:
+            self = .workspaceReviewCommentDelete(try container.decode(SpacesDeviceWorkspaceReviewCommentDeleteRequest.self, forKey: key))
+        case .workspaceReviewCommentsSend:
+            self = .workspaceReviewCommentsSend(try container.decode(SpacesDeviceWorkspaceReviewCommentsSendRequest.self, forKey: key))
         }
     }
 
@@ -2171,6 +2341,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .subscribeWorkspaceDiffSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceDiffSignature)
+        case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
+        case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
+        case .workspaceReviewCommentDelete(let payload): try container.encode(payload, forKey: .workspaceReviewCommentDelete)
+        case .workspaceReviewCommentsSend(let payload): try container.encode(payload, forKey: .workspaceReviewCommentsSend)
         }
     }
 }
@@ -2251,6 +2425,8 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteResult)
     case workspaceDiff(SpacesDeviceWorkspaceDiffResult)
+    case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
+    case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -2277,6 +2453,8 @@ extension SpacesDeviceAPIResult: Codable {
         case workspaceFileRead
         case workspaceFileWrite
         case workspaceDiff
+        case workspaceReviewCommentList
+        case workspaceReviewCommentUpsert
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2308,6 +2486,10 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffResult.self, forKey: key))
+        case .workspaceReviewCommentList:
+            self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListResult.self, forKey: key))
+        case .workspaceReviewCommentUpsert:
+            self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertResult.self, forKey: key))
         }
     }
 
@@ -2336,6 +2518,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
+        case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
+        case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         }
     }
 }
@@ -2424,6 +2608,14 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var workspaceDiff: SpacesDeviceWorkspaceDiffResult? { if case .workspaceDiff(let payload) = result { payload } else { nil } }
+
+    public var workspaceReviewCommentList: SpacesDeviceWorkspaceReviewCommentListResult? {
+        if case .workspaceReviewCommentList(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceReviewCommentUpsert: SpacesDeviceWorkspaceReviewCommentUpsertResult? {
+        if case .workspaceReviewCommentUpsert(let payload) = result { payload } else { nil }
+    }
 }
 
 public enum SpacesDeviceAPICodec {

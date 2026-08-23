@@ -669,6 +669,60 @@ public enum SpacesDeviceClient {
         return result
     }
 
+    /// Draft review comments for a workspace's code pane, on a paired device. Sent-and-archived comments
+    /// are never included — v1 has no archive-browsing UI (see docs/spec.md).
+    public static func workspaceReviewCommentList(
+        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceReviewComment] {
+        let response = try request(
+            .init(command: .workspaceReviewCommentList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceReviewCommentList else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result.comments
+    }
+
+    /// Creates a review-comment draft when `id` is nil, or updates an existing one's body/anchor when it
+    /// names one this workspace owns and has not yet sent (see `SpacesDeviceWorkspaceReviewCommentUpsertRequest`).
+    public static func workspaceReviewCommentUpsert(
+        workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String,
+        body: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceReviewComment {
+        let response = try request(
+            .init(
+                command: .workspaceReviewCommentUpsert(
+                    .init(workspaceID: workspaceID, id: id, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body))),
+            device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceReviewCommentUpsert else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result.comment
+    }
+
+    /// Deletes one review-comment draft on a paired device.
+    @discardableResult public static func workspaceReviewCommentDelete(
+        workspaceID: String, id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .workspaceReviewCommentDelete(.init(workspaceID: workspaceID, id: id))), device: device, clientApp: clientApp,
+            profile: profile)
+    }
+
+    /// Writes `text` to `sessionID`'s terminal input, then archives every comment in `comments` (id plus
+    /// the caller's last-seen `revision`, for the daemon's stale-version check), on a paired device — see
+    /// `SpacesDeviceWorkspaceReviewCommentsSendRequest` for why this is one call rather than a client-side
+    /// send-then-archive, and the ordering guarantee it does (and does not) give. A write failure or a
+    /// version mismatch leaves every named comment as an untouched draft.
+    @discardableResult public static func workspaceReviewCommentsSend(
+        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .workspaceReviewCommentsSend(.init(workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments))),
+            device: device, clientApp: clientApp, profile: profile)
+    }
+
     /// Opens a live per-(workspace, ref)-scope diff-signature subscription: the paired daemon pushes a frame
     /// whenever the scope's `scopeSignature` changes (notify-then-pull; the daemon polls, see
     /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiff` (with the same `refName`)
@@ -1123,7 +1177,8 @@ public enum SpacesDeviceClient {
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
             .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .openServiceTunnel,
-            .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
+            .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns, .workspaceReviewCommentList,
+            .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
             defaultRequestTimeoutSeconds
         }
     }

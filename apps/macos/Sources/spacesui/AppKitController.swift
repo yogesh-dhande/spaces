@@ -5011,6 +5011,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hasExistingPane || deviceAcceptsDaemonActions
     }
 
+    /// Whether a fresh code pane may be created for a device. Unlike
+    /// `canOpenOrFocusTerminalPane`, this takes no `hasExistingPane` flag: a code pane has
+    /// no daemon-side session to attach, but building its content still means installing a
+    /// pane into the layout and persisting it, so a device that cannot act right now must
+    /// not have one added on its behalf. Both `PanelCoordinator` call sites that create a
+    /// code pane (`openCodePaneInNewTab`, `fillSplitWithCodePane`) are only reached once
+    /// their caller has already established no placement exists for this device/workspace
+    /// pair — `openOrFocusCodePane`'s own existing-placement branch focuses and returns
+    /// before creation is even considered — so this only ever needs to ask "can we create,"
+    /// never "can we create or is one already there." Pure for the same test-seam reason as
+    /// `canOpenOrFocusTerminalPane`.
+    nonisolated static func canCreateCodePane(deviceAcceptsDaemonActions: Bool) -> Bool { deviceAcceptsDaemonActions }
+
     /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
     /// running the open path's state fetch, attach, and ownership reclaim. All three conditions are load
     /// bearing: the pane must be the focused one in the panel's selected tab (anything else has to move
@@ -5382,6 +5395,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The keep-set is workspace ids from this overview: a workspace absent from `overview.workspaces`
         // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set).
         panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id)))
+        // Same overview this device's prune just consumed carries this device's agent rows too, so a
+        // code pane's assigned-agent dropdown stays current with whatever just spawned/exited.
+        panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: self)
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
@@ -10138,6 +10154,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // remote/local branch below can never run the local path for a remote workspace.
             let deviceID = project.deviceID
             if isRemoteDeviceID(deviceID) {
+                // A remote launch dials the paired device directly over SSH — the editor's own
+                // connection, entirely outside this Mac's daemon session with that device — but
+                // `deviceAcceptsDaemonActions` is still the only signal Spaces has for whether the
+                // device is currently reachable at all. Attempting the launch anyway while it is
+                // offline just trades a clear "device offline" message for a confusing failure
+                // buried inside the editor's own SSH handshake, so this is gated the same way the
+                // code-pane creation door is (`PanelCoordinator.mayCreateCodePane`). A local launch
+                // needs no such check: it runs the editor CLI directly with no daemon involved, and
+                // this Mac's own daemon being down is the separate, already-handled case in
+                // `deviceUnreachableError`'s `isLocal` branch.
+                guard deviceAcceptsDaemonActions(forDeviceID: deviceID) else {
+                    showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
+                    return
+                }
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
                 else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }

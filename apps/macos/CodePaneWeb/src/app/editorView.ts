@@ -1,7 +1,7 @@
 import { CodeView } from "@pierre/diffs";
 import type { CodeViewItem } from "@pierre/diffs";
 import { Editor } from "@pierre/diffs/edit";
-import { CodePaneEditorState, SpacesBridge, SpacesBridgeError, WorkspaceFileReadResult } from "../bridge/types";
+import { CodePaneEditorState, SpacesBridge, SpacesBridgeError, WorkspaceFileReadResult, WorkspaceFileWriteResult } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
 
 const SEARCH_DEBOUNCE_MS = 150;
@@ -50,6 +50,15 @@ export class EditorView {
   private conflict = false;
   private editGeneration = 0;
   private searchToken = 0;
+  /** Bumped at the start of every `open()` call; a call whose token has been superseded by a later
+   *  `open()` drops its result (success or failure) instead of clobbering whatever that later call
+   *  already loaded. Same latest-wins shape as `root.ts`'s `diffRequestToken`. */
+  private openGeneration = 0;
+  /** True for the duration of one `save()` call. `saveBtn.disabled` alone doesn't stop re-entrancy:
+   *  a second click already queued (or a programmatic `save()`) can still run before the first
+   *  await yields control back to the DOM, and two overlapping CAS writes racing the same baseline
+   *  would let the second silently win with a hash the first's in-flight write invalidates. */
+  private saveInFlight = false;
   private searchTimer: ReturnType<typeof setTimeout> | undefined;
   private editorStatePushTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -69,10 +78,16 @@ export class EditorView {
     this.input.addEventListener("focus", () => this.scheduleSearch());
     this.input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
+      // round-14 Comment B (accepted, no behavior change): the trim is deliberate paste-hygiene —
+      // a path copied out of a terminal often carries trailing whitespace/newlines — and it does
+      // make a filename with genuine leading/trailing whitespace unopenable via manual Return-entry.
+      // Accepted: the search-suggestion click path (`search()`'s result rows) passes the exact
+      // untrimmed path and will cover such files once `workspaceFileList` gets its real daemon
+      // endpoint (see this file's doc comment).
       const path = this.input.value.trim();
       if (!path) return;
       event.preventDefault();
-      void this.open(path);
+      this.openGated(path);
     });
     resultsHost.appendChild(this.input);
 
@@ -143,7 +158,7 @@ export class EditorView {
       opt.addEventListener("click", () => {
         this.resultsList.style.display = "none";
         this.input.value = path;
-        void this.open(path);
+        this.openGated(path);
       });
       this.resultsList.appendChild(opt);
     }
@@ -193,14 +208,84 @@ export class EditorView {
     this.codeView.setItems([item]);
   }
 
-  private async open(path: string): Promise<void> {
+  /**
+   * Gate in front of the two user-initiated ways to open a file (Return in the path input, a
+   * search-suggestion click) — `open()` itself stays ungated, since `restoreState`'s clean branch
+   * calls it directly with nothing at risk (that path only ever follows a fresh restore, never an
+   * in-progress edit).
+   *
+   * round-13 Fix 1: silently replacing the buffer here would violate the spec's unsaved-edit
+   * promise (README.md: "only quitting and reopening the app loses an unsaved edit") — a save-in-
+   * progress buffer must not vanish just because the user typed a different path or clicked a
+   * search result. A modal confirmation is out per this codebase's design rules (no new modal
+   * surfaces), so the existing non-blocking banner carries the explicit discard consent instead:
+   * clicking its action is the one deliberate way to abandon the current edit, distinct from the
+   * silent replace this gate refuses to do on its own.
+   *
+   * round-15 Fix (Bugs A+B): this upfront check is a fast path only, not the whole contract. It
+   * runs before the read starts, so it cannot see dirty state that arises WHILE that read is in
+   * flight (the user typing into the currently-open file during a slow remote read) — `open()`
+   * itself re-checks dirty at completion and raises the identical banner if the race occurred (see
+   * the completion-check comment inside `open()`). And the banner's discard button no longer clears
+   * `dirty` at click time: it commits the discard only once `open()` actually succeeds, via
+   * `open(path, { discard: true })`, so a read that fails after a discard click leaves the old
+   * buffer correctly marked dirty rather than lying about it having been abandoned.
+   */
+  private openGated(path: string): void {
+    if (this.dirty && this.currentPath !== undefined) {
+      this.showDiscardBanner(path);
+      return;
+    }
+    void this.open(path);
+  }
+
+  /** Renders the non-blocking discard-consent banner used by `openGated`'s gate and by `open()`'s
+   *  own completion-time recheck (see both call sites' comments). Only ever called when
+   *  `this.currentPath !== undefined` already holds, so reading it directly here is safe. */
+  private showDiscardBanner(targetPath: string): void {
+    const from = this.currentPath;
+    const text = document.createElement("span");
+    text.textContent = `Unsaved changes in ${from}. Save them first, or discard them to open ${targetPath}.`;
+    const discardBtn = document.createElement("button");
+    discardBtn.type = "button";
+    discardBtn.className = "btn";
+    discardBtn.textContent = "Discard edits and open";
+    discardBtn.addEventListener("click", () => {
+      void this.open(targetPath, { discard: true });
+    });
+    this.banner.className = "banner conflict";
+    this.banner.replaceChildren(text, discardBtn);
+    this.banner.style.display = "flex";
+  }
+
+  private async open(path: string, opts?: { discard?: boolean }): Promise<void> {
+    const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
     try {
       result = await this.bridge.workspaceFileRead(path);
     } catch (err) {
+      if (generation !== this.openGeneration) return; // a later open() already won
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
       this.renderMessage(message, "error");
       return; // leave the input editable so the user can correct the path
+    }
+    if (generation !== this.openGeneration) return; // a later open() already won
+    if (!opts?.discard && this.dirty && this.currentPath !== undefined) {
+      // Bug A fix: a DIFFERENT open (openGated's own upfront check, which ran before this read
+      // started) cannot see dirty state that arises WHILE this read is in flight — the user may
+      // type into the currently-open file during the seconds a remote read can take. Rechecking
+      // here, at completion, is what actually closes that race, showing the identical consent
+      // banner instead of silently replacing the buffer.
+      //
+      // The `!opts?.discard` guard is required, not optional: Bug B's fix (above) stops clearing
+      // `dirty` at the discard button's click time, deferring that clear to this function's own
+      // success path. Without this guard, a discard-open's own completion would see
+      // `this.dirty === true` (never cleared before the call) and treat its OWN replacement as a
+      // conflict, re-raising the very banner the user just dismissed — forever, since every
+      // subsequent discard attempt would hit the same unmet condition. The flag marks "this call IS
+      // the user's chosen resolution of that conflict, do not re-litigate it."
+      this.showDiscardBanner(path);
+      return;
     }
     this.resultsList.replaceChildren();
     this.resultsList.style.display = "none";
@@ -300,38 +385,90 @@ export class EditorView {
 
   private async save(): Promise<void> {
     if (!this.currentPath || this.latestContent === undefined || !this.baseSHA256) return;
-    // Captured before the await: this exact string is what's being submitted, and (per the
-    // success arm below) what ends up on disk. `this.latestContent` can move on underneath this
-    // call if the user keeps typing while the write is in flight — the two must not be conflated.
-    const submitted = this.latestContent;
-    const result = await this.bridge.workspaceFileWrite(this.currentPath, submitted, {
-      baseSHA256: this.baseSHA256,
-    });
-    if ("conflict" in result) {
-      this.conflict = true;
-      this.saveBtn.disabled = true;
-      this.banner.textContent = result.fileMissing ? "File deleted on disk — save disabled" : "File changed on disk — save disabled";
-      this.banner.style.display = "flex";
-      // Immediate: conflict state changing is a discrete transition, not a buffer edit.
+    // Re-entrancy guard: a second save() (a queued click, or a programmatic call) can still start
+    // before this call's first await yields control back to the DOM, which would submit two CAS
+    // writes against the same baseline from the same tab. Disabling the button is the visible half
+    // of this; the flag is the half that actually blocks it.
+    if (this.saveInFlight) return;
+    this.saveInFlight = true;
+    this.saveBtn.disabled = true;
+    // Captured before the await, alongside `submitted` below: identifies which file this save
+    // belongs to. If the user opens a different file before this write resolves, `openGeneration`
+    // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner/
+    // `saveBtn` — all of those now describe the newly opened file, not this one.
+    const generation = this.openGeneration;
+    try {
+      // Captured before the await: this exact string is what's being submitted, and (per the
+      // success arm below) what ends up on disk. `this.latestContent` can move on underneath this
+      // call if the user keeps typing while the write is in flight — the two must not be conflated.
+      const submitted = this.latestContent;
+      let result: WorkspaceFileWriteResult;
+      try {
+        result = await this.bridge.workspaceFileWrite(this.currentPath, submitted, {
+          baseSHA256: this.baseSHA256,
+        });
+      } catch (err) {
+        if (generation !== this.openGeneration) return; // a later open() already won; this failure is moot
+        // A rejected write (offline device, timeout, daemon error — e.g. a `SpacesBridgeError` with
+        // code `unavailable`) never got a decodable answer from the daemon at all, unlike the
+        // `conflict` branch below which is a durable CAS rejection the daemon *did* decode and
+        // apply its rules to. Treat it as transient: surface it factually but do NOT set
+        // `this.conflict` — a real conflict permanently disables Save until the next open(); this
+        // must not latch the same way, since a retry of the exact same write can still succeed.
+        const message = err instanceof SpacesBridgeError ? err.message : "Failed to save file.";
+        // "error" styling (not "conflict") keeps this visually distinct from a real CAS conflict —
+        // see the conflict arm below, which sets its own class back explicitly since the banner
+        // element no longer has a fixed class after this arm can run.
+        this.banner.className = "banner error";
+        this.banner.textContent = message;
+        this.banner.style.display = "flex";
+        // Re-enable Save iff the buffer is still dirty, mirroring the success arm's own rule —
+        // `saveInFlight`/`saveBtn.disabled` were both set at entry, so this is what undoes that.
+        this.saveBtn.disabled = !this.dirty;
+        // Immediate: a save failure is a discrete transition, not a buffer edit.
+        this.pushEditorStateNow();
+        return;
+      }
+      if (generation !== this.openGeneration) {
+        // A newer open() already moved this pane on to a different file. The write above was still
+        // a valid CAS write for the superseded file's own content against its own baseline, so
+        // disk is correct either way; there is just no in-memory editor state left for it to update.
+        return;
+      }
+      if ("conflict" in result) {
+        this.conflict = true;
+        this.saveBtn.disabled = true;
+        // Explicit here (not just relying on the constructor's initial class) because a prior save
+        // attempt on this same file can have left the banner in "error" styling above.
+        this.banner.className = "banner conflict";
+        this.banner.textContent = result.fileMissing ? "File deleted on disk — save disabled" : "File changed on disk — save disabled";
+        this.banner.style.display = "flex";
+        // Immediate: conflict state changing is a discrete transition, not a buffer edit.
+        this.pushEditorStateNow();
+        return;
+      }
+      // The pair (submitted, write hash) is self-consistent by construction — adopt the write's own
+      // hash as the next CAS baseline directly rather than re-reading the file. A re-read here would
+      // instead race whatever else might write the file (e.g. an agent) between this save and the
+      // read: a write landing in that window would make the re-read return someone else's hash
+      // paired with this buffer's un-saved-again content, and the next save would then pass CAS and
+      // silently overwrite it.
+      this.baseSHA256 = result.sha256;
+      // NOT unconditionally clean: the buffer showing in the editor right now is only guaranteed to
+      // match disk if nothing was typed during the await. A keystroke that landed while this save was
+      // in flight left `latestContent` ahead of `submitted` — that content was never written, so the
+      // buffer must stay dirty against the baseline just adopted above (its own next save CAS-checks
+      // against this save's hash, which is correct: it is the disk state that content hasn't seen yet).
+      this.dirty = this.latestContent !== submitted;
+      this.saveBtn.disabled = !this.dirty;
+      // Clears a save-failure banner left by a prior attempt on this same file (the conflict arm
+      // above never falls through to here, so this can't accidentally hide a real conflict banner).
+      this.banner.style.display = "none";
+      // Immediate: a successful save is a discrete transition (new baseline, dirty possibly changed).
       this.pushEditorStateNow();
-      return;
+    } finally {
+      this.saveInFlight = false;
     }
-    // The pair (submitted, write hash) is self-consistent by construction — adopt the write's own
-    // hash as the next CAS baseline directly rather than re-reading the file. A re-read here would
-    // instead race whatever else might write the file (e.g. an agent) between this save and the
-    // read: a write landing in that window would make the re-read return someone else's hash
-    // paired with this buffer's un-saved-again content, and the next save would then pass CAS and
-    // silently overwrite it.
-    this.baseSHA256 = result.sha256;
-    // NOT unconditionally clean: the buffer showing in the editor right now is only guaranteed to
-    // match disk if nothing was typed during the await. A keystroke that landed while this save was
-    // in flight left `latestContent` ahead of `submitted` — that content was never written, so the
-    // buffer must stay dirty against the baseline just adopted above (its own next save CAS-checks
-    // against this save's hash, which is correct: it is the disk state that content hasn't seen yet).
-    this.dirty = this.latestContent !== submitted;
-    this.saveBtn.disabled = !this.dirty;
-    // Immediate: a successful save is a discrete transition (new baseline, dirty possibly changed).
-    this.pushEditorStateNow();
   }
 
   cleanUp(): void {

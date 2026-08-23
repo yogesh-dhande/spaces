@@ -144,6 +144,17 @@ import workspacecore
         #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
     }
 
+    @Test func aFreshCodePaneIsRefusedForADeviceThatCannotAct() {
+        // A code pane has no daemon-side session to attach, but building its content still means
+        // installing a pane into the layout and persisting it, so an unreachable device must not have
+        // one created on its behalf — the code-pane counterpart of `canOpenOrFocusTerminalPane`'s
+        // creation branch. Unlike that function, there is no `hasExistingPane` flag here:
+        // `openOrFocusCodePane` already handles "a pane exists" by focusing it before creation is ever
+        // considered, so this only ever answers "can we create."
+        #expect(!AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: true))
+    }
+
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
         // The refusal a user reads has to match what they can see: the device's rows are on screen, so
         // "Spaces has not finished loading" would be plainly wrong. It names the device and says offline,

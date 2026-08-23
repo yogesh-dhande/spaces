@@ -6,6 +6,12 @@ public enum SpacesDeviceErrorCode: String, Codable, Sendable, Equatable {
     case unauthorized
     case notFound
     case invalidArgument
+    /// The request's view of some server-side state is stale — e.g. a review comment named for send
+    /// carries an `updatedAt` that no longer matches the draft's current one, because it changed (edit,
+    /// delete-and-recreate) since the client last read it. Distinct from `.invalidArgument`: the
+    /// argument was well-formed and named a real thing, it's specifically the version echo that lost the
+    /// race. Refused before any write, same as `.invalidArgument` — see `isRequestVerdict`.
+    case conflict
     case sessionNotRunning
     case sessionNotAvailable
     case serviceNotRunning
@@ -43,7 +49,7 @@ extension SpacesDeviceErrorCode {
         switch self {
         // Rejected before any work: authorization, an unresolvable target, an argument the daemon would
         // not act on (a default workspace, a workspace already busy), or a daemon declining mid-handoff.
-        case .unauthorized, .notFound, .invalidArgument, .handingOff: true
+        case .unauthorized, .notFound, .invalidArgument, .conflict, .handingOff: true
         default: false
         }
     }

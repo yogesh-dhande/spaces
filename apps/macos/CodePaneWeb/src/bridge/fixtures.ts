@@ -1,4 +1,4 @@
-import { CodePaneInitPayload, DiffFileEntry, DiffScope } from "./types";
+import { CodePaneAgentSummary, CodePaneInitPayload, DiffFileEntry, DiffScope } from "./types";
 
 /**
  * Fixture data for the `npm run dev` harness and for the mock bridge's unit
@@ -237,10 +237,19 @@ export const FIXTURE_ALL_PATHS: string[] = [
   "package.json",
 ];
 
+/** Two running agents by default so the harness demonstrates the manual-pick dropdown state;
+ *  `simulateAgentsChange` (dev-only harness control) cycles down to one (auto-default) and to
+ *  none (sending disabled) and back. */
+export const FIXTURE_AGENTS: CodePaneAgentSummary[] = [
+  { id: "agent-1", label: "claude · main", sessionId: "session-1" },
+  { id: "agent-2", label: "codex · fix-flaky-test", sessionId: "session-2" },
+];
+
 export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
   workspaceId: "fixture-workspace",
   workspaceName: "spaces-demo",
   initialMode: "diff",
   initialScope: { kind: "uncommitted" },
   theme: "dark",
+  agents: FIXTURE_AGENTS,
 };

@@ -32,6 +32,7 @@ enum CodePaneMode: Equatable {
     private static let initEventName = "spaces:init"
     private static let themeEventName = "spaces:theme"
     private static let diffSignatureEventName = "spaces:diffSignature"
+    private static let agentsEventName = "spaces:agents"
 
     let descriptor: PaneContentDescriptor
     let initialMode: CodePaneMode
@@ -59,6 +60,13 @@ enum CodePaneMode: Equatable {
     /// the page has a listener attached for them either.
     private var isReady = false
     private var currentTheme: ThemeAppearance?
+    /// The running-agent set last pushed via `spaces:agents` (or folded into the pending
+    /// `spaces:init` payload before the page was ready) — `nil` until the first push/init, so the
+    /// first call after activation always sends. Not reset on hibernation: the running-agent set is a
+    /// fact about the workspace, not the page, so a reactivated pane's `spaces:init` should reuse
+    /// whatever was last known rather than re-querying and potentially re-sending the same set as if
+    /// it were new (mirrors `currentTheme`, which is the same kind of workspace/app-level fact).
+    private var currentAgents: [CodePaneRunningAgent]?
 
     /// Bumped every time `installWebView()` creates a fresh page. The web app's own JS request-id
     /// counter (`realBridge.ts`) restarts at 1 on every page load, so an id alone can't disambiguate a
@@ -135,6 +143,69 @@ enum CodePaneMode: Equatable {
     /// `close()` just discarded.
     private var editorStateGeneration = 0
 
+    /// round-16 Fix 1a: the web app's last-known teardown snapshot of comment text typed but not yet
+    /// persisted (see `CodePaneBridge.ReviewCommentEntryPayload`) — mirrors `editorState` above exactly,
+    /// including its lifecycle (survives `deactivate()`, discarded by `close()`) and its rehydration
+    /// via `spaces:init`'s `pendingReviewComments` field. `nil` means "nothing pending", the same
+    /// meaning as the `'__none__'` sentinel on the wire.
+    ///
+    /// A CREATE upsert (`commentID == nil`) that completes after this snapshot was taken corrects the
+    /// snapshot's matching provisional entry before any deferred `ready` resumes, so the replacement
+    /// page's `spaces:init` doesn't replay it as a duplicate of the row `loadInitial()` will already
+    /// list: dropped entirely if the create's committed body already matches the snapshot entry's body
+    /// (the listed row already carries this text), or rewritten in place as non-provisional with the
+    /// server-assigned id if the snapshot's body has since diverged (the user kept typing after the
+    /// create's RPC went out, so the snapshot's newer text is what should overlay the listed row). See
+    /// `reconcilePendingReviewCommentStateAfterCreate(comment:)`.
+    private var pendingReviewCommentState: [CodePaneBridge.ReviewCommentEntryPayload]?
+    /// The page generation that most recently wrote `pendingReviewCommentState` — mirrors
+    /// `editorStateGeneration` exactly, but kept as an independent counter (not reused) since the two
+    /// snapshots are written by unrelated flushes and gating one against the other's generation would
+    /// let an editor-only (or comment-only) flush incorrectly block the other's apply.
+    private var pendingReviewCommentStateGeneration = 0
+
+    /// Count of teardown flushes (`flushPendingEditorState` AND, since round-16 Fix 1a,
+    /// `flushPendingReviewCommentState`) started but not yet answered. Bumped when a flush actually
+    /// kicks off, decremented once its completion applies (or discards) its result. `handleReady()`
+    /// reads this to know whether a flush from the just-torn-down page could still overwrite
+    /// `editorState`/`pendingReviewCommentState` with fresher content than whatever is on hand right
+    /// now — see `deferredReadyGeneration` below for why that matters. A counter, not a flag, because a
+    /// pane can in principle rack up more than one outstanding flush (teardown → reactivate → teardown
+    /// again, all before the first flush's `evaluateJavaScript` round trip returns, or the editor and
+    /// comment-state flushes from the very same teardown both still in flight); `handleReady()` must
+    /// wait for all of them, not just the most recent. `evaluateJavaScript` (what `evaluateCodePaneScript`
+    /// wraps) always calls its completion, success or failure, so this is guaranteed to return to zero
+    /// and never strands a deferred `ready` forever. Folded into one counter (renamed from
+    /// `outstandingEditorFlushCount`) rather than tracked separately per flush kind: both flushes gate
+    /// the exact same `ready` decision, so one shared count is the cleaner mirror and there is nothing
+    /// either flush kind needs to know about the other's count.
+    private var outstandingTeardownFlushCount = 0
+    /// round-16 Fix 1b: count of in-flight review-comment mutation RPCs (`reviewCommentUpsert`/
+    /// `reviewCommentDelete`/`reviewCommentsSend`) — kept separate from `outstandingTeardownFlushCount`
+    /// above rather than folded into it, since this counts a different thing (an RPC round trip to the
+    /// daemon, not a teardown flush) even though both gate the same `ready` decision below. Bumped
+    /// right before each RPC's `Task` starts, decremented — unconditionally, success or failure — in its
+    /// completion, mirroring the teardown flush's own unconditional decrement. `handleReady()`/
+    /// `resumeDeferredReadyIfNeeded()` also wait for this to reach zero: answering `ready` while a send/
+    /// upsert/delete is still in flight would let the web app's rehydrated comment state (from
+    /// `pendingReviewCommentState`, or the next `loadInitial()`) race the mutation's own effect on the
+    /// daemon. See the tradeoff noted at each `perform*` call site below.
+    private var outstandingReviewCommentMutationCount = 0
+    /// The page generation `handleReady()` was called for when it deferred sending `spaces:init`
+    /// because `outstandingTeardownFlushCount`/`outstandingReviewCommentMutationCount` was nonzero —
+    /// `nil` when nothing is deferred. Sending init immediately in that state would ship the stale
+    /// pre-flush `editorState`/`pendingReviewCommentState`, and once the flush's completion did land,
+    /// `storeFlushedEditorState`'s `generation >= editorStateGeneration` guard (and its
+    /// `storeFlushedReviewCommentState` sibling) would silently drop it (this page's own activity can
+    /// have already moved the generation past the flush's captured value), losing the just-typed
+    /// content for good rather than merely delaying it. Re-checked against `pageGeneration` when the
+    /// last outstanding flush/mutation finally settles (`resumeDeferredReadyIfNeeded`), since the page
+    /// that was waiting can itself be torn down again before that happens. Only the newest deferral is
+    /// ever kept: a second `ready` arriving while one is already pending can only be from a newer page
+    /// (a same-page repeat is blocked by `isReady`), so overwriting here is correct — there is nothing
+    /// to queue.
+    private var deferredReadyGeneration: Int?
+
     /// The pane's live mode, distinct from the immutable `initialMode` it was constructed with: the
     /// user can toggle Diff/Editor from the in-page toolbar afterward, and this tracks wherever
     /// they left it (via the `modeChanged` push — see `handleModeChanged`). Survives hibernation
@@ -184,6 +255,11 @@ enum CodePaneMode: Equatable {
         // completion would still satisfy `flushGeneration >= editorStateGeneration` (neither moves on
         // its own between the two calls) and could resurrect the snapshot this line just discarded.
         editorStateGeneration += 1
+        // round-16 Fix 1a: mirrors the editorState treatment immediately above, for the same reason —
+        // a comment-state flush already in flight from the teardown just above must not resurrect this
+        // snapshot after close() just discarded it.
+        pendingReviewCommentState = nil
+        pendingReviewCommentStateGeneration += 1
         currentMode = initialMode
     }
 
@@ -212,6 +288,20 @@ enum CodePaneMode: Equatable {
         guard isReady, let scriptEvaluator else { return }
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.themeEventName, detail: CodePaneBridge.ThemePayload(theme: appearance.rawValue))
         else { return }
+        scriptEvaluator.evaluateCodePaneScript(script)
+    }
+
+    /// Called by `PanelCoordinator.updateCodePaneAgents` whenever the host reprocesses an overview
+    /// for this pane's device — the same overview-apply call sites that already call
+    /// `pruneOpenCodePanes`. Dedupes on the full running-agent set (array equality) so a routine
+    /// overview refresh that didn't touch this workspace's agents doesn't spam the page with a
+    /// no-op push, mirroring `applyAppearance`'s `currentTheme` guard above.
+    func applyRunningAgents(_ agents: [CodePaneRunningAgent]) {
+        guard currentAgents != agents else { return }
+        currentAgents = agents
+        guard isReady, let scriptEvaluator else { return }
+        let payload = CodePaneBridge.AgentsPayload(agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+        guard let script = CodePaneBridge.dispatchEventScript(name: Self.agentsEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 
@@ -254,6 +344,10 @@ enum CodePaneMode: Equatable {
 
     private func teardownWebView() {
         flushPendingEditorState()
+        // round-16 Fix 1a: mirrors the editor-state flush immediately above — both are counted by the
+        // same `outstandingTeardownFlushCount` (see its doc comment), so `handleReady()` waits for
+        // whichever of the two is slower to answer.
+        flushPendingReviewCommentState()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageHandlerName)
         webView?.removeFromSuperview()
         webView = nil
@@ -286,6 +380,7 @@ enum CodePaneMode: Equatable {
     private func flushPendingEditorState() {
         guard let webView, let scriptEvaluator else { return }
         let flushGeneration = pageGeneration
+        outstandingTeardownFlushCount += 1
         // Strongly captured (not `[weak webView]`): `webView` is about to be removed from `rootView`
         // and have its message handler stripped by the rest of `teardownWebView()`, but its web
         // process must stay alive long enough for this in-flight `evaluateJavaScript` call to actually
@@ -293,22 +388,111 @@ enum CodePaneMode: Equatable {
         scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectEditorStateScript) { [weak self] result in
             withExtendedLifetime(webView) {
                 self?.storeFlushedEditorState(CodePaneBridge.decodeCollectedEditorState(result), generation: flushGeneration)
+                self?.outstandingTeardownFlushCount -= 1
+                // A `handleReady()` deferred behind this flush (see `deferredReadyGeneration`) can now
+                // go out — `editorState` above has just been settled for this flush's generation, so a
+                // now-built `spaces:init` payload reads whatever it actually was, not a stale pre-flush
+                // value.
+                self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
+    /// round-16 Fix 1a: mirrors `flushPendingEditorState` exactly (see its doc comment for the
+    /// return-value-vs-message-channel reasoning), but pulls the web app's live comment-draft snapshot
+    /// instead — closes the same race for text typed into a comment textarea that hasn't blurred yet.
+    private func flushPendingReviewCommentState() {
+        guard let webView, let scriptEvaluator else { return }
+        let flushGeneration = pageGeneration
+        outstandingTeardownFlushCount += 1
+        scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectReviewCommentStateScript) { [weak self] result in
+            withExtendedLifetime(webView) {
+                self?.storeFlushedReviewCommentState(
+                    CodePaneBridge.decodeCollectedReviewCommentState(result), generation: flushGeneration)
+                self?.outstandingTeardownFlushCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
             }
         }
     }
 
     /// Applies a teardown flush's result under the same ordering rule `handleEditorStateChanged`
     /// writes under — see `editorStateGeneration`'s doc comment for the `>=` rule this enforces.
+    /// `.notReported` returns immediately without touching `editorState` or `editorStateGeneration`:
+    /// it carries no information (the page never got far enough to answer, or the evaluate call
+    /// itself failed — see `CollectedEditorState`'s doc comment), so it must not consume or advance
+    /// the generation-ordering slot — a later flush that DOES report something for the same or an
+    /// earlier generation must still be accepted.
     private func storeFlushedEditorState(_ collected: CodePaneBridge.CollectedEditorState, generation: Int) {
         guard generation >= editorStateGeneration else { return }
         switch collected {
+        case .notReported: return
         case .noFile: editorState = nil
         case .file(let state): editorState = state
         }
         editorStateGeneration = generation
     }
 
+    /// round-16 Fix 1a: mirrors `storeFlushedEditorState` exactly, against the independent
+    /// `pendingReviewCommentStateGeneration` guard (see its doc comment for why it is not shared with
+    /// `editorStateGeneration`). `.none` (the `'__none__'` sentinel) clears the stored snapshot, the
+    /// same way `.noFile` clears `editorState`.
+    private func storeFlushedReviewCommentState(_ collected: CodePaneBridge.CollectedReviewCommentState, generation: Int) {
+        guard generation >= pendingReviewCommentStateGeneration else { return }
+        switch collected {
+        case .notReported: return
+        case .none: pendingReviewCommentState = nil
+        case .entries(let entries): pendingReviewCommentState = entries
+        }
+        pendingReviewCommentStateGeneration = generation
+    }
+
     // MARK: - Bridge dispatch
+
+    /// The actual body of `WKScriptMessageHandler.userContentController(_:didReceive:)`, split out
+    /// because `WKScriptMessage` has no public initializer a test can construct (see below) — this
+    /// takes its three relevant fields directly so a test can drive the sender-identity guard without
+    /// needing a real `WKScriptMessage`.
+    ///
+    /// `senderWebView === webView` is checked once here, ahead of every kind of message (`ready`, an
+    /// editor-state/mode push, or an RPC request): WebKit can deliver a message a page queued before
+    /// it was itself torn down (a rapid deactivate→reactivate hibernation cycle is the case that
+    /// matters — see the class doc comment) *after* its replacement page is already installed, and
+    /// message ordering across that transition is not guaranteed. Sender identity is the only reliable
+    /// way to tell that stale message apart from a live one — a `ready` from the old page marking the
+    /// new page ready before its own JS listener even exists would hang the pane, and a stale RPC
+    /// executing under the replacement's generation would reply to a request nobody sent. `webView`
+    /// being `nil` (no live page installed at all) also fails this comparison, correctly — there is
+    /// nothing live to process for.
+    ///
+    /// This makes the `senderWebView` checks inside `handleEditorStateChanged`/`handleModeChanged`
+    /// redundant for anything that arrives through this method — deliberately left in place rather
+    /// than removed, since those two are also driven directly by tests (and, in principle, could be
+    /// driven by other callers) that don't go through this guard at all; the overlap is intentional
+    /// defense-in-depth, not an oversight.
+    func handleScriptMessage(name: String, body: Any, senderWebView: WKWebView?) {
+        guard name == Self.messageHandlerName else { return }
+        guard senderWebView != nil, senderWebView === webView else { return }
+        if CodePaneBridge.isReady(body: body) {
+            handleReady()
+            return
+        }
+        switch CodePaneBridge.decodeEditorStateChanged(body: body) {
+        case .file(let state):
+            handleEditorStateChanged(state, senderWebView: senderWebView)
+            return
+        case .noFile:
+            handleEditorStateChanged(nil, senderWebView: senderWebView)
+            return
+        case .notThisMessage:
+            break
+        }
+        if let mode = CodePaneBridge.decodeModeChanged(body: body) {
+            handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: senderWebView)
+            return
+        }
+        guard let request = CodePaneBridge.decodeRequest(body: body) else { return }
+        dispatch(request)
+    }
 
     /// Not `private`: `WKScriptMessage` has no public initializer a test can construct, so a test
     /// simulates the web app's `ready` handshake by calling this directly instead of going through
@@ -316,7 +500,51 @@ enum CodePaneMode: Equatable {
     /// already use to give tests a seam without adding any new product-facing surface.
     func handleReady() {
         guard !isReady, let scriptEvaluator, let hosting else { return }
+        // Flips here, not after the deferral check below: a second `ready` from THIS SAME page while
+        // a flush-deferred send is pending must not re-enter (there is nothing new to capture, and
+        // `guard !isReady` above is what blocks it). A stale `true` left over from a torn-down page
+        // never wrongly blocks a genuinely new page's `ready`, either — `teardownWebView()` always
+        // resets `isReady = false` before a replacement page can load, so this self-corrects across a
+        // hibernation cycle.
         isReady = true
+        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0 else {
+            // A flush kicked off by tearing down the page before this one (see
+            // `flushPendingEditorState`/`flushPendingReviewCommentState`), or a review-comment mutation
+            // RPC still in flight from before that (round-16 Fix 1b — see
+            // `outstandingReviewCommentMutationCount`'s doc comment), may still be outstanding and could
+            // still change what `editorState`/`pendingReviewCommentState` should read right now. See
+            // `deferredReadyGeneration`'s doc comment for why sending `spaces:init` before that lands
+            // would lose content for good rather than merely delay it. Capture the generation this
+            // `ready` belongs to and let the outstanding work's completion resume this once settled
+            // (`resumeDeferredReadyIfNeeded`).
+            deferredReadyGeneration = pageGeneration
+            return
+        }
+        sendInitPayload(scriptEvaluator: scriptEvaluator, hosting: hosting)
+    }
+
+    /// Fires the `handleReady()` continuation deferred while a teardown flush or review-comment
+    /// mutation RPC was outstanding (see `deferredReadyGeneration`), once every such flush/RPC has
+    /// settled (`outstandingTeardownFlushCount` and `outstandingReviewCommentMutationCount` both back
+    /// at zero — see their doc comments for why counts, not flags). Re-verifies the deferred generation
+    /// is still the live page: the page that was waiting can itself have been torn down again (a second
+    /// `deactivate()`/`activate()` cycle) before this flush's completion landed, in which case there is
+    /// nothing to resume — that page is gone, `scriptEvaluator` no longer points at it, and whichever
+    /// page is current now will get its own `ready` → `handleReady()` call in due course.
+    private func resumeDeferredReadyIfNeeded() {
+        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0,
+            let generation = deferredReadyGeneration
+        else { return }
+        deferredReadyGeneration = nil
+        guard generation == pageGeneration, let scriptEvaluator, let hosting else { return }
+        sendInitPayload(scriptEvaluator: scriptEvaluator, hosting: hosting)
+    }
+
+    /// Builds and sends `spaces:init` from the controller's current state. Split out of `handleReady()`
+    /// so the same send can run either immediately (the common case) or later, once a teardown flush
+    /// `handleReady()` deferred behind has settled (`resumeDeferredReadyIfNeeded`) — both call sites
+    /// have already confirmed `isReady` and re-resolved `scriptEvaluator`/`hosting` as needed.
+    private func sendInitPayload(scriptEvaluator: any CodePaneScriptEvaluator, hosting: any CodePaneHosting) {
         let appearance = currentTheme ?? hosting.codePaneCurrentAppearance()
         currentTheme = appearance
         let workspaceInfo = hosting.codePaneWorkspaceInfo(workspaceID: workspaceID)
@@ -324,6 +552,11 @@ enum CodePaneMode: Equatable {
         // Same emptiness rule as `refName(for:)`'s `.baseBranch` case: an empty string reads as "no
         // base branch configured", not a literal branch named "".
         let baseBranch = workspaceInfo?.baseBranch.flatMap { $0.isEmpty ? nil : $0 }
+        // Reuses whatever `applyRunningAgents` already recorded (e.g. from an overview that landed
+        // while this pane was still loading) instead of re-querying, so init and the dedupe guard
+        // agree on the same value — matches `currentTheme`'s `??` fallback just above.
+        let agents = currentAgents ?? hosting.codePaneRunningAgents(workspaceID: workspaceID)
+        currentAgents = agents
         let payload = CodePaneBridge.InitPayload(
             workspaceId: workspaceID, workspaceName: workspaceName,
             // `currentMode`, not `initialMode`: after a hibernation cycle this is wherever the user
@@ -333,7 +566,12 @@ enum CodePaneMode: Equatable {
             // Every code pane opens on the uncommitted-vs-HEAD scope; the toolbar's scope control
             // (see CodePaneWeb's toolbar.ts) is what moves it from there.
             initialScope: .init(kind: "uncommitted", refName: nil), theme: appearance.rawValue, baseBranch: baseBranch,
-            editorState: editorState)
+            editorState: editorState,
+            // round-16 Fix 1a: only present when a teardown flush actually captured something (mirrors
+            // `editorState`'s own nil-when-empty handling above) — `InitPayload`'s doc comment on this
+            // field explains why an omitted key, not an empty array, is the "nothing pending" wire shape.
+            pendingReviewComments: pendingReviewCommentState,
+            agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -396,6 +634,16 @@ enum CodePaneMode: Equatable {
             performFileRead(path: path, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256):
             performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
+        case .reviewCommentList:
+            performReviewCommentList(id: id, generation: generation, hosting: hosting)
+        case .reviewCommentUpsert(let commentID, let filePath, let side, let lineNumber, let lineText, let body):
+            performReviewCommentUpsert(
+                commentID: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body, id: id,
+                generation: generation, hosting: hosting)
+        case .reviewCommentDelete(let commentID):
+            performReviewCommentDelete(commentID: commentID, id: id, generation: generation, hosting: hosting)
+        case .reviewCommentsSend(let sessionID, let text, let comments):
+            performReviewCommentsSend(sessionID: sessionID, text: text, comments: comments, id: id, generation: generation, hosting: hosting)
         }
     }
 
@@ -526,6 +774,172 @@ enum CodePaneMode: Equatable {
         }
     }
 
+    private func performReviewCommentList(id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let comments = try await deviceGateway.workspaceReviewCommentList(workspaceID: workspaceID, device: device)
+                self?.reply(id: id, generation: generation, result: comments)
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+            }
+        }
+    }
+
+    private func performReviewCommentUpsert(
+        commentID: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String, id: String,
+        generation: Int, hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        // round-16 Fix 1b: bumped before the RPC starts, decremented — unconditionally, success or
+        // failure — in its completion below. See `outstandingReviewCommentMutationCount`'s doc comment
+        // for why a deferred `ready` also waits on this, not just on `outstandingTeardownFlushCount`.
+        outstandingReviewCommentMutationCount += 1
+        Task { [weak self] in
+            do {
+                let comment = try await deviceGateway.workspaceReviewCommentUpsert(
+                    workspaceID: workspaceID, id: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText,
+                    body: body, device: device)
+                self?.reply(id: id, generation: generation, result: comment)
+                // Only a CREATE (`commentID == nil` on the call this Task is completing) can have raced a
+                // teardown flush that snapshotted this same draft while it was still provisional — an
+                // UPDATE's snapshot entry, if any, was already non-provisional and needs no correction.
+                if commentID == nil {
+                    self?.reconcilePendingReviewCommentStateAfterCreate(comment: comment)
+                }
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
+    /// Corrects a stale `pendingReviewCommentState` snapshot after a CREATE upsert (never an UPDATE —
+    /// see the call site) commits server-side, closing the race described on `pendingReviewCommentState`'s
+    /// doc comment: a blur fires this CREATE, the same gesture (or an unrelated race) hibernates the pane
+    /// before the RPC replies, and `flushPendingReviewCommentState()` snapshots the still-provisional
+    /// entry because it looked unpersisted at that instant. Left uncorrected, the replacement page's
+    /// `spaces:init` would restore that stale provisional entry *alongside* the new server row the
+    /// replacement page's own `loadInitial()` already lists — two cards for one comment — and the
+    /// restored provisional card's next blur would fire another CREATE, minting a second real
+    /// server-side row.
+    ///
+    /// Runs unconditionally, even when the page is still alive (not torn down): if so,
+    /// `pendingReviewCommentState` is necessarily a stale snapshot from some *previous* teardown that the
+    /// live page has already moved past — a live page holds its own in-memory draft state, not this
+    /// snapshot — so correcting stale-but-harmless data here is harmless. Nothing reads this snapshot
+    /// except a future `spaces:init` construction, so there is nothing to gate this against.
+    ///
+    /// At most one entry is touched, matched against `comment`'s `(filePath, side, lineNumber, lineText)`
+    /// anchor: a body-equal provisional match (nothing was typed after the CREATE went out) is removed
+    /// outright, since the listed server row already carries this exact text; an anchor-only match with a
+    /// different body (the user kept typing while the CREATE was in flight) is rewritten in place as
+    /// non-provisional with the server-assigned id, keeping its own (newer) body so it still overlays the
+    /// listed row as unsaved text. Left untouched — same generation, same value — if nothing matches.
+    private func reconcilePendingReviewCommentStateAfterCreate(comment: SpacesDeviceReviewComment) {
+        guard var entries = pendingReviewCommentState else { return }
+        var bodyEqualIndex: Int?
+        var anchorOnlyIndex: Int?
+        for (index, entry) in entries.enumerated() {
+            guard entry.provisional, entry.filePath == comment.filePath, entry.side == comment.side, entry.lineNumber == comment.lineNumber,
+                entry.lineText == comment.lineText
+            else { continue }
+            if entry.body == comment.body {
+                bodyEqualIndex = index
+                break
+            }
+            if anchorOnlyIndex == nil { anchorOnlyIndex = index }
+        }
+        if let index = bodyEqualIndex {
+            entries.remove(at: index)
+        } else if let index = anchorOnlyIndex {
+            let stale = entries[index]
+            entries[index] = CodePaneBridge.ReviewCommentEntryPayload(
+                id: comment.id, provisional: false, filePath: stale.filePath, side: stale.side, lineNumber: stale.lineNumber,
+                lineText: stale.lineText, body: stale.body)
+        } else {
+            return
+        }
+        // Deliberately not touched: this corrects the content already stored under the current
+        // generation, it does not answer a new teardown flush, so bumping it would be wrong (see
+        // `pendingReviewCommentStateGeneration`'s doc comment).
+        pendingReviewCommentState = entries
+    }
+
+    private func performReviewCommentDelete(commentID: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        outstandingReviewCommentMutationCount += 1
+        Task { [weak self] in
+            do {
+                _ = try await deviceGateway.workspaceReviewCommentDelete(workspaceID: workspaceID, id: commentID, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
+    private func performReviewCommentsSend(
+        sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], id: String, generation: Int,
+        hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        // round-16 Fix 1b: a send held up by this counter can hold `ready` for as long as the send's
+        // own terminal-write timeout (~5s), if teardown happens right after the user hits send. Accepted:
+        // the alternative — answering `ready` (and thus letting a `reviewCommentList` race it) before
+        // the send lands — would show the just-sent draft as still present/unsent in the rehydrated
+        // page, which is worse than a bounded delay.
+        outstandingReviewCommentMutationCount += 1
+        Task { [weak self] in
+            do {
+                _ = try await deviceGateway.workspaceReviewCommentsSend(
+                    workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.outstandingReviewCommentMutationCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
     /// (Re)points the live diff-signature stream at `refName` if it isn't already there. A repeat
     /// `workspaceDiff` call for the same resolved scope is a no-op here — only an actual scope
     /// change tears down and reopens the stream.
@@ -563,8 +977,22 @@ enum CodePaneMode: Equatable {
                 let client = try await deviceGateway.subscribeWorkspaceDiffSignature(
                     workspaceID: workspaceID, refName: refName, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
                 // The pane may have deactivated, or resubscribed to a different scope, while this was
-                // in flight; only keep the client if it's still the one this scope wants.
-                guard let self, self.subscribedScope == .scope(refName), self.webView != nil else {
+                // in flight; only keep the client if it's still the one this scope wants. Scope alone
+                // is not enough: a rapid A → B → A scope-change sequence can land a STALE A attempt's
+                // completion here after a newer A attempt has already taken over — `subscribedScope ==
+                // .scope(refName)` would read true again even though this in-flight `Task` belongs to a
+                // completely different (superseded) subscription attempt than the one that's actually
+                // current. `subscriptionGeneration` is the identity of this one ATTEMPT, not just its
+                // target scope, so it's what actually tells a stale A from the current A apart. Without
+                // it, a stale success either bare-assigns over the current client with no `.stop()`
+                // (leaking the stream the current attempt installed), or installs itself as the live
+                // client while carrying an `onDisconnect` that closed over its own now-dead generation —
+                // when that stale client eventually disconnects, `handleDiffSignatureDisconnect`'s own
+                // generation guard correctly refuses to act on it, so the pane silently stops
+                // reconnecting until something else forces a fresh resubscribe.
+                guard let self, self.subscribedScope == .scope(refName), self.diffSignatureSubscriptionGeneration == subscriptionGeneration,
+                    self.webView != nil
+                else {
                     client.stop()
                     return
                 }
@@ -576,7 +1004,13 @@ enum CodePaneMode: Equatable {
                 // beyond scheduling a retry (below) — this arm runs both for a first-attempt
                 // subscribe failure and for a backoff retry's own subscribe call failing, since both
                 // go through this same code path.
-                guard let self, self.subscribedScope == .scope(refName) else { return }
+                //
+                // Same staleness concern as the success arm above, and the same fix: a stale attempt's
+                // failure must not clear `subscribedScope`/schedule a reconnect for a newer, still-live
+                // subscription that has nothing to do with this failure — `subscriptionGeneration` (not
+                // just scope) is what tells them apart.
+                guard let self, self.subscribedScope == .scope(refName), self.diffSignatureSubscriptionGeneration == subscriptionGeneration
+                else { return }
                 self.subscribedScope = .none
                 self.scheduleDiffSignatureReconnect(refName: refName, generation: subscriptionGeneration)
             }
@@ -685,27 +1119,7 @@ enum CodePaneMode: Equatable {
 extension CodePaneContentController: WKScriptMessageHandler {
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
-            guard message.name == Self.messageHandlerName else { return }
-            if CodePaneBridge.isReady(body: message.body) {
-                handleReady()
-                return
-            }
-            switch CodePaneBridge.decodeEditorStateChanged(body: message.body) {
-            case .file(let state):
-                handleEditorStateChanged(state, senderWebView: message.webView)
-                return
-            case .noFile:
-                handleEditorStateChanged(nil, senderWebView: message.webView)
-                return
-            case .notThisMessage:
-                break
-            }
-            if let mode = CodePaneBridge.decodeModeChanged(body: message.body) {
-                handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: message.webView)
-                return
-            }
-            guard let request = CodePaneBridge.decodeRequest(body: message.body) else { return }
-            dispatch(request)
+            handleScriptMessage(name: message.name, body: message.body, senderWebView: message.webView)
         }
     }
 }

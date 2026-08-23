@@ -4,9 +4,12 @@ import {
   DiffScope,
   DiffSignatureEvent,
   DiffSignatureListener,
+  ReviewCommentSendEntry,
+  ReviewCommentUpsertInput,
   SpacesBridge,
   SpacesBridgeError,
   SpacesErrorCode,
+  SpacesReviewComment,
   Unsubscribe,
   WorkspaceDiffResult,
   WorkspaceFileListResult,
@@ -165,6 +168,23 @@ class RealSpacesBridge implements SpacesBridge {
 
   async workspaceFileList(query: string): Promise<WorkspaceFileListResult> {
     return (await this.post("workspaceFileList", { query })) as WorkspaceFileListResult;
+  }
+
+  async reviewCommentList(): Promise<SpacesReviewComment[]> {
+    return (await this.post("reviewCommentList", {})) as SpacesReviewComment[];
+  }
+
+  async reviewCommentUpsert(input: ReviewCommentUpsertInput): Promise<SpacesReviewComment> {
+    return (await this.post("reviewCommentUpsert", input)) as SpacesReviewComment;
+  }
+
+  async reviewCommentDelete(id: string): Promise<void> {
+    // The reply is an ack (`{ok:true}`); nothing here needs it beyond confirming the call settled.
+    await this.post("reviewCommentDelete", { id });
+  }
+
+  async reviewCommentsSend(sessionId: string, text: string, comments: ReviewCommentSendEntry[]): Promise<void> {
+    await this.post("reviewCommentsSend", { sessionId, text, comments });
   }
 
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {

@@ -243,6 +243,22 @@ import spacesterminalcore
         closeCodePanes { paneDeviceID, workspaceID in paneDeviceID == deviceID && !liveWorkspaceIDs.contains(workspaceID) }
     }
 
+    /// Pushes `spaces:agents` (via `CodePaneContentController.applyRunningAgents`) to every open code
+    /// pane on `deviceID`, using its own workspace's running-agent set. Call from the same
+    /// overview-apply sites that already call `pruneOpenCodePanes` for this device — a code pane's
+    /// running-agent set is derived from the same overview those sites already have in hand. The
+    /// per-pane dedupe (skip the actual push when nothing changed) lives on
+    /// `applyRunningAgents` itself, mirroring `broadcastAppearance`'s `applyAppearance` dedupe.
+    func updateCodePaneAgents(deviceID: String, hosting: any CodePaneHosting) {
+        for state in panels.values {
+            for pane in PanelLayoutEngine.allPanes(in: state.layout) {
+                guard case .codePane(let paneDeviceID, let workspaceID) = pane.content, paneDeviceID == deviceID else { continue }
+                guard let content = codePaneControllers[pane.id] as? CodePaneContentController else { continue }
+                content.applyRunningAgents(hosting.codePaneRunningAgents(workspaceID: workspaceID))
+            }
+        }
+    }
+
     /// Cross-client lifecycle close: a workspace observed transitioning to not-running in a device's
     /// overview closes its code panes, the overview-driven counterpart of the direct-mutation
     /// `closeWorkspacePanes` path. A workspace's runtime status arrives per device, so the device id
@@ -642,6 +658,20 @@ import spacesterminalcore
                 deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forTerminalOpenRequest: request))
         else {
             host.showTerminalOpenRequestDeviceUnavailableError(request, focusIntent: focusIntent)
+            return false
+        }
+        return true
+    }
+
+    /// Whether a fresh code pane may be installed for `workspaceID`, refusing — with the reason,
+    /// naming the device — a creation whose device cannot service any daemon action right now.
+    /// Mirrors `mayActOnTerminalPane`'s "install door" reasoning: focusing a code pane that
+    /// already exists is client-side and always allowed, and `openOrFocusCodePane` never reaches
+    /// this helper for that case (its own existing-placement branch returns first), so this only
+    /// ever needs to gate creation, never focus.
+    private func mayCreateCodePane(workspaceID: String) -> Bool {
+        guard AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forWorkspaceID: workspaceID)) else {
+            host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             return false
         }
         return true
@@ -1145,11 +1175,15 @@ import spacesterminalcore
 
     /// Opens a fresh code pane as a new tab in the workspace's panel (the "Diff" and "Open file…"
     /// picker rows), in its workspace's panel by default or an explicit scope (mirrors
-    /// `openSessionInNewTab`).
+    /// `openSessionInNewTab`). This is the single choke point both `openOrFocusCodePane` (the
+    /// "Review changes" shortcut's creation branch) and the new-tab picker's "Diff"/"Open
+    /// file…" rows funnel through, so the `mayCreateCodePane` gate below covers both callers
+    /// at once.
     @discardableResult func openCodePaneInNewTab(
         deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil
     ) -> Bool {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: workspaceID) else { return false }
+        guard mayCreateCodePane(workspaceID: workspaceID) else { return false }
         let paneID = UUID().uuidString
         let content = installCodePaneController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode)
         let pane = Pane(id: paneID, content: content.descriptor)
@@ -1159,10 +1193,15 @@ import spacesterminalcore
         return true
     }
 
-    /// Fills a split with a fresh code pane, the code-pane counterpart of `fillSplit`.
+    /// Fills a split with a fresh code pane, the code-pane counterpart of `fillSplit`. Reached
+    /// from the split picker's "Diff"/"Open file…" rows, which — like the new-tab picker — offer
+    /// a workspace-scoped panel's code-pane rows without filtering by current device
+    /// reachability, so this needs its own `mayCreateCodePane` gate rather than inheriting one
+    /// from the picker.
     private func fillSplitWithCodePane(
         scope: PanelScope, paneID: String, direction: PaneSplitDirection, deviceID: String, workspaceID: String, mode: CodePaneMode
     ) {
+        guard mayCreateCodePane(workspaceID: workspaceID) else { return }
         let newPaneID = UUID().uuidString
         let content = installCodePaneController(paneID: newPaneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode)
         let pane = Pane(id: newPaneID, content: content.descriptor)

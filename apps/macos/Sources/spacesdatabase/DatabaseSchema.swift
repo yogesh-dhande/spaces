@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 17
+    public static let currentVersion = 18
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -554,6 +554,36 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 16, toVersion: 17, description: "Persist automation next-run overrides", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN next_fire_override REAL;")
         },
+        // Adds the code pane's review-comment drafts: one row per draft or archived (sent) comment,
+        // anchored to a file/side/line with the anchored line's text captured for re-anchoring after a
+        // diff refresh. `sent_at` is NULL for a draft and the send timestamp once archived; there is no
+        // tombstone or thread state, matching the locked v1 decision that a sent comment simply leaves
+        // the tray. `CREATE TABLE IF NOT EXISTS` (rather than a bare `CREATE TABLE`) for the same reason
+        // the v15→v16 step uses it: no migration step has ever created `workspaces` either, so this step
+        // must tolerate running on a chain where the frozen shape doesn't exist yet only if such a chain
+        // existed — here it's defensive parity with that established convention, not a real gap, since
+        // `workspaces` is created by the fresh-schema SQL on every DB this migrator ever opens.
+        DatabaseMigrationStep(fromVersion: 17, toVersion: 18, description: "Persist code pane review-comment drafts", requiresBackup: true) {
+            handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS workspace_review_comments (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      file_path TEXT NOT NULL,
+                      side TEXT NOT NULL,
+                      line_number INTEGER NOT NULL,
+                      line_text TEXT NOT NULL,
+                      body TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      revision INTEGER NOT NULL DEFAULT 0,
+                      sent_at TEXT,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                    );
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -780,6 +810,21 @@ public enum DatabaseSchema {
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL,
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_review_comments (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              side TEXT NOT NULL,
+              line_number INTEGER NOT NULL,
+              line_text TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              revision INTEGER NOT NULL DEFAULT 0,
+              sent_at TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 

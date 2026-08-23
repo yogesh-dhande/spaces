@@ -96,6 +96,74 @@ export type DiffSignatureListener = (event: DiffSignatureEvent) => void;
 /** Unsubscribe function returned by `subscribeDiffSignature`. */
 export type Unsubscribe = () => void;
 
+/** One line's side within a diff: `"old"` is the deletion side, `"new"` is the addition side.
+ *  `@pierre/diffs`' own `AnnotationSide`/`SelectionSide` types use `"deletions"`/`"additions"`
+ *  instead — see `reviewComments.ts`'s `toAnnotationSide`/`fromAnnotationSide` for the mapping at
+ *  the one boundary that needs it (diffView.ts). This bridge stays on the host's own vocabulary. */
+export type ReviewCommentSide = "old" | "new";
+
+/** A draft code-review comment anchored to one diff line. The daemon is the sole source of truth
+ *  (see `SpacesBridge.reviewComment*` below) — there is no web-local draft store beyond in-memory
+ *  render state pulled from `reviewCommentList` and kept in sync by local mutations. */
+export interface SpacesReviewComment {
+  id: string;
+  filePath: string;
+  side: ReviewCommentSide;
+  lineNumber: number;
+  /** The diff line's content at the moment this comment was created, used to re-anchor the
+   *  comment against a live diff refresh (see `reviewComments.ts`'s `reanchorComments`). */
+  lineText: string;
+  body: string;
+  createdAt: string;
+  /** Monotonic edit counter, bumped by the daemon on every save. This is what `reviewCommentsSend`
+   *  echoes back as the concurrency token (see `ReviewCommentSendEntry`) — not a timestamp, since the
+   *  daemon's `updatedAt` has whole-second resolution and two edits within the same second wouldn't
+   *  change it. There is no user-facing display of edit recency in v1, so no timestamp is carried here. */
+  revision: number;
+}
+
+/** `reviewCommentUpsert`'s input: `id` omitted creates a new draft, present updates an existing one. */
+export interface ReviewCommentUpsertInput {
+  id?: string;
+  filePath: string;
+  side: ReviewCommentSide;
+  lineNumber: number;
+  lineText: string;
+  body: string;
+}
+
+/** round-16 Fix 1a: one entry in a teardown comment-state snapshot — see
+ *  `CommentsController.collectStateForFlush`/`restorePendingState` and `CodePaneInitPayload`'s
+ *  `pendingReviewComments` field. `provisional` distinguishes a never-persisted local-only draft
+ *  (recreated as a fresh local card on rehydrate) from a persisted draft whose live, unsaved text is
+ *  merely seeded into the rehydrated controller's `liveBodies` ahead of `loadInitial()`. `body` is
+ *  always the live, in-progress text at teardown, not the last-persisted value. */
+export interface PendingReviewCommentEntry {
+  id: string;
+  provisional: boolean;
+  filePath: string;
+  side: ReviewCommentSide;
+  lineNumber: number;
+  lineText: string;
+  body: string;
+}
+
+/** A running agent this pane's workspace can send comments to. */
+export interface CodePaneAgentSummary {
+  id: string;
+  label: string;
+  sessionId: string;
+}
+
+/** One comment named in a `reviewCommentsSend` call: its id plus the `revision` this caller last saw
+ *  for it. The daemon compares this against the draft's current `revision` before sending anything,
+ *  so a comment edited (by this client or another surface) since it was last read is rejected as a
+ *  `conflict` instead of being sent with stale text. */
+export interface ReviewCommentSendEntry {
+  id: string;
+  revision: number;
+}
+
 export type SpacesErrorCode = "notFound" | "invalidArgument" | "conflict" | "internalError" | "unavailable";
 
 export interface SpacesErrorShape {
@@ -151,6 +219,28 @@ export interface SpacesBridge {
    * value.
    */
   notifyModeChanged(mode: CodePaneMode): void;
+  /** All of this workspace's draft comments, ordered by `createdAt` (server-enforced). Called once
+   *  on mount to rehydrate the comment surface — see `root.ts` and `reviewComments.ts`'s doc
+   *  comments for why this is not re-fetched on every diff refresh. */
+  reviewCommentList(): Promise<SpacesReviewComment[]>;
+  /** Creates (no `id`) or updates (with `id`) one draft comment. Rejects `invalidArgument` if a
+   *  required field is missing, `notFound` if `id` belongs to another workspace or already names a
+   *  sent (non-draft) comment. */
+  reviewCommentUpsert(input: ReviewCommentUpsertInput): Promise<SpacesReviewComment>;
+  /** Deletes one draft comment. Rejects `notFound` for an unknown or foreign id. */
+  reviewCommentDelete(id: string): Promise<void>;
+  /**
+   * Writes `text` into terminal session `sessionId` (must belong to this workspace and be running),
+   * then — only once that write succeeds — marks every comment in `comments` (must be non-empty)
+   * sent. The guarantee this gives is send-then-archive ordering: a comment is never archived unless
+   * its text was actually sent. The converse isn't guaranteed (a daemon crash between the write and
+   * the archive step would leave a sent comment still a draft) — an accepted low-probability gap,
+   * since a client whose send didn't resolve already has to reconcile by re-reading `reviewCommentList`.
+   * Each entry's `revision` must match the draft's current one or the whole call rejects `conflict`
+   * before anything is sent (see `ReviewCommentSendEntry`). On any rejection every named comment
+   * stays a draft exactly as it was; callers must not optimistically remove drafts before this resolves.
+   */
+  reviewCommentsSend(sessionId: string, text: string, comments: ReviewCommentSendEntry[]): Promise<void>;
 }
 
 /** Theme the Swift host reports at init and on subsequent appearance changes. */
@@ -187,6 +277,14 @@ export interface CodePaneInitPayload {
    *  absent when there is none (a pane's first-ever load, or one whose editor never opened a
    *  file). See `EditorView.restoreState`'s doc comment for the rehydration rules. */
   editorState?: CodePaneEditorState;
+  /** round-16 Fix 1a: the host-held snapshot of comment text typed but not yet persisted before this
+   *  pane's most recent teardown, absent when there is none. See
+   *  `CommentsController.restorePendingState`'s doc comment for the rehydration rules — mirrors
+   *  `editorState` above but for the comment surface. */
+  pendingReviewComments?: PendingReviewCommentEntry[];
+  /** Agents running in this workspace at startup, for the assigned-agent dropdown (see
+   *  `reviewComments.ts`'s `selectDefaultAgentId`). Kept current after startup by `spaces:agents`. */
+  agents: CodePaneAgentSummary[];
 }
 
 /**
@@ -196,6 +294,12 @@ export interface CodePaneInitPayload {
  */
 export interface CodePaneThemeChangedEvent {
   theme: CodePaneTheme;
+}
+
+/** Detail of the `spaces:agents` event (see README.md), dispatched whenever the set of agents
+ *  running in this workspace changes after startup. */
+export interface CodePaneAgentsChangedEvent {
+  agents: CodePaneAgentSummary[];
 }
 
 declare global {
@@ -212,5 +316,10 @@ declare global {
      * survives hibernation".
      */
     __spacesCollectEditorState?: () => string | null;
+    /** round-16 Fix 1a: mirrors `__spacesCollectEditorState` above, but for the comment surface —
+     *  see `CommentsController.collectStateForFlush`'s doc comment. Returns the exact
+     *  `PendingReviewCommentEntry[]` JSON-stringified, or `null` when nothing is pending. Wired in
+     *  `root.ts` at the point the `CommentsController` instance is constructed. */
+    __spacesCollectReviewCommentState?: () => string | null;
   }
 }

@@ -1,13 +1,23 @@
 import { createBridge } from "../bridge";
-import { CodePaneInitPayload, CodePaneThemeChangedEvent, DiffFileEntry, WorkspaceDiffResult } from "../bridge/types";
+import {
+  CodePaneAgentsChangedEvent,
+  CodePaneInitPayload,
+  CodePaneThemeChangedEvent,
+  DiffFileEntry,
+  SpacesBridgeError,
+  WorkspaceDiffResult,
+} from "../bridge/types";
+import { CommentsController, CommentsToolbarState } from "./commentsController";
 import { DiffView } from "./diffView";
 import { EditorView } from "./editorView";
 import { renderFileList } from "./fileList";
+import { selectDefaultAgentId } from "./reviewComments";
 import { CodePaneAction, CodePaneState, codePaneReducer, initialState } from "./state";
 import { renderToolbar } from "./toolbar";
 
 const INIT_EVENT = "spaces:init";
 const THEME_EVENT = "spaces:theme";
+const AGENTS_EVENT = "spaces:agents";
 
 /**
  * Wires the bridge, toolbar, file list, and diff/editor views together.
@@ -75,32 +85,95 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   const diffAreaEl = document.createElement("div");
   diffAreaEl.className = "diff-area";
+  diffAreaEl.style.position = "relative"; // hosts the comments controller's absolutely-positioned error banner
 
   const editorContainerEl = document.createElement("div");
   editorContainerEl.className = "diff-area";
 
-  const diffView = new DiffView(diffAreaEl, state.layout);
+  // Seeded synchronously to match `CommentsController`'s own constructor logic exactly (see
+  // `selectDefaultAgentId`), so the toolbar's very first paint already reflects the real
+  // auto-default rather than an `undefined` placeholder that only self-corrects once the
+  // controller's first `onToolbarStateChange` callback fires.
+  let lastCommentsToolbarState: CommentsToolbarState = {
+    agents: initPayload.agents,
+    selectedAgentId: selectDefaultAgentId(initPayload.agents, undefined),
+    draftCount: 0,
+  };
+
+  const comments = new CommentsController(bridge, initPayload.agents, {
+    onToolbarStateChange: (commentsState) => {
+      lastCommentsToolbarState = commentsState;
+      toolbar.update(buildToolbarState());
+    },
+  });
+  const diffView = new DiffView(diffAreaEl, state.layout, comments.hooks);
+  comments.attachDiffView(diffView);
+  comments.mount(diffAreaEl);
   const editorView = new EditorView(editorContainerEl, bridge);
   // Wired here (not inside EditorView itself) so the global always reaches this exact instance's
   // live state — see Window.__spacesCollectEditorState's doc comment in bridge/types.ts and
   // EditorView.collectStateForFlush.
   window.__spacesCollectEditorState = () => editorView.collectStateForFlush();
+  // round-16 Fix 1a: mirrors the wiring above, for the comment surface — see
+  // Window.__spacesCollectReviewCommentState's doc comment in bridge/types.ts and
+  // CommentsController.collectStateForFlush.
+  window.__spacesCollectReviewCommentState = () => comments.collectStateForFlush();
 
-  const toolbar = renderToolbar(
-    toolbarHost,
-    { mode: state.mode, scope: state.scope, layout: state.layout, baseBranch: initPayload.baseBranch },
-    {
-      onModeChange: (mode) => dispatch({ type: "setMode", mode }),
-      onScopeChange: (scope) => {
-        // Belt-and-suspenders alongside the toolbar's own disabled control (see segButton's doc
-        // comment): a "vs base branch" scope is unreachable for a workspace with none, so refuse it
-        // here too rather than trusting every future caller of onScopeChange to check first.
-        if (scope.kind === "baseBranch" && initPayload.baseBranch === undefined) return;
-        dispatch({ type: "setScope", scope });
-      },
-      onLayoutChange: (layout) => dispatch({ type: "setLayout", layout }),
+  // A running agent set changes independently of any diff refresh or user action in this pane
+  // (an agent can start or exit from elsewhere in the app), so this listens for the whole
+  // lifetime of the pane rather than being read once at startup like `initPayload.agents`.
+  window.addEventListener(AGENTS_EVENT, (event) => {
+    comments.onAgentsChanged((event as CustomEvent<CodePaneAgentsChangedEvent>).detail.agents);
+  });
+
+  /** Folds the toolbar's own mode/scope/layout state together with the comments controller's
+   *  agent/draft-count state — kept as one function so every call site building a `ToolbarState`
+   *  (the initial render, every `dispatch`, and every comments-controller change) builds it the
+   *  same way and can't drift apart. */
+  function buildToolbarState() {
+    return {
+      mode: state.mode,
+      scope: state.scope,
+      layout: state.layout,
+      baseBranch: initPayload.baseBranch,
+      agents: lastCommentsToolbarState.agents,
+      selectedAgentId: lastCommentsToolbarState.selectedAgentId,
+      draftCount: lastCommentsToolbarState.draftCount,
+    };
+  }
+
+  const toolbar = renderToolbar(toolbarHost, buildToolbarState(), {
+    onModeChange: (mode) => dispatch({ type: "setMode", mode }),
+    onScopeChange: (scope) => {
+      // Belt-and-suspenders alongside the toolbar's own disabled control (see segButton's doc
+      // comment): a "vs base branch" scope is unreachable for a workspace with none, so refuse it
+      // here too rather than trusting every future caller of onScopeChange to check first.
+      if (scope.kind === "baseBranch" && initPayload.baseBranch === undefined) return;
+      dispatch({ type: "setScope", scope });
     },
-  );
+    onLayoutChange: (layout) => dispatch({ type: "setLayout", layout }),
+    onAgentSelect: (id) => comments.onAgentSelected(id),
+    onSendBatch: () => void comments.sendBatch(),
+  });
+
+  // Seeded here, synchronously and as early as possible (before any yielding `await` below can let
+  // a teardown race this pane's own startup) — mirrors `editorView.restoreState`'s ordering rule
+  // below, but this seeding is pure synchronous local-state mutation (no network round trip), so
+  // there is no reason to defer it as far as that call. Seeding before `loadInitial()`'s network
+  // call specifically matters (see `restorePendingState`'s doc comment): a teardown mid-`loadInitial`
+  // would otherwise flush an empty comment-state snapshot, discarding this seeded text for good.
+  //
+  // This can't run any earlier than right here, immediately after `toolbar` is constructed: when
+  // `entries` is non-empty, `restorePendingState` synchronously calls `refresh()`, which invokes
+  // the `onToolbarStateChange` callback wired above (in `comments`'s constructor), and that
+  // callback closes over `toolbar`. `toolbar` is a `const` initialized by the `renderToolbar(...)`
+  // call directly above; calling this any earlier — e.g. back where `comments` itself is
+  // constructed — would reach that callback before `toolbar`'s initializer has run, throwing
+  // "Cannot access 'toolbar' before initialization" and taking down the whole pane. Every existing
+  // test happened to pass an empty `pendingReviewComments`, which short-circuits before `refresh()`
+  // is ever called, which is why this TDZ hazard went uncaught until round-16 Fix 1a's test seeded
+  // a non-empty one.
+  comments.restorePendingState(initPayload.pendingReviewComments ?? []);
 
   function renderBody(): void {
     body.replaceChildren();
@@ -113,15 +186,26 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   }
 
   /**
-   * Pulls the diff for the current scope. A failed pull is swallowed and retried with a bounded
-   * exponential backoff (`scheduleDiffRetry`) rather than thrown: the diff-signature push stream
-   * dedupes repeat frames end-to-end (both the Swift host's `lastDeliveredSignature` and this
-   * app's own `subscribeDiffSignature` listener never re-announce a signature it already told this
-   * pane about), so a transient fetch failure here is never retried by anything upstream — if this
-   * loop didn't retry, a pull that failed once would never be attempted again until the scope's
-   * git state changed again. `token` makes retries latest-wins the same way regular refreshes are:
-   * a scope switch (or another refresh) bumps `diffRequestToken`, so a stale retry silently no-ops
+   * Pulls the diff for the current scope. A failed pull is classified before deciding what to do
+   * with it (see the `catch` block below): a *transient* failure is swallowed and retried with a
+   * bounded exponential backoff (`scheduleDiffRetry`) rather than thrown — the diff-signature push
+   * stream dedupes repeat frames end-to-end (both the Swift host's `lastDeliveredSignature` and
+   * this app's own `subscribeDiffSignature` listener never re-announce a signature it already told
+   * this pane about), so a transient fetch failure here is never retried by anything upstream — if
+   * this loop didn't retry, a pull that failed once would never be attempted again until the
+   * scope's git state changed again. A *permanent* failure is rendered instead: retrying an
+   * identical request the daemon has already rejected for a durable reason would just fail the
+   * same way forever, leaving the previous scope's stale files on screen with no indication
+   * anything is wrong. `token` makes retries latest-wins the same way regular refreshes are: a
+   * scope switch (or another refresh) bumps `diffRequestToken`, so a stale retry silently no-ops
    * instead of clobbering whatever the newer attempt already applied.
+   *
+   * Two typed codes join the render-AND-retry class rather than the durable-rejection class — see
+   * the `catch` block below for why `unavailable` and `internalError` both belong there: a bad ref
+   * is a durable `invalidArgument` rejection (retrying buys nothing), while a transient git failure
+   * on the daemon side now surfaces as `internalError` specifically so this loop can retry it — see
+   * `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable`'s doc comment (Swift host) for the
+   * daemon-side split this depends on.
    */
   async function refreshDiff(preserveScroll: boolean): Promise<void> {
     const token = ++diffRequestToken;
@@ -129,8 +213,56 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     let result: WorkspaceDiffResult;
     try {
       result = await bridge.workspaceDiff(state.scope);
-    } catch {
+    } catch (err) {
       if (token !== diffRequestToken) return; // superseded: a newer refresh already won, so this failure is moot
+      // A typed `SpacesBridgeError` means the daemon decoded the request and rejected it for a
+      // durable reason (e.g. a bad/deleted ref for a "vs chosen ref" scope, or the workspace itself
+      // is gone) — the exact same request will fail the exact same way on every retry, so retrying
+      // buys nothing and only leaves stale files on screen. Anything else (a thrown plain error,
+      // e.g. from a socket failure) never even got a decodable answer — that's a transport-level
+      // hiccup, which is what the retry loop below exists for.
+      //
+      // `unavailable` and `internalError` are the two typed codes that are an exception to "typed =
+      // durable rejection":
+      //
+      // `unavailable`: CodePaneBridge.mapClientError (Swift host) collapses every not-reachable/not-ready
+      // client failure — the device offline, the daemon mid-restart, the connection not yet
+      // established — into this single code, and realBridge.ts wraps it in a SpacesBridgeError like
+      // any other decoded reply. That's a transient condition that heals on its own once the
+      // daemon/device comes back, not a rejection of this specific request, so it must retry like an
+      // untyped transport failure.
+      //
+      // `internalError`: the daemon's own git work can fail transiently (a wedged process, a timeout)
+      // in a way that is indistinguishable, at the git-command level, from a caller-supplied ref that
+      // simply doesn't resolve — `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable` (Swift host)
+      // probes ref resolvability up front specifically so the two can be told apart on the wire: a bad
+      // ref is rejected as `invalidArgument` (durable, no retry — see the fallthrough below), while
+      // `internalError` is reserved for the daemon's own transient trouble and is safe to retry here.
+      //
+      // Both still render the error (rather than staying silent like the untyped path) so the user
+      // sees why the pane is empty while the retry runs in the background — the only cheap recovery
+      // signal here (diff-signature subscription) doesn't exist yet this early.
+      if (SpacesBridgeError.isSpacesBridgeError(err)) {
+        if (err.code === "unavailable" || err.code === "internalError") {
+          files = [];
+          renderFileList(fileListEl, files, undefined, {
+            onSelect: (path) => diffView.scrollToFile(path),
+          });
+          diffView.setError(err.message);
+          scheduleDiffRetry(preserveScroll, token);
+          return;
+        }
+        // Reset here (not just on a normal success) so a later transient failure — once this
+        // scope's state changes and a fresh refreshDiff runs — starts its own backoff at the
+        // floor instead of inheriting whatever count this permanently-failing run left behind.
+        diffRetryFailures = 0;
+        files = [];
+        renderFileList(fileListEl, files, undefined, {
+          onSelect: (path) => diffView.scrollToFile(path),
+        });
+        diffView.setError(err.message);
+        return;
+      }
       scheduleDiffRetry(preserveScroll, token);
       return;
     }
@@ -142,6 +274,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       onSelect: (path) => diffView.scrollToFile(path),
     });
     diffView.setFiles(files, preserveScroll);
+    comments.setFiles(files);
   }
 
   /** Schedules the next attempt for a failed refreshDiff pull: floor 1s, doubling, capped at 30s,
@@ -171,13 +304,22 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   function dispatch(action: CodePaneAction): void {
     state = codePaneReducer(state, action);
-    toolbar.update({ mode: state.mode, scope: state.scope, layout: state.layout, baseBranch: initPayload.baseBranch });
+    toolbar.update(buildToolbarState());
     renderBody();
 
     if (action.type === "setLayout") {
       diffView.setLayout(state.layout);
     } else if (action.type === "setScope") {
       diffLoaded = false;
+      // round-13 Fix 2: clear synchronously, before refreshDiff's await can yield control, so the
+      // diff area never shows files from a scope other than the toolbar's current pick — a stale
+      // diff labeled as the new scope is worse than a loading gap while the fetch is in flight.
+      files = [];
+      renderFileList(fileListEl, files, undefined, {
+        onSelect: (path) => diffView.scrollToFile(path),
+      });
+      diffView.setLoading();
+      comments.setFiles([]);
       void refreshDiff(false);
       resubscribeDiffSignature();
     } else if (action.type === "setMode") {
@@ -192,13 +334,27 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   }
 
   renderBody();
+  // Rehydrate the editor from the host's post-hibernation snapshot BEFORE any of the awaits below
+  // that can yield to a teardown. `window.__spacesCollectEditorState` (wired to
+  // `editorView.collectStateForFlush` above) can be called by the Swift host at any moment this
+  // pane is torn down — including mid-init, if the user switches away again immediately — and its
+  // result is written back under the new page-generation number, which the host's `>=`
+  // generation-ordering rule accepts unconditionally. Until this line runs, `EditorView` is still
+  // empty, so that flush would return `undefined` and silently overwrite whatever dirty hibernated
+  // snapshot the host was holding: a permanent loss of an unsaved edit. `restoreState`'s
+  // dirty-restoration branch is pure synchronous computation over the snapshot (no network round
+  // trip); only the clean-restoration branch does one `workspaceFileRead` call, an accepted extra
+  // cost of moving this earlier. `initPayload.initialMode` already carries the host's live (not
+  // original) mode — see the Swift host's `currentMode` — so a pane that hibernated in Editor mode
+  // has already loaded back into Editor mode above; this call is what puts its buffer back too,
+  // regardless of which mode ends up on screen.
+  await editorView.restoreState(initPayload.editorState);
   if (state.mode === "diff") {
     await refreshDiff(false);
   }
   resubscribeDiffSignature();
-  // Rehydrate the editor from the host's post-hibernation snapshot. `initPayload.initialMode`
-  // already carries the host's live (not original) mode — see the Swift host's `currentMode` —
-  // so a pane that hibernated in Editor mode has already loaded back into Editor mode above; this
-  // call is what puts its buffer back too, regardless of which mode ends up on screen.
-  await editorView.restoreState(initPayload.editorState);
+  // Workspace-scoped, independent of `state.scope`: fetched once here regardless of which scope
+  // or mode the pane happens to open in, not re-fetched on every scope switch (see
+  // `CommentsController.loadInitial`'s doc comment).
+  await comments.loadInitial();
 }

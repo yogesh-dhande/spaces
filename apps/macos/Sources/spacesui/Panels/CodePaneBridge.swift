@@ -70,30 +70,92 @@ enum CodePaneBridge {
     /// `CodePaneScriptEvaluator.evaluateCodePaneScript(_:completion:)`), bypassing
     /// `scheduleEditorStatePush`'s trailing debounce window entirely — the flush reads the editor's
     /// live fields directly rather than waiting on the same timer that can otherwise still be pending
-    /// when a tab or workspace switch tears the page down. `typeof` guards a page that hasn't finished
-    /// its own bootstrap yet (the global isn't defined), answering `null` instead of throwing.
-    static let collectEditorStateScript = "typeof window.__spacesCollectEditorState === 'function' ? window.__spacesCollectEditorState() : null"
+    /// when a tab or workspace switch tears the page down. `typeof` distinguishes a page that hasn't
+    /// finished its own bootstrap yet (the global isn't defined — answers the `'__uninstalled__'`
+    /// sentinel) from an installed collector's own explicit "nothing open" answer (`null`, coalesced to
+    /// the `'__no_file__'` sentinel) — see `CollectedEditorState` for why that distinction matters.
+    static let collectEditorStateScript =
+        "typeof window.__spacesCollectEditorState === 'function' ? (window.__spacesCollectEditorState() ?? '__no_file__') : '__uninstalled__'"
 
     /// Result of decoding a teardown flush's collect-script return value (see
-    /// `collectEditorStateScript`). `.noFile` covers three cases the flush can't (and doesn't need
-    /// to) tell apart: the page genuinely has no open file, `evaluateCodePaneScript(_:completion:)`'s
-    /// WKWebView conformance folded a real evaluate error into a `nil` result (see that method's doc
-    /// comment), or the returned string failed to parse (defensively — only this host's own trusted
-    /// JS ever produces this argument). All three collapse to "nothing to store" the same way a live
-    /// page's own `null` answer would, matching `decodeEditorStateChanged`'s existing "can't parse it
-    /// -> no file" convention above.
+    /// `collectEditorStateScript`). Three-way, not two-way: a pane reactivated with a dirty retained
+    /// buffer can be hibernated again before the bundle's JS finishes re-bootstrapping, so a teardown
+    /// flush can land before `__spacesCollectEditorState` even exists — that must NOT be treated as
+    /// "no file", or it would wipe the real snapshot the host is holding from the prior hibernation.
+    /// - `.notReported`: the page never got far enough to answer (collector not installed yet), or the
+    ///   evaluate call itself failed (folds to a `nil` result — see `CodePaneScriptEvaluator`'s doc
+    ///   comment), or the answer was a string that isn't one of the two sentinels and isn't valid JSON
+    ///   either (only this host's own trusted JS ever produces this argument, so this is purely
+    ///   defensive). The caller must leave whatever snapshot it already has untouched: worst case a
+    ///   stale snapshot survives a genuinely-now-empty page (harmless — restore just re-renders it),
+    ///   but destroying a real unsaved edit because the page hadn't booted yet is strictly worse.
+    /// - `.noFile`: an installed collector's own explicit "nothing open" answer. Clearing the stored
+    ///   snapshot for this case is correct.
+    /// - `.file`: the given state should be stored.
     enum CollectedEditorState: Equatable {
+        case notReported
         case noFile
         case file(EditorState)
     }
 
     /// Decodes a teardown flush's collect-script return value into `CollectedEditorState`. See that
-    /// type's doc comment for why every non-well-formed-JSON-string case folds to `.noFile`.
+    /// type's doc comment for the three-way split this enforces: only the `'__no_file__'` sentinel
+    /// (an installed collector's own explicit answer) maps to `.noFile` — everything else that isn't
+    /// well-formed `EditorState` JSON, including the `'__uninstalled__'` sentinel and a non-String
+    /// result (`nil`, or any other type — this is also what an evaluate error folds into), maps to
+    /// `.notReported`.
     static func decodeCollectedEditorState(_ result: Any?) -> CollectedEditorState {
-        guard let jsonString = result as? String, let data = jsonString.data(using: .utf8),
-            let state = try? JSONDecoder().decode(EditorState.self, from: data)
-        else { return .noFile }
+        guard let jsonString = result as? String else { return .notReported }
+        if jsonString == "__uninstalled__" { return .notReported }
+        if jsonString == "__no_file__" { return .noFile }
+        guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(EditorState.self, from: data) else {
+            return .notReported
+        }
         return .file(state)
+    }
+
+    /// round-16 Fix 1a: one entry in a teardown comment-state snapshot, mirroring
+    /// `CodePaneWeb/src/bridge/types.ts`'s `PendingReviewCommentEntry` exactly. The wire shape of both
+    /// `collectReviewCommentStateScript`'s JSON entries and `InitPayload.pendingReviewComments`.
+    struct ReviewCommentEntryPayload: Codable, Equatable {
+        let id: String
+        let provisional: Bool
+        let filePath: String
+        let side: SpacesDeviceReviewCommentSide
+        let lineNumber: Int
+        let lineText: String
+        let body: String
+    }
+
+    /// Evaluated by `CodePaneContentController.flushPendingReviewCommentState()` at teardown — mirrors
+    /// `collectEditorStateScript` exactly (see its doc comment for the `typeof`/sentinel reasoning),
+    /// but for the comment surface: `'__none__'` is this method's "nothing pending" sentinel, standing
+    /// in for `collectEditorStateScript`'s `'__no_file__'`.
+    static let collectReviewCommentStateScript =
+        "typeof window.__spacesCollectReviewCommentState === 'function' ? (window.__spacesCollectReviewCommentState() ?? '__none__') : '__uninstalled__'"
+
+    /// Result of decoding a teardown flush's comment-state collect-script return value — mirrors
+    /// `CollectedEditorState` exactly (see its doc comment for the three-way discipline this
+    /// enforces), with `.none` (the `'__none__'` sentinel) standing in for `.noFile`.
+    enum CollectedReviewCommentState: Equatable {
+        case notReported
+        case none
+        case entries([ReviewCommentEntryPayload])
+    }
+
+    /// Decodes a teardown flush's comment-state collect-script return value into
+    /// `CollectedReviewCommentState` — mirrors `decodeCollectedEditorState` exactly, substituting the
+    /// `'__none__'` sentinel for `'__no_file__'` and a JSON array for a single JSON object.
+    static func decodeCollectedReviewCommentState(_ result: Any?) -> CollectedReviewCommentState {
+        guard let jsonString = result as? String else { return .notReported }
+        if jsonString == "__uninstalled__" { return .notReported }
+        if jsonString == "__none__" { return .none }
+        guard let data = jsonString.data(using: .utf8),
+            let entries = try? JSONDecoder().decode([ReviewCommentEntryPayload].self, from: data)
+        else {
+            return .notReported
+        }
+        return .entries(entries)
     }
 
     /// Result of decoding a message body as the fire-and-forget `editorStateChanged` notification
@@ -190,6 +252,15 @@ enum CodePaneBridge {
         /// Decodes successfully (the params are well-formed) but has no daemon endpoint yet; the
         /// controller always replies `unavailable` for this rather than attempting a client call.
         case workspaceFileList
+        case reviewCommentList
+        /// `commentID` is `nil` for a new draft — the daemon mints its id — or names an existing
+        /// draft this workspace owns when the web app is editing one.
+        case reviewCommentUpsert(
+            commentID: String?, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String)
+        case reviewCommentDelete(commentID: String)
+        /// `comments` pairs each id with the `revision` the web app's local mirror last saw for it —
+        /// the daemon's stale-version check (see `SpacesDeviceWorkspaceReviewCommentsSendRequest`).
+        case reviewCommentsSend(sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry])
     }
 
     /// Maps a decoded request to a `Plan`, or a `BridgeError` if its method is unrecognized or its
@@ -213,6 +284,41 @@ enum CodePaneBridge {
             return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256))
         case "workspaceFileList":
             return .success(.workspaceFileList)
+        case "reviewCommentList":
+            return .success(.reviewCommentList)
+        case "reviewCommentUpsert":
+            guard let filePath = request.params["filePath"] as? String, let sideRaw = request.params["side"] as? String,
+                let side = SpacesDeviceReviewCommentSide(rawValue: sideRaw), let lineNumber = request.params["lineNumber"] as? Int,
+                let lineText = request.params["lineText"] as? String, let body = request.params["body"] as? String
+            else {
+                return .failure(
+                    BridgeError(
+                        code: .invalidArgument, message: "reviewCommentUpsert requires filePath, side, lineNumber, lineText, and body."))
+            }
+            let commentID = request.params["id"] as? String
+            return .success(
+                .reviewCommentUpsert(commentID: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body))
+        case "reviewCommentDelete":
+            guard let commentID = request.params["id"] as? String else {
+                return .failure(BridgeError(code: .invalidArgument, message: "reviewCommentDelete requires an id."))
+            }
+            return .success(.reviewCommentDelete(commentID: commentID))
+        case "reviewCommentsSend":
+            guard let sessionID = request.params["sessionId"] as? String, let text = request.params["text"] as? String,
+                let rawComments = request.params["comments"] as? [[String: Any]], !rawComments.isEmpty
+            else {
+                return .failure(
+                    BridgeError(code: .invalidArgument, message: "reviewCommentsSend requires sessionId, text, and a non-empty comments."))
+            }
+            var comments: [SpacesDeviceReviewCommentSendEntry] = []
+            for raw in rawComments {
+                guard let id = raw["id"] as? String, let revision = raw["revision"] as? Int else {
+                    return .failure(
+                        BridgeError(code: .invalidArgument, message: "Each reviewCommentsSend entry requires an id and revision."))
+                }
+                comments.append(SpacesDeviceReviewCommentSendEntry(id: id, revision: revision))
+            }
+            return .success(.reviewCommentsSend(sessionID: sessionID, text: text, comments: comments))
         default:
             return .failure(BridgeError(code: .invalidArgument, message: "Unknown method \"\(request.method)\"."))
         }
@@ -235,11 +341,12 @@ enum CodePaneBridge {
         return BridgeError(code: bridgeErrorCode(for: code), message: message)
     }
 
-    /// `SpacesDeviceErrorCode` has 13 cases; the bridge has 5. A code the daemon refused the
+    /// `SpacesDeviceErrorCode` has 14 cases; the bridge has 5. A code the daemon refused the
     /// request outright with (bad input, or something about the target it rejected) maps to
-    /// `invalidArgument`; anything about the device/session/service not presently being reachable
-    /// or ready maps to `unavailable`; `nil` (no code attached) or `internalError` map to
-    /// `internalError`.
+    /// `invalidArgument`; `.conflict` (a stale version echo, e.g. `reviewCommentsSend`'s `revision`
+    /// check) maps to the bridge's own `.conflict`; anything about the device/session/service not
+    /// presently being reachable or ready maps to `unavailable`; `nil` (no code attached) or
+    /// `internalError` map to `internalError`.
     private static func bridgeErrorCode(for code: SpacesDeviceErrorCode?) -> ErrorCode {
         guard let code else { return .internalError }
         switch code {
@@ -247,6 +354,8 @@ enum CodePaneBridge {
             return .notFound
         case .invalidArgument, .ownershipRejected, .payloadTooLarge, .unsupportedFormat:
             return .invalidArgument
+        case .conflict:
+            return .conflict
         case .internalError:
             return .internalError
         case .unauthorized, .sessionNotRunning, .sessionNotAvailable, .serviceNotRunning, .busy, .capabilityMissing, .misroutedRequest,
@@ -304,6 +413,10 @@ enum CodePaneBridge {
         }
         return .success(FileWritePayload(ok: nil, conflict: true, currentSHA256: currentSHA256, fileMissing: nil, sha256: nil))
     }
+
+    /// The success reply for `reviewCommentDelete`/`reviewCommentsSend`: both are pure side effects
+    /// with nothing worth handing back beyond confirmation.
+    struct AckPayload: Encodable, Equatable { let ok = true }
 
     // MARK: - JS generation
 
@@ -377,6 +490,23 @@ enum CodePaneBridge {
         /// never opened a file). See `CodePaneContentController.editorState`'s doc comment for the
         /// persistence model this rehydrates.
         let editorState: EditorState?
+        /// round-16 Fix 1a: the host-held snapshot of comment text typed but not yet persisted before
+        /// this pane's most recent teardown, nil-omitted when there is none. See
+        /// `CodePaneContentController.pendingReviewCommentState`'s doc comment for the persistence
+        /// model this rehydrates — mirrors `editorState` above but for the comment surface.
+        let pendingReviewComments: [ReviewCommentEntryPayload]?
+        /// Coding agents running in this workspace right now, for the toolbar's assigned-agent
+        /// dropdown (auto-default when exactly one, disabled sending with a reason when empty). Kept
+        /// in sync after startup by `spaces:agents` (see `AgentsPayload` below).
+        let agents: [AgentPayload]
+    }
+
+    /// One running agent, as sent in `InitPayload.agents` and `AgentsPayload.agents`. Mirrors
+    /// `CodePaneRunningAgent`; `sessionId` is what `reviewCommentsSend` writes into.
+    struct AgentPayload: Encodable, Equatable {
+        let id: String
+        let label: String
+        let sessionId: String
     }
 
     /// `spaces:theme`'s detail, dispatched whenever the app's effective light/dark appearance changes after
@@ -385,6 +515,10 @@ enum CodePaneBridge {
 
     /// `spaces:diffSignature`'s detail, dispatched whenever the subscribed scope's git state changes.
     struct DiffSignaturePayload: Encodable, Equatable { let scopeSignature: String }
+
+    /// `spaces:agents`'s detail, dispatched whenever this workspace's running-agent set changes after
+    /// startup (`spaces:init`'s `agents` field carries the set at page-load time).
+    struct AgentsPayload: Encodable, Equatable { let agents: [AgentPayload] }
 
     /// Builds the JS the host evaluates to dispatch one of the push events above. `nil` only if
     /// `detail` somehow fails to encode.
