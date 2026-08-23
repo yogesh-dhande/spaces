@@ -2215,10 +2215,7 @@ private struct FocusableWindowNamesCommand: ParsableCommand {
     /// Returns the running app's ordered focusable window names (the numbered-shortcut
     /// order) so the shell harness can align its keyboard assertions with production
     /// ordering. The app owns the ordering and writes it to a file over IPC; this command
-    /// posts the request, waits for the file, and relays its `{"names": [...], "kinds": [...]}` to
-    /// stdout. `kinds` parallels `names` with each target's kind, so a harness can tell a running
-    /// process (`process`) from a configured one the app's snapshot has not caught up with yet
-    /// (`missingConfiguredProcess`) before it sends a focus that would otherwise fail `no_match`.
+    /// posts the request, waits for the file, and relays its `{"names": [...]}` to stdout.
     func run() throws {
         let workspaceID = try workspaceID(forDir: workspaceDir)
         let outputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("spaces-focusable-window-names-\(UUID().uuidString).json")

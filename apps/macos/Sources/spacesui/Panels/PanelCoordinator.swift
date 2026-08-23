@@ -1163,7 +1163,10 @@ import spacesterminalcore
     /// The panel scope for a workspace, or nil when no loaded device owns it. Panel state is
     /// keyed by (deviceID, workspaceID), so guessing the device would split one workspace's
     /// panel across two keys and mint a fresh empty panel beside its real one.
-    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
+    ///
+    /// Internal (not private) so `AppKitController` can tell a workspace the sidebar's index does not
+    /// know about yet from one it knows and is refusing for another reason.
+    func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
         guard let deviceID = host.deviceID(forWorkspaceID: workspaceID) else { return nil }
         return .workspace(deviceID: deviceID, workspaceID: workspaceID)
     }
