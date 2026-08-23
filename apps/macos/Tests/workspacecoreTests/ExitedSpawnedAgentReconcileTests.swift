@@ -30,7 +30,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         // A plain-shell subscriber terminal with no agent row of its own counts as idle: it receives now.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
         XCTAssertTrue(didMutate)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the spawned agent row is deleted by handleAgentExit")
@@ -55,7 +56,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
         // A live session's id appears in the excluded live set the caller computes, so the sweep skips it.
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [sessionID])
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [sessionID])
 
         XCTAssertFalse(didMutate)
         XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .spinning)
@@ -86,7 +88,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             workspaceID: workspace.id, provider: .spaces, label: "Other CLI", terminalTrackingID: "other-child", status: .waiting)
         try store.insertAgentSubscription(subscriberTerminalSessionID: sessionID, agentSessionID: otherChild.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
         XCTAssertTrue(didMutate)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the dead ad-hoc shell agent row is deleted by handleAgentExit, not marked .done")
@@ -99,7 +102,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             "the closed shell terminal's own outgoing watch edge must be torn down")
 
         // A second pass finds no live-status row for the deleted session, so it re-notifies nothing.
-        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
         XCTAssertFalse(secondPassMutated)
         XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
     }
@@ -127,7 +131,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         // A plain-shell subscriber terminal with no agent row of its own counts as idle: it receives now.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
         XCTAssertTrue(didMutate)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the dead hookless .done row is finalized (deleted) by handleAgentExit")
@@ -138,7 +143,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty, "the dead row's inbound edge is dropped")
 
         // A second pass finds no live-status row for the deleted session, so it re-notifies nothing.
-        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
         XCTAssertFalse(secondPassMutated)
         XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
     }
@@ -174,7 +180,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertEqual(reincarnated.id, agent.id, "the restart-reuse init reuses the same row id")
         try writeEndedTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent)
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
         XCTAssertTrue(didMutate, "the reincarnated row is sweepable again — the old life's exit event no longer blocks it")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session", "orchestrator-session"])
@@ -184,7 +191,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
 
         // The new life's terminal had already ended, so the sweep deleted the row; a further pass finds
         // nothing left to finalize and re-notifies nothing.
-        let thirdPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        let thirdPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+            index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
         XCTAssertFalse(thirdPassMutated)
         XCTAssertEqual(recorder.delivered.count, 2, "exactly one notice per life, none re-delivered")
     }

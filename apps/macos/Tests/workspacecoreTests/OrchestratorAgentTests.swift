@@ -1058,12 +1058,11 @@ extension OrchestratorTests {
         }
     }
 
-    /// Regression for a live rename bug: `TerminalForegroundAgentReconciler` and
-    /// `ProcessExitMonitorService` both run `reconcileTerminalForegroundAgentClassifications` detached, so
-    /// two overlapping passes can each read `existingRow == nil` for the same session and both call
-    /// `insertAdHocDetectedAgent`. The row id is deterministic, so the second call upserts the SAME row —
-    /// but must not treat the first call's own already-inserted row as a name conflict with itself and
-    /// suffix it "-2".
+    /// Regression for a live rename bug. `TerminalForegroundAgentReconciler` is the single owner of
+    /// foreground classification and serializes its passes (one in flight plus one trailing re-run), but a
+    /// re-run still runs `insertAdHocDetectedAgent` over a session whose row the pass before it inserted.
+    /// The row id is deterministic, so the second call upserts the SAME row, and must not treat the first
+    /// call's own already-inserted row as a name conflict with itself and suffix it "-2".
     func testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
@@ -1089,12 +1088,12 @@ extension OrchestratorTests {
         XCTAssertEqual(Set(labelsAfterDistinctSession), Set(["claude", "claude-2"]))
     }
 
-    /// Regression: the SAME overlapping-reconcile-pass race as
+    /// Regression: the SAME repeated-pass case as
     /// `testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses`, but with a hook landing
     /// in the window between the two passes' `insertAdHocDetectedAgent` calls. Pass A inserts the
-    /// detection row; a hook then advances it to `.spinning` with a session key; the delayed pass B (which
-    /// also read `existingRow == nil` before A's insert) must merge into that live state rather than
-    /// re-upserting its stale `.idle`/`sessionKey: nil` detection defaults over it.
+    /// detection row; a hook then advances it to `.spinning` with a session key; pass B (which read
+    /// `existingRow == nil` before A's insert) must merge into that live state rather than re-upserting
+    /// its stale `.idle`/`sessionKey: nil` detection defaults over it.
     func testInsertAdHocDetectedAgentPreservesHookStateFromDelayedOverlappingPass() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

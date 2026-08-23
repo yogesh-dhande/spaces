@@ -21,6 +21,22 @@ public final class SQLiteStore {
     /// uncommitted state. One connection serializes its own writes, so a plain
     /// counter is sufficient.
     private var openTransactionCount = 0
+    /// Prepared statements, keyed by their SQL text, held for the connection's lifetime.
+    ///
+    /// Compiling SQL is most of the cost of a small statement, and the daemon's reconcile loops issue
+    /// thousands of them per pass, so every statement is compiled once here and reset for reuse.
+    ///
+    /// The cache is bounded by the SQL this store can issue, which is fixed in shape: the
+    /// `\(Self.xColumns)` interpolations are constant column lists, the agent upsert's two conflict
+    /// clauses are constants, the automation status filters are derived from `allCases`, and savepoint
+    /// names go through `executeBatch`/`sqlite3_exec`, which never caches. The only shapes that vary are
+    /// the automation `IN (?, ?, ...)` lists, whose placeholder count is bounded by the overview's
+    /// recent-run window.
+    ///
+    /// One handle per SQL text is safe because a statement is never re-entered while it is being stepped:
+    /// `queryRows` drains its statement before returning and `queryRow` returns after a single row, and
+    /// both reset it on the way out.
+    private var statementCache: [String: OpaquePointer] = [:]
 
     public init(path: String) throws {
         databasePath = path
@@ -40,7 +56,10 @@ public final class SQLiteStore {
         try initializeSchema()
     }
 
-    deinit { sqlite3_close(db) }
+    deinit {
+        for statement in statementCache.values { sqlite3_finalize(statement) }
+        sqlite3_close(db)
+    }
 
     /// Public entry point for wrapping several store/orchestrator mutations in one
     /// atomic unit. Nests safely: an outer `withTransaction` and the
@@ -228,7 +247,9 @@ public final class SQLiteStore {
 
     func execute(sql: String, bindings: [Any]) throws {
         let statement = try prepareStatement(sql: sql, errorCode: 3)
-        defer { sqlite3_finalize(statement) }
+        // Resetting is required, not tidiness: a cached statement left stepped but unreset holds its read
+        // transaction open, which pins the WAL and blocks checkpoints and other writers.
+        defer { sqlite3_reset(statement) }
 
         try bind(bindings, to: statement)
 
@@ -243,7 +264,7 @@ public final class SQLiteStore {
 
     func queryRow(sql: String, bindings: [Any] = []) throws -> [String]? {
         let statement = try prepareStatement(sql: sql, errorCode: 5)
-        defer { sqlite3_finalize(statement) }
+        defer { sqlite3_reset(statement) }
         try bind(bindings, to: statement)
         let result = try stepWithRetry(statement: statement)
         if result == SQLITE_DONE { return nil }
@@ -256,7 +277,7 @@ public final class SQLiteStore {
 
     func queryRows(sql: String, bindings: [Any] = []) throws -> [[String]] {
         let statement = try prepareStatement(sql: sql, errorCode: 7)
-        defer { sqlite3_finalize(statement) }
+        defer { sqlite3_reset(statement) }
         try bind(bindings, to: statement)
         var rows: [[String]] = []
         while true {
@@ -279,11 +300,19 @@ public final class SQLiteStore {
     }
 
     private func prepareStatement(sql: String, errorCode: Int) throws -> OpaquePointer {
+        if let cached = statementCache[sql] {
+            sqlite3_reset(cached)
+            sqlite3_clear_bindings(cached)
+            return cached
+        }
         var attempts = 0
         while true {
             var statement: OpaquePointer?
             let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
-            if result == SQLITE_OK, let statement { return statement }
+            if result == SQLITE_OK, let statement {
+                statementCache[sql] = statement
+                return statement
+            }
             if isBusyOrLocked(result), attempts < busyRetryAttempts {
                 attempts += 1
                 Thread.sleep(forTimeInterval: busyRetryDelaySeconds)
