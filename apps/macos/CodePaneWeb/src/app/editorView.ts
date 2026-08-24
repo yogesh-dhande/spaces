@@ -127,7 +127,7 @@ export class EditorView {
    *  execution-failure retry (see its catch branch and `scheduleExternalChangeRetry`) — same
    *  floor/doubling/cap backoff shape as root.ts's `diffRetryFailures`/`diffRetryTimer`. Reset to 0
    *  whenever a `handleExternalChange` run reaches a decoded outcome (a successful read or an
-   *  authoritative `notFound`), by a successful `open()`, and by `cleanUp()`; the pending timer is
+   *  authoritative `notFound`) or by a successful `open()`; the pending timer is
    *  additionally cleared at the very top of every `handleExternalChange` call (see its doc
    *  comment), so a fresh trigger — a live signature event or `save()`'s CAS-conflict arm —
    *  supersedes whatever retry was pending without needing a separate reset path. */
@@ -1034,14 +1034,5 @@ export class EditorView {
     } finally {
       this.saveInFlight = false;
     }
-  }
-
-  cleanUp(): void {
-    clearTimeout(this.searchTimer);
-    clearTimeout(this.editorStatePushTimer);
-    clearTimeout(this.externalChangeRetryTimer);
-    this.externalChangeRetryFailures = 0;
-    this.fileSignatureUnsubscribe?.();
-    this.codeView?.cleanUp();
   }
 }

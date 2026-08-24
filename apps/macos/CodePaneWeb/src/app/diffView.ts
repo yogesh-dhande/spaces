@@ -199,10 +199,6 @@ export class DiffView {
     });
   }
 
-  cleanUp(): void {
-    this.codeView?.cleanUp();
-  }
-
   private buildCodeViewOptions(): CodeViewOptions<AnchoredComment> {
     const onGutterUtilityClick: NonNullable<CodeViewOptions<AnchoredComment>["onGutterUtilityClick"]> = (
       range,
