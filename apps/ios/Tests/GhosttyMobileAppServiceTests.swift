@@ -197,6 +197,10 @@
                 await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
             }
 
+            /// Whether the held attach has been answered, so a responder can model the daemon: a heartbeat
+            /// for this client is `not found` only until its attach completes.
+            var hasReleased: Bool { isReleased }
+
             func waitForFirstAttachStart() async {
                 guard !didStart else { return }
                 await withCheckedContinuation { continuation in startWaiters.append(continuation) }
@@ -866,7 +870,11 @@
             XCTAssertTrue(didDetach, "stop must detach after the automatic takeover response settles")
         }
 
-        func testForegroundResumeSharesAnInFlightReconnectViewerAttach() async throws {
+        /// A foreground resume while the reconnect's viewer attach is still in flight must end with one
+        /// attach. The resume heartbeat rides the same command channel as the attach, so it is answered
+        /// only after the attach completes, and the daemon then knows the client: the resume must not
+        /// reattach on top of that.
+        func testForegroundResumeDoesNotReattachOverAnInFlightReconnectViewerAttach() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let heldAttach = HeldFirstAttachResponder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
@@ -876,7 +884,12 @@
                     return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
                 if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
-                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                    // The daemon answers a heartbeat for a client it has not attached with not-found; once
+                    // the attach has been answered the client exists.
+                    guard await heldAttach.hasReleased else {
+                        return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
                 if case .state = request.command {
                     return Self.terminalStateResponse(
@@ -894,11 +907,11 @@
             model.prepareForBackgrounding()
             model.resumeAfterBackgrounding()
             let startedSecondAttach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
-            XCTAssertFalse(startedSecondAttach, "foreground resume must join the reconnect's in-flight viewer attach")
+            XCTAssertFalse(startedSecondAttach, "foreground resume must not start a second attach while the reconnect's attach is in flight")
 
             await heldAttach.release()
             let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
-            XCTAssertTrue(didTakeOver, "the shared attach must settle before the foreground ownership decision")
+            XCTAssertTrue(didTakeOver, "the reconnect's attach must settle before the foreground ownership decision")
             let requests = await recorder.snapshot()
             let attachCount = requests.filter { request in
                 guard case .terminalControl(let payload) = request.command else { return false }
@@ -3245,6 +3258,49 @@
             XCTAssertFalse(hostView.debugAppliedFrameCoversHostColumnsForTesting, "releasing the mirror drops what it recorded about the surface")
         }
 
+        /// End-to-end coverage for the #492 gate: a tap on a frame the mirror actually applied as a
+        /// column-cropped slice must not probe for a link at all, and the same session's tap probes
+        /// normally again once a frame covering the viewport's columns has been applied. The other tests
+        /// around this one check the two halves separately (that the coverage flag tracks a real applied
+        /// frame's width, and that the tap gate reads whatever the flag says); this one drives both
+        /// halves together through the real `update(snapshot:)` apply path and the real tap entry point,
+        /// which is what the deleted UI-test phase used to be the only coverage for.
+        func testTapOnAColumnCroppedFrameDoesNotProbeLinks() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "tap-crop-gate") { view in
+                view.setSurfaceViewportSizeForTesting(columns: 49, rows: 20)
+            }
+            defer { hostView.removeFromSuperview() }
+            hostView.setAcceptsTerminalInput(true)
+
+            var probeCount = 0
+            hostView.debugTapLinkHandlerForTesting = { _ in
+                probeCount += 1
+                return true
+            }
+
+            hostView.update(snapshot: filledSnapshot(columns: 105, rows: 20), renderStateKey: "owner|mac-width", fallbackText: "")
+            XCTAssertFalse(
+                hostView.debugAppliedFrameCoversHostColumnsForTesting, "sanity: the applied frame is a column-cropped slice of the host grid")
+            XCTAssertEqual(
+                hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused,
+                "a tap on a column-cropped frame must fall through to focusing the keyboard, not open a link")
+            XCTAssertEqual(probeCount, 0, "a column-cropped frame must never reach the link probe")
+
+            hostView.update(snapshot: filledSnapshot(columns: 49, rows: 20), renderStateKey: "owner|phone-width", fallbackText: "")
+            XCTAssertTrue(hostView.debugAppliedFrameCoversHostColumnsForTesting, "sanity: the applied frame now covers the viewport's columns")
+            XCTAssertEqual(
+                hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink,
+                "a frame covering the host's columns allows the tap to probe for a link")
+            XCTAssertEqual(probeCount, 1)
+        }
+
         private func filledSnapshot(columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil) -> GhosttyTerminalSnapshot {
             GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
@@ -3296,8 +3352,7 @@
             hostView.onClearSelectionTapped = { clearCount += 1 }
             let selection = GhosttyTerminalSelectionRange(
                 startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-            let endedRender = GhosttyRemoteTerminalEndedRender(
-                id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection))
+            let endedRender = GhosttyRemoteTerminalEndedRender(id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection))
             hostView.update(ownerEpoch: nil, endedRender: endedRender, fallbackText: "")
             let reappliedCountBeforeTap = hostView.reappliedEndedRenderFrameCountForTesting
 
@@ -4448,6 +4503,110 @@
             XCTAssertGreaterThan(try XCTUnwrap(reportedColumns.last), columnsAtDefaultSize)
         }
 
+        /// A cold open's pre-mirror layout pass must not report the `UIFont` estimate: the real
+        /// surface (a few hundred ms later, once `scheduleMirrorAcquisitionIfNeeded`'s task actually
+        /// acquires one) almost never agrees with it, which is what forces the daemon into a second,
+        /// visible resize. With nothing cached for this (font size, scale) yet, the view has to wait
+        /// for that surface rather than report a guess in the meantime.
+        func testAnEstimateViewportIsSuppressedWhileMirrorAcquisitionIsImminent() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let originalCache = GhosttyRemoteTerminalHostView.cellMetricsCache
+            GhosttyRemoteTerminalHostView.cellMetricsCache = GhosttyTerminalCellMetricsCache(
+                defaults: try XCTUnwrap(UserDefaults(suiteName: "suppression-test-\(UUID().uuidString)")), storageKey: "cache", stamp: "test-stamp")
+            defer { GhosttyRemoteTerminalHostView.cellMetricsCache = originalCache }
+
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+
+            // Synchronous: layoutSubviews reports before the async acquisition task (scheduled from
+            // renderLatestSnapshot, which nothing has called yet) has any chance to run.
+            viewController.view.layoutIfNeeded()
+            XCTAssertEqual(reportedViewports.count, 0, "the pre-mirror estimate must not reach onViewportSizeChanged")
+
+            hostView.update(
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=suppression",
+                fallbackText: "Waiting for terminal state...")
+            viewController.view.layoutIfNeeded()
+            XCTAssertEqual(reportedViewports.count, 0, "still nothing to report until a mirror actually exists")
+
+            let deadline = Date().addingTimeInterval(2)
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            XCTAssertGreaterThan(reportedViewports.count, 0, "the surface-backed report must land once the mirror exists")
+        }
+
+        /// With the native mirror disabled (every other test in this file, and any view that never
+        /// becomes entitled to the shared mirror in production), `isMirrorAcquisitionImminent` is
+        /// always false, so the suppression gate never applies: the pre-mirror estimate reports
+        /// exactly as it did before this gate existed.
+        func testEstimateViewportReportsNormallyWithTheNativeMirrorDisabled() {
+            XCTAssertFalse(GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting, "this test relies on setUp's default")
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+
+            viewController.view.layoutIfNeeded()
+            XCTAssertGreaterThan(reportedViewports.count, 0, "a disabled native mirror must keep reporting the estimate synchronously")
+        }
+
+        /// Layer 1 (suppression) plus layer 2 (the cell metrics cache) together: a cache entry seeded
+        /// for this view's (font size, scale) before the mirror is acquired lets the very first
+        /// report already be the padding-correct predicted grid, instead of waiting on the surface.
+        func testACachedCellSizeProducesAnImmediateAccuratePreMirrorReport() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let cache = GhosttyTerminalCellMetricsCache(
+                defaults: try XCTUnwrap(UserDefaults(suiteName: "cache-hit-test-\(UUID().uuidString)")), storageKey: "cache", stamp: "test-stamp")
+            let originalCache = GhosttyRemoteTerminalHostView.cellMetricsCache
+            GhosttyRemoteTerminalHostView.cellMetricsCache = cache
+            defer { GhosttyRemoteTerminalHostView.cellMetricsCache = originalCache }
+
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let scale = Double(window.screen.scale)
+            cache.recordCellPixelSize(fontSizePoints: TerminalFontSize.default.rawValue, scale: scale, width: 24, height: 51)
+            let expectedPrediction = try XCTUnwrap(
+                cache.predictedGrid(
+                    fontSizePoints: TerminalFontSize.default.rawValue, scale: scale, renderBoundsWidth: viewController.view.bounds.width,
+                    renderBoundsHeight: viewController.view.bounds.height))
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+
+            viewController.view.layoutIfNeeded()
+
+            XCTAssertFalse(hostView.hasMirrorSurfaceForTesting, "this assertion only means anything before the surface exists")
+            let firstReport = try XCTUnwrap(reportedViewports.first)
+            XCTAssertEqual(firstReport.columns, expectedPrediction.columns)
+            XCTAssertEqual(firstReport.rows, expectedPrediction.rows)
+        }
+
         /// Mounts a terminal host view with a live native mirror and waits until it holds one.
         private func mountNativeMirrorHostView(
             in viewController: UIViewController, window: UIWindow, screenKey: String, configure: (GhosttyRemoteTerminalHostView) -> Void = { _ in }
@@ -4467,6 +4626,73 @@
             while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
             XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
             return hostView
+        }
+
+        /// A cold open has a window and nonzero bounds well before the first daemon snapshot arrives
+        /// (the render pipeline is what delivers the snapshot in the first place). Acquisition only
+        /// requires those two things (`isEntitledToSharedMirror`), not content, so it must happen even
+        /// when a snapshot never comes. Before the fix, `scheduleMirrorAcquisitionIfNeeded()` was only
+        /// reachable from `renderLatestSnapshot()`'s post-snapshot path, so a view that never receives a
+        /// snapshot never acquired a mirror, and the open-screen hold this feeds never saw a viewport
+        /// report until its own timeout.
+        func testHostViewAcquiresTheMirrorBeforeAnySnapshotArrives() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            XCTAssertNil(hostView.capturedSnapshotForTesting(), "this test only means something before any content arrives")
+            let deadline = Date().addingTimeInterval(2)
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting, "a view with a window and bounds must acquire the mirror even with no snapshot yet")
+        }
+
+        /// A mirror that fails to acquire (a genuine creation failure, not a timing race that resolves on
+        /// its own) must not become an unbounded reschedule loop, and must not leave the view stuck
+        /// suppressing viewport reports forever. Before the fix, `acquireMirrorIfNeeded()`'s catch branch
+        /// only traced the failure: the view stayed entitled, so `scheduleMirrorAcquisitionIfNeeded()`'s
+        /// own completion (`renderLatestSnapshot()`) rescheduled another acquisition attempt on every
+        /// turn, and `isMirrorAcquisitionImminent` stayed true forever, suppressing the estimate-based
+        /// report that is otherwise this view's only viewport source. Regression test for
+        /// `didFailMirrorAcquisition`, which latches the failure so both stop.
+        func testFailedMirrorAcquisitionStopsReschedulingAndResumesEstimateReporting() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            hostView.forceMirrorAcquisitionFailureForTesting = true
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            // Let the acquisition task (and, pre-fix, whatever it keeps rescheduling) run for a while.
+            let settleDeadline = Date().addingTimeInterval(1)
+            while Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertFalse(hostView.hasMirrorSurfaceForTesting, "the forced failure must never produce a mirror")
+
+            let callCountAfterSettling = hostView.renderLatestSnapshotCallCountForTesting
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            XCTAssertEqual(
+                hostView.renderLatestSnapshotCallCountForTesting, callCountAfterSettling,
+                "a persistent acquisition failure must stop rescheduling instead of looping renderLatestSnapshot")
+
+            XCTAssertGreaterThan(
+                reportedViewports.count, 0, "a view whose mirror can never exist must still deliver the estimate-based viewport report")
         }
 
         func testRemoteTerminalHostViewDoesNotRepublishInputReadinessWhenInstallingCallback() throws {
@@ -5186,6 +5412,115 @@
                 defaultBackgroundRGB: 0x1A1E26, cells: cells)
         }
 
+    }
+
+    /// `GhosttyTerminalCellMetricsCache` needs no live surface, window, or main actor either, so it is
+    /// exercised directly against an isolated `UserDefaults` suite per the repo's test-env hygiene
+    /// (a distinct suite name per test, removed in `tearDown`) rather than through the host view.
+    final class GhosttyTerminalCellMetricsCacheTests: XCTestCase {
+        private var suiteName = ""
+        private var defaults: UserDefaults!
+
+        override func setUp() {
+            super.setUp()
+            suiteName = "GhosttyTerminalCellMetricsCacheTests.\(UUID().uuidString)"
+            defaults = UserDefaults(suiteName: suiteName)
+        }
+
+        override func tearDown() {
+            defaults.removePersistentDomain(forName: suiteName)
+            defaults = nil
+            super.tearDown()
+        }
+
+        private func makeCache(stamp: String = "stamp-1") -> GhosttyTerminalCellMetricsCache {
+            GhosttyTerminalCellMetricsCache(defaults: defaults, storageKey: "cache", stamp: stamp)
+        }
+
+        func testEntriesAreKeyedByFontSizeAndScaleIndependently() {
+            let cache = makeCache()
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 24, height: 51)
+            cache.recordCellPixelSize(fontSizePoints: 12, scale: 3.0, width: 29, height: 61)
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 2.0, width: 16, height: 34)
+
+            XCTAssertEqual(cache.cellPixelSize(fontSizePoints: 10, scale: 3.0), .init(width: 24, height: 51))
+            XCTAssertEqual(cache.cellPixelSize(fontSizePoints: 12, scale: 3.0), .init(width: 29, height: 61))
+            XCTAssertEqual(cache.cellPixelSize(fontSizePoints: 10, scale: 2.0), .init(width: 16, height: 34))
+            XCTAssertNil(cache.cellPixelSize(fontSizePoints: 11, scale: 3.0), "an unrecorded font size must miss, not fall back to a neighbor")
+        }
+
+        func testAStampMismatchDropsEveryExistingEntry() {
+            let cacheV1 = makeCache(stamp: "stamp-1")
+            cacheV1.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 24, height: 51)
+            XCTAssertNotNil(cacheV1.cellPixelSize(fontSizePoints: 10, scale: 3.0))
+
+            // A different stamp (an app/GhosttyKit update, or the generated config's content
+            // changing) reads through the same UserDefaults storage but must see nothing recorded
+            // under the old stamp.
+            let cacheV2 = makeCache(stamp: "stamp-2")
+            XCTAssertNil(cacheV2.cellPixelSize(fontSizePoints: 10, scale: 3.0))
+
+            cacheV2.recordCellPixelSize(fontSizePoints: 9, scale: 2.0, width: 16, height: 34)
+            XCTAssertNil(cacheV1.cellPixelSize(fontSizePoints: 10, scale: 3.0), "recording under the new stamp must not resurrect the old entry")
+            XCTAssertEqual(cacheV2.cellPixelSize(fontSizePoints: 9, scale: 2.0), .init(width: 16, height: 34))
+        }
+
+        func testRecordingOverwritesAMismatchedEntryForTheSameKey() {
+            let cache = makeCache()
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 20, height: 40)
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 24, height: 51)
+
+            XCTAssertEqual(
+                cache.cellPixelSize(fontSizePoints: 10, scale: 3.0), .init(width: 24, height: 51),
+                "the live surface's later read must replace a stale prediction rather than sit alongside it")
+        }
+
+        func testAnEntryPersistsThroughANewCacheInstanceOverTheSameStorage() {
+            let cache = makeCache()
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 24, height: 51)
+
+            let reloaded = makeCache()
+            XCTAssertEqual(reloaded.cellPixelSize(fontSizePoints: 10, scale: 3.0), .init(width: 24, height: 51))
+        }
+
+        /// `paddingPerSidePx` per iOS's non-macOS `default_dpi = 96` (see the doc comment on the
+        /// constant): scale 2.0 -> 5px/side, scale 3.0 -> 8px/side. Confirmed against a live iOS
+        /// surface (booted-simulator `xcodebuild test`, font sizes 9/10/12): scale 2.0 measured a
+        /// 10px total padding, scale 3.0 measured 16px total, both exactly 2x this per-side value.
+        func testPaddingPerSidePixelsMatchesTheMeasuredIOSDefaultDPI() {
+            XCTAssertEqual(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: 2.0), 5)
+            XCTAssertEqual(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: 3.0), 8)
+        }
+
+        func testPredictedGridAppliesThePaddingCorrectFloorMathOnBothAxes() {
+            let cache = makeCache()
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 2.0, width: 10, height: 20)
+
+            // scale 2.0 -> 5px padding/side (10 total). 125pt x 100pt at scale 2.0 is 250x200px;
+            // content is (250-10)x(200-10) = 240x190px; 240/10 = 24 columns, 190/20 = 9.5 -> 9 rows.
+            let predicted = cache.predictedGrid(fontSizePoints: 10, scale: 2.0, renderBoundsWidth: 125, renderBoundsHeight: 100)
+            XCTAssertEqual(predicted?.columns, 24)
+            XCTAssertEqual(predicted?.rows, 9)
+        }
+
+        /// Grounded in the same live-surface probe as `testPaddingPerSidePixelsMatchesTheMeasuredIOSDefaultDPI`:
+        /// at scale 3.0, font size 10, a real surface measured `cellWidthPx=24` and reported the
+        /// grid's column count flipping from 6 to 7 exactly at `widthPx=184`. `predictedGrid` must
+        /// reproduce that same flip from a cached `cellWidthPx=24` alone.
+        func testPredictedGridReproducesALiveMeasuredColumnFlip() {
+            let cache = makeCache()
+            cache.recordCellPixelSize(fontSizePoints: 10, scale: 3.0, width: 24, height: 51)
+
+            // 61pt * 3.0 = 183px (one below the measured flip) -> still 6 columns.
+            XCTAssertEqual(cache.predictedGrid(fontSizePoints: 10, scale: 3.0, renderBoundsWidth: 61, renderBoundsHeight: 400)?.columns, 6)
+            // 62pt * 3.0 = 186px (past the measured flip at 184) -> 7 columns.
+            XCTAssertEqual(cache.predictedGrid(fontSizePoints: 10, scale: 3.0, renderBoundsWidth: 62, renderBoundsHeight: 400)?.columns, 7)
+        }
+
+        func testPredictedGridReturnsNilWithoutACachedEntry() {
+            let cache = makeCache()
+            XCTAssertNil(cache.predictedGrid(fontSizePoints: 10, scale: 3.0, renderBoundsWidth: 400, renderBoundsHeight: 400))
+        }
     }
 
     /// Pins the pure C-frame marshalling `GhosttyRemoteTerminalHostView.withCFrame` leans on for the

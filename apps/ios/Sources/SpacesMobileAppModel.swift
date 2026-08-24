@@ -120,6 +120,16 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let runtimeRows: Int?
     let snapshotColumns: Int?
     let snapshotRows: Int?
+    /// The columns/rows of the frame actually fed to the terminal's paint path (the native mirror's
+    /// `ownerEpoch.bootstrapSnapshot`), as opposed to `snapshotColumns`/`snapshotRows` above, which track
+    /// the model's last-applied render snapshot regardless of whether it was painted. The open hold defers
+    /// only the paint: an `.initial` bootstrap payload still updates the model's render snapshot
+    /// immediately (it is a state-transition reason, not screen content), so `snapshotColumns` can read a
+    /// wider, unpainted grid while the hold is active. This pair tracks `holdsFirstPaint`'s gate instead
+    /// (see `TerminalViewerModel.applyReducedState`), so it is nil until the hold actually releases a
+    /// frame to paint.
+    let appliedFrameColumns: Int?
+    let appliedFrameRows: Int?
     let snapshotText: String?
     let errorMessage: String?
     let isPreparingLinkPreview: Bool

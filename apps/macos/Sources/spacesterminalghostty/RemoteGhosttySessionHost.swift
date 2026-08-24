@@ -247,7 +247,8 @@
             }
             terminalView.onClearSelection = { [weak self] in self?.sendRemoteClearSelection() }
             terminalView.onSetSelection = { [weak self] startColumn, startRow, endColumn, endRow, isRectangle in
-                self?.sendRemoteSetSelection(startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
+                self?.sendRemoteSetSelection(
+                    startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
@@ -397,8 +398,8 @@
             Task { @MainActor [weak self] in
                 let selectionText = await Task.detached(priority: .userInitiated) {
                     let response = try? Self.sendControlRequest(
-                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID,
-                        socketPath: socketPath, requestSender: requestSender)
+                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID, socketPath: socketPath,
+                        requestSender: requestSender)
                     return response?.selectionText
                 }.value
                 guard let self, let selectionText, !selectionText.isEmpty else {
@@ -866,7 +867,7 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
                     detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
             }
-            postLocalNotifications(for: payload)
+            postLocalNotifications(for: output)
         }
 
         /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
@@ -889,10 +890,12 @@
             GhosttyClipboardBridge.writePlainText(clipboardWrite.text, to: clipboardPasteboardOverrideForTesting ?? .general)
         }
 
-        private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
-            for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: payload.reason) {
-                TerminalSessionNotification.post(name, sessionID: payload.sessionID)
-            }
+        /// Posts `output.notificationNames`, the union across every reason this apply stands for: its
+        /// own plus every reason it collapsed away. A collapsed-away `runtime_state` never reaches this
+        /// call on its own apply, but it still owes its consumer a refresh, so the survivor posts for it.
+        private func postLocalNotifications(for output: TerminalRemoteStateReductionOutput) {
+            let sessionID = output.incomingPayload.sessionID
+            for name in output.notificationNames { TerminalSessionNotification.post(name, sessionID: sessionID) }
         }
 
         private func currentSnapshot() -> GhosttyTerminalSnapshot? { latestSnapshotIfCompatible() }
@@ -1089,7 +1092,9 @@
         /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call. Writes only
         /// for the newest committed drag, and only while the pasteboard still holds what it held at
         /// that commit, so a copy the user made during the round trip is never overwritten.
-        private func writeSelectionTextToPasteboard(_ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int) {
+        private func writeSelectionTextToPasteboard(
+            _ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int
+        ) {
             guard commitGeneration == selectionCommitGeneration else { return }
             terminalView.writeSelectionTextToPasteboard(text, ifPasteboardUnchangedSince: changeCount)
         }

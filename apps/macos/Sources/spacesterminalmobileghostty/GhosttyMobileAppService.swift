@@ -153,7 +153,10 @@ import Foundation
         /// generator root (`<profile-root>/ghostty`, i.e. `~/.spaces/ghostty`) is unusable here: an
         /// iOS app container's home root is not writable on a physical device, so creating `.spaces`
         /// there fails with EPERM and the terminal surface never comes up.
-        static func themeConfigRootDirectory(
+        // `nonisolated`: a pure function of `FileManager`/`NSHomeDirectory`, not of anything the
+        // `@MainActor` isolation on this class actually protects, so a nonisolated caller (the cell
+        // metrics cache's static-initializer stamp lookup) can resolve the config path directly.
+        nonisolated static func themeConfigRootDirectory(
             applicationSupportDirectory: URL? = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
             homeDirectory: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         ) -> URL {
