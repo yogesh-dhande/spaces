@@ -60,8 +60,17 @@ struct AutomationRunRowsList: View {
     private func runRow(_ row: SpacesMobileAutomationRunRow) -> some View {
         let run = row.run
         var detailParts = [SpacesMobileAutomations.runTriggerLabel(run)]
-        if let started = SpacesMobileAutomations.startedDescription(run) { detailParts.append(started) }
-        if let duration = SpacesMobileAutomations.durationDescription(run) { detailParts.append(duration) }
+        // Both read the shared 30-second label clock rather than `Date()`, so this text stays put across
+        // the 2-second overview poll instead of jittering (#540) — see
+        // `SpacesMobileAppModel.relativeTimeReference`. `startedDescription` clamps internally against a
+        // reference that trails a just-started run; `durationDescription`'s own `max(0, ...)` already
+        // covers the same case for the live-running duration it renders.
+        if let started = SpacesMobileAutomations.startedDescription(run, relativeTo: model.relativeTimeReference) {
+            detailParts.append(started)
+        }
+        if let duration = SpacesMobileAutomations.durationDescription(run, relativeTo: model.relativeTimeReference) {
+            detailParts.append(duration)
+        }
         if let exitCode = run.exitCode { detailParts.append("exit \(exitCode)") }
         if run.status == "skipped", let reason = run.skipReason { detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))") }
 

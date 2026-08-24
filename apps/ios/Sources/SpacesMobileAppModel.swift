@@ -454,6 +454,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
     private(set) var isDemoModeEnabled: Bool
     var overview: SpacesDeviceOverviewPayload?
+    /// The clock every relative-time label (automation next-fire, run started/duration, alert age) reads
+    /// at render time instead of calling `Date()` directly. Advances in 30-second jumps off the existing
+    /// poll cadence (`advanceRelativeTimeReferenceIfDue`, called from every `performRefresh`) — matching
+    /// the Mac's independent label-only beat (`AutomationsController.armRelativeTimeRefresh`) — rather
+    /// than on every 2-second overview tick, which is the churn #540 reports. `@Observable` notifies on
+    /// this property exactly like `overview`, so a view reading it re-renders on that cadence regardless
+    /// of whether the fetched overview payload itself changed: the equality gate in `publishOverview`
+    /// must not also freeze the labels that used to be repainted as a side effect of its every-tick
+    /// republish.
+    var relativeTimeReference: Date
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
     var daemonStatus: TerminalServiceDaemonStatus?
@@ -697,6 +707,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceDeletionReconciliationInterval = .seconds(2)
         now = { ContinuousClock.now }
         wallClock = { Date() }
+        relativeTimeReference = wallClock()
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -746,6 +757,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.workspaceDeletionReconciliationInterval = workspaceDeletionReconciliationInterval
         self.now = now
         self.wallClock = wallClock
+        relativeTimeReference = wallClock()
     }
 
     /// The workspaces this client lists: neither archived, hidden, nor under a hidden project, matching
@@ -1303,6 +1315,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         await task.value
     }
 
+    /// Advances `relativeTimeReference` to the current wall-clock instant once at least 30 seconds have
+    /// elapsed since it last moved — the same cadence the Mac's `AutomationsController.armRelativeTimeRefresh`
+    /// uses for its own label-only beat. Piggybacks on the existing poll instead of a separate timer: every
+    /// `performRefresh` calls this once, so the label clock advances on a coarse cadence of its own without
+    /// adding new timer machinery.
+    private func advanceRelativeTimeReferenceIfDue() {
+        let current = wallClock()
+        guard current.timeIntervalSince(relativeTimeReference) >= 30 else { return }
+        relativeTimeReference = current
+    }
+
     /// One overview fetch on behalf of connection `identity`. Publishes nothing when the identity
     /// moved on mid-fetch: the payload — or error — belongs to the previous connection and would
     /// overwrite the reset state the identity change just established.
@@ -1320,6 +1343,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer {
             isLoading = false
             refreshInFlight = nil
+            // Runs on every refresh attempt regardless of outcome: it only reads the local wall clock, so
+            // a fetch failure or a stale-identity discard still counts as "we checked in". That matters for
+            // a returning tab (hidden, backgrounded, or behind a closed detail route while polling was
+            // paused): its first refresh on resume already clears the 30-second bar by itself, since the
+            // reference sat untouched for the whole gap, so labels catch straight up with no separate
+            // "just resumed" case to write.
+            advanceRelativeTimeReferenceIfDue()
         }
         do {
             // Read compatibility from the overview's inline frozen-core status so the compatible steady
@@ -2796,8 +2826,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Republishes `overview` only when the freshly fetched payload actually differs from what's already
+    /// published. `.overviewPolling` fetches on a flat 2-second cadence for every list tab regardless of
+    /// how often the device's state actually changes (see `OverviewPollingModifier`), and an unconditional
+    /// `overview = payload` here re-triggers `@Observable`'s change notification on every one of those
+    /// ticks — even a no-op fetch — invalidating and re-rendering every view reading `overview` twice a
+    /// second (#540: the Automations tab's constant visible churn). `SpacesDeviceOverviewPayload` is
+    /// `Equatable`, so a matching fetch is skipped here at effectively no cost.
+    ///
+    /// The two calls below still run against every fetched `payload`, gate or no gate: both are idempotent
+    /// against an unchanged payload (they derive their result solely from `payload`'s own content, so a
+    /// repeat payload reproduces the same no-op), and `resolveDeferredWorkspaceDeletions` in particular is
+    /// documented to treat "every published overview" — read: every successful fetch, not just the ones
+    /// that changed `overview` — as a chance to settle a deferred delete.
     private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
-        overview = payload
+        if payload != overview { overview = payload }
         if let payload {
             pruneDismissedAlertIDs(against: payload)
             resolveDeferredWorkspaceDeletions(against: payload)
