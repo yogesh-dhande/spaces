@@ -111,6 +111,12 @@ export class EditorView {
    *  `CodePaneEditorState` (see its doc comment) — a hibernation cycle simply drops the Undo offer,
    *  which is an accepted, cheap-to-lose affordance rather than a data-loss risk. */
   private pendingMergeUndo: string | undefined;
+  /** Monotonic count of buffer edits, bumped once per `onItemEditChange` firing. Used only to
+   *  detect whether an edit landed between a discard consent (the "Discard edits and open" button
+   *  click) and that discard's `open()` call completing — see `showDiscardBanner`'s click handler
+   *  and `open()`'s completion check. Not persisted, not part of `CodePaneEditorState`: it only
+   *  ever needs to compare two values captured within the same live session. */
+  private bufferEditGeneration = 0;
   private editGeneration = 0;
   private searchToken = 0;
   /** Bumped at the start of every `open()` call; a call whose token has been superseded by a later
@@ -293,6 +299,7 @@ export class EditorView {
         onItemEditChange: (_item, file) => {
           this.latestContent = file.contents;
           this.dirty = true;
+          this.bufferEditGeneration += 1;
           this.saveBtn.disabled = this.conflict;
           // A merge indicator's Undo only makes sense against the exact pre-merge buffer: an edit
           // made on top of the merge result would be silently discarded by an Undo that reverts to
@@ -348,8 +355,11 @@ export class EditorView {
    * itself re-checks dirty at completion and raises the identical banner if the race occurred (see
    * the completion-check comment inside `open()`). And the banner's discard button no longer clears
    * `dirty` at click time: it commits the discard only once `open()` actually succeeds, via
-   * `open(path, { discard: true })`, so a read that fails after a discard click leaves the old
-   * buffer correctly marked dirty rather than lying about it having been abandoned.
+   * `open(path, { discardConsentEditGeneration })`, so a read that fails after a discard click
+   * leaves the old buffer correctly marked dirty rather than lying about it having been abandoned.
+   * The generation carried by that option additionally scopes the consent to the buffer as it stood
+   * at the click, not whatever the buffer becomes while the read is still in flight — see `open()`'s
+   * completion check.
    *
    * A standing conflict is dirty by construction (`this.dirty` stays true throughout), so it falls
    * through the same gate as any other unsaved buffer — opening a different file is one of the
@@ -375,14 +385,19 @@ export class EditorView {
     discardBtn.className = "btn";
     discardBtn.textContent = "Discard edits and open";
     discardBtn.addEventListener("click", () => {
-      void this.open(targetPath, { discard: true });
+      // Captured here, inside the listener, not hoisted out to banner-render time: the consent this
+      // click gives only covers the buffer AS IT STANDS RIGHT NOW. Reading `bufferEditGeneration` at
+      // click time (rather than whatever value it happened to have when the banner was first shown)
+      // is what lets `open()`'s completion check detect an edit that lands during this call's own
+      // read — see that check's comment.
+      void this.open(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration });
     });
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, discardBtn);
     this.banner.style.display = "flex";
   }
 
-  private async open(path: string, opts?: { discard?: boolean }): Promise<void> {
+  private async open(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
     const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
     try {
@@ -394,20 +409,28 @@ export class EditorView {
       return; // leave the input editable so the user can correct the path
     }
     if (generation !== this.openGeneration) return; // a later open() already won
-    if (!opts?.discard && this.dirty && this.currentPath !== undefined) {
-      // Bug A fix: a DIFFERENT open (openGated's own upfront check, which ran before this read
-      // started) cannot see dirty state that arises WHILE this read is in flight — the user may
-      // type into the currently-open file during the seconds a remote read can take. Rechecking
-      // here, at completion, is what actually closes that race, showing the identical consent
-      // banner instead of silently replacing the buffer.
+    const isStaleConsent =
+      opts?.discardConsentEditGeneration === undefined || opts.discardConsentEditGeneration !== this.bufferEditGeneration;
+    if (isStaleConsent && this.dirty && this.currentPath !== undefined) {
+      // Bug A fix (round-15): a DIFFERENT open (openGated's own upfront check, which ran before
+      // this read started) cannot see dirty state that arises WHILE this read is in flight — the
+      // user may type into the currently-open file during the seconds a remote read can take.
+      // Rechecking here, at completion, is what actually closes that race, showing the identical
+      // consent banner instead of silently replacing the buffer.
       //
-      // The `!opts?.discard` guard is required, not optional: Bug B's fix (above) stops clearing
-      // `dirty` at the discard button's click time, deferring that clear to this function's own
-      // success path. Without this guard, a discard-open's own completion would see
-      // `this.dirty === true` (never cleared before the call) and treat its OWN replacement as a
-      // conflict, re-raising the very banner the user just dismissed — forever, since every
-      // subsequent discard attempt would hit the same unmet condition. The flag marks "this call IS
-      // the user's chosen resolution of that conflict, do not re-litigate it."
+      // A discard consent only ever covers the buffer AS OF THE CLICK, not whatever the buffer
+      // becomes while this call's own read is still in flight (a later fix, tracked via
+      // `bufferEditGeneration`). Without the generation check, a discard-open's completion would
+      // see `this.dirty === true` (never cleared before the call — that's Bug B's fix, deferring
+      // the clear to this function's own success path below) and treat its OWN replacement as a
+      // conflict, re-raising the very banner the user just dismissed — but ONLY re-raising it when
+      // an edit actually landed after the click is what makes that re-raise correct rather than a
+      // repeat of Bug B: a second click with `discardConsentEditGeneration` still matching the
+      // current `bufferEditGeneration` (no edit landed in between) is exactly the "resolution
+      // already given, do not re-litigate it" case Bug B's fix protects, and `isStaleConsent` is
+      // false for it, so the buffer is replaced below and this cannot loop forever — each re-raise
+      // requires the user to have typed something new, which is new unsaved work the original
+      // consent never covered.
       this.showDiscardBanner(path);
       return;
     }

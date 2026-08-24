@@ -1430,6 +1430,143 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
   });
 });
 
+describe("EditorView — discard consent is scoped to the edit-generation at click time (against-main round-3 fix)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  /** Same held-per-path-read idiom as the "completion recheck + discard-flag interplay" block above:
+   *  each call to `workspaceFileRead(path)` gets its own deferred promise, tracked by path (a later
+   *  call for the same path overwrites the earlier entry — every test here only needs to hold the
+   *  LATEST in-flight read for a given path, since a re-raised banner's second discard click issues
+   *  a brand new read for the same target path). */
+  function makeDeferredRead(): {
+    workspaceFileRead: SpacesBridge["workspaceFileRead"];
+    settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }>;
+  } {
+    const settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }> = {};
+    const workspaceFileRead = vi.fn((path: string) => {
+      let resolve!: (result: WorkspaceFileReadResult) => void;
+      let reject!: (err: unknown) => void;
+      const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      settle[path] = { resolve, reject, promise };
+      return promise;
+    });
+    return { workspaceFileRead, settle };
+  }
+
+  it("an edit landing after the discard click but before its read completes re-raises the banner instead of silently discarding it", async () => {
+    const { workspaceFileRead, settle } = makeDeferredRead();
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
+    await settle["a.ts"]!.promise;
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
+
+    pressEnter(input, "b.ts"); // dirty: gated, banner shown, no read yet
+    const banner = container.querySelector(".banner.conflict") as HTMLElement;
+    (banner.querySelector("button") as HTMLButtonElement).click(); // discard consent captured at THIS click's bufferEditGeneration
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+
+    // A further keystroke lands into the still-live A buffer while B's read is still held — this is
+    // new unsaved work the click's consent never covered.
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited further" });
+
+    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
+    await settle["b.ts"]!.promise;
+
+    // The banner re-raises: the intervening edit invalidated this discard's consent.
+    await vi.waitFor(() => expect(banner.style.display).toBe("flex"));
+    expect(banner.firstChild?.textContent).toBe("Unsaved changes in a.ts. Save them first, or discard them to open b.ts.");
+
+    // The buffer was NOT replaced with B's content: A's post-intervening-edit buffer still stands,
+    // still dirty, still the open file.
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "a.ts", baseSHA256: "sha-a", baseContent: "a content", content: "a content edited further", dirty: true, conflict: false }),
+    );
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(false);
+  });
+
+  it("clicking discard a second time with no further edits lets the reopen complete normally (no infinite re-raise)", async () => {
+    const { workspaceFileRead, settle } = makeDeferredRead();
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
+    await settle["a.ts"]!.promise;
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
+
+    pressEnter(input, "b.ts");
+    const banner = container.querySelector(".banner.conflict") as HTMLElement;
+    (banner.querySelector("button") as HTMLButtonElement).click(); // first discard click, consent gen 1
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited further" }); // intervening edit bumps to gen 2
+    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
+    await settle["b.ts"]!.promise;
+    await vi.waitFor(() => expect(banner.style.display).toBe("flex")); // re-raised, same as the previous test
+
+    // Second discard click: no further edit happens this time, so this click's consent generation
+    // still matches `bufferEditGeneration` when the reopen completes.
+    (banner.querySelector("button") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3)); // a.ts, b.ts, b.ts again
+    settle["b.ts"]!.resolve({ content: "b content v2", sha256: "sha-b2", size: 12 });
+    await settle["b.ts"]!.promise;
+
+    // B opens normally this time: the fix does not cause an infinite re-raise loop once there is no
+    // new edit to re-litigate.
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b2", baseContent: "b content v2", content: "b content v2", dirty: false, conflict: false }),
+    );
+    expect(input.value).toBe("b.ts");
+    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(banner.style.display).toBe("none");
+  });
+
+  it("a discard with no intervening edit opens the target file normally, unchanged from before this fix", async () => {
+    const { workspaceFileRead, settle } = makeDeferredRead();
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
+    await settle["a.ts"]!.promise;
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
+
+    pressEnter(input, "b.ts");
+    const banner = container.querySelector(".banner.conflict") as HTMLElement;
+    (banner.querySelector("button") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+
+    // No edit happens while the read is held this time — the original, unraced discard shape.
+    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
+    await settle["b.ts"]!.promise;
+
+    expect(input.value).toBe("b.ts");
+    expect(banner.style.display).toBe("none");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
+    );
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(true);
+  });
+});
+
 describe("EditorView.collectStateForFlush (round-6 Fix 1)", () => {
   let container: HTMLElement;
 
