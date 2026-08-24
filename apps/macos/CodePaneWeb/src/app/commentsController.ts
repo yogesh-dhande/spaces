@@ -807,6 +807,15 @@ export class CommentsController {
       }
     }
 
+    // Membership is deliberately computed from THIS pane's mirror (`this.drafts`), not from a fresh
+    // `reviewCommentList` at send time: with two code panes open on the same workspace (e.g. the main
+    // window plus a global monitor window), a draft authored in the other pane after this pane's
+    // `loadInitial` is absent here and is NOT swept into this batch. Accepted v1 behavior — each
+    // pane's Send batch sends exactly the drafts that pane lists (its tray, toolbar count, and this
+    // filter all agree, by design). A send-time relist-and-merge would instead deliver drafts the
+    // user never saw in this pane's tray, and the omitted draft is never lost: it stays pending,
+    // listed, and sendable in the pane that owns it. Cross-pane liveness would need a review-comment
+    // change subscription (the diff-signature channel's sibling), which v1 does not carry.
     const anchored = reanchorComments(this.drafts, this.files);
     const sendableAnchored = anchored.filter((ac) => {
       // Sendability is judged on LIVE text (falling back to the persisted body when there is no live
