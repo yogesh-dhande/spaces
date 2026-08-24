@@ -1499,8 +1499,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let selectionPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.selection))
             XCTAssertNotNil(
-                selectionPayload.renderUpdate,
-                "a selection broadcast (set or clear) must always carry the frame, even on an otherwise blank screen")
+                selectionPayload.renderUpdate, "a selection broadcast (set or clear) must always carry the frame, even on an otherwise blank screen")
 
             let outputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.output))
             XCTAssertNil(outputPayload.renderUpdate, "an output-driven export on a blank screen still ships no frame")
@@ -4120,8 +4119,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"),
-                connectedAt: "2026-05-17T00:00:00Z")
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z"
+            )
             let localClient = TerminalClient(
                 id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             let takingOverClient = TerminalClient(
@@ -4687,9 +4686,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-has-live-attachments-stale-lease", backend: .ghosttyEmbedded, title: "shell",
-                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
-                kind: .shell)
+                sessionID: "session-has-live-attachments-stale-lease", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
@@ -4742,9 +4740,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-owner-probe-before-durable-commit", backend: .ghosttyEmbedded, title: "shell",
-                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
-                kind: .shell)
+                sessionID: "session-owner-probe-before-durable-commit", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
@@ -4769,6 +4766,60 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             gate.signal()
             host.debugDrainPersistenceQueue()
+        }
+    }
+
+    /// Broadcasts carry the live-row projection of the attachment snapshot, and that projection is
+    /// memoized so the session's attach history is not rescanned on every output tick. The memo is
+    /// invalidated by the snapshot's own `didSet`, so every attachment change — attach, the ownership
+    /// handover a second owner attach performs, and detach — must be visible in the very next export.
+    func testExportedAttachmentSnapshotCarriesOnlyLiveRowsAndTracksEveryChange() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-live-wire-projection", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+            @TerminalEngineActor func exportedSnapshot() -> TerminalSessionAttachmentSnapshot? {
+                host.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot
+            }
+            // The overview's live-session merge reads the same attachment state through a path that must
+            // not touch the database, so it is asserted alongside every export below.
+            @TerminalEngineActor func catalogSnapshot() -> TerminalSessionAttachmentSnapshot? { host.inMemoryCatalogEntry()?.attachmentSnapshot }
+
+            let first = TerminalClient(
+                id: "window-a", kind: .localWindow, identity: .init(label: "Spaces window A"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: first, attachmentMode: .owner)).ok)
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(exportedSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
+            XCTAssertEqual(exportedSnapshot()?.clients.map { $0.id }, ["window-a"])
+            XCTAssertEqual(catalogSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
+
+            let second = TerminalClient(
+                id: "window-b", kind: .localWindow, identity: .init(label: "Spaces window B"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: second, attachmentMode: .owner)).ok)
+            host.debugDrainPersistenceQueue()
+            let afterHandover = try XCTUnwrap(exportedSnapshot())
+            XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: afterHandover), "window-b")
+            XCTAssertTrue(afterHandover.attachments.allSatisfy { $0.detachedAt == nil }, "a detached row must never reach the wire")
+            XCTAssertEqual(Set(afterHandover.clients.map { $0.id }), Set(afterHandover.attachments.map { $0.clientID }))
+            XCTAssertEqual(catalogSnapshot()?.attachments.map { $0.clientID }, ["window-b"])
+
+            try host.detach(clientID: second.id)
+            host.debugDrainPersistenceQueue()
+            let afterDetach = try XCTUnwrap(exportedSnapshot())
+            XCTAssertTrue(afterDetach.attachments.isEmpty, "the detach must be visible in the next export, not hidden behind a stale memo")
+            XCTAssertTrue(afterDetach.clients.isEmpty, "a client no active attachment names must not ride along")
+            XCTAssertEqual(catalogSnapshot()?.attachments.isEmpty, true)
         }
     }
 
@@ -5134,8 +5185,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: "session-b2-placeholder", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
-            paths: placeholderPaths)
+                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: placeholderPaths)
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -5143,9 +5193,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-b2-terminates-on-launch-write-failure", backend: .ghosttyEmbedded, title: "shell",
-            workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1",
-            kind: .shell)
+            sessionID: "session-b2-terminates-on-launch-write-failure", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
 
         let databasePath = try SpacesProfile.current().databasePath
         try Self.breakDatabase(at: databasePath)
@@ -5187,7 +5236,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             "a core terminated over a failed launch-configuration write must call onSessionClosed so the daemon's session registry forgets it")
         XCTAssertNil(
             TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID),
-            "the final write failure must clear the pending-launch entry along with terminating the core, or a launch-pending probe would keep reporting a launch in flight for a session that no longer exists")
+            "the final write failure must clear the pending-launch entry along with terminating the core, or a launch-pending probe would keep reporting a launch in flight for a session that no longer exists"
+        )
     }
 
     /// The launch-configuration row is itself write-behind, so a session whose first write is still queued
@@ -5217,8 +5267,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: launchConfiguration.sessionID), launchConfiguration,
             "the registry must hold the launch configuration while its durable write is still parked behind the queue")
         XCTAssertThrowsError(
-            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
-            "no row is durably readable yet while the write is parked")
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths), "no row is durably readable yet while the write is parked")
 
         gate.signal()
         TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
@@ -5511,14 +5560,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// there) or where a valid main file is visible without its WAL.
     private static func restoreDatabase(at databasePath: String) throws {
         for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + ".unbroken" + suffix) {
-            if FileManager.default.fileExists(atPath: databasePath + suffix) {
-                try FileManager.default.removeItem(atPath: databasePath + suffix)
-            }
+            if FileManager.default.fileExists(atPath: databasePath + suffix) { try FileManager.default.removeItem(atPath: databasePath + suffix) }
             try FileManager.default.moveItem(atPath: databasePath + ".unbroken" + suffix, toPath: databasePath + suffix)
         }
-        guard rename(databasePath + ".unbroken", databasePath) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        guard rename(databasePath + ".unbroken", databasePath) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         TerminalSessionPersistence.closeDatabaseConnection()
     }
 

@@ -85,15 +85,18 @@ struct AutomationDetailView: View {
     /// sheet. Present for every automation, including one that never fires on its own, since the sheet is
     /// also where Run Now lives and where a manual automation gets a one-shot scheduled run.
     private func nextRunRow(_ automation: TerminalServiceAutomationSummary) -> some View {
-        HStack(spacing: 10) {
+        // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across the
+        // 2-second overview poll instead of jittering (#540) — see
+        // `SpacesMobileAppModel.relativeTimeReference`.
+        let chipValue = SpacesMobileAutomations.nextRunChipValue(automation, relativeTo: model.relativeTimeReference)
+        return HStack(spacing: 10) {
             Text("Next run").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
             Spacer(minLength: 0)
             Button {
                 isShowingNextRunSheet = true
             } label: {
                 HStack(spacing: 5) {
-                    Text(SpacesMobileAutomations.nextRunChipValue(automation)).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary)
-                        .lineLimit(1).truncationMode(.middle)
+                    Text(chipValue).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).lineLimit(1).truncationMode(.middle)
                     Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.muted)
                 }.padding(.horizontal, 8).padding(.vertical, 5).background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }.buttonStyle(.plain).accessibilityIdentifier("automations.detail.nextRun")

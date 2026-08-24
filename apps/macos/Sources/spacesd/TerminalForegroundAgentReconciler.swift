@@ -5,6 +5,10 @@ import workspacecore
 /// Reconciles ad-hoc foreground coding-agent classifications when a terminal's
 /// runtime state changes (the foreground process is part of runtime state).
 ///
+/// This is the only place ad-hoc foreground classification runs. The scan reads every live session and
+/// every workspace's rows, so a second owner running it on the same notification doubles that cost for a
+/// result the first owner already produced.
+///
 /// The daemon hosts the terminal session cores, which post
 /// `.spacesTerminalRuntimeStateDidChange` in-process on a runtime-state change, so
 /// this classification — device-runtime work — runs in `spacesd` rather than the
@@ -32,16 +36,18 @@ import workspacecore
 
     init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil) {
         self.onError = onError
-        reconcileStore = DaemonReconcileStore(label: "spaces.daemon.foreground-agent-reconcile", databasePath: databasePath) { store in
-            _ = try WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
-        }
+        reconcileStore = DaemonReconcileStore(label: "spaces.daemon.foreground-agent-reconcile", databasePath: databasePath)
     }
 
+    /// Installs the observer and runs one pass immediately. The startup pass is what finalizes agent rows
+    /// whose sessions died while the daemon was down: those sessions post no runtime-state change on the
+    /// way back up, so without it their rows would sit live until some unrelated terminal produced output.
     func start() {
         guard observer == nil else { return }
         observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reconcile() }
         }
+        reconcile()
     }
 
     /// Latching half of the stop, and deliberately synchronous. Every gate the loop consults is on the
@@ -84,7 +90,9 @@ import workspacecore
             guard let self else { return }
             while !self.stopped {
                 self.pending = false
-                do { try await self.reconcileStore.runPass() } catch { self.onError?(error) }
+                do {
+                    _ = try await self.reconcileStore.run { try WorkspaceOrchestrator(store: $0).reconcileTerminalForegroundAgentClassifications() }
+                } catch { self.onError?(error) }
                 guard self.pending else { break }
             }
             self.inFlight = false

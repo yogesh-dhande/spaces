@@ -127,7 +127,9 @@ import spacesterminalcore
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
         view.paneContentProvider = { [weak self] pane in self?.content(forPane: pane) }
-        view.onWindowMembershipChanged = { [weak self] isInWindow in self?.handlePanelViewWindowMembershipChanged(scope: scope, isInWindow: isInWindow) }
+        view.onWindowMembershipChanged = { [weak self] isInWindow in
+            self?.handlePanelViewWindowMembershipChanged(scope: scope, isInWindow: isInWindow)
+        }
         panels[scope, default: PanelState()].view = view
         render(scope: scope)
         return view
@@ -230,9 +232,7 @@ import spacesterminalcore
     /// an id-only match here can never touch another device's pane; the device-scoped overloads
     /// below take a device id for a different reason — they're driven by one device's overview or
     /// status stream, which says nothing about other devices' panes — not because ids could collide.
-    func closeCodePanes(workspaceID: String) {
-        closeCodePanes { _, paneWorkspaceID in paneWorkspaceID == workspaceID }
-    }
+    func closeCodePanes(workspaceID: String) { closeCodePanes { _, paneWorkspaceID in paneWorkspaceID == workspaceID } }
 
     /// Closes any open code pane owned by `deviceID` whose workspace dropped out of that device's
     /// overview workspace list — the code-pane counterpart of `pruneOpenPanes`. A hidden workspace
@@ -344,9 +344,7 @@ import spacesterminalcore
 
     /// The session whose pane currently holds keyboard focus in the key window, if any. Answers nil
     /// while a code pane holds focus — it has no session id.
-    func focusedSessionID() -> String? {
-        (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? any TerminalPaneContentHosting)?.sessionID
-    }
+    func focusedSessionID() -> String? { (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? any TerminalPaneContentHosting)?.sessionID }
 
     /// The workspace a focused code pane belongs to, if a code pane currently holds keyboard focus in
     /// the key window. The code-pane counterpart of `focusedSessionID()`, used to resolve which
@@ -360,9 +358,7 @@ import spacesterminalcore
     /// The pane id of a focused code pane in the key window, if any. The palette's return-focus
     /// capture for a code pane, the code-pane counterpart of `focusedSessionID()`: a code pane has no
     /// session id for the palette to remember, so it remembers this instead.
-    func focusedCodePaneID() -> String? {
-        (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? CodePaneContentController)?.paneID
-    }
+    func focusedCodePaneID() -> String? { (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? CodePaneContentController)?.paneID }
 
     /// Syncs the layout's focused pane to the content that actually has keyboard focus (clicks inside
     /// pane content bypass the pane chrome's mouse handling, so the app's mouse-down and key-down
@@ -1089,7 +1085,8 @@ import spacesterminalcore
             case .terminal(let request): self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
             case .codePane(let deviceID, let workspaceID, let mode):
                 self.resolveCodePanePickerChoice(deviceID: deviceID, workspaceID: workspaceID, mode: mode) {
-                    self.fillSplitWithCodePane(scope: scope, paneID: paneID, direction: direction, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+                    self.fillSplitWithCodePane(
+                        scope: scope, paneID: paneID, direction: direction, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
                 }
             }
         }
@@ -1215,25 +1212,20 @@ import spacesterminalcore
             focus(placement: placement)
             (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
             return true
-        case .none:
-            return openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
+        case .none: return openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
         }
     }
 
     /// Routes a code-pane picker row (the split picker's and new-tab picker's "Diff"/"Open file…" rows)
     /// through the same reuse-before-create resolution order as `openOrFocusCodePane`, falling through
     /// to `createIfNothingToReuse` only when nothing is open anywhere to reuse.
-    private func resolveCodePanePickerChoice(
-        deviceID: String, workspaceID: String, mode: CodePaneMode, createIfNothingToReuse: () -> Void
-    ) {
+    private func resolveCodePanePickerChoice(deviceID: String, workspaceID: String, mode: CodePaneMode, createIfNothingToReuse: () -> Void) {
         switch resolveCodePaneForNavigation(deviceID: deviceID, workspaceID: workspaceID) {
-        case .reuseGlobal(let placement):
-            reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+        case .reuseGlobal(let placement): reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
         case .focusLocal(let placement):
             focus(placement: placement)
             (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
-        case .none:
-            createIfNothingToReuse()
+        case .none: createIfNothingToReuse()
         }
     }
 
@@ -1265,9 +1257,9 @@ import spacesterminalcore
     /// case, and the new-tab picker's "Diff"/"Open file…" rows via
     /// `openOrReuseCodePaneInNewTab`'s `createIfNothingToReuse`. The `mayCreateCodePane` gate below
     /// covers both callers at once.
-    @discardableResult func openCodePaneInNewTab(
-        deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil
-    ) -> Bool {
+    @discardableResult func openCodePaneInNewTab(deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil)
+        -> Bool
+    {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: workspaceID) else { return false }
         guard mayCreateCodePane(workspaceID: workspaceID) else { return false }
         let paneID = UUID().uuidString
@@ -1316,8 +1308,7 @@ import spacesterminalcore
         paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode = .diff
     ) -> any PaneContentHosting {
         if let existing = codePaneControllers[paneID] { return existing }
-        let content = CodePaneContentController(
-            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, hosting: host)
+        let content = CodePaneContentController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, hosting: host)
         codePaneControllers[paneID] = content
         return content
     }
@@ -1625,7 +1616,10 @@ import spacesterminalcore
     /// The panel scope for a workspace, or nil when no loaded device owns it. Panel state is
     /// keyed by (deviceID, workspaceID), so guessing the device would split one workspace's
     /// panel across two keys and mint a fresh empty panel beside its real one.
-    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
+    ///
+    /// Internal (not private) so `AppKitController` can tell a workspace the sidebar's index does not
+    /// know about yet from one it knows and is refusing for another reason.
+    func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
         guard let deviceID = host.deviceID(forWorkspaceID: workspaceID) else { return nil }
         return .workspace(deviceID: deviceID, workspaceID: workspaceID)
     }

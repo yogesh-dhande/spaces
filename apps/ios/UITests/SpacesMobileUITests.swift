@@ -209,22 +209,36 @@ final class SpacesMobileUITests: XCTestCase {
         let linkText = configuration.terminalLinkText
         XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
 
-        // Opening the session starts the owner's render epoch on the daemon's bootstrap snapshot, which is
-        // still at the previous owner's width, so the phone shows that frame cropped to phone width until
-        // its own resize round-trips. A tap in that window must not open anything: the frame on screen
-        // carries each wrapped row's soft-wrap metadata without the columns the crop dropped, so a link
-        // resolved from it is a path the user never saw (#492).
-        var croppedTapReport = CroppedFrameTapReport()
+        // Opening the session used to start the owner's render epoch on the daemon's bootstrap snapshot,
+        // which is still at the previous owner's width, so the phone would show that frame cropped to
+        // phone width until its own resize round-trips. An open hold now defers the first paint until a
+        // frame at the phone's own grid arrives, so that cropped window no longer occurs on open: this
+        // watches to confirm it stays that way. The crop gate in the host view still guards the states
+        // that can still crop (a resize burst, a wider owner's frame arriving mid-session), and its unit
+        // test (`testTapOnAColumnCroppedFrameDoesNotProbeLinks`) covers the tap behavior on that gate
+        // directly (#492).
+        var cropObservation = HostGridCropObservation()
         try takeOverSessionFromList(
             in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview",
             afterOpeningSession: {
-                croppedTapReport = tapTerminalTextWhileHostGridIsCropped(
-                    String(linkText.prefix(24)), in: app, configuration: configuration, timeout: 20)
+                // Comfortably covers TerminalViewerModel's 6s open-hold timeout path, which paints
+                // whatever frame is newest at release even if it never matched the phone's viewport, so
+                // a timeout-path regression has time to show up before the window closes.
+                cropObservation = observeHostGridCropDuringOpen(in: app, configuration: configuration, timeout: 8)
             })
-        print("terminal-link-preview cropped-frame window: \(croppedTapReport)")
+        print("terminal-link-preview open-paint crop observation: \(cropObservation)")
+        // Non-vacuous: without this, a dump that never arrives (startup ate the window, the dump path
+        // misconfigured) would leave croppedObservations at 0 and pass for having watched nothing at all.
+        // At least one applied frame is the one-paint contract itself — the open is supposed to land
+        // exactly one paint, at the phone's own grid, during this window.
         XCTAssertGreaterThan(
-            croppedTapReport.tapCount, 0,
-            "No tap reached the phone while it was showing the host grid cropped. \(croppedTapReport) "
+            cropObservation.appliedFrameObservations, 0,
+            "The observation window closed without ever seeing an applied frame, so it never actually watched "
+                + "the open's paint. \(cropObservation) "
+                + "\(latestRenderDump(configuration: configuration).map { "\($0)" } ?? "No render dump was available.")")
+        XCTAssertEqual(
+            cropObservation.croppedObservations, 0,
+            "The open painted a frame wider than the phone's viewport at least once. \(cropObservation) "
                 + "\(latestRenderDump(configuration: configuration).map { "\($0)" } ?? "No render dump was available.")")
 
         XCTAssertTrue(tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20), "Unable to tap terminal text \(linkText)")
@@ -753,72 +767,75 @@ final class SpacesMobileUITests: XCTestCase {
         return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
     }
 
-    /// What a run of `tapTerminalTextWhileHostGridIsCropped` observed, in seconds from the moment it
-    /// started watching, so a failure says whether the window was missed or never opened at all.
-    private struct CroppedFrameTapReport: CustomStringConvertible {
-        var tapCount = 0
+    /// What a run of `observeHostGridCropDuringOpen` observed, in seconds from the moment the observation
+    /// window actually started (see that function's doc for why that is not the same as when it was
+    /// called), so a failure says when the open painted a frame wider than the phone's own viewport.
+    /// `appliedFrameObservations` is what keeps a "no crops" result honest: without at least one dump that
+    /// actually carried an applied frame, the window watched nothing and a zero `croppedObservations`
+    /// would prove nothing about the open.
+    private struct HostGridCropObservation: CustomStringConvertible {
         var croppedObservations = 0
-        var openedAt: TimeInterval?
-        var closedAt: TimeInterval?
-        var tapRequestedAt: TimeInterval?
-        var tapDeliveredAt: TimeInterval?
-        var stillCroppedAfterTap = false
+        var appliedFrameObservations = 0
+        var firstObservedAt: TimeInterval?
+        var firstAppliedFrameObservedAt: TimeInterval?
 
         var description: String {
             let format: (TimeInterval?) -> String = { $0.map { String(format: "%.3f", $0) } ?? "never" }
-            return "croppedTaps=\(tapCount) croppedObservations=\(croppedObservations) openedAt=\(format(openedAt)) "
-                + "closedAt=\(format(closedAt)) tapRequestedAt=\(format(tapRequestedAt)) tapDeliveredAt=\(format(tapDeliveredAt)) "
-                + "stillCroppedAfterTap=\(stillCroppedAfterTap)"
+            return "croppedObservations=\(croppedObservations) firstObservedAt=\(format(firstObservedAt)) "
+                + "appliedFrameObservations=\(appliedFrameObservations) firstAppliedFrameObservedAt=\(format(firstAppliedFrameObservedAt))"
         }
     }
 
-    /// Watches for the window in which the phone is showing a slice of a wider host grid and taps the text
-    /// as soon as it opens.
+    /// Watches, for a bounded window right after a session becomes the active render dump, for any frame
+    /// the phone paints that is a slice of a wider host grid.
     ///
-    /// That window opens when this device claims the session: the owner's render epoch starts on the
-    /// daemon's bootstrap snapshot, which is still the previous owner's grid, and closes as soon as this
-    /// device's own resize round-trips and the daemon sends a frame at phone width. It is short and it is
-    /// the only place the phone applies a cropped frame at all (a viewer renders no live frames), so the
-    /// dump is polled tightly rather than at the leisurely cadence the settled-state waits use.
+    /// Opening a session used to start the owner's render epoch on the daemon's bootstrap snapshot, which
+    /// is still the previous owner's grid, so the phone would show that frame cropped to phone width until
+    /// its own resize round-tripped. An open hold now defers the first paint until a frame at the phone's
+    /// own grid arrives, so that window no longer opens on this path at all; this only confirms it stays
+    /// closed, polled tightly rather than at the leisurely cadence the settled-state waits use.
     ///
-    /// A cropped frame keeps each row's soft-wrap metadata while dropping the columns past the phone's
-    /// width, so resolving a link from it assembles a value out of each row's visible slice: a file path
-    /// with its middle missing that the daemon then rejects (#492). Tapping here is how the test reaches
-    /// that state; what it asserts is what the tap produced, not how many landed.
-    private func tapTerminalTextWhileHostGridIsCropped(
-        _ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval
-    ) -> CroppedFrameTapReport {
-        var report = CroppedFrameTapReport()
+    /// `timeout` bounds the observation itself, not the wait for a dump to watch: the caller invokes this
+    /// from `takeOverSessionFromList`'s `afterOpeningSession`, which fires immediately after the row tap,
+    /// before the detail view has even mounted. Starting the clock there would charge that mount latency
+    /// against the window, leaving less than `timeout` seconds to actually watch for a cropped paint. So
+    /// this waits first — on the same `sessionID` + `showsTerminalSurface` signal `waitForOwnerState`'s
+    /// dump-based branch already uses to recognize the session is live — and only starts the timed window
+    /// once that dump exists.
+    private func observeHostGridCropDuringOpen(in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval)
+        -> HostGridCropObservation
+    {
+        func isSessionActive() -> UITestRenderDump? {
+            guard let dump = latestRenderDump(configuration: configuration), dump.sessionID == configuration.sessionID, dump.showsTerminalSurface
+            else { return nil }
+            return dump
+        }
+
+        var observation = HostGridCropObservation()
+        // Generous and not itself under test: what this measures is the timed window below, so a slow
+        // detail-view mount must eat into a readiness wait, never into the window that actually watches
+        // for a cropped paint.
+        let readinessDeadline = Date().addingTimeInterval(20)
+        while isSessionActive() == nil, Date() < readinessDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+
         let start = Date()
         let deadline = start.addingTimeInterval(timeout)
         while Date() < deadline {
-            guard let dump = latestRenderDump(configuration: configuration), dump.sessionID == configuration.sessionID, dump.showsTerminalSurface
-            else {
+            guard let dump = isSessionActive() else {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.02))
                 continue
             }
-            guard dump.showsCroppedHostGrid else {
-                // The phone reflows to its own width exactly once, so once the window has closed waiting
-                // out the rest of the timeout would only delay the result.
-                if report.openedAt != nil {
-                    report.closedAt = Date().timeIntervalSince(start)
-                    return report
-                }
-                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-                continue
+            if dump.appliedFrameColumns != nil {
+                observation.appliedFrameObservations += 1
+                if observation.firstAppliedFrameObservedAt == nil { observation.firstAppliedFrameObservedAt = Date().timeIntervalSince(start) }
             }
-            report.croppedObservations += 1
-            if report.openedAt == nil { report.openedAt = Date().timeIntervalSince(start) }
-            guard report.tapCount == 0 else {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-                continue
+            if dump.showsCroppedHostGrid {
+                observation.croppedObservations += 1
+                if observation.firstObservedAt == nil { observation.firstObservedAt = Date().timeIntervalSince(start) }
             }
-            report.tapRequestedAt = Date().timeIntervalSince(start)
-            if tapTerminalText(target, in: app, configuration: configuration, dump: dump) { report.tapCount += 1 }
-            report.tapDeliveredAt = Date().timeIntervalSince(start)
-            report.stillCroppedAfterTap = latestRenderDump(configuration: configuration)?.showsCroppedHostGrid == true
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        return report
+        return observation
     }
 
     private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
@@ -1510,6 +1527,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let viewportRows: Int?
     let snapshotColumns: Int?
     let snapshotRows: Int?
+    let appliedFrameColumns: Int?
+    let appliedFrameRows: Int?
     let snapshotText: String?
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
@@ -1532,6 +1551,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case viewportRows
         case snapshotColumns
         case snapshotRows
+        case appliedFrameColumns
+        case appliedFrameRows
         case snapshotText
         case errorMessage
         case isPreparingLinkPreview
@@ -1556,6 +1577,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         viewportRows = try container.decodeIfPresent(Int.self, forKey: .viewportRows)
         snapshotColumns = try container.decodeIfPresent(Int.self, forKey: .snapshotColumns)
         snapshotRows = try container.decodeIfPresent(Int.self, forKey: .snapshotRows)
+        appliedFrameColumns = try container.decodeIfPresent(Int.self, forKey: .appliedFrameColumns)
+        appliedFrameRows = try container.decodeIfPresent(Int.self, forKey: .appliedFrameRows)
         snapshotText = try container.decodeIfPresent(String.self, forKey: .snapshotText)
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         isPreparingLinkPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreparingLinkPreview) ?? false
@@ -1569,12 +1592,18 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
 
     var combinedText: String { [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n") }
 
-    /// Whether the phone is showing a slice of a wider host grid. The render path crops the host's
-    /// snapshot to the viewport, so while this holds every row on screen is missing the columns past the
-    /// viewport's width.
+    /// Whether the frame actually fed to the terminal's paint path is a slice of a wider host grid.
+    ///
+    /// Reads `appliedFrameColumns` (the native mirror's `ownerEpoch.bootstrapSnapshot`), not
+    /// `snapshotColumns` (the model's last-applied render snapshot): an `.initial` bootstrap payload
+    /// updates the model's render snapshot immediately on attach, before the open hold has released
+    /// anything to paint, because it is a state-transition reason and only screen-content reasons defer
+    /// to the hold. `appliedFrameColumns` tracks the hold's own paint gate instead (`holdsFirstPaint` in
+    /// `TerminalViewerModel.applyReducedState`), so it is nil, not wide, for as long as the hold is
+    /// actually suppressing the paint (#492's review, PR #554).
     var showsCroppedHostGrid: Bool {
-        guard let snapshotColumns, let viewportColumns, viewportColumns > 0 else { return false }
-        return snapshotColumns > viewportColumns
+        guard let appliedFrameColumns, let viewportColumns, viewportColumns > 0 else { return false }
+        return appliedFrameColumns > viewportColumns
     }
 
     var hasError: Bool {
@@ -1599,8 +1628,9 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
             "sessionID=\(sessionID)", "renderMode=\(renderMode)", "isOwner=\(isOwner)", "showsTerminalSurface=\(showsTerminalSurface)",
             "isBusy=\(isBusy)", "isPreparingInput=\(isPreparingInput)", "isInputSurfaceReady=\(isInputSurfaceReady)",
             "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")",
-            "snapshot=\(snapshotColumns.map(String.init) ?? "?")x\(snapshotRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
-            "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
+            "snapshot=\(snapshotColumns.map(String.init) ?? "?")x\(snapshotRows.map(String.init) ?? "?")",
+            "appliedFrame=\(appliedFrameColumns.map(String.init) ?? "?")x\(appliedFrameRows.map(String.init) ?? "?")",
+            "errorMessage=\(errorMessage ?? "")", "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
             "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")", "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)", "snapshotTextLength=\(snapshotText?.count ?? 0)", "renderedTextLength=\(renderedText.count)",
             "renderStateKey=\(renderStateKey)",

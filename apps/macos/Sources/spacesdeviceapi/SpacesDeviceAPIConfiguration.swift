@@ -174,6 +174,17 @@ public final class SpacesDeviceAPISettingsStore {
     /// each sibling profile's own `device-api.json`. A sibling is another directory beside this profile root,
     /// which for a development profile is another profile under `.spaces-dev/profiles/spaces/`.
     ///
+    /// The scan runs ONLY when `profileRoot` itself lives in that shared container — its own path components
+    /// must end with the consecutive sequence `.spaces-dev/profiles/spaces/<name>`, checked the same
+    /// HOME-independent way as `SpacesProfile.deployedDevelopmentProfileRoot(executablePath:)`. Every other
+    /// development profile (an ephemeral `SPACES_DB_PATH` profile, always first-start) sits beside whatever
+    /// arbitrary directory holds it — on one report, the system temp dir with 129k entries — so its parent
+    /// is not a meaningful sibling set at all. Enumerating it anyway cost ~21s of the daemon's first start
+    /// (contentsOfDirectory plus 129k failing per-entry reads), long enough to blow past e2e's 15s wait for
+    /// the service socket. Those profiles return an empty set without touching the filesystem; the port
+    /// collision that can result between two such profiles is the same "shares it" case already handled
+    /// below and by the Device API supervisor's bind retry.
+    ///
     /// Best effort by design: a sibling directory with no settings file, an unreadable one, or a malformed
     /// one contributes nothing instead of failing this profile's load. The consequence of missing a claim is
     /// only that two profiles may derive the same port, which the sticky assignment above then keeps stable
@@ -182,6 +193,7 @@ public final class SpacesDeviceAPISettingsStore {
     /// runtime root, and there is nothing on disk beside the profile root to point anywhere else.
     public static func portsClaimedBySiblingProfiles(profileRoot: String) -> Set<Int> {
         let rootURL = URL(fileURLWithPath: SpacesProfile.canonicalPath(profileRoot), isDirectory: true)
+        guard isSharedDevProfilesContainerMember(rootURL) else { return [] }
         let siblingURLs =
             (try? FileManager.default.contentsOfDirectory(
                 at: rootURL.deletingLastPathComponent(), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
@@ -194,6 +206,17 @@ public final class SpacesDeviceAPISettingsStore {
             claimedPorts.insert(settings.port)
         }
         return claimedPorts
+    }
+
+    /// True when `rootURL`'s own path components end with `.spaces-dev/profiles/spaces/<name>` — i.e. its
+    /// parent directory's trailing components are exactly `.spaces-dev`, `profiles`, `spaces`. Pure path
+    /// shape, matched the same way `SpacesProfile.deployedDevelopmentProfileRoot(executablePath:)` matches an
+    /// executable's ancestry, so it answers identically regardless of which HOME started the process.
+    private static func isSharedDevProfilesContainerMember(_ rootURL: URL) -> Bool {
+        let markers = [".spaces-dev", "profiles", "spaces"]
+        let parentComponents = rootURL.deletingLastPathComponent().standardizedFileURL.pathComponents
+        guard parentComponents.count >= markers.count else { return false }
+        return Array(parentComponents.suffix(markers.count)) == markers
     }
 
     private func loadStoredOrCreate() throws -> SpacesDeviceAPISettings {

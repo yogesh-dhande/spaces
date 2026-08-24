@@ -3,8 +3,6 @@ import XCTest
 import spacesterminalcore
 import workspacecore
 
-@testable import spacesd
-
 /// The daemon's hot reconcile loops keep one database connection alive across passes instead of
 /// opening and closing one per notification. These cover what that reuse must not break: every pass
 /// still sees the database's current contents (including writes another process made between
@@ -52,12 +50,13 @@ final class DaemonReconcileStoreTests: XCTestCase {
         try seedStore.setWorkspacePorts(workspaceID: workspace.id, ports: [21001], names: ["web"])
 
         let observedRoutes = LockedRoutesBox()
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.routes", databasePath: databasePath) { store in
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.routes", databasePath: databasePath)
+        let readRoutes: @Sendable (SQLiteStore) throws -> Void = { store in
             observedRoutes.set(try WorkspaceOrchestrator(store: store).caddyRouteTable())
         }
         addTeardownBlock { await reconcileStore.close() }
 
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(readRoutes)
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         XCTAssertEqual(observedRoutes.hosts(), ["web.\(slug).localhost"])
@@ -65,12 +64,12 @@ final class DaemonReconcileStoreTests: XCTestCase {
         // A different connection stands in for the app, the CLI, or another daemon service writing
         // between two passes — the case a reused connection could serve stale.
         try seedStore.setWorkspacePorts(workspaceID: workspace.id, ports: [21001, 21002], names: ["web", "backend"])
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(readRoutes)
         XCTAssertEqual(observedRoutes.hosts(), ["backend.\(slug).localhost", "web.\(slug).localhost"])
         XCTAssertEqual(observedRoutes.upstream(forHost: "backend.\(slug).localhost"), "localhost:21002")
 
         try seedStore.setWorkspacePorts(workspaceID: workspace.id, ports: [], names: [])
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(readRoutes)
         XCTAssertEqual(observedRoutes.hosts(), [])
     }
 
@@ -79,23 +78,24 @@ final class DaemonReconcileStoreTests: XCTestCase {
     func testFailingPassSurfacesErrorAndLeavesLaterPassesWorking() async throws {
         let shouldFail = LockedFlagBox()
         let passCount = LockedCounterBox()
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.failure", databasePath: databasePath) { store in
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.failure", databasePath: databasePath)
+        let pass: @Sendable (SQLiteStore) throws -> Void = { store in
             passCount.increment()
             _ = try store.projects()
             if shouldFail.value { throw NSError(domain: "test.reconcile", code: 7) }
         }
         addTeardownBlock { await reconcileStore.close() }
 
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(pass)
 
         shouldFail.set(true)
         do {
-            try await reconcileStore.runPass()
+            _ = try await reconcileStore.run(pass)
             XCTFail("Expected the failing pass to rethrow.")
         } catch { XCTAssertEqual((error as NSError).code, 7) }
 
         shouldFail.set(false)
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(pass)
         XCTAssertEqual(passCount.value, 3)
     }
 
@@ -105,18 +105,20 @@ final class DaemonReconcileStoreTests: XCTestCase {
     /// stopped service leaves a connection open across the daemon's exec handoff.
     func testPassSubmittedAfterCloseDoesNoWorkAndOpensNoConnection() async throws {
         let passCount = LockedCounterBox()
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.close", databasePath: databasePath) { store in
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.close", databasePath: databasePath)
+        let pass: @Sendable (SQLiteStore) throws -> Void = { store in
             passCount.increment()
             _ = try store.projects()
         }
 
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(pass)
         XCTAssertEqual(passCount.value, 1)
         XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
         await reconcileStore.close()
-        try await reconcileStore.runPass()
+        let resultAfterClose: Void? = try await reconcileStore.run(pass)
 
+        XCTAssertNil(resultAfterClose, "A pass after close must report that it did not run.")
         XCTAssertEqual(passCount.value, 1, "A pass after close must not run.")
         XCTAssertTrue(databaseIsCheckpointed(), "A pass after close must not reopen the connection.")
     }
@@ -126,14 +128,15 @@ final class DaemonReconcileStoreTests: XCTestCase {
     /// Neither may open a connection or trap.
     func testRepeatedCloseIsSafeAndNeverOpensAConnection() async throws {
         let passCount = LockedCounterBox()
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.repeat-close", databasePath: databasePath) { store in
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.repeat-close", databasePath: databasePath)
+        let pass: @Sendable (SQLiteStore) throws -> Void = { store in
             passCount.increment()
             _ = try store.projects()
         }
 
         await reconcileStore.close()
         await reconcileStore.close()
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(pass)
 
         XCTAssertEqual(passCount.value, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "Close must not create the database.")
@@ -161,7 +164,8 @@ final class DaemonReconcileStoreTests: XCTestCase {
     @MainActor func testCloseBehindARunningPassYieldsTheMainActorAndLeavesNoOpenConnection() async throws {
         let progress = PassProgressBox()
         let gate = PassGate()
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath)
+        let pass: @Sendable (SQLiteStore) throws -> Void = { store in
             progress.noteStarted()
             gate.waitUntilOpened()
             _ = try store.projects()
@@ -170,11 +174,11 @@ final class DaemonReconcileStoreTests: XCTestCase {
         // Opens the connection, so the WAL stays non-empty until the close checkpoints it. The gate starts
         // open so this priming pass runs straight through.
         gate.open()
-        try await reconcileStore.runPass()
+        _ = try await reconcileStore.run(pass)
         XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
         gate.shut()
-        async let racingPass: Void = reconcileStore.runPass()
+        async let racingPass: Void? = reconcileStore.run(pass)
         await progress.waitUntilStarted(2)
 
         // Enqueued while this main-actor test still owns the main actor, so it cannot run until the close
@@ -192,7 +196,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
         )
         XCTAssertEqual(progress.finished, 2, "Close must not return while the pass it queued behind is still running.")
         XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive a close that has returned.")
-        try await racingPass
+        _ = try await racingPass
     }
 
     /// SQLite runs a truncating checkpoint when the last connection to a database closes, so an

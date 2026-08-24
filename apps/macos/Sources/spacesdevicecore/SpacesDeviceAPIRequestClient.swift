@@ -23,19 +23,32 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
     }
 }
 
-/// One-shot Device API request client: opens a pinned-TLS connection per request, through the
-/// device's endpoint resolver so every request races the device's candidate addresses and lands on
-/// whichever one currently answers. All Device API clients authenticate the daemon by pinning its TLS
-/// identity fingerprint recorded at pairing time; authorization is the bearer token inside the request
-/// payload.
+/// Single-request Device API client: sends one request through the device's endpoint resolver, so it
+/// races the device's candidate addresses and lands on whichever one currently answers. All Device API
+/// clients authenticate the daemon by pinning its TLS identity fingerprint recorded at pairing time;
+/// authorization is the bearer token inside the request payload.
+///
+/// The connection it sends on is not one-shot. A raced request takes the endpoint's warm connection
+/// when one is parked and parks the connection back once the daemon has answered on it
+/// (`SpacesDeviceAPIWarmConnectionStore`), so a command path issuing requests continuously — the
+/// sidebar's overview read on every reload — pays one handshake and one certificate trust evaluation
+/// for the endpoint rather than one per request.
 public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
     private let resolver: SpacesDeviceEndpointResolver
     private let timeoutSeconds: TimeInterval
+    private let warmConnections: SpacesDeviceAPIWarmConnectionStore
+    private let endpointKey: String
 
-    public init(resolver: SpacesDeviceEndpointResolver, timeoutSeconds: TimeInterval = 10) throws {
+    public convenience init(resolver: SpacesDeviceEndpointResolver, timeoutSeconds: TimeInterval = 10) throws {
+        try self.init(resolver: resolver, timeoutSeconds: timeoutSeconds, warmConnections: .shared)
+    }
+
+    init(resolver: SpacesDeviceEndpointResolver, timeoutSeconds: TimeInterval, warmConnections: SpacesDeviceAPIWarmConnectionStore) throws {
         guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
         self.resolver = resolver
         self.timeoutSeconds = timeoutSeconds
+        self.warmConnections = warmConnections
+        endpointKey = SpacesDeviceAPIWarmConnectionStore.endpointKey(certificateFingerprint: resolver.certificateFingerprint, port: resolver.port)
     }
 
     /// Sends one request, racing the device's candidate addresses — unless `pinnedHost` names one, in
@@ -44,51 +57,106 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
     /// stream on one candidate cannot learn anything about that candidate from a request the race happily
     /// answers on a different one.
     public func request(_ request: SpacesDeviceAPIRequest, pinnedHost: String? = nil) throws -> SpacesDeviceAPIResponse {
-        try SpacesDeviceAPICodec.decodeResponse(requestData(SpacesDeviceAPICodec.encodeRequest(request), pinnedHost: pinnedHost))
+        let requestLine = try SpacesDeviceAPICodec.encodeRequest(request)
+        guard let pinnedHost else { return try raced(requestLine, isSafeToReplay: request.isSafeToReplayAfterConnectionFailure) }
+        return try pinned(requestLine, host: pinnedHost)
     }
 
-    public func requestData(_ requestData: Data) throws -> Data {
-        try self.requestData(requestData, pinnedHost: nil)
-    }
-
-    private func requestData(_ requestData: Data, pinnedHost: String?) throws -> Data {
-        let host: String
+    /// A request aimed at one address. It always dials its own connection: the caller is asking whether
+    /// *this* candidate answers right now, which a connection parked from a race — established on
+    /// whichever candidate won then — cannot answer.
+    private func pinned(_ requestLine: Data, host: String) throws -> SpacesDeviceAPIResponse {
         let connection: any SpacesPinnedTLSLineConnection
-        if let pinnedHost {
-            host = pinnedHost
-            do { connection = try resolver.connect(host: pinnedHost, timeout: timeoutSeconds) } catch {
-                noteFailure(host: pinnedHost, isPinned: true)
-                throw error
-            }
-        } else {
-            let resolved = try resolver.connect(timeout: timeoutSeconds)
-            host = resolved.host
-            connection = resolved.connection
-        }
-        defer { connection.cancel() }
-        do {
-            try connection.sendLine(requestData, timeout: timeoutSeconds)
-            do {
-                return try connection.readLine(timeout: timeoutSeconds)
-            } catch SpacesPinnedTLSConnectionError.connectionClosed {
-                throw SpacesDeviceAPIRequestClientError.emptyResponse
-            }
-        } catch {
-            noteFailure(host: host, isPinned: pinnedHost != nil)
+        do { connection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
             throw error
         }
+        defer { connection.cancel() }
+        let responseLine: Data
+        // A pinned request that broke is evidence about that one address specifically, which is what a
+        // stream needs: reporting it as a stream failure moves `nextStreamHost()` off the address
+        // instead of redialing it first. Decoding sits outside this: an answer that did not decode came
+        // back over a healthy connection, so it is evidence about a payload rather than about an address.
+        do { responseLine = try exchange(requestLine, on: connection) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        return try SpacesDeviceAPICodec.decodeResponse(responseLine)
     }
 
-    /// A raced request that broke tells the resolver only that its winner is no longer the right address
-    /// to go straight back to; the next connect re-walks every candidate. A pinned request that broke is
-    /// evidence about that one address specifically, which is what a stream needs: reporting it as a
-    /// stream failure moves `nextStreamHost()` off the address instead of redialing it first.
-    private func noteFailure(host: String, isPinned: Bool) {
-        if isPinned {
-            resolver.noteStreamFailed(host: host)
-        } else {
-            resolver.noteConnectionFailed(host: host)
+    /// A request aimed at the device rather than at an address: it goes on the endpoint's warm
+    /// connection when one is parked, and on a freshly raced one otherwise.
+    ///
+    /// Only a request that is safe to replay may take a parked connection. The daemon can close a parked
+    /// socket at any time (it closes one after answering a rejected request, and the Linux server closes
+    /// an idle one), and a client cannot tell a connection closed before its request was read from one
+    /// closed after — so a request that must not run twice dials its own connection instead of retrying
+    /// into that ambiguity. Those are the user-initiated mutations, which are rare; the continuous
+    /// traffic this exists for (overview, daemon status, ping, state) is all replay-safe.
+    private func raced(_ requestLine: Data, isSafeToReplay: Bool) throws -> SpacesDeviceAPIResponse {
+        let generation = warmConnections.currentGeneration
+        if isSafeToReplay, let warm = warmConnections.take(endpoint: endpointKey) {
+            var reusedResponseLine: Data?
+            do { reusedResponseLine = try exchange(requestLine, on: warm.connection) } catch {
+                warm.connection.cancel()
+                // A raced request that broke tells the resolver only that its winner is no longer the
+                // right address to go straight back to; the next connect re-walks every candidate.
+                resolver.noteConnectionFailed(host: warm.host)
+                // The parked connection was already gone, so this attempt never reached the daemon:
+                // dialing a fresh one and sending again is what keeps reuse invisible to callers. Any
+                // other failure is this attempt's own outcome and is reported as it is.
+                guard SpacesDeviceAPIConnectionFailure.isClosed(error) else { throw error }
+            }
+            if let reusedResponseLine { return try settle(reusedResponseLine, connection: warm.connection, host: warm.host, generation: generation) }
         }
+        let resolved = try resolver.connect(timeout: timeoutSeconds)
+        let responseLine: Data
+        do { responseLine = try exchange(requestLine, on: resolved.connection) } catch {
+            resolved.connection.cancel()
+            resolver.noteConnectionFailed(host: resolved.host)
+            throw error
+        }
+        return try settle(responseLine, connection: resolved.connection, host: resolved.host, generation: generation)
+    }
+
+    /// One round trip on an established connection.
+    private func exchange(_ requestLine: Data, on connection: any SpacesPinnedTLSLineConnection) throws -> Data {
+        try connection.sendLine(requestLine, timeout: timeoutSeconds)
+        do { return try connection.readLine(timeout: timeoutSeconds) } catch SpacesPinnedTLSConnectionError.connectionClosed {
+            throw SpacesDeviceAPIRequestClientError.emptyResponse
+        }
+    }
+
+    /// Decodes the daemon's answer and decides what becomes of the connection it arrived on: parked for
+    /// the next request, or closed.
+    ///
+    /// Only an `ok` answer parks. The server closes a request connection after the response it composes
+    /// for a rejected request, so parking one would hand the next request a socket that is already gone;
+    /// an answer that did not decode says nothing about the connection's state either.
+    private func settle(_ responseLine: Data, connection: any SpacesPinnedTLSLineConnection, host: String, generation: Int) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let response: SpacesDeviceAPIResponse
+        do { response = try SpacesDeviceAPICodec.decodeResponse(responseLine) } catch {
+            connection.cancel()
+            throw error
+        }
+        guard response.ok else {
+            connection.cancel()
+            return response
+        }
+        warmConnections.park(connection, host: host, endpoint: endpointKey, generation: generation)
+        return response
+    }
+}
+
+/// Whether a failure means the connection it happened on is gone, so the request may be retried on a
+/// fresh one. Shared by both request clients so "the socket was closed under us" means the same thing
+/// on the warm single-request path and on a pane's persistent session.
+enum SpacesDeviceAPIConnectionFailure {
+    static func isClosed(_ error: any Error) -> Bool {
+        if case SpacesDeviceAPIRequestClientError.emptyResponse = error { return true }
+        return SpacesPinnedTLSConnector.isClosedConnectionError(error)
     }
 }
 
@@ -195,10 +263,7 @@ public final class SpacesDeviceAPIRequestSessionClient: @unchecked Sendable {
         return uptime() - lastConnectionUseUptime >= idleReconnectInterval
     }
 
-    private static func isClosedConnectionError(_ error: any Error) -> Bool {
-        if case SpacesDeviceAPIRequestClientError.emptyResponse = error { return true }
-        return SpacesPinnedTLSConnector.isClosedConnectionError(error)
-    }
+    private static func isClosedConnectionError(_ error: any Error) -> Bool { SpacesDeviceAPIConnectionFailure.isClosed(error) }
 
     static func debugIsClosedConnectionErrorForTesting(_ error: any Error) -> Bool { isClosedConnectionError(error) }
 }

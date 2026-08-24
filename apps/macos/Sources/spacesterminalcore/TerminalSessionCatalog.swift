@@ -53,7 +53,10 @@ public enum TerminalSessionCatalog {
         try TerminalSessionPersistence.listInteractiveSessionRuntimeStates().filter { isInteractiveServiceAlive(for: $0.runtimeState) }.map {
             session in
             let paths = try TerminalSessionPaths.forStoredSession(id: session.sessionID, rootDirectory: session.rootDirectory)
-            let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
+            // Catalog entries exist to be reported off-device (the Device API overview rebuilds this
+            // several times a second), so they carry live rows only. See
+            // `TerminalSessionAttachmentSnapshot.liveWireProjection`.
+            let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()).liveWireProjection()
             return TerminalSessionCatalogEntry(
                 launchConfiguration: session.launchConfiguration, runtimeState: session.runtimeState, attachmentSnapshot: attachmentSnapshot,
                 paths: paths, isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
@@ -68,9 +71,9 @@ public enum TerminalSessionCatalog {
     /// write-behind on the per-core persistence queue, so without this merge a freshly created live
     /// session would vanish from a listing (and, for the Device API overview specifically, its terminal
     /// window would render as ended) until its queued writes commit.
-    public static func mergingLiveInMemorySessions(
-        _ dbSessions: [TerminalSessionCatalogEntry], inMemory: [TerminalSessionCatalogEntry]
-    ) -> [TerminalSessionCatalogEntry] {
+    public static func mergingLiveInMemorySessions(_ dbSessions: [TerminalSessionCatalogEntry], inMemory: [TerminalSessionCatalogEntry])
+        -> [TerminalSessionCatalogEntry]
+    {
         let knownSessionIDs = Set(dbSessions.map(\.sessionID))
         var merged = dbSessions
         for entry in inMemory where isInteractiveServiceAlive(for: entry.runtimeState) && !knownSessionIDs.contains(entry.sessionID) {

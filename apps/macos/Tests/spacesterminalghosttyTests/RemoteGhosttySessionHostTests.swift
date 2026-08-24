@@ -398,18 +398,30 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-once")
         defer { fixture.tearDown() }
 
-        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"))
+        // Served behind the fence pattern `setPayloads` documents: the recorder hands the clipboard
+        // payload to exactly one `.state` request and every later fetch gets "later", so a fetch landing
+        // between the clear below and the next arrival cannot re-serve the write. Re-serving is a fixture
+        // artifact anyway — a real daemon clears a one-shot clipboard event after delivering it.
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"),
+        ])
         waitForCondition("owner applies the clipboard write") {
             _ = fixture.host.effectiveTitle
             return fixture.pasteboard.string(forType: .string) == "copied once"
         }
 
         fixture.pasteboard.clearContents()
-        fixture.recorder.setPayload(
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"))
         waitForCondition("the later payload is applied") {
             _ = fixture.host.effectiveTitle
             return fixture.host.effectiveTitle == "later"
+        }
+        // One more observed apply past the clear proves later payloads leave the pasteboard alone.
+        fixture.recorder.setPayload(
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "settled"))
+        waitForCondition("the payload after the clear is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
         }
         XCTAssertNil(fixture.pasteboard.string(forType: .string))
     }
@@ -464,10 +476,13 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send)
         waitForCondition("host renders the running session") { host.snapshotText() != nil }
 
+        // On screen, because these tests fence on a payload the pane applies: a pane the user is typing
+        // in — the only pane an owner-targeted clipboard write is addressed to — is the selected tab's.
+        let display = makeDisplayedPaneContainer(width: 320, height: 180)
         try host.attach(
             client: TerminalClient(
                 id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-28T00:00:02Z"),
-            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+            mode: .owner, into: display.container)
 
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-clipboard-\(UUID().uuidString)"))
         pasteboard.clearContents()
@@ -475,6 +490,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         return ClipboardFixture(
             host: host, recorder: recorder, pasteboard: pasteboard, clientID: clientID,
             tearDown: {
+                MainActor.assumeIsolated { display.window.orderOut(nil) }
                 pasteboard.releaseGlobally()
                 try? FileManager.default.removeItem(at: root)
             })
@@ -757,8 +773,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// that is not yet key, and `focusWindow()` safely no-ops on a nil `window`.
     @MainActor func testMirrorClearsSharedSelectionOnPlainLeftClickAfterAppliedSelection() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-            command: nil, createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
         var clearCount = 0
@@ -1859,6 +1875,13 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 sessionID: "remote-live", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
                 createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
+        // On screen: this test follows the frames the pane paints, and an off-screen pane holds them.
+        let display = makeDisplayedPaneContainer()
+        defer { display.window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-18T00:00:00Z"),
+            mode: .viewer, into: display.container)
+
         waitForCondition("initial live snapshot") { host.snapshotText() == "alpha" }
         XCTAssertEqual(host.effectiveTitle, "live")
         XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/live")
@@ -2707,9 +2730,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             stateStreamSubscriber: subscriber.subscribe)
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
 
+        // On screen: this test asserts on the frames the pane paints, and an off-screen pane holds them.
+        let display = makeDisplayedPaneContainer()
+        defer { display.window.orderOut(nil) }
         try host.attach(
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
-            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+            mode: .owner, into: display.container)
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
         subscriber.emit(
@@ -2874,9 +2900,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
 
         // The attach's eager resync stamps the throttle and its read is held open.
+        // On screen: this test asserts on the frames the pane paints, and an off-screen pane holds them.
+        let display = makeDisplayedPaneContainer()
+        defer { display.window.orderOut(nil) }
         try host.attach(
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
-            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+            mode: .owner, into: display.container)
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
         // The frame the pane holds when the delta fails against it.
@@ -3076,6 +3105,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, stateStreamSubscriber: subscriber.subscribe)
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+        // On screen: this test asserts on the frame the pane paints, and an off-screen pane holds them.
+        let display = makeDisplayedPaneContainer()
+        defer { display.window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z"),
+            mode: .viewer, into: display.container)
 
         var frames: [GhosttyRenderFrame] = []
         for index in 0..<12 {
@@ -3101,13 +3136,48 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("host renders the last frame of the delta series") { host.snapshotText() == "fram1" }
     }
 
-    /// Captures the host's state-stream callback so a test can emit payloads the way the device state
-    /// model does: off the main actor, in a known order.
+    /// The handle the host holds for its state subscription is a listener on the state model's shared
+    /// fan-out, and the model keeps that listener attached until the handle says otherwise. Dropping the
+    /// handle on a disconnect without stopping it therefore left this host's callbacks in the fan-out for
+    /// the life of the session, with the next subscribe registering a second listener on top of them
+    /// (issue #537).
+    @MainActor func testStateStreamDisconnectStopsTheSubscriptionHandleItDrops() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-disconnect-detaches-listener"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        subscriber.disconnect(nil)
+
+        waitForCondition("the host stops the subscription handle it drops") { subscriber.stoppedClientCount >= 1 }
+        withExtendedLifetime(host) {}
+    }
+
+    /// Captures the host's state-stream callbacks so a test can emit payloads the way the device state
+    /// model does: off the main actor, in a known order. It also stands in for the model's listener
+    /// handle, counting the handles the host stops so a test can prove the host detaches from the
+    /// fan-out rather than silently dropping its subscription.
     private final class RecordingStateStreamSubscriber: @unchecked Sendable {
-        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable {
+            private let onStop: @Sendable () -> Void
+
+            init(onStop: @escaping @Sendable () -> Void) { self.onStop = onStop }
+
+            func stop() { onStop() }
+        }
 
         private let lock = NSLock()
         private var onEvent: (@Sendable (GhosttyRemoteSessionStatePayload) -> Void)?
+        private var onDisconnect: (@Sendable ((any Error)?) -> Void)?
+        private var stoppedClients = 0
 
         var isSubscribed: Bool {
             lock.lock()
@@ -3115,14 +3185,34 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             return onEvent != nil
         }
 
+        var stoppedClientCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return stoppedClients
+        }
+
         func subscribe(
             _: String, onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect _: @escaping @Sendable ((any Error)?) -> Void
+            onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> any TerminalRemoteStateStreamClient {
             lock.lock()
             self.onEvent = onEvent
+            self.onDisconnect = onDisconnect
             lock.unlock()
-            return Client()
+            return Client(onStop: { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                self.stoppedClients += 1
+                self.lock.unlock()
+            })
+        }
+
+        /// Reports the drop the model reports to a listener when the shared subscription goes away.
+        func disconnect(_ error: (any Error)?) {
+            lock.lock()
+            let onDisconnect = self.onDisconnect
+            lock.unlock()
+            onDisconnect?(error)
         }
 
         func emit(_ payload: GhosttyRemoteSessionStatePayload) {
@@ -3369,6 +3459,168 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 return false
             }.count >= 2 && host.snapshotText() == "bravo"
         }
+    }
+
+    /// A pane whose tab is not selected is off screen, and while it is there it applies no screen
+    /// updates at all. What it paints when its tab comes back is the session's CURRENT screen, because
+    /// the reduction never stopped and the one update it held is a materialized full frame.
+    ///
+    /// A title change is not screen content, so it lands while the pane is off screen — that is what
+    /// keeps an unselected tab's label live — and the screen the pane was holding applies with it.
+    @MainActor func testOffScreenPaneHoldsScreenUpdatesAndPaintsTheCurrentScreenWhenDisplayedAgain() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-offscreen-hold"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try seedSessionRow(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-08-20T00:00:00Z",
+            title: "live", workingDirectory: "/tmp/live", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let queue = DispatchQueue(label: "spaces.remote-device.offscreen-hold-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-08-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+
+        // The pane's terminal container is a subview rather than the window's content view, so hiding it
+        // takes the pane off screen exactly the way switching to another tab does.
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let container = NSView(frame: contentView.bounds)
+        contentView.addSubview(container)
+        let window = NSWindow(contentRect: contentView.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = contentView
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
+            mode: .owner, into: container)
+
+        func screenPayload(text: String, sequence: Int) throws -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-20T00:00:0\(sequence)Z",
+                sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: UInt64(sequence + 1),
+                runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live",
+                outputByteCount: nil, renderUpdate: try renderUpdate(text: text, sessionRevision: UInt64(sequence + 1)))
+        }
+
+        server.broadcast(try screenPayload(text: "alpha", sequence: 1))
+        waitForCondition("the displayed pane painted its first frame") { self.normalize(self.visibleText(for: host)) == "alpha" }
+
+        container.isHidden = true
+        server.broadcast(try screenPayload(text: "bravo", sequence: 2))
+        // Long enough that an ungated pane would have applied several times over.
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(normalize(visibleText(for: host)), "alpha", "an off-screen pane applied a screen update")
+
+        server.broadcast(try screenPayload(text: "charlie", sequence: 3))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(normalize(visibleText(for: host)), "alpha")
+
+        // A title change is a state transition, so it applies while the pane is still off screen, and it
+        // brings the screen the pane was holding with it.
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata, emittedAt: "2026-08-20T00:00:04Z",
+                sessionStateRevision: 5, sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renamed", workingDirectory: "/tmp/live", outputByteCount: nil))
+        waitForCondition("the off-screen pane's title kept up with the session") { host.effectiveTitle == "renamed" }
+        XCTAssertEqual(normalize(visibleText(for: host)), "charlie", "the transition painted an older screen than the one being held")
+
+        // Back on screen: the pane repaints from the newest frame, not from the one it left on.
+        server.broadcast(try screenPayload(text: "delta", sequence: 5))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(normalize(visibleText(for: host)), "charlie", "the pane resumed applying screen updates while still off screen")
+        container.isHidden = false
+        waitForCondition("the pane painted the session's current screen") { self.normalize(self.visibleText(for: host)) == "delta" }
+    }
+
+    /// A pane opens with its terminal container hidden and stays hidden until it reports it has content
+    /// to show, so its FIRST frame can never be held: holding it would leave the pane waiting to be
+    /// displayed so it could apply the frame that is what would let it be displayed.
+    @MainActor func testPaneThatHasNeverPaintedAppliesItsFirstFrameWhileOffScreen() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-offscreen-first-frame"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try seedSessionRow(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-08-20T00:00:00Z",
+            title: "live", workingDirectory: "/tmp/live", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let queue = DispatchQueue(label: "spaces.remote-device.offscreen-first-frame-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-08-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let container = NSView(frame: contentView.bounds)
+        container.isHidden = true
+        contentView.addSubview(container)
+        let window = NSWindow(contentRect: contentView.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = contentView
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
+            mode: .owner, into: container)
+
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-20T00:00:01Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 2))
+        )
+
+        waitForCondition("the pane reports content the controller can unhide it for") { host.hasRenderableSurface() }
+        XCTAssertEqual(normalize(host.snapshotText()), "alpha")
+    }
+
+    /// A pane container inside a visible window: a host attached into it is ON SCREEN, the way an
+    /// installed pane in the selected tab is.
+    ///
+    /// A pane that is off screen holds its screen updates until it comes back
+    /// (`TerminalRemoteStateReductionPipeline.setHoldsScreenUpdates`), so a test that asserts on what a
+    /// pane paints — or that uses a screen-content payload as a fence — has to put the pane on screen.
+    /// The container is a subview of the window's content view rather than the content view itself, so a
+    /// test can also take the pane off screen with `container.isHidden = true`, which is what switching
+    /// to another tab amounts to.
+    @MainActor private func makeDisplayedPaneContainer(width: CGFloat = 420, height: CGFloat = 180) -> (container: NSView, window: NSWindow) {
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let container = NSView(frame: contentView.bounds)
+        contentView.addSubview(container)
+        let window = NSWindow(contentRect: contentView.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = contentView
+        window.makeKeyAndOrderFront(nil)
+        return (container, window)
     }
 
     @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 30, condition: @escaping () -> Bool) {

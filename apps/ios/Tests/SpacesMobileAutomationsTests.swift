@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import Foundation
     import XCTest
     import spacesdevicecore
     import spacesterminalcore
@@ -9,6 +10,44 @@
 
         func append(_ request: SpacesDeviceAPIRequest) { requests.append(request) }
         func snapshot() -> [SpacesDeviceAPIRequest] { requests }
+    }
+
+    /// Serves whatever overview payload was last handed to it, mutable mid-test so a fake bridge client can
+    /// return an identical payload across several fetches and then switch to a genuinely different one.
+    private actor SpacesMobileOverviewResponder {
+        private var overview: SpacesDeviceOverviewPayload
+        init(overview: SpacesDeviceOverviewPayload) { self.overview = overview }
+        func set(_ overview: SpacesDeviceOverviewPayload) { self.overview = overview }
+        func current() -> SpacesDeviceOverviewPayload { overview }
+    }
+
+    /// Wall clock the relative-time-reference tests step by hand, so "at least 30 seconds have passed"
+    /// is asserted deterministically instead of racing the real clock.
+    private final class SpacesMobileTestWallClock: @unchecked Sendable {
+        private(set) var now: Date
+        init(_ now: Date = Date(timeIntervalSinceReferenceDate: 1_000_000)) { self.now = now }
+        @discardableResult func advance(_ seconds: TimeInterval) -> Date {
+            now = now.addingTimeInterval(seconds)
+            return now
+        }
+    }
+
+    /// A plain counter `withObservationTracking`'s `onChange` can safely mutate: that closure isn't
+    /// guaranteed to run on the calling actor, so a bare captured `var` would race under strict
+    /// concurrency checking.
+    private final class SpacesMobileChangeCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() {
+            lock.lock()
+            defer { lock.unlock() }
+            count += 1
+        }
+        func value() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
     }
 
     /// Holds one automation request until the test changes the model's connection identity, making a
@@ -139,6 +178,22 @@
             XCTAssertNotNil(SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: iso), relativeTo: now))
         }
 
+        /// A published `nextFireTime` is not guaranteed to stay future-dated relative to the reference it
+        /// renders against: a refresh that failed retains the last-known overview while the reference keeps
+        /// advancing, and a request can race the daemon's own scheduler tick by a moment. Both collapse the
+        /// interval to zero or negative, which must read exactly like the Mac's own wording for the same
+        /// case ("due"), not as `RelativeDateTimeFormatter`'s "ago" phrasing ("next 5s ago").
+        func testNextFireDescriptionReadsDueWhenTheFireTimeIsNotInTheFuture() {
+            let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+            let overdue = ISO8601DateFormatter().string(from: now.addingTimeInterval(-5))
+            let exactlyNow = ISO8601DateFormatter().string(from: now)
+
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: overdue), relativeTo: now), "next due")
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: exactlyNow), relativeTo: now), "next due")
+        }
+
         func testNextRunChipValueFallsBackToNotScheduledPlaceholder() {
             let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
             let iso = ISO8601DateFormatter().string(from: now.addingTimeInterval(300))
@@ -205,6 +260,21 @@
             expectedFormatter.unitsStyle = .abbreviated
             expectedFormatter.maximumUnitCount = 2
             XCTAssertEqual(SpacesMobileAutomations.durationDescription(running, relativeTo: now), expectedFormatter.string(from: 90))
+        }
+
+        /// #540 P2: the shared relative-time reference advances in 30-second jumps and can still trail a
+        /// run that started only moments before the jump caught up. Read unguarded, that renders in the
+        /// future tense ("started in 5s"); comparing `started` against itself to avoid the wrong tense
+        /// instead renders "in 0 sec" (the formatter's numeric abbreviated style has no bare "now" for a
+        /// zero interval). Neither is right, so this boundary — the reference at or before `started` —
+        /// reads a plain "started now" instead of going through the formatter at all.
+        func testStartedDescriptionReadsStartedNowWhenTheReferenceIsAtOrBeforeTheStartTime() {
+            let started = Date(timeIntervalSinceReferenceDate: 2_000_000)
+            let run = makeRun(id: "r", automationID: "a", status: "running", startedAt: ISO8601DateFormatter().string(from: started), endedAt: nil)
+
+            // Both the reference trailing `started` and landing exactly on it hit the same boundary.
+            XCTAssertEqual(SpacesMobileAutomations.startedDescription(run, relativeTo: started.addingTimeInterval(-5)), "started now")
+            XCTAssertEqual(SpacesMobileAutomations.startedDescription(run, relativeTo: started), "started now")
         }
 
         // MARK: - SpacesMobileAutomations.statusTitle
@@ -619,6 +689,99 @@
             XCTAssertEqual(payload.runID, "run-1")
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// A refresh whose fetched overview is byte-for-byte identical to what's already published must not
+        /// rewrite `model.overview`: rewriting it — even to an equal value — re-triggers `@Observable`'s
+        /// change notification and re-renders every view reading it, which is the invalidation storm #540
+        /// reports. `withObservationTracking` is the direct way to observe whether a write happened at all,
+        /// independent of the resulting value (which looks identical either way for a value type).
+        func testRefreshSkipsRepublishWhenTheFetchedOverviewIsUnchanged() async {
+            let settings = SpacesMobileConnectionSettings()
+            let responder = SpacesMobileOverviewResponder(overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            await model.refresh()
+
+            let counter = SpacesMobileChangeCounter()
+            withObservationTracking({ _ = model.overview }, onChange: { counter.increment() })
+
+            // Same payload again: no write, so no change notification.
+            await model.refresh()
+            XCTAssertEqual(counter.value(), 0)
+
+            // A genuinely different payload: the write happens, firing the one-shot registration above.
+            await responder.set(makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy (renamed)")]))
+            await model.refresh()
+            XCTAssertEqual(counter.value(), 1)
+        }
+
+        /// `relativeTimeReference` only moves once at least 30 seconds have elapsed since it last did —
+        /// the same cadence the Mac's `AutomationsController.armRelativeTimeRefresh` uses for its own
+        /// label-only beat — so a refresh well under that bar leaves it untouched.
+        func testRelativeTimeReferenceAdvancesOnlyAfterThirtySecondsHaveElapsed() async {
+            let clock = SpacesMobileTestWallClock()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")])
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            let initialReference = model.relativeTimeReference
+
+            clock.advance(10)
+            await model.refresh()
+            XCTAssertEqual(model.relativeTimeReference, initialReference)
+
+            clock.advance(25)  // 35 seconds total since `initialReference`: past the 30-second bar.
+            await model.refresh()
+            XCTAssertEqual(model.relativeTimeReference, clock.now)
+        }
+
+        /// The equality gate that stops republishing an unchanged `overview` (#540 P1) must not also stop
+        /// relative-time labels from advancing: they read `relativeTimeReference`, a separate published
+        /// property proven here to keep moving — and keep invalidating views that read it — on its own
+        /// 30-second cadence even while the fetched overview is byte-for-byte identical on every refresh.
+        func testRelativeTimeReferenceKeepsAdvancingAcrossRefreshesWithAnUnchangedOverview() async {
+            let clock = SpacesMobileTestWallClock()
+            let settings = SpacesMobileConnectionSettings()
+            let responder = SpacesMobileOverviewResponder(overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            await model.refresh()
+
+            let counter = SpacesMobileChangeCounter()
+            withObservationTracking({ _ = model.relativeTimeReference }, onChange: { counter.increment() })
+
+            clock.advance(31)
+            // Same overview payload as the first refresh: `overview` itself would not republish, but the
+            // reference still crosses its 30-second bar and fires its own change notification.
+            await model.refresh()
+            XCTAssertEqual(counter.value(), 1)
+        }
+
+        /// A tab whose poll was paused for a long stretch (hidden, backgrounded, or behind a closed detail
+        /// route) catches straight up on its very next refresh instead of creeping forward in fixed
+        /// 30-second steps: the reference sat untouched for the whole gap, so the elapsed check already
+        /// clears the 30-second bar by a wide margin on that first tick.
+        func testRelativeTimeReferenceCatchesUpImmediatelyAfterALongPollGap() async {
+            let clock = SpacesMobileTestWallClock()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")])
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            await model.refresh()
+
+            clock.advance(300)  // five minutes with polling paused
+            await model.refresh()
+
+            XCTAssertEqual(model.relativeTimeReference, clock.now)
         }
 
         func testTriggerAutomationDoesNotRefreshAfterConnectionChanges() async {

@@ -269,7 +269,7 @@ let executableTargets: [Target] = [
         .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
         .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
         .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
-        .testTarget(name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore"]),
+        .testTarget(name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore", "spacesdevicecore"]),
         .testTarget(
             name: "spacescliTests",

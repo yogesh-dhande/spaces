@@ -298,9 +298,9 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws
-        -> [(sessionID: String, effectiveName: String, launchName: String)]
-    {
+    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws -> [(
+        sessionID: String, effectiveName: String, launchName: String
+    )] {
         var seenSessionIDs = Set<String>()
         return try store.windows(workspaceID: workspaceID).compactMap { window in
             guard !excludingWindowIDs.contains(window.id), window.roleValue == .terminal, terminalHost(for: window.app) == .spaces,
@@ -743,24 +743,36 @@ extension WorkspaceOrchestrator {
         return runtimeState?.workingDirectory ?? launchConfiguration.workingDirectory
     }
 
+    /// Reads every row an ownership lookup consults, in the project-then-workspace order the lookup
+    /// resolves its first match in. A caller that resolves several sessions builds this once.
+    func builtInTerminalOwnershipIndex() throws -> BuiltInTerminalOwnershipIndex {
+        let workspaceIDs = try store.projects().flatMap { project in try store.workspaces(projectID: project.id).map(\.id) }
+        return BuiltInTerminalOwnershipIndex(
+            workspaceIDs: workspaceIDs, runningProcessesByWorkspace: try store.runningProcessesByWorkspace(),
+            agentWindowsByWorkspace: try store.agentWindowsByWorkspace(), windowsByWorkspace: try store.windowsByWorkspace())
+    }
+
     func builtInTerminalSessionOwnership(sessionID: String) throws -> BuiltInTerminalSessionOwnership {
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id) }
+        builtInTerminalSessionOwnership(sessionID: sessionID, index: try builtInTerminalOwnershipIndex())
+    }
+
+    func builtInTerminalSessionOwnership(sessionID: String, index: BuiltInTerminalOwnershipIndex) -> BuiltInTerminalSessionOwnership {
         var owningProcess: RunningProcessRecord?
         var owningAgent: AgentWindowRecord?
         var terminalWindowWorkspaceID: String?
-        for workspace in workspaces {
+        for workspaceID in index.workspaceIDs {
             if owningProcess == nil {
-                owningProcess = try store.runningProcesses(workspaceID: workspace.id).first { builtInTerminalSessionID(for: $0) == sessionID }
+                owningProcess = index.runningProcesses(workspaceID: workspaceID).first { builtInTerminalSessionID(for: $0) == sessionID }
             }
             if owningAgent == nil {
-                owningAgent = try store.agentWindows(workspaceID: workspace.id).first { builtInTerminalSessionID(for: $0) == sessionID }
+                owningAgent = index.agentWindows(workspaceID: workspaceID).first { builtInTerminalSessionID(for: $0) == sessionID }
             }
             if terminalWindowWorkspaceID == nil,
-                try store.windows(workspaceID: workspace.id).contains(where: {
+                index.windows(workspaceID: workspaceID).contains(where: {
                     $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
                 })
             {
-                terminalWindowWorkspaceID = workspace.id
+                terminalWindowWorkspaceID = workspaceID
             }
             if owningProcess != nil, owningAgent != nil, terminalWindowWorkspaceID != nil { break }
         }

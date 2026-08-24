@@ -1441,9 +1441,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// Confined to `streamQueue`: the timer handler's write, `lineProvider`'s broadcast-time read, and
         /// `lineProvider`'s connect-time read all run there (see the type doc above), so a plain var needs
         /// no lock.
-        private final class LatestSignatureBox: @unchecked Sendable {
-            var signature: String?
-        }
+        private final class LatestSignatureBox: @unchecked Sendable { var signature: String? }
 
         let socketPath: String
         let server: DeviceOverviewStreamServer
@@ -1478,8 +1476,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     // nil-compare still broadcasts a corrective frame regardless, which is the existing
                     // intended behavior `lastBroadcastSignature`'s doc comment describes.
                     let signature =
-                        latestSignatureBox.signature
-                        ?? signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
+                        latestSignatureBox.signature ?? signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
                     return try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.encodeLine(
                         SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: scope.workspaceID, refName: scope.refName, scopeSignature: signature))
                 })
@@ -1506,9 +1503,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
 
         func start() throws {
-            do {
-                try server.start()
-            } catch {
+            do { try server.start() } catch {
                 // A dispatch source must never be released while suspended (`pollTimer` is created
                 // suspended above and only resumed on success) — releasing one traps in libdispatch. Arm
                 // then immediately cancel it so this subscription can be discarded safely after an ordinary
@@ -1538,8 +1533,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // git calls (now up to 30s, per the git-command timeout) must degrade only this scope's poll,
         // keepalive, and producer-socket accept, never another scope's. See the type doc on
         // `WorkspaceDiffSignatureSubscription`.
-        let streamQueue = DispatchQueue(
-            label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.refName ?? "uncommitted")")
+        let streamQueue = DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.refName ?? "uncommitted")")
         let subscription = WorkspaceDiffSignatureSubscription(
             scope: scope, socketPath: socketPath, streamQueue: streamQueue,
             signatureProvider: { [weak self] scope in try? self?.computeWorkspaceDiffScopeSignature(scope: scope) })
@@ -1671,9 +1665,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     final class WorkspaceFileSignatureSubscription: @unchecked Sendable {
         /// Mirrors `WorkspaceDiffSignatureSubscription.LatestSignatureBox`'s role and retain-cycle rationale
         /// exactly, just holding a `WorkspaceFileSignatureValue` instead of a signature string.
-        private final class LatestValueBox: @unchecked Sendable {
-            var value: WorkspaceFileSignatureValue?
-        }
+        private final class LatestValueBox: @unchecked Sendable { var value: WorkspaceFileSignatureValue? }
 
         let socketPath: String
         let server: DeviceOverviewStreamServer
@@ -1728,9 +1720,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
 
         func start() throws {
-            do {
-                try server.start()
-            } catch {
+            do { try server.start() } catch {
                 // See `WorkspaceDiffSignatureSubscription.start()`'s identical comment: a dispatch source
                 // must never be released while suspended, so arm then immediately cancel on setup failure.
                 pollTimer.resume()
@@ -1848,15 +1838,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
         }
-        do {
-            _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspace.dir)
-        } catch {
+        do { _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspace.dir) } catch {
             // Rethrown as the same typed, `errorCode(for:)`-mapped shape `handleWorkspaceFileReadRequest`
             // uses for this identical failure, rather than letting the raw `PathError.escapesWorkspace`
             // propagate — that generic error has no domain/code mapping and would fall through to
             // `.internalError`, misreporting a client mistake (an escaping path) as a server fault.
-            throw NSError(
-                domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Path escapes the workspace directory."])
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Path escapes the workspace directory."])
         }
     }
 
@@ -2021,8 +2008,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert engine-blocking terminal commands, and (round-13 Fix 3) the review-comment
         // mutations that compose with them, to `terminalControlQueue` before they reach here (see
         // `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
-        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentsSend,
-            .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete:
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentsSend, .workspaceReviewCommentUpsert,
+            .workspaceReviewCommentDelete:
             return try handleTerminalControlQueueRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
@@ -2183,9 +2170,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         ) {
             let workspaceID = workspaceGitQueueWorkspaceID(for: request)
             let exists: Bool
-            do {
-                exists = try workspaceExistsForGitQueueRouting(workspaceID: workspaceID)
-            } catch {
+            do { exists = try workspaceExistsForGitQueueRouting(workspaceID: workspaceID) } catch {
                 completion(.failure(error))
                 return
             }
@@ -2990,7 +2975,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         else { return nil }
         guard !runtimeState.state.isInteractive || TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) else { return nil }
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()).liveWireProjection()
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
             isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
@@ -3319,20 +3304,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static func boundedReadWorkspaceFile(atPath path: String, cap: Int) -> Data? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
-        do {
-            return try handle.read(upToCount: cap + 1) ?? Data()
-        } catch {
-            return nil
-        }
+        do { return try handle.read(upToCount: cap + 1) ?? Data() } catch { return nil }
     }
 
     /// Resolves `workspaceID` to its checkout directory, or throws the same `NSError(domain:
     /// "SpacesDeviceAPIServer", code: 404)` the rest of this file uses for a not-found target (mapped to
     /// `.notFound` by `errorCode(for:)`).
     private func resolveWorkspaceDirectory(workspaceID: String, context: RequestContext) throws -> String {
-        guard let workspace = try context.store().workspace(id: workspaceID) else {
-            throw Self.workspaceNotFoundError(workspaceID: workspaceID)
-        }
+        guard let workspace = try context.store().workspace(id: workspaceID) else { throw Self.workspaceNotFoundError(workspaceID: workspaceID) }
         return workspace.dir
     }
 
@@ -3343,9 +3322,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let resolvedPath: String
         do {
             resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
-        } catch {
-            return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument)
-        }
+        } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
 
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath), let size = attributes[.size] as? Int else {
             return SpacesDeviceAPIResponse(ok: false, message: "File '\(request.relativePath)' was not found.", errorCode: .notFound)
@@ -3398,9 +3375,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let resolvedPath: String
         do {
             resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
-        } catch {
-            return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument)
-        }
+        } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
         guard let newData = Data(base64Encoded: request.base64Data) else {
             return SpacesDeviceAPIResponse(ok: false, message: "File content is not valid base64.", errorCode: .invalidArgument)
         }
@@ -3468,7 +3443,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Workspace file changed since it was last read.",
-                result: .workspaceFileWrite(.init(didWrite: false, currentBase64Data: currentData?.base64EncodedString(), currentSHA256: currentSHA256)))
+                result: .workspaceFileWrite(
+                    .init(didWrite: false, currentBase64Data: currentData?.base64EncodedString(), currentSHA256: currentSHA256)))
         }
 
         do { try Self.atomicallyWriteWorkspaceFile(newData, to: resolvedPath) } catch {
@@ -3517,9 +3493,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         let existingPermissions = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? NSNumber
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        if let existingPermissions {
-            try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path)
-        }
+        if let existingPermissions { try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path) }
     }
 
     private func handleWorkspaceDiffRequest(_ request: SpacesDeviceWorkspaceDiffRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
@@ -3654,9 +3628,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard !request.filePath.isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "filePath is required.", errorCode: .invalidArgument)
         }
-        guard !request.body.isEmpty else {
-            return SpacesDeviceAPIResponse(ok: false, message: "body is required.", errorCode: .invalidArgument)
-        }
+        guard !request.body.isEmpty else { return SpacesDeviceAPIResponse(ok: false, message: "body is required.", errorCode: .invalidArgument) }
         return try reviewCommentQueue.sync {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             guard try store.workspace(id: request.workspaceID) != nil else {
@@ -3778,8 +3750,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// distinct queue objects and nothing this body calls — `SQLiteStore`, `TerminalControlClient.send`,
     /// `TerminalSessionPersistence` — dispatches back onto either queue (verified: none of the three uses
     /// `DispatchQueue` at all).
-    private func handleWorkspaceReviewCommentsSendRequest(_ request: SpacesDeviceWorkspaceReviewCommentsSendRequest) throws
-        -> SpacesDeviceAPIResponse
+    private func handleWorkspaceReviewCommentsSendRequest(_ request: SpacesDeviceWorkspaceReviewCommentsSendRequest) throws -> SpacesDeviceAPIResponse
     {
         guard !request.comments.isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "comments is required.", errorCode: .invalidArgument)
@@ -3790,14 +3761,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
             }
             for entry in request.comments {
-                guard let comment = try store.reviewComment(id: entry.id), comment.workspaceID == request.workspaceID, comment.sentAt == nil
-                else {
+                guard let comment = try store.reviewComment(id: entry.id), comment.workspaceID == request.workspaceID, comment.sentAt == nil else {
                     return SpacesDeviceAPIResponse(
                         ok: false, message: "Comment '\(entry.id)' is not a draft belonging to this workspace.", errorCode: .invalidArgument)
                 }
                 guard comment.revision == entry.revision else {
-                    return SpacesDeviceAPIResponse(
-                        ok: false, message: "Comment '\(entry.id)' changed since it was last read.", errorCode: .conflict)
+                    return SpacesDeviceAPIResponse(ok: false, message: "Comment '\(entry.id)' changed since it was last read.", errorCode: .conflict)
                 }
             }
 
@@ -3830,9 +3799,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 request: TerminalControlRequest(
                     command: .send(TerminalControlSendPayload(text: request.text, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: true))),
                 socketPath: paths.controlSocketPath)
-            guard sendResponse.ok else {
-                return SpacesDeviceAPIResponse(ok: false, message: sendResponse.message, errorCode: sendResponse.errorCode)
-            }
+            guard sendResponse.ok else { return SpacesDeviceAPIResponse(ok: false, message: sendResponse.message, errorCode: sendResponse.errorCode) }
 
             try store.markReviewCommentsSent(ids: request.comments.map(\.id), sentAt: TerminalSessionTimestamp.string(from: Date()))
             return SpacesDeviceAPIResponse(ok: true, message: "Sent review comments.")
@@ -4409,9 +4376,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 do {
                     try assertWorkspaceDiffScopeIsGitRepository(scope: scope)
                     socketPath = try addWorkspaceDiffSignatureSubscriber(scope: scope)
-                } catch {
-                    return .response(SpacesDeviceAPIServer.failureResponse(for: error))
-                }
+                } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
                 return .relay(
                     LinuxSubscription(
                         sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.refName ?? "")",
@@ -4427,9 +4392,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 do {
                     try assertWorkspaceFileScopeIsValid(scope: scope)
                     socketPath = try addWorkspaceFileSignatureSubscriber(scope: scope)
-                } catch {
-                    return .response(SpacesDeviceAPIServer.failureResponse(for: error))
-                }
+                } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
                 return .relay(
                     LinuxSubscription(
                         sessionID: "workspace-file-signature:\(scope.workspaceID):\(scope.path)",
@@ -4468,12 +4431,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // regardless of where it ends. There is no explicit unsubscribe command; this relay loop
             // returning (EOF, error, or an early throw) is what "unsubscribe" means.
             defer {
-                if let scope = subscription.diffSignatureScope {
-                    performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) }
-                }
-                if let scope = subscription.fileSignatureScope {
-                    performOnQueue { self.removeWorkspaceFileSignatureSubscriber(scope: scope) }
-                }
+                if let scope = subscription.diffSignatureScope { performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) } }
+                if let scope = subscription.fileSignatureScope { performOnQueue { self.removeWorkspaceFileSignatureSubscriber(scope: scope) } }
             }
             let relaySocketFD = try connectUnixSocket(path: subscription.subscriptionSocketPath)
             defer {
@@ -5065,7 +5024,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         -> GhosttyRemoteSessionStatePayload
     {
         let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+            .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,

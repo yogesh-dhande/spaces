@@ -1025,7 +1025,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer,
             sessionHostProvider: { _, _ in
                 providerCallCount += 1
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
                 return host
             })
         await Task.yield()
@@ -1054,7 +1054,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
             sessionHostProvider: { _, _ in
                 providerCallCount += 1
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
                 return host
             })
         let owner = TerminalClient(
@@ -2566,8 +2566,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
-                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,

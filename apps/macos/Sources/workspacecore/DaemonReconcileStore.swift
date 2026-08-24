@@ -1,6 +1,5 @@
 import Dispatch
 import Foundation
-import workspacecore
 
 /// Owns one long-lived `SQLiteStore` for a single daemon reconcile loop, and is the only
 /// execution context that ever touches it.
@@ -16,10 +15,10 @@ import workspacecore
 /// `SQLiteStore` is a plain, non-`Sendable` class, so a shared connection must live in exactly one
 /// isolation domain. `queue` is that domain: it is the only place `store` is created, read, or
 /// released, and passes run one at a time on it, so the connection can never be touched from two
-/// contexts concurrently. The reconcile body is supplied once at construction rather than per call
-/// so the non-`Sendable` store never has to cross an isolation boundary. `.utility` matches the
-/// priority the previous per-pass detached tasks ran at: reconciles are background housekeeping and
-/// must not compete with terminal I/O.
+/// contexts concurrently. A pass body is handed the store as a parameter and runs on the queue, and only
+/// its `Sendable` result crosses back, so the store itself never leaves the isolation domain. A body that
+/// captured it and used it later would defeat that, and must not. `.utility` is the priority
+/// reconciles belong at: they are background housekeeping and must not compete with terminal I/O.
 ///
 /// ## Why reuse is safe across passes
 /// Each pass commits (or rolls back) before it returns, so no transaction is held open between
@@ -39,41 +38,39 @@ import workspacecore
 ///
 /// `@unchecked Sendable` is sound because the only mutable state is `store` and `isClosed`, both
 /// confined to `queue`; everything else is immutable.
-final class DaemonReconcileStore: @unchecked Sendable {
+public final class DaemonReconcileStore: @unchecked Sendable {
     private let databasePath: String
     private let queue: DispatchQueue
-    private let pass: (SQLiteStore) throws -> Void
     /// Queue-confined. Opened on the first pass and reused by every pass after it.
     private var store: SQLiteStore?
     /// Queue-confined. Latched by `close()` and never cleared.
     private var isClosed = false
 
-    init(label: String, databasePath: String, pass: @escaping (SQLiteStore) throws -> Void) {
+    public init(label: String, databasePath: String) {
         self.databasePath = databasePath
-        self.pass = pass
         queue = DispatchQueue(label: label, qos: .utility)
     }
 
-    /// Runs one reconcile pass on the owning queue and suspends the caller until it finishes,
-    /// rethrowing whatever the pass threw. Awaiting keeps the caller's coalescing (one pass in
-    /// flight plus at most one trailing re-run) accurate.
+    /// Runs one pass body on the owning queue and suspends the caller until it finishes, returning what
+    /// the body returned and rethrowing whatever it threw. Awaiting keeps the caller's coalescing (one
+    /// pass in flight plus at most one trailing re-run) accurate.
     ///
-    /// After `close()` this succeeds without running the pass. A pass submitted during shutdown is
-    /// ordinary — the owning services coalesce on the main actor while passes run here, and a
-    /// notification already queued for delivery can reach a service that has just stopped — so it is
-    /// neither an error to report nor a reason to reopen the database; there is simply nothing left
-    /// to reconcile on a service that has stopped.
-    func runPass() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+    /// A service that runs more than one kind of pass over its connection passes the body here rather
+    /// than fixing it at construction, so both kinds share the one connection this owns.
+    ///
+    /// After `close()` this runs no body and returns nil. A pass submitted during shutdown is ordinary —
+    /// the owning services coalesce on the main actor while passes run here, and a notification already
+    /// queued for delivery can reach a service that has just stopped — so it is neither an error to report
+    /// nor a reason to reopen the database; there is simply nothing left to reconcile on a service that
+    /// has stopped, and nil says exactly that.
+    public func run<T: Sendable>(_ body: @escaping @Sendable (SQLiteStore) throws -> T) async throws -> T? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, any Error>) in
             queue.async {
                 guard !self.isClosed else {
-                    continuation.resume()
+                    continuation.resume(returning: nil)
                     return
                 }
-                do {
-                    try self.pass(try self.openedStore())
-                    continuation.resume()
-                } catch { continuation.resume(throwing: error) }
+                do { continuation.resume(returning: try body(try self.openedStore())) } catch { continuation.resume(throwing: error) }
             }
         }
     }
@@ -95,7 +92,7 @@ final class DaemonReconcileStore: @unchecked Sendable {
     /// main waits on this queue, the pass on it waits on the engine, and the engine waits on main.
     /// Awaiting a continuation leaves the main actor free instead, so the engine's hop to main runs, the
     /// pass ahead finishes, the release happens, and this call resumes.
-    func close() async {
+    public func close() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {
                 self.isClosed = true

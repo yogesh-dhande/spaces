@@ -106,6 +106,9 @@
         /// the one it was collapsed into — clearing on any apply cannot leave this stuck set, and clearing
         /// it early (on an apply for an older payload) costs at most the one resync it exists to avoid.
         private let pendingFullFrameSubmission = PendingFullFrameSubmission()
+        /// What `updateHeldScreenUpdates` last told the pipeline, so the reads that answer the question
+        /// do not take the mailbox's lock on every apply.
+        private var lastHeldScreenUpdates = false
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
@@ -200,6 +203,7 @@
             self.inputFailureHandler = inputFailureHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             terminalView.onOpenLink = linkOpenHandler
+            terminalView.onDisplayStateChanged = { [weak self] _ in self?.updateHeldScreenUpdates() }
             ensureStateStreamStartedIfNeeded()
         }
 
@@ -243,7 +247,8 @@
             }
             terminalView.onClearSelection = { [weak self] in self?.sendRemoteClearSelection() }
             terminalView.onSetSelection = { [weak self] startColumn, startRow, endColumn, endRow, isRectangle in
-                self?.sendRemoteSetSelection(startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
+                self?.sendRemoteSetSelection(
+                    startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
@@ -393,8 +398,8 @@
             Task { @MainActor [weak self] in
                 let selectionText = await Task.detached(priority: .userInitiated) {
                     let response = try? Self.sendControlRequest(
-                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID,
-                        socketPath: socketPath, requestSender: requestSender)
+                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID, socketPath: socketPath,
+                        requestSender: requestSender)
                     return response?.selectionText
                 }.value
                 guard let self, let selectionText, !selectionText.isEmpty else {
@@ -530,6 +535,12 @@
                     },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
+                            // Stop before dropping the reference. The handle this holds is a listener on the
+                            // state model's shared subscription, and the model keeps that listener attached
+                            // until the handle says otherwise, so releasing it silently would leave this
+                            // host's callbacks in the fan-out while the next subscribe below registers a
+                            // second listener on top (issue #537).
+                            self?.directStateStreamClient?.stop()
                             self?.directStateStreamClient = nil
                             self?.handleStreamDisconnect()
                         }
@@ -713,6 +724,33 @@
             statePipeline.submit(payload, isOutOfBand: isOutOfBand)
         }
 
+        /// Tells the pipeline whether this pane's screen updates may wait for the pane to come back on
+        /// screen (see `TerminalRemoteStateReductionPipeline.setHoldsScreenUpdates`).
+        ///
+        /// They may once the pane is off screen AND already holds a frame. The second half is what keeps
+        /// a pane from stranding itself: a pane opens with its terminal container hidden, so it is off
+        /// screen from the start, and the pane controller unhides that container only once the pane
+        /// reports it has content to show (`hasRenderableSurface`), which it can only report after a
+        /// frame has been applied. Holding that first frame would leave the pane hidden forever, waiting
+        /// to be displayed so it could apply the frame that is what would let it be displayed.
+        ///
+        /// Called on every display transition and at the end of every apply, so both halves are read
+        /// where they change. The compare keeps a displayed pane's per-apply call free of the mailbox
+        /// lock.
+        ///
+        /// `releaseRendererSurface` drops the retained frame, so a pane whose surface is released while
+        /// it is off screen keeps holding with nothing left to show. That cannot strand the pane: the
+        /// pane controller strips the container on release and re-attaches when the pane is next shown,
+        /// and that attach both puts the view back in a window (releasing the hold) and asks for a
+        /// resync when it finds no frame. Falling past the warm-surface cap does not reach this case at
+        /// all, since the MRU frees the mirror through `evictMirrorSurface` and keeps the frame.
+        private func updateHeldScreenUpdates() {
+            let holds = !terminalView.isDisplayed && terminalView.hasRenderedSurfaceContent
+            guard holds != lastHeldScreenUpdates else { return }
+            lastHeldScreenUpdates = holds
+            statePipeline.setHoldsScreenUpdates(holds)
+        }
+
         private func isInteractiveRuntimeStateForControl() -> Bool {
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
@@ -793,6 +831,9 @@
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
+            // An off-screen pane starts holding its screen updates as soon as it has a frame to show, and
+            // this apply is what can have given it one.
+            updateHeldScreenUpdates()
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
             // The attribute dictionary below is ~20 string conversions per payload on a path that runs
             // at the session's flush rate, so it is built only when something is listening. `emittedAt`
@@ -832,7 +873,7 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
                     detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
             }
-            postLocalNotifications(for: payload)
+            postLocalNotifications(for: output)
         }
 
         /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
@@ -855,10 +896,12 @@
             GhosttyClipboardBridge.writePlainText(clipboardWrite.text, to: clipboardPasteboardOverrideForTesting ?? .general)
         }
 
-        private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
-            for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: payload.reason) {
-                TerminalSessionNotification.post(name, sessionID: payload.sessionID)
-            }
+        /// Posts `output.notificationNames`, the union across every reason this apply stands for: its
+        /// own plus every reason it collapsed away. A collapsed-away `runtime_state` never reaches this
+        /// call on its own apply, but it still owes its consumer a refresh, so the survivor posts for it.
+        private func postLocalNotifications(for output: TerminalRemoteStateReductionOutput) {
+            let sessionID = output.incomingPayload.sessionID
+            for name in output.notificationNames { TerminalSessionNotification.post(name, sessionID: sessionID) }
         }
 
         private func currentSnapshot() -> GhosttyTerminalSnapshot? { latestSnapshotIfCompatible() }
@@ -1055,7 +1098,9 @@
         /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call. Writes only
         /// for the newest committed drag, and only while the pasteboard still holds what it held at
         /// that commit, so a copy the user made during the round trip is never overwritten.
-        private func writeSelectionTextToPasteboard(_ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int) {
+        private func writeSelectionTextToPasteboard(
+            _ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int
+        ) {
             guard commitGeneration == selectionCommitGeneration else { return }
             terminalView.writeSelectionTextToPasteboard(text, ifPasteboardUnchangedSince: changeCount)
         }

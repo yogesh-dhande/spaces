@@ -427,7 +427,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
@@ -570,11 +569,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .terminalSession(let workspaceID, let sessionID): "session:\(workspaceID):\(sessionID)"
             }
         }
-    }
-
-    enum ExternalWindowAction: Sendable {
-        case focus(hidesApp: Bool)
-        case open(hidesApp: Bool)
     }
 
     private static let isRunningFromAppBundle = Bundle.main.bundleURL.pathExtension == "app"
@@ -879,13 +873,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// A workspace's focusable targets read out of the app's current sidebar snapshot, with the data
+    /// needed to name and resolve them.
+    typealias FocusableWindowContext = (
+        detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
+        targets: [WorkspaceRunShortcutTarget]
+    )
+
     /// The workspace's focusable targets plus the context needed to name and resolve them,
     /// using the same ordering and (all configured) browser sessions as the numbered
     /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
-    func focusableWindowContext(workspaceID: String) -> (
-        detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
-        targets: [WorkspaceRunShortcutTarget]
-    )? {
+    func focusableWindowContext(workspaceID: String) -> FocusableWindowContext? {
         guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else { return nil }
         let browserSessions = detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
         let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
@@ -933,35 +931,78 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let startedAt = Date()
         var targetResolutionMS = 0
         var routeMS = 0
+        var retriedAfterReload = false
         func logResult(_ success: Bool, reason: String = "") {
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
-                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)")
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)\(retryDetail)")
         }
         let resolutionStartedAt = Date()
-        guard let context = focusableWindowContext(workspaceID: workspaceID),
-            let target = context.targets.first(where: {
-                Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
-                    Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name)
-                } ?? false
-            })
-        else {
+        let resolved = await resolvingAfterFreshSidebarSnapshot { () -> (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)? in
+            guard let context = self.focusableWindowContext(workspaceID: workspaceID),
+                let target = context.targets.first(where: {
+                    Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
+                        Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name)
+                    } ?? false
+                })
+            else { return nil }
+            return (context, target)
+        }
+        retriedAfterReload = resolved.retried
+        guard let match = resolved.value else {
             targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
             logResult(false, reason: "no_match")
             return
         }
+        let (context, target) = match
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
-        guard let action = await executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail) else {
+        guard await executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail) else {
             routeMS = windowShortcutElapsedMS(since: routeStartedAt)
             logResult(false, reason: "focus_failed")
             return
         }
         routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
-        hideAfterSuccessfulExternalWindowAction(action)
+    }
+
+    /// Resolves `resolve` against the app's current sidebar snapshot and, when it finds nothing, once
+    /// more after the next snapshot lands.
+    ///
+    /// A focus or open request can arrive in the window between the daemon writing a just-started
+    /// process (or a just-created workspace) and the app's paced reload applying the snapshot that
+    /// carries it. In that window a miss says nothing about whether the target exists, so the request
+    /// waits for the app to catch up instead of being refused. Exactly one fresh snapshot and exactly
+    /// one retry: the second answer is about the target, not about the app being behind.
+    ///
+    /// - Returns: what the resolution found, and whether it took the retry, which the caller's log line
+    ///   reports so a stale snapshot can be told from a genuinely missing target.
+    private func resolvingAfterFreshSidebarSnapshot<T>(_ resolve: @MainActor () -> T?) async -> (value: T?, retried: Bool) {
+        if let value = resolve() { return (value, false) }
+        await sidebar.reloadAwaitingFreshSnapshot()
+        return (resolve(), true)
+    }
+
+    /// The focusable target for a workspace's running process, by template name, waiting once for a
+    /// fresh sidebar snapshot when the current one has no running row for that name yet (it lists the
+    /// process as a `.missingConfiguredProcess` target until the reload carrying the row lands).
+    func processFocusMatch(workspaceID: String, processName: String) async -> (
+        value: (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)?, retried: Bool
+    ) {
+        await resolvingAfterFreshSidebarSnapshot { () -> (context: FocusableWindowContext, target: WorkspaceRunShortcutTarget)? in
+            guard let context = self.focusableWindowContext(workspaceID: workspaceID),
+                let target = context.targets.first(where: { target in
+                    guard target.kind == .process, let id = target.processID,
+                        let rowName = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name
+                    else { return false }
+                    return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
+                })
+            else { return nil }
+            return (context, target)
+        }
     }
 
     /// Focuses a workspace's running process window by template name. Threads `requestID`
@@ -971,40 +1012,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let startedAt = Date()
         var targetResolutionMS = 0
         var routeMS = 0
+        var retriedAfterReload = false
         func logResult(_ success: Bool, reason: String = "") {
             let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
-                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)")
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)\(retryDetail)")
         }
         let resolutionStartedAt = Date()
-        guard let context = focusableWindowContext(workspaceID: workspaceID),
-            let target = context.targets.first(where: { target in
-                guard target.kind == .process, let id = target.processID,
-                    let rowName = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name
-                else { return false }
-                return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
-            })
-        else {
+        let resolved = await processFocusMatch(workspaceID: workspaceID, processName: processName)
+        retriedAfterReload = resolved.retried
+        guard let match = resolved.value else {
             targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
             logResult(false, reason: "no_match")
             return
         }
+        let (context, target) = match
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
-        guard
-            let action = await executeWindowFocusResolution(
-                resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail)
-        else {
+        guard await executeWindowFocusResolution(resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail) else {
             routeMS = windowShortcutElapsedMS(since: routeStartedAt)
             logResult(false, reason: "focus_failed")
             return
         }
         routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
-        hideAfterSuccessfulExternalWindowAction(action)
     }
 
     // In-memory window-cycle state (a "window" is a client concept). The cursor remembers
@@ -1073,22 +1108,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let startIndex = WorkspaceWindowCycle.nextIndex(orderedCount: orderedTargets.count, orderedCurrentIndex: ordering.currentIndex, delta: delta)
 
-        var focusedAction: ExternalWindowAction?
+        // Cycling closes the palette for every target it can land on, browser sessions included,
+        // because the palette is a transient panel over whatever the cycle is navigating to. It
+        // closes before the focus work rather than after: focusing a browser activates Chrome, and
+        // an open palette resigning key to Chrome mid-await would run the ordinary dismissal, whose
+        // return-focus restore would take the front straight back from the app just focused.
+        commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
+
+        var didFocus = false
         var resolvedIndex = startIndex
         for attempt in 0..<orderedTargets.count {
             let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
             let resolution = Self.windowShortcutTargetResolution(
                 orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
-            if let action = await executeWindowFocusResolution(
+            if await executeWindowFocusResolution(
                 resolution, requestID: requestID, preferredTarget: orderedTargets[candidateIndex], preferredDetail: detail,
                 preserveWindowCycleSession: true)
             {
-                focusedAction = action
+                didFocus = true
                 resolvedIndex = candidateIndex
                 break
             }
         }
-        guard let action = focusedAction else {
+        guard didFocus else {
             logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false, detail: resolutionDetail)
             return
         }
@@ -1097,12 +1139,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
             orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
         logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true, detail: resolutionDetail)
-
-        let hidesApp: Bool
-        switch action {
-        case .focus(let value), .open(let value): hidesApp = value
-        }
-        if hidesApp { hideAfterSuccessfulExternalWindowAction(action) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
     }
 
     private func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
@@ -1709,10 +1745,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sessionID: sessionID, requestedMode: requestedMode, found: content != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
             visibleSurfaceOutput: debugState?.visibleSurfaceOutput, surfaceSelectionText: debugState?.surfaceSelectionText,
-            summary: debugState?.summary, state: debugState?.state,
-            showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
-            didClose: debugState?.didCloseWindow, windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
-            surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            summary: debugState?.summary, state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface,
+            showsTextRenderer: debugState?.showsTextRenderer, didClose: debugState?.didCloseWindow,
+            windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
             searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
             takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
@@ -1983,7 +2019,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// deep-link open resolves the request against the link's explicitly named device (so it never
     /// falls back to the local device the way the session-id-only resolve does) and hands it in here,
     /// reusing this one open/focus + owner-reclaim + metric path.
-    @discardableResult private func openTerminalSessionPane(
+    ///
+    /// Internal (not private) so a test can drive the `retried_after_reload` gate directly with a
+    /// non-focusing `openIntent`: every production caller opens focused, and a focusing refusal here
+    /// shows a real modal alert, which a unit test process must never trigger.
+    @discardableResult func openTerminalSessionPane(
         sessionID: String, mode: TerminalAttachmentMode, openIntent: TerminalPaneOpenIntent, requestID: String? = nil,
         resolvedRequest: DeviceTerminalOpenRequest? = nil
     ) async -> Bool {
@@ -2008,9 +2048,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 panelCoordinator.releasePaneHeldForReplacement(sessionID: orphaned)
             }
         }
-        // A non-focusing open leaves the app wherever it is, so a pending "hide Spaces after a browser
-        // focus" task is not superseded by it the way a focusing open supersedes it.
-        if focusIntent == .focus { cancelDeferredExternalWindowHide() }
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
         // Re-showing the pane the user is already focused in and owns is a foreground-and-focus, so it also
         // skips resolving the request: resolution only exists to install or re-target a pane. A
@@ -2029,17 +2066,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 detail: "\(modeDetail) route=pane reason=resolve_nil\(requestDetail)")
             return false
         }
-        guard let action = panelCoordinator.openOrFocusTerminalPane(request, openIntent: openIntent) else {
+        // The open resolves the workspace's scope through the sidebar's index. A request for a
+        // just-created workspace whose index entry has not landed yet is refused for exactly that reason
+        // (`workspaceScope(forWorkspaceID:)` nil), so wait for the app's next snapshot and try once more;
+        // the miss can equally be in the request's own resolution, so a request this function resolved is
+        // resolved again (one handed in by the caller is already pinned to its device and is reused as
+        // is). A request whose scope is already present was refused for something else entirely: an
+        // unreachable or incompatible device (which already showed its own modal for a focusing intent)
+        // or a content-construction failure. Retrying either would only repeat the same refusal, and for
+        // the device case, its modal a second time.
+        var attempt = panelCoordinator.openOrFocusTerminalPane(request, openIntent: openIntent)
+        var retriedAfterReload = false
+        if attempt == nil, panelCoordinator.workspaceScope(forWorkspaceID: request.workspaceID) == nil {
+            retriedAfterReload = true
+            await sidebar.reloadAwaitingFreshSnapshot()
+            var retryRequest = request
+            if resolvedRequest == nil, let reresolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) {
+                retryRequest = reresolved
+            }
+            attempt = panelCoordinator.openOrFocusTerminalPane(retryRequest, openIntent: openIntent)
+        }
+        let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
+        guard let action = attempt else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "\(modeDetail) route=pane reason=pane_open_failed\(requestDetail)")
+                detail: "\(modeDetail) route=pane reason=pane_open_failed\(requestDetail)\(retryDetail)")
             return false
         }
         openAction = action
         if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "\(modeDetail) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "\(modeDetail) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)\(retryDetail)")
         return true
     }
 
@@ -3587,21 +3645,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
-        guard succeeded else { return false }
-        switch action {
-        case .focus(let hidesApp), .open(let hidesApp): return hidesApp
-        }
-    }
-
-    nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
-        guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
-        switch action {
-        case .focus(_): return .milliseconds(400)
-        case .open(_): return nil
-        }
-    }
-
     nonisolated static func shouldRefreshVisibleWorkspaceDetail(
         selectedWorkspaceID: String?, showingAlerts: Bool, showingSettings: Bool, workspaceExists: Bool, mainWindowIsFocused: Bool,
         commandPaletteIsVisible: Bool
@@ -3851,6 +3894,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func remoteWorkspacePathActionErrorMessage(action: WorkspacePathAction, deviceName: String) -> String {
         "\(action.title) requires a workspace path on this Mac. \(deviceName) workspaces live on the selected daemon; use an SSH-capable workflow for that remote path."
+    }
+
+    /// Message for a browser-session focus that Chrome refused. Workspace browser sessions are a
+    /// Chrome feature (Spaces tracks and groups their tabs by Chrome window id), so a failure is
+    /// reported rather than redirected to another browser. A denied Automation permission is the
+    /// one failure the user can fix themselves, so it names the setting; every other cause
+    /// (Chrome missing, not running, or refusing the script) gets the plain message.
+    nonisolated static func browserSessionFocusFailureMessage(automationStatus: ChromeAutomationStatus) -> String {
+        switch automationStatus {
+        case .denied:
+            return
+                "Spaces could not open this browser session because it is not allowed to control Google Chrome. Allow Spaces to control Google Chrome in System Settings > Privacy & Security > Automation."
+        case .granted, .notDetermined, .unavailable:
+            return
+                // Not "installed and running": scripting a quit Chrome launches it, so a failure
+                // here means Chrome is missing or cannot be scripted, never merely closed.
+                "Spaces could not open this browser session in Google Chrome. Workspace browser sessions open in Google Chrome; make sure it is installed."
+        }
     }
 
     static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
@@ -9984,15 +10045,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         NSPasteboard.general.setString(path, forType: .string)
     }
 
+    /// Reveals a workspace directory from the detail Reveal button or the sidebar row menu.
     @objc func revealDirectoryInFinder(_ sender: Any) {
         if let context = Self.senderWorkspacePathActionContext(sender) {
             if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: context.workspaceID) { return }
-            NSWorkspace.shared.selectFile(context.path, inFileViewerRootedAtPath: "")
+            revealPathInFinder(context.path)
             return
         }
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+        revealPathInFinder(path)
+    }
+
+    /// Reveals a path and reports a reveal macOS refused, most often a worktree deleted outside
+    /// Spaces whose row survives until the next discovery scan retires it. Spaces does not hide
+    /// itself for a Finder reveal, so nothing else would explain the absent Finder window: a
+    /// discarded `false` here reads as the click having done nothing at all.
+    private func revealPathInFinder(_ path: String) {
+        guard !NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") else { return }
+        showError(WorkspaceError.invalidArgument(message: Self.finderRevealFailureMessage(path: path)))
     }
 
     /// Accepts the `identifier.rawValue` from either an `NSMenuItem` or any
@@ -10172,6 +10243,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return true
     }
 
+    /// Reports a browser-session focus that Chrome refused. The permission is read at
+    /// failure time so the message matches the current grant.
+    private func showBrowserSessionFocusFailureError() {
+        showError(
+            WorkspaceError.invalidArgument(message: Self.browserSessionFocusFailureMessage(automationStatus: ChromeAutomationPermission.status())))
+    }
+
     /// The configured editor resolved to a launchable CLI, carrying the per-family data a
     /// remote open needs: VS Code-family editors keep their `EditorRemoteSSHSupport` (for
     /// extension detection); Zed needs only its CLI path because remoting is built in.
@@ -10229,7 +10307,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 try EditorLauncher.open(cliExecutablePath: target.cliExecutablePath, directory: workspace.dir)
             }
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
+            // The palette is dismissed without its return-focus restore so closing it cannot pull
+            // focus back from the editor. When the palette was the only visible Spaces window,
+            // that leaves no Spaces window on screen: accepted, because the palette closes for
+            // every action it takes and the main window was already hidden before the editor was
+            // asked for.
+            commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
         } catch { showError(error) }
     }
 
@@ -10310,7 +10393,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
             panelCoordinator.openSessionInNewTab(request)
-            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
             logPerfMetric(
                 "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "route=\(route.rawValue)")
@@ -10334,7 +10416,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
                     applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
-                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                 case .failure(let error):
                     logPerfMetric(
                         "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
@@ -10412,8 +10493,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: workspaceID) { return }
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
+        guard NSWorkspace.shared.open(url) else {
+            showError(WorkspaceError.invalidArgument(message: Self.finderRevealFailureMessage(path: workspace.dir)))
+            return
+        }
     }
+
+    /// One message for every Finder reveal entry point: the keyboard shortcut, the workspace
+    /// detail Reveal button, and the sidebar row menu.
+    nonisolated static func finderRevealFailureMessage(path: String) -> String { "Spaces could not reveal \(path) in Finder." }
 
     /// Marks a workspace whose delete the user just confirmed, and moves the selection off it: a marked
     /// row is inert, so it must not stay selected with its detail pane open. The marking is read on every
@@ -10617,6 +10705,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
+                // Unlike the editor path, this one needs no palette dismissal of its own. The editor
+                // runs off a Carbon global hotkey that fires with any app frontmost, so it can be
+                // invoked while the palette is key; this is a local monitor, and a visible palette is
+                // key with its search field first responder, so the `isTextInputFocused()` check above
+                // returns the event before reaching here. Finder therefore cannot be covered by the
+                // palette's return-focus restore.
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceFinder(workspaceID: workspaceID) }
                 return nil
             }
@@ -11182,17 +11276,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func performWindowFocus(_ request: WindowFocusRequest) async {
-        guard let action = await executeWindowFocus(request) else { return }
+        guard await executeWindowFocus(request) else { return }
         reloadData()
-        hideAfterSuccessfulExternalWindowAction(action)
     }
 
     /// Resolves an explicit focus request against its workspace's overview and focuses the
-    /// client's window for it, returning the resulting action (or nil if nothing was
-    /// focused). Shared by the command palette and attention-item focus. A missing window
-    /// is reopened by the executor itself, so there is no separate recovery prompt.
-    func executeWindowFocus(_ request: WindowFocusRequest) async -> ExternalWindowAction? {
-        guard let overview = overview(forWorkspaceID: request.workspaceID) else { return nil }
+    /// client's window for it, returning whether a target was focused. Shared by the command
+    /// palette and attention-item focus. A missing window is reopened by the executor itself,
+    /// so there is no separate recovery prompt.
+    func executeWindowFocus(_ request: WindowFocusRequest) async -> Bool {
+        guard let overview = overview(forWorkspaceID: request.workspaceID) else { return false }
         let targetContext = Self.windowFocusTarget(for: request, overview: overview)
         return await executeWindowFocusResolution(
             Self.windowFocusResolution(for: request, overview: overview), preferredTarget: targetContext?.target,
@@ -11260,10 +11353,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// client state keyed by resolved URL; multiple browser sessions in the same workspace may point
     /// at the same Chrome window so they stay grouped as tabs. Re-focus first uses the tracked window
     /// id for the fast path, then scans all Chrome windows for a matching URL so a tab the user moved
-    /// by hand is adopted into tracking instead of duplicated. `NSWorkspace.open` is a last resort
-    /// when Chrome cannot be scripted. Remote service sessions use this after their URL has been
+    /// by hand is adopted into tracking instead of duplicated. Workspace browser sessions are a Chrome
+    /// feature; when Chrome cannot be scripted, the failure is reported to the caller rather than
+    /// redirected to another browser. Remote service sessions use this after their URL has been
     /// routed through the Mac Caddy router.
-    private func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String], fallbackURL: URL) async {
+    private func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String]) async -> Bool {
         let startedAt = Date()
         let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
@@ -11319,7 +11413,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
             guard newWindowID > 0 else {
                 return BrowserFocusResult(
-                    focused: false, path: "fallback", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    focused: false, path: "chrome_failed", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
                     chromeAppleScriptMS: chromeAppleScriptMS)
             }
             let dbWriteStartedAt = Date()
@@ -11329,13 +11423,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
                 chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
-        if !result.focused { NSWorkspace.shared.open(fallbackURL) }
         logPerfMetric(
             "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: result.focused,
             detail:
                 "path=\(result.path) client_db_lookup_ms=\(result.clientDBLookupMS) client_db_write_ms=\(result.clientDBWriteMS) chrome_applescript_ms=\(result.chromeAppleScriptMS)"
         )
+        return result.focused
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
@@ -11421,16 +11515,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     { overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init) }
 
     /// The single window-shortcut dispatcher for every device. It executes the resolved
-    /// target, then applies the window-shortcut profiling and app-hide handling. The
-    /// focus work itself lives in `executeWindowFocusResolution` so the cycle and
-    /// command-palette paths reuse it.
+    /// target, then applies the window-shortcut profiling. The focus work itself lives in
+    /// `executeWindowFocusResolution` so the cycle and command-palette paths reuse it.
     private func dispatchWindowShortcut(
         _ context: WindowFocusResolutionContext, index: Int, startedAt: Date, shortcutDispatchMS: Int, targetResolutionMS: Int
     ) async {
         let routeStartedAt = Date()
         let resolution = context.resolution
         let kind = Self.windowShortcutKind(for: resolution)
-        guard let action = await executeWindowFocusResolution(resolution, preferredTarget: context.target, preferredDetail: context.detail) else {
+        guard await executeWindowFocusResolution(resolution, preferredTarget: context.target, preferredDetail: context.detail) else {
             logWindowShortcutProfile("stage=aborted index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric(
                 "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
@@ -11445,32 +11538,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logPerfMetric(
             "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
             detail: "kind=\(kind) shortcut_dispatch_ms=\(shortcutDispatchMS) target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)")
-        hideAfterSuccessfulExternalWindowAction(action)
         activeWindowShortcutProfile = nil
     }
 
-    /// Executes a resolved focus target on the client and reports the resulting window
-    /// action, or nil when nothing was focused (the executor surfaces its own errors).
-    /// Shared by the numbered-shortcut, command-palette, and cycle focus paths so all
-    /// three behave identically. Only two leaves depend on where the workspace's daemon
-    /// runs: browser URLs may need remote-service routing before local Chrome focus, and
-    /// terminal windows use native sessions locally vs Device API mirrors remotely.
+    /// Executes a resolved focus target on the client and reports whether a target was
+    /// focused (the executor surfaces its own errors on failure). Shared by the
+    /// numbered-shortcut, command-palette, and cycle focus paths so all three behave
+    /// identically. Only two leaves depend on where the workspace's daemon runs: browser
+    /// URLs may need remote-service routing before local Chrome focus, and terminal
+    /// windows use native sessions locally vs Device API mirrors remotely.
     @discardableResult func executeWindowFocusResolution(
         _ resolution: DeviceWindowShortcutResolution, requestID: String? = nil, preferredTarget: WorkspaceRunShortcutTarget? = nil,
         preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil, preserveWindowCycleSession: Bool = false
-    ) async -> ExternalWindowAction? {
+    ) async -> Bool {
         switch resolution {
         case .openURL(let workspaceID, let targetURL):
-            guard let url = URL(string: targetURL) else {
+            guard URL(string: targetURL) != nil else {
                 showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
-                return nil
+                return false
             }
             // Whether the URL needs remote-service routing depends on the owning device. With no
             // known owner there is no answer, and opening the raw URL would point this Mac's
             // Chrome at a localhost port that belongs to another machine's workspace.
             guard let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID) else {
                 showDeviceNotLoadedError()
-                return nil
+                return false
             }
             let browserSessionTargetURLs = Self.browserSessionTargetURLs(
                 workspaceID: workspaceID, targetURL: targetURL, overview: overview(forWorkspaceID: workspaceID))
@@ -11478,11 +11570,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if isRemoteDeviceID(workspaceDeviceID) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                     showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
-                    return nil
+                    return false
                 }
                 guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
                     showError(WorkspaceError.invalidArgument(message: "Workspace not found on the selected device."))
-                    return nil
+                    return false
                 }
                 // Opening a missing workspace SSH forward and reconciling the Caddy route blocks (spawns
                 // `ssh`, polls local ports and router config up to the timeout), so run it off the main
@@ -11501,42 +11593,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch routeResult {
                 case .success(let routedTarget):
                     refreshVisibleServicePortDisplays(deviceID: device.id)
-                    await focusLocalChromeTab(
-                        workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString, siblingTargetURLs: routedTarget.siblingTargetURLs,
-                        fallbackURL: routedTarget.targetURL)
+                    guard
+                        await focusLocalChromeTab(
+                            workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString,
+                            siblingTargetURLs: routedTarget.siblingTargetURLs)
+                    else {
+                        showBrowserSessionFocusFailureError()
+                        return false
+                    }
                 case .failure(let error):
                     showError(error)
-                    return nil
+                    return false
                 }
             } else {
-                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, fallbackURL: url)
+                guard await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs) else {
+                    showBrowserSessionFocusFailureError()
+                    return false
+                }
             }
             Self.setClientActiveWorkspaceID(workspaceID)
             rememberWindowNavigationFocus(
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)
-            return .focus(hidesApp: true)
+            return true
         case .openTerminal(let request):
-            guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return nil }
+            guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return false }
             rememberWindowNavigationFocus(
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)
-            return .focus(hidesApp: false)
+            return true
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
             guard
-                let action = await runTerminalSessionMutationAndOpenPane(
+                await runTerminalSessionMutationAndOpenPane(
                     workspaceID: workspaceID,
                     operation: { device in
                         try SpacesDeviceClient.runWorkspaceProcess(
                             workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
                             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     })
-            else { return nil }
+            else { return false }
             rememberWindowNavigationFocus(
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)
-            return action
-        case .noWorkspace, .noMatch: return nil
+            return true
+        case .noWorkspace, .noMatch: return false
         }
     }
 
@@ -11549,12 +11649,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var ownershipRequestMS = 0
         var focusObservationMS = 0
         var focusObserved = false
+        var retriedAfterReload = false
         func logTerminalPaneFocus(success: Bool, reason: String = "") {
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             logPerfMetric(
                 "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
                 detail:
-                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)"
+                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)\(retryDetail)"
             )
         }
         // Window-focus terminal targets are always workspace-backed (they come from a
@@ -11571,19 +11673,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return false
         }
         Self.setClientActiveWorkspaceID(request.workspaceID)
-        // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
-        // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
-        // fires just after we foreground the terminal and re-hides the app, leaving
-        // `NSApp.isActive` false — which breaks window-cycle current-target resolution
-        // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
-        cancelDeferredExternalWindowHide()
         // A row-built resolution can predate the session's overview entry and lack the
         // real shell/command. Only recover that metadata when opening a new pane: an
         // already-open pane already has its state model and can focus entirely client-side.
         let existingPaneBeforeResolution = panelCoordinator.placement(forSessionID: request.sessionID) != nil
         let requestResolveStartedAt = Date()
-        let openRequest: DeviceTerminalOpenRequest
-        if Self.terminalOpenRequestNeedsColdResolution(request, hasExistingPane: existingPaneBeforeResolution) {
+        var openRequest: DeviceTerminalOpenRequest
+        let needsColdResolution = Self.terminalOpenRequestNeedsColdResolution(request, hasExistingPane: existingPaneBeforeResolution)
+        if needsColdResolution {
             openRequest = await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request
         } else {
             openRequest = request
@@ -11591,7 +11688,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
         let reusedExistingPane = existingPaneBeforeResolution || panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
         let paneFocusStartedAt = Date()
-        guard panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil else {
+        // The open resolves the workspace's scope through the sidebar's index. A request for a
+        // just-created workspace whose index entry has not landed yet is refused for exactly that reason
+        // (`workspaceScope(forWorkspaceID:)` nil), so wait for the app's next snapshot and try once more,
+        // redoing the cold resolution when this request needed one, since the miss can be in either. A
+        // request whose scope is already present was refused for something else entirely: an unreachable
+        // or incompatible device (which already showed its own modal, since this focusing entry point is
+        // always a focusing intent) or a content-construction failure. Retrying either would only repeat
+        // the same refusal and its modal a second time.
+        var openedPane = panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
+        if !openedPane, panelCoordinator.workspaceScope(forWorkspaceID: openRequest.workspaceID) == nil {
+            retriedAfterReload = true
+            await sidebar.reloadAwaitingFreshSnapshot()
+            if needsColdResolution { openRequest = await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? openRequest }
+            openedPane = panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
+        }
+        guard openedPane else {
             if reusedExistingPane {
                 existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
             } else {
@@ -11664,10 +11776,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func runTerminalSessionMutationAndOpenPane(
         workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) async -> ExternalWindowAction? {
+    ) async -> Bool {
         guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation), await openOrFocusTerminalTarget(request)
-        else { return nil }
-        return .focus(hidesApp: false)
+        else { return false }
+        return true
     }
 
     nonisolated private static func windowShortcutKind(for resolution: DeviceWindowShortcutResolution) -> String {
@@ -11803,27 +11915,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: self.windowShortcutElapsedMS(since: startedAt),
                 success: true, detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
         }
-    }
-
-    func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
-        let hideDelay = Self.hideDelayAfterSuccessfulExternalWindowAction(true, action: action)
-        guard hideDelay != nil || Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
-        cancelDeferredExternalWindowHide()
-        if let hideDelay {
-            deferredExternalWindowHideTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: hideDelay)
-                guard let self, !Task.isCancelled else { return }
-                self.deferredExternalWindowHideTask = nil
-                NSApp.hide(nil)
-            }
-            return
-        }
-        NSApp.hide(nil)
-    }
-
-    private func cancelDeferredExternalWindowHide() {
-        deferredExternalWindowHideTask?.cancel()
-        deferredExternalWindowHideTask = nil
     }
 
     /// Resolves the workspace owning a terminal session from the overview (sessions and

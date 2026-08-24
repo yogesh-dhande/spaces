@@ -44,6 +44,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // one load at a time and applies before starting the next, so a plain instance field
                 // carries this safely from here to the apply site.
                 self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
+                if let override = self?.loadSnapshotOverrideForTesting { return await override() }
                 return await AppKitController.initialSidebarDataSnapshot()
             },
             applySnapshot: { [weak self] snapshot, forceRemoteRefresh, bypassesBackoff in
@@ -136,6 +137,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// result and disconnect means.
     private var remoteOverviewSubscriptions: RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIOverviewStreamClient>!
     private var reloadCoordinator: SidebarReloadCoordinator<SidebarDataSnapshot>!
+    /// Stands in for the daemon read a reload performs, so a test can drive an apply with a snapshot of
+    /// its own choosing and assert what the app does once it lands.
+    var loadSnapshotOverrideForTesting: (@MainActor () async -> Result<SidebarDataSnapshot, any Error>)?
     /// `PanelCoordinator.paneReplacementEpoch` as of the moment the in-flight local reload's `loadSnapshot`
     /// began gathering data. Read at apply time to tell a snapshot whose DB read predates a pane
     /// replacement from one that postdates it: see `PanelCoordinator.paneReplacementEpoch` and the guard
@@ -336,6 +340,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
         reloadCoordinator.request(
             failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+    }
+
+    /// Requests a reload and returns once the snapshot it starts has been applied, for a caller whose
+    /// lookup missed against the snapshot on screen (a focus or open request arriving before the reload
+    /// carrying a just-started process or a just-created workspace).
+    ///
+    /// While the user is mid-edit, `handleDatabaseDidChange` holds reloads back until the edit ends, and
+    /// this must not park the caller behind it: it returns immediately in that state, leaving the caller
+    /// to re-resolve against the snapshot it already had.
+    ///
+    /// Accepted limitation: the run this awaits is the local device's snapshot load. A remote device's
+    /// rows arrive through its own overview push stream instead, which this wait does not cover, so a
+    /// retry for a remote target resolves against whatever that stream has delivered by the time the wait
+    /// returns rather than against a guaranteed-fresh remote snapshot.
+    func reloadAwaitingFreshSnapshot() async {
+        guard host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        await reloadCoordinator.requestAndAwaitNextRun()
     }
 
     func applySidebarDataSnapshot(

@@ -230,6 +230,29 @@ import Foundation
 
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (UnsafeRawPointer?) -> Void = { _ in }
         nonisolated(unsafe) static var nativeMirrorEnabledForTesting = true
+        /// Forces `acquireMirrorIfNeeded()` down its failure branch without touching
+        /// `GhosttySharedTerminalMirror`, so a test can exercise the persistent-failure latch
+        /// (`didFailMirrorAcquisition`) without a real surface ever existing to fail on.
+        var forceMirrorAcquisitionFailureForTesting = false
+        /// Swappable in tests for isolation (a distinct `UserDefaults` suite and stamp); production
+        /// resolves once, lazily, from the app's own version and its generated Ghostty config.
+        nonisolated(unsafe) static var cellMetricsCache = GhosttyTerminalCellMetricsCache(
+            stamp: GhosttyRemoteTerminalHostView.currentCellMetricsStamp())
+
+        /// `spacesterminalmobileghostty` is iOS-only and never links `workspacecore` (the module
+        /// `AppVersion` lives in requires macOS-only transitive dependencies that have never been
+        /// built for iOS), so this reads the same version data through `Bundle.main` instead —
+        /// `apps/ios/Info.plist`'s version keys are generated from the same `AppVersion.plist`
+        /// source (`scripts/sync-app-version.sh`), so the two stay in lockstep without a new
+        /// cross-module edge.
+        private static nonisolated func currentCellMetricsStamp() -> String {
+            let info = Bundle.main.infoDictionary
+            let shortVersion = info?["CFBundleShortVersionString"] as? String ?? ""
+            let buildVersion = info?["CFBundleVersion"] as? String ?? ""
+            let configPath = GhosttyMobileAppService.themeConfigRootDirectory().appendingPathComponent("config").path
+            let configContents = FileManager.default.contents(atPath: configPath)
+            return GhosttyTerminalCellMetricsCache.stamp(appVersion: "\(shortVersion)+\(buildVersion)", configFileContents: configContents)
+        }
 
         private var mirror: ghostty_mirror_t?
         private var fontSize: TerminalFontSize = .default
@@ -275,6 +298,14 @@ import Foundation
         private var emittedHostRenderEvents = Set<String>()
         private var mirrorAcquisitionTask: Task<Void, Never>?
         private var didSurrenderSharedMirror = false
+        /// Latches once `acquireMirrorIfNeeded()`'s creation attempt throws. Without this, the entitled
+        /// view stays entitled after a failed acquire, so the acquisition task's own completion
+        /// (`renderLatestSnapshot()`, which re-schedules acquisition) turns a persistent creation failure
+        /// into an unbounded main-actor reschedule loop, and `isMirrorAcquisitionImminent` staying true
+        /// keeps suppressing estimate-based viewport reports forever — a stuck open. Cleared only where a
+        /// retry is legitimately warranted: `didMoveToWindow`'s re-entry branch, alongside
+        /// `didSurrenderSharedMirror`.
+        private var didFailMirrorAcquisition = false
         private var isTerminalVisible = true
         private var fallbackText = ""
         private var lastScrollTranslation = CGPoint.zero
@@ -420,8 +451,10 @@ import Foundation
                 prepareForDismantle()
             } else {
                 // Entering a window is what makes this view the terminal on screen, so it is also
-                // what re-entitles it to the shared mirror after a newer view took it over.
+                // what re-entitles it to the shared mirror after a newer view took it over, or after a
+                // previous acquisition attempt in this window failed.
                 didSurrenderSharedMirror = false
+                didFailMirrorAcquisition = false
                 reportViewportSizeIfNeeded()
                 renderLatestSnapshot()
             }
@@ -906,7 +939,14 @@ import Foundation
                 deferredViewportSizeReport = true
                 return
             }
-            let size = viewportSize()
+            let (size, source) = viewportSizeWithSource()
+            // While the mirror is about to be acquired, an estimate is not trustworthy enough to
+            // report: see `isMirrorAcquisitionImminent`. A cache prediction or a live surface read
+            // still reports normally. Suppressing the estimate here is safe only because acquisition
+            // itself never waits on a frame (`renderLatestSnapshot` schedules it ahead of the
+            // nil-snapshot return): if that ever changed, this gate would suppress the one report an
+            // open needs and turn it into a wait for the open-screen hold's bounded timeout instead.
+            guard !(isMirrorAcquisitionImminent && source == .estimate) else { return }
             guard size.columns > 0, size.rows > 0 else { return }
             guard lastReportedViewportSize?.columns != size.columns || lastReportedViewportSize?.rows != size.rows else { return }
             lastReportedViewportSize = size
@@ -923,6 +963,14 @@ import Foundation
 
         private func renderLatestSnapshot() {
             renderLatestSnapshotCallCountForTesting += 1
+            // The open-screen hold blocks every frame from reaching this view until a viewport
+            // report leads to a matching resize, so acquisition cannot be one of the things waiting
+            // on a frame: it has to run ahead of the nil-snapshot return below, on nothing more than
+            // a window and nonzero bounds (see `isEntitledToSharedMirror`). Gating it behind a
+            // snapshot instead is exactly the deadlock this call site exists to avoid: no snapshot
+            // could ever arrive to satisfy it, so the hold would sit until its own bounded timeout
+            // and the open would paint a stale grid first.
+            scheduleMirrorAcquisitionIfNeeded()
             guard let latestSnapshot else {
                 currentRenderedSnapshot = nil
                 renderedSnapshotCoversHostColumns = false
@@ -933,7 +981,6 @@ import Foundation
                 return
             }
             emitHostRenderEvent("host_view_render_begin", dedupeKey: lastRenderKey)
-            scheduleMirrorAcquisitionIfNeeded()
             let window = viewportWindow(for: latestSnapshot)
             let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
             currentRenderedSnapshot = cropped
@@ -959,10 +1006,29 @@ import Foundation
         /// layer bound at zero size never grows back. Checked again at acquisition rather than only
         /// when one is scheduled, since a view can lose any of this in between.
         private var isEntitledToSharedMirror: Bool {
-            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return false }
+            guard mirror == nil, window != nil, !didSurrenderSharedMirror, !didFailMirrorAcquisition else { return false }
             guard Self.nativeMirrorEnabledForTesting else { return false }
             let renderBounds = visibleRenderBounds()
             return renderBounds.width > 0 && renderBounds.height > 0
+        }
+
+        /// True in the window where `scheduleMirrorAcquisitionIfNeeded` is about to (or already has)
+        /// scheduled an acquisition: the same base condition as `isEntitledToSharedMirror`, minus
+        /// the render-bounds check, which a layout pass can flip on its own without a report firing
+        /// in between. A viewport report made while this is true and no mirror exists can only come
+        /// from `cellMetrics()`'s `UIFont.monospacedSystemFont` probe, a font Ghostty never actually
+        /// renders with, so `reportViewportSizeIfNeeded()` suppresses that source here rather than
+        /// asking the daemon to reflow to a grid the real surface abandons moments later. This adds
+        /// no deadline: production always resolves the window via the acquisition task's own
+        /// `reportViewportSizeIfNeeded()` call once a surface (or, failing that, a cache prediction)
+        /// exists, and a view that never becomes entitled — every existing unit test, which runs
+        /// with the native mirror disabled — reports exactly as it does without this gate.
+        ///
+        /// `!didFailMirrorAcquisition` matters here on its own: once acquisition has failed for good,
+        /// no surface is ever coming, so the estimate this suppresses is the only viewport source left,
+        /// and it is the intended, correct report for a view whose surface cannot exist.
+        private var isMirrorAcquisitionImminent: Bool {
+            mirror == nil && Self.nativeMirrorEnabledForTesting && !didSurrenderSharedMirror && !didFailMirrorAcquisition && window != nil
         }
 
         private func scheduleMirrorAcquisitionIfNeeded() {
@@ -983,10 +1049,14 @@ import Foundation
             }
         }
 
+        /// Thrown only from `forceMirrorAcquisitionFailureForTesting`'s test-only branch below.
+        private struct ForcedMirrorAcquisitionFailureForTesting: Error {}
+
         private func acquireMirrorIfNeeded() {
             guard isEntitledToSharedMirror else { return }
             do {
                 emitHostRenderEvent("host_view_mirror_acquire_begin", dedupeKey: lastRenderKey)
+                if forceMirrorAcquisitionFailureForTesting { throw ForcedMirrorAcquisitionFailureForTesting() }
                 let acquired = try GhosttySharedTerminalMirror.shared.acquire(
                     for: self, fontSize: fontSize, scaleFactor: Double(window?.screen.scale ?? UIScreen.main.scale))
                 mirror = acquired
@@ -1003,7 +1073,16 @@ import Foundation
                     GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
                 }
                 emitHostRenderEvent("host_view_mirror_acquire_end", dedupeKey: lastRenderKey)
-            } catch { ghosttyRemoteTerminalTrace("mirror_acquire_failed error=\(error)") }
+            } catch {
+                // Latching this stops `scheduleMirrorAcquisitionIfNeeded` (via `isEntitledToSharedMirror`)
+                // from rescheduling on the acquisition task's own completion, which would otherwise loop
+                // forever on a persistent creation failure, and lets `isMirrorAcquisitionImminent` fall
+                // through so the estimate-based viewport report below can go out — the surface this
+                // describes can never exist, so the estimate path is this view's only correct source.
+                didFailMirrorAcquisition = true
+                ghosttyRemoteTerminalTrace("mirror_acquire_failed error=\(error)")
+                reportViewportSizeIfNeeded()
+            }
         }
 
         private func makeSurfaceHost() -> ghostty_surface_host_s {
@@ -1272,18 +1351,44 @@ import Foundation
             return GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading)
         }
 
-        private func viewportSize() -> (columns: Int, rows: Int) {
+        /// Where a `viewportSize()` result came from: a live surface read, a `cellMetricsCache`
+        /// prediction keyed off a past surface read, or the pre-mirror `UIFont` estimate.
+        /// `reportViewportSizeIfNeeded()` uses this to suppress the one source
+        /// (`isMirrorAcquisitionImminent`) that a real surface is guaranteed to contradict a moment
+        /// later; every other caller (rendering, cropping) uses whichever size this returns
+        /// regardless of source, since some size is needed either way to lay out the current frame.
+        private enum ViewportSizeSource { case surface, cachePrediction, estimate }
+
+        private var currentScaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
+
+        private func viewportSize() -> (columns: Int, rows: Int) { viewportSizeWithSource().size }
+
+        private func viewportSizeWithSource() -> (size: (columns: Int, rows: Int), source: ViewportSizeSource) {
             let renderBounds = visibleRenderBounds()
             if let surfaceSize = surfaceViewportSize(renderBounds: renderBounds) {
-                return GhosttyRemoteTerminalViewport.reportedSize(
-                    rawColumns: surfaceSize.columns, rawRows: surfaceSize.rows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom)
+                return (
+                    GhosttyRemoteTerminalViewport.reportedSize(
+                        rawColumns: surfaceSize.columns, rawRows: surfaceSize.rows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom), .surface
+                )
+            }
+            if let predicted = Self.cellMetricsCache.predictedGrid(
+                fontSizePoints: fontSize.rawValue, scale: currentScaleFactor, renderBoundsWidth: Double(renderBounds.width),
+                renderBoundsHeight: Double(renderBounds.height))
+            {
+                return (
+                    GhosttyRemoteTerminalViewport.reportedSize(
+                        rawColumns: predicted.columns, rawRows: predicted.rows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom),
+                    .cachePrediction
+                )
             }
             let metrics = cellMetrics()
             let content = renderBounds.inset(by: Self.contentInsets)
             let rawColumns = max(Int(floor(max(content.width, 1) / metrics.width)), 1)
             let rawRows = max(Int(floor(max(content.height, 1) / metrics.height)), 1)
-            return GhosttyRemoteTerminalViewport.reportedSize(
-                rawColumns: rawColumns, rawRows: rawRows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom)
+            return (
+                GhosttyRemoteTerminalViewport.reportedSize(
+                    rawColumns: rawColumns, rawRows: rawRows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom), .estimate
+            )
         }
 
         private func surfaceViewportSize(renderBounds: CGRect) -> (columns: Int, rows: Int)? {
@@ -1298,11 +1403,33 @@ import Foundation
             let columns = Int(size.columns)
             let rows = Int(size.rows)
             guard size.cell_height_px > 0 else { return (columns: columns, rows: rows) }
+            if size.cell_width_px > 0 { recordCellMetricsIfNeeded(cellWidthPx: Int(size.cell_width_px), cellHeightPx: Int(size.cell_height_px)) }
 
             let scale = CGFloat(window?.screen.scale ?? UIScreen.main.scale)
             let visiblePixelHeight = max(floor(renderBounds.height * scale), 1)
             let visibleRows = max(Int(floor(visiblePixelHeight / CGFloat(size.cell_height_px))), 1)
             return (columns: columns, rows: min(rows, visibleRows))
+        }
+
+        /// Records what a live surface just measured for this view's (font size, scale) into
+        /// `cellMetricsCache`, self-healing a stale prediction: the surface is always right, so a
+        /// mismatched entry is overwritten and a host render event marks it (a signal that the
+        /// padding formula `GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale:)` predicts from
+        /// has drifted, e.g. from a Ghostty/GhosttyKit update). A correct prediction is a silent
+        /// write-through with no event. The cache is never trusted over this live read.
+        private func recordCellMetricsIfNeeded(cellWidthPx: Int, cellHeightPx: Int) {
+            let scale = currentScaleFactor
+            let existing = Self.cellMetricsCache.cellPixelSize(fontSizePoints: fontSize.rawValue, scale: scale)
+            guard existing?.width != cellWidthPx || existing?.height != cellHeightPx else { return }
+            if let existing {
+                emitHostRenderEvent(
+                    "host_view_cell_metrics_mismatch",
+                    attributes: [
+                        "predicted_width_px": "\(existing.width)", "predicted_height_px": "\(existing.height)", "actual_width_px": "\(cellWidthPx)",
+                        "actual_height_px": "\(cellHeightPx)",
+                    ])
+            }
+            Self.cellMetricsCache.recordCellPixelSize(fontSizePoints: fontSize.rawValue, scale: scale, width: cellWidthPx, height: cellHeightPx)
         }
 
         private func scrollPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {

@@ -78,6 +78,8 @@
         }
 
         private var listeners: [Listener] = []
+        // Handles for listeners registered through `startStateStream`, which returns none to its caller.
+        private var retainedListenerHandles: [ListenerHandle] = []
         // Paces this session's reconnects. Internal (not `private`) so behavior tests can shorten its
         // delays instead of waiting out real seconds.
         let reconnectBackoff = TerminalStateStreamReconnectBackoff()
@@ -93,6 +95,20 @@
         // post-connect rejection, or a straggling disconnect after replacement) is ignored instead of
         // tearing down or feeding the current stream.
         private var streamClientGeneration: UInt64 = 0
+        // The generation the client currently in `streamClient` was installed under, or nil while none is
+        // installed. Moves with `streamClient` only (see `installStreamClient`/`clearInstalledStreamClient`),
+        // which is what makes it a safe answer to "did this disconnect come from the stream we hold?" —
+        // `streamClientGeneration` alone is not, because it is bumped before a client is installed and again
+        // when one is retired, so comparing against it can reject a drop from the very client still
+        // installed and leave it there dead forever (issue #537).
+        private var installedStreamClientGeneration: UInt64?
+        // Owns the liveness recheck a stream loss starts when the cached runtime state claims the session
+        // needs no stream (see `recheckLivenessAfterStreamLoss`). One task, which both asks and waits, so
+        // there is a single place the question can be open and no second timer can pace it.
+        private var livenessRecheckTask: Task<Void, Never>?
+        // Identifies which recheck owns `livenessRecheckTask`, so a cancelled one that is still suspended in
+        // its own request cannot clear the slot out from under its replacement (see `finishLivenessRecheck`).
+        private var livenessRecheckGeneration: UInt64 = 0
         private var lastSubscriptionAttemptAt: Date?
         private var refreshInFlight = false
         private var stateRefreshRetryTask: Task<Void, Never>?
@@ -155,6 +171,7 @@
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
                 reconnectTask?.cancel()
+                livenessRecheckTask?.cancel()
                 linkCorroborationProbe?.task.cancel()
                 requestClientBox.current.client.cancel()
             }
@@ -185,9 +202,13 @@
             }
         }
 
+        /// The handle is retained by the model because this protocol entry point hands the caller nothing to
+        /// stop with: the listener it registers lives as long as the model does. `ListenerHandle` detaches on
+        /// release as well as on `stop()`, so without the retain the handle would be freed on return and
+        /// take the listener just registered with it.
         func startStateStream(
             onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor ((any Error)?) -> Void
-        ) { registerListener(onUpdate: onUpdate, onDisconnect: onDisconnect) }
+        ) { retainedListenerHandles.append(registerListener(onUpdate: onUpdate, onDisconnect: onDisconnect)) }
 
         // MARK: Host wiring
 
@@ -374,7 +395,31 @@
             if listeners.isEmpty {
                 stateRefreshRetryTask?.cancel()
                 stateRefreshRetryTask = nil
+                // Nothing is left to show an answer to, so stop asking rather than letting the recheck
+                // poll out its current backoff against a session no one is watching.
+                livenessRecheckTask?.cancel()
+                livenessRecheckTask = nil
             }
+        }
+
+        /// Installs `client` as the session's live subscription, recording the generation it was created
+        /// under. Every install goes through here so `installedStreamClientGeneration` can never drift from
+        /// the client it describes; `handleStreamDisconnect` decides ownership of a drop by comparing
+        /// against it.
+        private func installStreamClient(_ client: any TerminalRemoteStateStreamClient, generation: UInt64) {
+            streamClient = client
+            installedStreamClientGeneration = generation
+        }
+
+        /// Detaches the installed subscription and returns it so the caller can stop it. The stop is the
+        /// caller's because its timing differs by path (before or after arming a reconnect), but the state
+        /// it leaves behind must not: nothing else clears `streamClient`.
+        @discardableResult private func clearInstalledStreamClient() -> (any TerminalRemoteStateStreamClient)? {
+            let installedClient = streamClient
+            streamClient = nil
+            installedStreamClientGeneration = nil
+            streamConnectedHost = nil
+            return installedClient
         }
 
         private func ensureSubscriptionStarted(now: Date = Date()) {
@@ -383,7 +428,15 @@
             // in-flight guard) instead of guessing whether real time has passed. Nil in production.
             ensureSubscriptionStartedInvokedForTesting?()
             if streamClient != nil || subscriptionConnectTask != nil { return }
-            if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
+            if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 {
+                // The throttle paces attempts; it must never be the reason a session is left with listeners
+                // and nothing arranging a stream for them. A pane whose last listener left and whose
+                // replacement registers inside this window would otherwise land exactly there — the removal
+                // cancelled the liveness recheck, and this return would drop the new listener's attempt with
+                // nothing scheduled behind it. Hand the attempt to the paced retry instead of losing it.
+                if reconnectTask == nil, livenessRecheckTask == nil { scheduleReconnect() }
+                return
+            }
             lastSubscriptionAttemptAt = now
             // Catch up unconditionally, before (and independent of) the subscribe below.
             // The daemon only streams live sessions, so an ended session's subscribe is
@@ -464,7 +517,7 @@
                         Task { @MainActor [weak self] in self?.handleStreamDisconnect(error, generation: generation) }
                     })
             } catch { return false }
-            streamClient = client
+            installStreamClient(client, generation: generation)
             let started: Bool
             if let connectOverrideForTesting = stateStreamConnectOverrideForTesting {
                 // Test seam: lets `spacesuiTests` control exactly when and how the blocking connect
@@ -482,10 +535,7 @@
             guard started else {
                 // Only clear the installed client if it is still this one; a racing disconnect (or a newer
                 // connect) may already have replaced it, and clearing then would drop a healthy stream.
-                if streamClient === client {
-                    streamClient = nil
-                    streamConnectedHost = nil
-                }
+                if streamClient === client { clearInstalledStreamClient() }
                 client.stop()
                 return false
             }
@@ -585,8 +635,14 @@
         /// box to the daemon's current token and the next subscribe authenticates. Every other disconnect
         /// takes the plain delayed reconnect.
         func handleStreamDisconnect(_ error: (any Error)?, generation: UInt64) {
-            // A superseded stream client's late disconnect must not tear down the client that replaced it.
-            guard generation == streamClientGeneration else { return }
+            // A drop is this model's to react to exactly when it came from the client the model currently
+            // holds. That is deliberately compared against the INSTALLED client's generation rather than the
+            // newest generation issued: a superseded client's late disconnect must still not tear down the
+            // client that replaced it, but a generation that moved on without replacing anything must not
+            // turn away a drop from the stream still installed either — that leaves a dead client in place,
+            // and `ensureSubscriptionStarted` reads any installed client as a live subscription, so the pane
+            // would never resubscribe and never report the outage (issue #537).
+            guard generation == installedStreamClientGeneration else { return }
             // Keep listeners attached through a subscribe drop: the asynchronous catch-up
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
@@ -596,9 +652,7 @@
             // Stop the dropped client before dropping the reference: its pinned-TLS connection is
             // released only by an explicit cancel, so a bare `nil` would orphan the connection and its
             // dispatch queue for the life of the process while the reconnect mints a fresh one.
-            let disconnectedClient = streamClient
-            streamClient = nil
-            streamConnectedHost = nil
+            let disconnectedClient = clearInstalledStreamClient()
             disconnectedClient?.stop()
             // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
             // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
@@ -681,9 +735,7 @@
             // receive loop then delivers one final disconnect callback, and that callback must not arm a
             // second reconnect on top of the one below.
             streamClientGeneration &+= 1
-            let deadClient = streamClient
-            streamClient = nil
-            streamConnectedHost = nil
+            let deadClient = clearInstalledStreamClient()
             deadClient?.stop()
             scheduleReconnect()
         }
@@ -885,11 +937,9 @@
         // these instead of racing a real connect.
         /// `connectedHost` stands in for the address the concrete client would have pinned itself to, so a
         /// test can drive the probe's host correlation without a multi-address daemon.
-        @discardableResult func installStreamClientForTesting(
-            _ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil
-        ) -> UInt64 {
+        @discardableResult func installStreamClientForTesting(_ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil) -> UInt64 {
             streamClientGeneration &+= 1
-            streamClient = client
+            installStreamClient(client, generation: streamClientGeneration)
             streamConnectedHost = connectedHost
             return streamClientGeneration
         }
@@ -907,6 +957,17 @@
 
         /// See the call site in `ensureSubscriptionStarted`.
         var ensureSubscriptionStartedInvokedForTesting: (@MainActor () -> Void)?
+
+        /// Overrides the `.state` request the liveness recheck makes, so `spacesuiTests` can hand it a
+        /// chosen answer — a transport failure, a coded refusal, a running session, an exited one — and a
+        /// chosen moment to answer. Nil in production, where every attempt is a real request. Same purpose
+        /// as `stateStreamConnectOverrideForTesting`: this loop's whole contract is what it does with each
+        /// answer, and racing a real device to produce them is neither fast nor deterministic.
+        var livenessStateFetchOverrideForTesting: (@Sendable () async -> Result<GhosttyRemoteSessionStatePayload, any Error>)?
+
+        /// Whether a liveness question is currently open (asking, or waiting out its retry delay). Cleared
+        /// only after the answer has been acted on, so a test that sees it false can read the outcome.
+        var hasArmedLivenessRecheckForTesting: Bool { livenessRecheckTask != nil }
 
         /// The delay `scheduleReconnect` last actually armed a retry with, or nil once that retry has
         /// fired. A call that no-ops because a retry is already pending leaves this untouched, so
@@ -930,34 +991,171 @@
             await subscriptionConnectTask?.value
         }
 
-        /// Re-subscribes after a backoff delay — only while the session may still be interactive and
-        /// listeners remain. An ended session needs no live stream, so it is left disconnected, and it is
-        /// also not reported as disconnected: the daemon streams live sessions only, so refusing an ended
-        /// one is the expected answer rather than a link the user should be told about.
+        /// Re-subscribes after a backoff delay — only while listeners remain and the session is still
+        /// interactive as far as the DEVICE is concerned. An ended session needs no live stream, so it is
+        /// left disconnected, and it is also not reported as disconnected: the daemon streams live sessions
+        /// only, so refusing an ended one is the expected answer rather than a link the user should be told
+        /// about. Whether the session has ended is a question for the device, not for the cache this model
+        /// happens to hold (see `recheckLivenessAfterStreamLoss`).
         ///
         /// The delay grows with the run of failures (`reconnectBackoff`) instead of retrying flat forever:
         /// a pane outlives its device going away, and a fixed cadence is a reconnect storm against a device
         /// that is genuinely down. Marking the link down here rather than in `handleStreamDisconnect` keeps
-        /// the flag meaning exactly what the banner tells the user — the connection dropped and a retry is
-        /// coming.
+        /// the flag meaning exactly what the banner tells the user — the connection dropped, and a retry is
+        /// coming unless nothing is listening for one.
         ///
         /// Idempotent while a retry is already pending (`reconnectTask != nil`): more than one caller can
         /// decide the same failed connect owes a retry (see the connect-completion check in
         /// `ensureSubscriptionStarted`), and a second call here must not stack a competing timer or double
         /// the backoff on top of the one already armed.
         private func scheduleReconnect() {
+            // A retry is already armed, and whoever armed it already published the drop.
             guard reconnectTask == nil else { return }
-            guard !listeners.isEmpty, currentRuntimeState?.state.isInteractive != false else { return }
+            // Order matters below, and it is the opposite of the obvious one. A cached non-interactive
+            // runtime state is not evidence that this session needs no stream: the stream that just died is
+            // the only thing that keeps that cache current, so a cache that has gone `.exited` while the
+            // session is in fact still running would turn this into a dead end no later event can reopen:
+            // no stream, no retry, and no notice either (issue #537). So the cache is not trusted here; the
+            // device is asked, and its answer re-enters this method through `apply`. A session that really
+            // did end stays quiescent, which is why publishing the drop comes after this check rather than
+            // at the top: the daemon streams live sessions only, so refusing an ended one is the expected
+            // answer, not an outage to put on the pane.
+            guard currentRuntimeState?.state.isInteractive != false else {
+                recheckLivenessAfterStreamLoss()
+                return
+            }
+            // Published before the listener check below: a live session whose stream is gone is an outage
+            // the pane must be able to report whether or not this model goes on to arm a retry for it.
             setStateStreamDisconnected(true)
+            // Nothing is being fanned out to, so nothing needs a live stream; a listener registering later
+            // starts one itself through `registerListener`.
+            guard !listeners.isEmpty else { return }
             let delay = reconnectBackoff.nextDelay()
             lastReconnectDelayForTesting = delay
             reconnectTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: delay)
                 guard let self else { return }
                 self.reconnectTask = nil
-                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else { return }
+                guard self.streamClient == nil, !self.listeners.isEmpty else { return }
+                // Same rule as above: the retry does not end on the cached state's word alone.
+                guard self.currentRuntimeState?.state.isInteractive != false else {
+                    self.recheckLivenessAfterStreamLoss()
+                    return
+                }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
+            }
+        }
+
+        /// Asks the device whether the session is still live, after a stream loss the cached runtime state
+        /// claims needs no stream — and keeps asking until the device answers.
+        ///
+        /// The question is settled only by the answer to THIS recheck's own `.state` request. It
+        /// deliberately does not ride `refreshState()`: that call coalesces with an in-flight request older
+        /// than the drop, silently drops its failures, and delivers its result through `apply`, where any
+        /// unrelated payload is indistinguishable from an answer. Each of those leaves the question open
+        /// with nothing left to reopen it — a live session frozen behind a stale `.exited` cache, which is
+        /// the stall this whole path exists to end (issue #537).
+        ///
+        /// A request that never arrives is not silence to wait out: it means the device is unreachable,
+        /// which is an outage the pane must show, so the notice goes up and the question is asked again on
+        /// the same paced cadence the reconnect uses (`reconnectBackoff`) rather than going quiescent. Only
+        /// the device settles it: still interactive re-arms the reconnect the stale cache turned away, and a
+        /// confirmed end (or a reachable daemon refusing the session) quiesces and clears the notice, per
+        /// the ended-session contract that a refused subscribe is the expected answer, not an outage.
+        private func recheckLivenessAfterStreamLoss() {
+            guard wantsLivenessRecheck, livenessRecheckTask == nil else { return }
+            livenessRecheckGeneration &+= 1
+            let generation = livenessRecheckGeneration
+            livenessRecheckTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    // Rebuilt per attempt, and nil once nothing needs an answer any more. Awaited outside
+                    // the model so the round trip never holds it alive.
+                    guard let fetch = self?.makeLivenessStateFetch() else { break }
+                    let result = await fetch()
+                    guard !Task.isCancelled, let outcome = self?.settleLivenessRecheck(with: result) else { break }
+                    guard case .retryAfter(let retryDelay) = outcome else { break }
+                    try? await Task.sleep(for: retryDelay)
+                    guard !Task.isCancelled else { break }
+                    // Re-resolve a local daemon that may have moved before asking again. An idle-shut-down
+                    // daemon comes back on a fresh ephemeral port, so every attempt made through the request
+                    // client the drop left behind would keep dialing an address nothing is listening on —
+                    // the pane would poll and stay bannered forever against a daemon that is running. This is
+                    // the same recovery the connect path runs between its own attempts, and a no-op for
+                    // remote devices, whose candidate addresses are re-walked inside the request itself.
+                    await self?.ensureLocalDeviceReachableForRetry()
+                }
+                self?.finishLivenessRecheck(generation: generation)
+            }
+        }
+
+        /// Releases the recheck slot, but only for the task that still holds it. A cancelled recheck can be
+        /// suspended inside its own request while a replacement is already armed; clearing the slot on its
+        /// way out would strand that replacement — armed but no longer reachable, so a later listener removal
+        /// could not cancel it and the next drop would arm a second recheck alongside it.
+        private func finishLivenessRecheck(generation: UInt64) {
+            guard generation == livenessRecheckGeneration else { return }
+            livenessRecheckTask = nil
+        }
+
+        private enum LivenessRecheckOutcome {
+            case settled
+            case retryAfter(Duration)
+        }
+
+        /// Whether an open liveness question is still this model's to answer. An installed stream, a connect
+        /// in flight, or an armed reconnect all mean recovery is owned elsewhere, and a background poll that
+        /// kept raising the disconnected notice underneath a healthy stream would be worse than no poll.
+        private var wantsLivenessRecheck: Bool { !listeners.isEmpty && streamClient == nil && subscriptionConnectTask == nil && reconnectTask == nil }
+
+        /// The recheck's own `.state` request, or nil once nothing needs the answer. Vended as a closure so
+        /// the recheck loop can await the round trip without holding the model across it.
+        private func makeLivenessStateFetch() -> (@Sendable () async -> Result<GhosttyRemoteSessionStatePayload, any Error>)? {
+            guard wantsLivenessRecheck else { return nil }
+            if let livenessStateFetchOverrideForTesting { return livenessStateFetchOverrideForTesting }
+            let sessionID = self.sessionID
+            let clientApp = self.clientApp
+            let requestClientBox = self.requestClientBox
+            return {
+                await Task.detached(priority: .userInitiated) {
+                    let (client, token) = requestClientBox.current
+                    return Self.fetchState(sessionID: sessionID, requestClient: client, authToken: token, clientApp: clientApp)
+                }.value
+            }
+        }
+
+        /// Reacts to one recheck answer, reporting whether the question is now settled or owes another ask.
+        private func settleLivenessRecheck(with result: Result<GhosttyRemoteSessionStatePayload, any Error>) -> LivenessRecheckOutcome {
+            switch result {
+            case .success(let payload):
+                // Applied first: this is also the freshest state this pane has. The decision below then
+                // reads the cache rather than the payload, so an answer the emission-time guard refuses
+                // (something newer landed while it was in flight) is decided on that newer truth.
+                apply(payload)
+                guard wantsLivenessRecheck else { return .settled }
+                if currentRuntimeState?.state.isInteractive != false { scheduleReconnect() } else { setStateStreamDisconnected(false) }
+                return .settled
+            case .failure(let error):
+                // Ownership is re-checked here for the same reason it is above: this answer describes a
+                // request that was in flight, and a stream installed while it flew (another listener
+                // registering is enough) already cleared the notice. Raising it again from a stale failure
+                // would leave an outage notice standing over a healthy pane, with the loop then exiting
+                // because that stream exists — so nothing would ever take it down.
+                guard wantsLivenessRecheck else { return .settled }
+                // ONLY the daemon's verdict on this session settles it: it looked the session up and has
+                // none to serve, which is an answer about the session. Every other failure — a request that
+                // never arrived, a pinned identity that did not match, an `ok` response carrying no state, a
+                // refusal about credentials or the daemon's own state rather than the session — says nothing
+                // about whether the session is alive, so treating any of them as an answer would quiesce
+                // recovery on no evidence.
+                if let refusal = error as? StateFetchError, refusal.isSessionVerdict {
+                    setStateStreamDisconnected(false)
+                    return .settled
+                }
+                // Unanswered, for whatever reason: the pane cannot reach its session, which is the outage it
+                // exists to report — and the question is still open, so ask again after a paced delay.
+                setStateStreamDisconnected(true)
+                return .retryAfter(reconnectBackoff.nextDelay())
             }
         }
 
@@ -1030,7 +1228,37 @@
 
         // MARK: Device API requests
 
-        private enum StateFetchError: Error { case rejected(String) }
+        /// Why a `.state` fetch produced no payload. The two are not interchangeable: only `rejected` is the
+        /// daemon answering about this session, which is what lets the liveness recheck stop asking
+        /// (`settleLivenessRecheck`). Internal (not `private`) so `spacesuiTests` can hand the recheck each
+        /// shape without a daemon.
+        enum StateFetchError: Error {
+            /// The daemon answered `ok == false`, with the machine-readable reason it sent. Only some of
+            /// those reasons are answers about this session — see `isSessionVerdict`.
+            case rejected(message: String, code: SpacesDeviceErrorCode?)
+            /// The daemon answered `ok` but carried no session state — an answer about nothing, which says
+            /// as little about the session as a request that never arrived.
+            case missingState
+
+            /// Whether this refusal is the daemon's verdict on the session itself, which is the only kind of
+            /// failure that settles the liveness recheck.
+            ///
+            /// `ok == false` is also how a reachable daemon reports conditions that have nothing to do with
+            /// the session: a revoked or rotated token (`unauthorized`), a daemon shutting down or mid
+            /// handoff, a request that reached the wrong daemon, an internal failure, or a code this build
+            /// does not know. Reading any of those as "the session is gone" clears the outage notice and
+            /// stops the asking, so a pane holding a stale non-interactive cache freezes there for good and
+            /// never reaches the credential and endpoint recovery each retry runs
+            /// (`ensureLocalDeviceReachableForRetry`) — issue #537's stall arriving by another road.
+            var isSessionVerdict: Bool {
+                guard case .rejected(_, let code) = self else { return false }
+                switch code {
+                // The daemon looked this session up and has no live session to serve.
+                case .sessionNotRunning, .sessionNotAvailable, .notFound: return true
+                default: return false
+                }
+            }
+        }
 
         private nonisolated static func fetchState(
             sessionID: String, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
@@ -1039,8 +1267,8 @@
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID)), authToken: authToken, clientApp: clientApp))
-                guard response.ok else { throw StateFetchError.rejected(response.message) }
-                guard let payload = response.sessionState else { throw StateFetchError.rejected("Device did not return terminal state.") }
+                guard response.ok else { throw StateFetchError.rejected(message: response.message, code: response.errorCode) }
+                guard let payload = response.sessionState else { throw StateFetchError.missingState }
                 return .success(payload)
             } catch { return .failure(error) }
         }
@@ -1116,7 +1344,8 @@
                     // daemon-authoritative copy text for a `setSelection`/`readSelectionText` on a
                     // paired device's session, where the selection can extend beyond the mirror's
                     // viewport-clipped snapshot.
-                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message, selectionText: response.terminalSelectionText))
+                    controlResponse: TerminalControlResponse(
+                        ok: response.ok, message: response.message, selectionText: response.terminalSelectionText))
             case .resolveTerminalLink(let payload):
                 guard let terminalLink = payload.terminalLink?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLink.isEmpty else {
                     throw WorkspaceError.invalidArgument(message: "Missing terminal link to resolve.")
@@ -1215,6 +1444,13 @@
         private let detach: @Sendable () -> Void
 
         init(detach: @escaping @Sendable () -> Void) { self.detach = detach }
+
+        /// Releasing the handle detaches too, not only `stop()`. A subscriber torn down without stopping —
+        /// `RemoteGhosttySessionHost`'s `deinit` returns without stopping anything when it runs off the main
+        /// thread — would otherwise leave its callbacks in the model's fan-out for the life of the session,
+        /// so every payload would keep reaching a dead host and `listeners` could never fall empty
+        /// (issue #537). `detach` removes by listener id, so detaching twice is a no-op.
+        deinit { detach() }
 
         func stop() { detach() }
     }

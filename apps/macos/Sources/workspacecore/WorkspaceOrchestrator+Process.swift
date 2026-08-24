@@ -70,6 +70,10 @@ extension WorkspaceOrchestrator {
         return pids
     }
 
+    /// Brings every workspace's configured-process rows up to date with the processes actually running,
+    /// applying each exit's on-exit policy. Process-status work only: foreground coding-agent
+    /// classification is a separate reconcile with a single owner (`TerminalForegroundAgentReconciler`),
+    /// and running it from here as well would make every process-status pass repeat that whole scan.
     public func checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: Bool = false) throws -> Bool {
         var didUpdate = false
         let allProjects = try store.projects()
@@ -81,7 +85,6 @@ extension WorkspaceOrchestrator {
                 }
             }
         }
-        if try reconcileTerminalForegroundAgentClassifications() { didUpdate = true }
         return didUpdate
     }
 

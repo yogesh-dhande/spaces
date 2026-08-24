@@ -39,9 +39,7 @@ struct AutomationsListView: View {
             model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
     }
 
-    private var activeDetailRouteID: String? {
-        selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) ?? selectedSession?.id
-    }
+    private var activeDetailRouteID: String? { selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) ?? selectedSession?.id }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
@@ -61,7 +59,13 @@ struct AutomationsListView: View {
 
     private func automationRow(_ row: SpacesMobileAutomationRow) -> some View {
         let automation = row.automation
-        var detailParts = [SpacesMobileAutomations.triggerSummary(automation), SpacesMobileAutomations.nextFireDescription(automation)]
+        var detailParts = [
+            SpacesMobileAutomations.triggerSummary(automation),
+            // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across
+            // the 2-second overview poll instead of jittering (#540) — see
+            // `SpacesMobileAppModel.relativeTimeReference`.
+            SpacesMobileAutomations.nextFireDescription(automation, relativeTo: model.relativeTimeReference),
+        ]
         if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
             detailParts.append(workspaceName)
         }
@@ -105,8 +109,7 @@ struct AutomationRunsView: View {
     private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
 
     var body: some View {
-        content.navigationTitle(title).tint(Theme.accent).overviewPolling(
-            model: model, tab: .automations, activeDetailRouteID: selectedSession?.id)
+        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: selectedSession?.id)
     }
 
     @ViewBuilder private var content: some View {

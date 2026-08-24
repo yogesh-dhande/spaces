@@ -2805,6 +2805,45 @@ extension OrchestratorTests {
             XCTAssertTrue(error.localizedDescription.contains("Workspace not found"))
         }
     }
+
+    /// The process-status reconcile does not classify foreground coding agents. That scan reads every live
+    /// session against every workspace's rows, and it has exactly one owner (the daemon's
+    /// `TerminalForegroundAgentReconciler`), which observes the same runtime-state notification this
+    /// monitor does; running it from here as well would repeat the whole scan on every process event.
+    func testCheckAndUpdateProcessStatusesDoesNotClassifyForegroundAgents() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "process-status-foreground-agent"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            try markBuiltInSessionLive(sessionID: sessionID)
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            _ = try orchestrator.checkAndUpdateProcessStatuses()
+            XCTAssertTrue(
+                try store.agentWindows(workspaceID: workspace.id).isEmpty,
+                "the process-status reconcile must leave foreground classification to its own owner")
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).compactMap(\.label), ["Codex"])
+        }
+    }
 }
 
 /// Runs a one-shot mutation from an injected orchestrator closure, so a concurrent stop, restart, or

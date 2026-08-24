@@ -905,7 +905,6 @@ enum SpacesDaemonErrorClassification {
         portReservationService?.beginStop()
         #if os(macOS)
             processExitMonitor?.stop()
-            processExitMonitor = nil
             caddyRouterService?.beginStop()
         #endif
     }
@@ -920,6 +919,8 @@ enum SpacesDaemonErrorClassification {
         await portReservationService?.releaseStore()
         portReservationService = nil
         #if os(macOS)
+            await processExitMonitor?.releaseStore()
+            processExitMonitor = nil
             await caddyRouterService?.releaseStore()
             caddyRouterService = nil
         #endif
@@ -2797,8 +2798,8 @@ enum SpacesDaemonErrorClassification {
             lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
             childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
             launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-            attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
-            hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
+            attachmentSnapshot: ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+                .liveWireProjection(), hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
     }
 
     /// Off-main state read for the `.state` handler. Only the live in-process core lookup is a narrow
@@ -2889,7 +2890,8 @@ enum SpacesDaemonErrorClassification {
         -> GhosttyRemoteSessionStatePayload
     {
         let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
-        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let attachmentSnapshot = ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
+            .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,

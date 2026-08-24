@@ -138,13 +138,22 @@ final class CommandPalettePanel: NSPanel {
 
     func dismissCommandPaletteForBuiltInWindowNavigation() {
         if let panel = commandPalettePanel, panel.isVisible {
-            panel.makeFirstResponder(nil)
-            panel.orderOut(nil)
+            // Ordering out a key panel makes it resign key synchronously, and the resign observer
+            // runs the ordinary `dismissCommandPalette()`. Clearing the return targets first and
+            // holding the same dismissal guard keeps that reentry from restoring focus, which is
+            // the one thing this variant exists to skip.
             commandPaletteContextWorkspaceID = nil
             commandPaletteMainWindowVisibility = nil
             commandPaletteReturnTerminalSessionID = nil
             commandPaletteReturnCodePaneID = nil
             commandPaletteReturnApplicationProcessID = nil
+            isDismissingCommandPalette = true
+            panel.makeFirstResponder(nil)
+            panel.orderOut(nil)
+            isDismissingCommandPalette = false
+            // A dismissal in picker mode resolves the picker as cancelled, matching
+            // `dismissCommandPalette()`: its completion must be delivered exactly once.
+            takeSessionPickerContext()?.completion(nil)
         }
     }
 
@@ -752,10 +761,10 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let action = await self.host.executeWindowFocus(item.focusRequest)
+            let focused = await self.host.executeWindowFocus(item.focusRequest)
             guard self.pendingSelectionExecution?.id == execution.id else { return }
             self.pendingSelectionExecution = nil
-            guard let action else {
+            guard focused else {
                 if self.commandPalettePanel?.isVisible == true {
                     self.commandPaletteReturnTerminalSessionID = execution.returnTerminalSessionID
                     self.commandPaletteReturnCodePaneID = execution.returnCodePaneID
@@ -767,10 +776,10 @@ final class CommandPalettePanel: NSPanel {
                 }
                 return
             }
-            if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
+            // Every successful focus is remembered as the recent palette focus identity.
+            self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity)
             self.dismissCommandPaletteForBuiltInWindowNavigation()
             self.host.reloadData()
-            self.host.hideAfterSuccessfulExternalWindowAction(action)
         }
     }
 }

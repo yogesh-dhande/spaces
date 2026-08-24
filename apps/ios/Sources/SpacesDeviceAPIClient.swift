@@ -702,6 +702,36 @@ actor SpacesDeviceAPICommandChannel {
     private let transport: any SpacesDeviceAPIRequestTransport
     private let authToken: String?
     private let clientApp: SpacesDeviceClientApp
+    /// Whether a round trip is on the wire. The transport under this channel keeps ONE connection and the
+    /// wire is line framed with no request identifiers, so the reply to whatever was written last is the
+    /// next line to arrive and nothing tells two callers apart. Both this actor and the transport actor
+    /// suspend inside a send (the write, then the read), and an actor lets another call in at every
+    /// suspension, so without this gate a second caller writes its request while the first is still
+    /// waiting on its reply and each then reads the other's answer. That is not a rare interleaving now
+    /// that one viewer's attach, state reads, takeover, heartbeat, resize, and input all ride the same
+    /// channel: the foreground heartbeat and the state read behind it are issued together.
+    private var isRoundTripInFlight = false
+    /// Callers waiting their turn, resumed one at a time in arrival order — by `endRoundTrip` handing the
+    /// gate on, by that waiter's own timeout task giving up, or by the waiter's task being cancelled.
+    /// Each carries an id so any of the three can remove exactly its own entry rather than guessing which
+    /// continuation is still pending; removal is what keeps the resume to exactly one of the three.
+    private var roundTripWaiters: [RoundTripWaiter] = []
+    private var nextRoundTripWaiterID: UInt64 = 0
+
+    private struct RoundTripWaiter {
+        let id: UInt64
+        let continuation: CheckedContinuation<RoundTripTurnOutcome, Never>
+    }
+
+    /// What a suspended `waitForTurn` was resumed with. `endRoundTrip` hands the gate directly to the
+    /// head waiter rather than clearing `isRoundTripInFlight` and letting whoever wakes up race for it
+    /// again, so `.gateHandedOff` means the gate is already this waiter's: `beginRoundTrip` returns
+    /// without re-checking or re-setting the flag. `.giveUp` covers both a timeout and a cancellation:
+    /// neither owns the gate, so `beginRoundTrip` throws directly rather than looping.
+    private enum RoundTripTurnOutcome {
+        case gateHandedOff
+        case giveUp
+    }
 
     init(transport: any SpacesDeviceAPIRequestTransport, authToken: String?, clientApp: SpacesDeviceClientApp) {
         self.transport = transport
@@ -711,12 +741,103 @@ actor SpacesDeviceAPICommandChannel {
 
     func close() async { await transport.close() }
 
+    /// `timeout` is a deadline over the whole round trip, not just the time on the wire: it also bounds
+    /// the wait for this channel's gate, so a fast request queued behind a slow one cannot silently
+    /// inherit the slow one's duration (a 3 s detach queued behind a 12 s state read must not
+    /// take 15 s). `beginRoundTrip` throws `requestTimedOut` without ever acquiring the gate if the
+    /// wait alone exhausts `timeout`; only a caller that acquires the gate reaches the transport, and it
+    /// does so with whatever of `timeout` the wait left, so the transport's own budget cannot be inflated
+    /// by time this call already spent waiting.
     func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
         var request = request
         if request.authToken == nil {
             request = SpacesDeviceAPIRequest(command: request.command, authToken: authToken, clientApp: request.clientApp ?? clientApp)
         }
-        return try await transport.send(request: request, timeout: timeout)
+        let waitStartedAt = ContinuousClock.now
+        try await beginRoundTrip(timeout: timeout)
+        defer { endRoundTrip() }
+        let remainingTimeout = timeout - (ContinuousClock.now - waitStartedAt)
+        // The gate can be handed over just as the deadline expires. Sending anyway would give the
+        // transport a zero budget it can still write a mutating command inside, leaving the caller
+        // reporting a timeout for a command that executed; an exhausted deadline fails before the send.
+        guard remainingTimeout > .zero else { throw SpacesDeviceAPIClientError.requestTimedOut }
+        // A failure here leaves the transport to drop its connection and the next caller to redial, which
+        // is why the gate is released for a throwing send exactly as for a successful one.
+        return try await transport.send(request: request, timeout: remainingTimeout)
+    }
+
+    private func beginRoundTrip(timeout: Duration) async throws {
+        let deadline = ContinuousClock.now + timeout
+        // A `while` loop rather than a single wait: resuming a waiter and setting `isRoundTripInFlight`
+        // back to true are two separate actor turns, so a fresh caller can slip in and reacquire the gate
+        // between them. Looping re-checks the gate rather than trusting a stale "it's your turn" signal —
+        // except when the turn arrives as an explicit handoff (see below), where there is nothing to
+        // re-check: the gate is already this caller's.
+        while isRoundTripInFlight {
+            let remaining = deadline - ContinuousClock.now
+            guard remaining > .zero else { throw SpacesDeviceAPIClientError.requestTimedOut }
+            switch await waitForTurn(timeout: remaining) {
+            case .gateHandedOff:
+                // `endRoundTrip` kept `isRoundTripInFlight` true and resumed this waiter as the gate's
+                // new owner. Returning here (rather than falling through to `isRoundTripInFlight = true`
+                // below and looping again) is what makes the handoff a direct pass rather than a
+                // re-race: a fresh caller cannot slip in ahead of a waiter that already owns the gate.
+                return
+            case .giveUp:
+                if Task.isCancelled { throw CancellationError() }
+                throw SpacesDeviceAPIClientError.requestTimedOut
+            }
+        }
+        isRoundTripInFlight = true
+    }
+
+    /// Suspends until either this waiter is handed the gate (`endRoundTrip` resumes it with
+    /// `.gateHandedOff`), `timeout` elapses (its own timeout task resumes it with `.giveUp`), or the
+    /// calling task is cancelled (the cancellation handler resumes it with `.giveUp`). Whichever of the
+    /// three runs first removes the waiter from `roundTripWaiters` before resuming it — that removal is
+    /// what arbitrates among them, so the continuation is resumed exactly once regardless of which side
+    /// wins the race.
+    private func waitForTurn(timeout: Duration) async -> RoundTripTurnOutcome {
+        let id = nextRoundTripWaiterID
+        nextRoundTripWaiterID += 1
+        let channel = self
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<RoundTripTurnOutcome, Never>) in
+                roundTripWaiters.append(RoundTripWaiter(id: id, continuation: continuation))
+                Task.detached {
+                    try? await Task.sleep(for: timeout)
+                    await channel.timeoutRoundTripWaiter(id: id)
+                }
+            }
+        } onCancel: {
+            Task.detached { await channel.cancelRoundTripWaiter(id: id) }
+        }
+    }
+
+    private func timeoutRoundTripWaiter(id: UInt64) {
+        guard let index = roundTripWaiters.firstIndex(where: { $0.id == id }) else { return }
+        roundTripWaiters.remove(at: index).continuation.resume(returning: .giveUp)
+    }
+
+    /// A cancelled caller must not stay queued until its own timeout: this is the other end of
+    /// `waitForTurn`'s `withTaskCancellationHandler`. Removal from `roundTripWaiters` is what makes this
+    /// safe against the timeout task or `endRoundTrip` also racing for the same waiter — whichever finds
+    /// the id first is the one that resumes it, and this is a no-op for a waiter already taken by either.
+    private func cancelRoundTripWaiter(id: UInt64) {
+        guard let index = roundTripWaiters.firstIndex(where: { $0.id == id }) else { return }
+        roundTripWaiters.remove(at: index).continuation.resume(returning: .giveUp)
+    }
+
+    private func endRoundTrip() {
+        guard !roundTripWaiters.isEmpty else {
+            isRoundTripInFlight = false
+            return
+        }
+        // Hand the gate directly to the head waiter instead of clearing `isRoundTripInFlight` first: a
+        // caller that has been queued the longest must not lose the gate to a fresh caller that happens
+        // to notice it free first. `isRoundTripInFlight` stays true across the handoff; the resumed
+        // waiter already owns it (see `beginRoundTrip`'s `.gateHandedOff` case) and never re-sets it.
+        roundTripWaiters.removeFirst().continuation.resume(returning: .gateHandedOff)
     }
 }
 
@@ -1143,7 +1264,17 @@ private final class StreamSubscription: @unchecked Sendable {
             case .ready:
                 connectionReady = true
                 sendInitialRequest()
-            case .failed(let error): lifecycle.finish(error: pinRejection.error ?? error)
+            case .failed(let error):
+                lifecycle.finish(error: pinRejection.error ?? error)
+                // Cancel, like every other way a stream ends here (the initial-event timeout, a send
+                // failure, a decode failure, a receive error, a clean close). A connection holds its
+                // handler blocks until it is cancelled, and those blocks hold this subscription, its
+                // buffer, and the per-stream `DispatchQueue` — so a termination that only reports the drop
+                // orphans all of it. Network.framework reaches `.failed` rarely (an unreachable endpoint,
+                // a refused port, and a rejected pin all sit in `.waiting` instead, and a connection that
+                // dies after `.ready` surfaces through the outstanding receive), which is exactly why this
+                // branch must not be the one that forgets: nothing downstream would notice.
+                connection.cancel()
             case .cancelled: lifecycle.finish(error: nil)
             default: break
             }

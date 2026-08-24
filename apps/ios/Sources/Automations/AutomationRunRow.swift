@@ -60,15 +60,20 @@ struct AutomationRunRowsList: View {
     private func runRow(_ row: SpacesMobileAutomationRunRow) -> some View {
         let run = row.run
         var detailParts = [SpacesMobileAutomations.runTriggerLabel(run)]
-        if let started = SpacesMobileAutomations.startedDescription(run) { detailParts.append(started) }
-        if let duration = SpacesMobileAutomations.durationDescription(run) { detailParts.append(duration) }
+        // Both read the shared 30-second label clock rather than `Date()`, so this text stays put across
+        // the 2-second overview poll instead of jittering (#540) — see
+        // `SpacesMobileAppModel.relativeTimeReference`. `startedDescription` clamps internally against a
+        // reference that trails a just-started run; `durationDescription`'s own `max(0, ...)` already
+        // covers the same case for the live-running duration it renders.
+        if let started = SpacesMobileAutomations.startedDescription(run, relativeTo: model.relativeTimeReference) { detailParts.append(started) }
+        if let duration = SpacesMobileAutomations.durationDescription(run, relativeTo: model.relativeTimeReference) { detailParts.append(duration) }
         if let exitCode = run.exitCode { detailParts.append("exit \(exitCode)") }
         if run.status == "skipped", let reason = run.skipReason { detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))") }
 
         let isNavigable = SpacesMobileAutomations.runIsNavigable(run)
         let band = BandRow(
-            dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
-            title: title(run), detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
+            dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"), title: title(run),
+            detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
         ) {
             if row.isRunning {
                 Button {
@@ -97,7 +102,9 @@ struct AutomationRunRowsList: View {
                 Button {
                     guard let session = SpacesMobileAutomations.runSession(for: run, overview: model.overview) else { return }
                     onOpenSession(session)
-                } label: { band }.buttonStyle(.plain)
+                } label: {
+                    band
+                }.buttonStyle(.plain)
             } else {
                 band
             }
@@ -124,6 +131,8 @@ struct AutomationRunRowsList: View {
         return Button {
             guard let session = SpacesMobileAutomations.agentSession(for: agent, overview: model.overview) else { return }
             onOpenSession(session)
-        } label: { chip }.buttonStyle(.plain)
+        } label: {
+            chip
+        }.buttonStyle(.plain)
     }
 }

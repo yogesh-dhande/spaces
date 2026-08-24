@@ -183,7 +183,15 @@
         /// core, so they can never race one. A fresh core (daemon restart, exec-in-place handoff) reseeds from
         /// the mirror. Termination's detach-all is durable-only: the control server is gone by then, so nothing
         /// reads this snapshot again.
-        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { didSet { cachedLiveWireAttachmentSnapshot = nil } }
+        /// `cachedAttachmentSnapshot` reduced to what a subscriber is sent, memoized so a session's attach
+        /// history is scanned once per attachment change instead of once per broadcast. The broadcast path
+        /// runs on the shared `TerminalEngineActor`, where the scan would otherwise grow with the session's
+        /// lifetime attach count on every output tick — the very growth this projection exists to keep off
+        /// the wire. Invalidated by `cachedAttachmentSnapshot`'s `didSet` rather than by each of its writers,
+        /// so no mutation path can forget to.
+        private var cachedLiveWireAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+
         /// Attachment-mutation transforms acknowledged to a caller while no base snapshot was available to
         /// apply them to (cache empty AND the reseeding disk read also failed). Replayed, in order, by
         /// `seedAttachmentSnapshot` the next time a reseed reads successfully — including a reseed triggered
@@ -381,8 +389,8 @@
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(),
+                hasFinalRender: false)
         }
 
         /// The catalog entry built entirely from this core's in-memory state, with no DB read. Serves the
@@ -395,9 +403,8 @@
         public func inMemoryCatalogEntry(fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
             guard let runtimeState = lastRuntimeState else { return nil }
             return TerminalSessionCatalogEntry(
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), paths: paths,
-                isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(),
+                paths: paths, isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
                 isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
 
@@ -878,8 +885,7 @@
             // decline the touch rather than manufacture an attached-or-not answer from unknown state. The
             // caller reports this exactly as it would a genuinely unattached client; the remote client's own
             // heartbeat retry recovers it once a later reseed succeeds.
-            guard let snapshot = currentAttachmentSnapshot(),
-                snapshot.clients.contains(where: { $0.id == clientID && $0.disconnectedAt == nil })
+            guard let snapshot = currentAttachmentSnapshot(), snapshot.clients.contains(where: { $0.id == clientID && $0.disconnectedAt == nil })
             else { return false }
             cachedAttachmentSnapshot = snapshot.applyingClientLeaseTouch(clientID: clientID, leaseRefreshedAt: touchedAt)
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: now) else { return true }
@@ -1236,9 +1242,7 @@
             guard let startColumn = request.selectionStartColumn, let startRow = request.selectionStartRow,
                 let endColumn = request.selectionEndColumn, let endRow = request.selectionEndRow
             else { return TerminalControlResponse(ok: false, message: "Missing selection endpoints.", errorCode: .invalidArgument) }
-            guard
-                spaces_ghostty_vt_session_set_selection(
-                    vtSession, startColumn, startRow, endColumn, endRow, request.selectionRectangle ?? false)
+            guard spaces_ghostty_vt_session_set_selection(vtSession, startColumn, startRow, endColumn, endRow, request.selectionRectangle ?? false)
             else { return TerminalControlResponse(ok: false, message: "Unable to set terminal selection.") }
             let text = selectionText(session: vtSession)
             // A selection mutation writes no output, so nothing else advances the screen revision.
@@ -1306,6 +1310,35 @@
             if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
             seedAttachmentSnapshot()
             return cachedAttachmentSnapshot
+        }
+
+        /// The attachment snapshot a broadcast carries: `currentAttachmentSnapshot()` reduced by
+        /// `TerminalSessionAttachmentSnapshot.liveWireProjection`, served from `cachedLiveWireAttachmentSnapshot`.
+        private func currentLiveWireAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
+            if let cachedLiveWireAttachmentSnapshot { return cachedLiveWireAttachmentSnapshot }
+            // Read the full snapshot first: a cache miss there assigns `cachedAttachmentSnapshot`, whose
+            // `didSet` clears the derived cache, so the projection must be stored after that call returns.
+            guard let snapshot = currentAttachmentSnapshot() else { return nil }
+            let projection = snapshot.liveWireProjection()
+            cachedLiveWireAttachmentSnapshot = projection
+            return projection
+        }
+
+        /// The broadcast projection of whatever attachment state is already in memory, WITHOUT the disk
+        /// reseed `currentLiveWireAttachmentSnapshot()` performs. The in-memory summary and catalog entry
+        /// exist to describe a session whose lifecycle writes have not committed yet, so a DB read there
+        /// would both defeat their purpose and put a SQLite open on the overview's per-session rebuild.
+        private func inMemoryLiveWireAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot {
+            if let cachedLiveWireAttachmentSnapshot { return cachedLiveWireAttachmentSnapshot }
+            // An empty snapshot for a nil cache is deliberately NOT memoized: storing it would make
+            // `currentLiveWireAttachmentSnapshot()` serve "nobody is attached" from the derived cache and
+            // skip the disk reseed that would have told it otherwise. Populating from a real snapshot is
+            // safe and is what keeps a lease touch (every keystroke clears the derived cache) from making
+            // each later overview rebuild re-filter the session's whole attach history.
+            guard let cachedAttachmentSnapshot else { return TerminalSessionAttachmentSnapshot() }
+            let projection = cachedAttachmentSnapshot.liveWireProjection()
+            cachedLiveWireAttachmentSnapshot = projection
+            return projection
         }
 
         /// Applies an attachment mutation to the authoritative in-memory snapshot. A nil snapshot means the
@@ -1843,9 +1876,8 @@
             let paths = paths
             persistence.enqueueLifecycleWrite(
                 "agent_signal",
-                write: { databasePath in
-                    try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath)
-                }, onFailure: {})
+                write: { databasePath in try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath) },
+                onFailure: {})
         }
 
         /// Advances the in-memory authoritative state immediately (so broadcasts show live truth regardless of
@@ -1915,7 +1947,9 @@
             // `attachmentSnapshot` on the wire is itself optional, and a subscriber merging updates keeps its
             // last-known attachment state on a nil rather than being told nobody is attached (see
             // `GhosttyRemoteSessionState.merged(with:)`).
-            let attachmentSnapshot = currentAttachmentSnapshot()
+            // Broadcasts carry live rows only; the core keeps the full history for its own gating.
+            // See `TerminalSessionAttachmentSnapshot.liveWireProjection`.
+            let attachmentSnapshot = currentLiveWireAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
             let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
@@ -2059,8 +2093,7 @@
         /// frame is exporting (see `GhosttyTerminalSelectionProjection`). When the selection is present but
         /// its tracked endpoint pins were garbaged by a scrollback trim, clears it and defers a broadcast
         /// (see `pendingSelectionGarbagePinBroadcast`) rather than reporting stale, meaningless coordinates.
-        private func resolvedSelection(session: OpaquePointer, viewportRowOffset: UInt32, columns: Int, rows: Int) -> GhosttyTerminalSelectionRange?
-        {
+        private func resolvedSelection(session: OpaquePointer, viewportRowOffset: UInt32, columns: Int, rows: Int) -> GhosttyTerminalSelectionRange? {
             var state = SpacesGhosttyVtSelectionState()
             guard spaces_ghostty_vt_session_selection_state(session, &state), state.present else { return nil }
             guard state.valid else {

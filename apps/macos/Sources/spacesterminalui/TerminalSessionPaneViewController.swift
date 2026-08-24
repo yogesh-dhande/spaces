@@ -1062,30 +1062,30 @@ private final class NotificationObserverBag: @unchecked Sendable {
             NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_inactive", requestWindowFocus: false, focused: false) }
             })
+        // Every observer below is scoped to this pane's session. `NotificationCenter` routes on the
+        // scope object the post carries, so these blocks are never called out to for another
+        // session's payload and need no session check of their own.
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main) {
-                [weak self] notification in
-                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            TerminalSessionNotification.addObserver(forName: .spacesTerminalAttachmentStateDidChange, sessionID: sessionID, queue: .main) {
+                [weak self] in
                 Task { @MainActor [weak self] in
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    guard let self else { return }
                     self.refreshNow()
                 }
             })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main) {
-                [weak self] notification in
-                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            TerminalSessionNotification.addObserver(forName: .spacesTerminalSessionMetadataDidChange, sessionID: sessionID, queue: .main) {
+                [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    guard let self else { return }
                     self.refreshNow()
                 }
             })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) {
-                [weak self] notification in
-                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            TerminalSessionNotification.addObserver(forName: .spacesTerminalRuntimeStateDidChange, sessionID: sessionID, queue: .main) {
+                [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    guard let self else { return }
                     self.refreshNow()
                 }
             })
@@ -1098,11 +1098,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
         // presentation from state that has not changed and queue an attach against the very device
         // this notification says is unreachable.
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, object: nil, queue: .main) {
-                [weak self] notification in
-                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            TerminalSessionNotification.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID, queue: .main) {
+                [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    guard let self else { return }
                     self.refreshRuntimeStateFromProvider()
                     self.updatePersistentBanner(
                         runtimeState: self.lastObservedRuntimeState, isStateStreamDisconnected: self.isStateStreamDisconnected)
@@ -1110,10 +1109,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 }
             })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) { [weak self] notification in
-                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            TerminalSessionNotification.addObserver(forName: .spacesTerminalOutputDidChange, sessionID: sessionID, queue: .main) { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    guard let self else { return }
                     // Screen content changed. Refresh only when that can change what this pane
                     // presents: typing, scrolling, and resizing must stay off the refresh path both
                     // for the pane whose mirror painted them and for a pane parked on the takeover

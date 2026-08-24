@@ -231,6 +231,53 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
         XCTAssertTrue(SpacesDeviceAPIDefaults.developmentPortRange.contains(assigned))
     }
 
+    /// A profile root that actually lives in the shared dev-profiles container (`.spaces-dev/profiles/spaces/<name>`)
+    /// still finds ports its siblings under that same container have claimed.
+    func testPortsClaimedBySiblingProfilesScansSiblingsInsideTheSharedContainer() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let containerRoot = base.appendingPathComponent(".spaces-dev/profiles/spaces", isDirectory: true)
+        let profileA = containerRoot.appendingPathComponent("profile-a", isDirectory: true)
+        let profileB = containerRoot.appendingPathComponent("profile-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: profileA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: profileB, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let siblingPort = SpacesDeviceAPISettingsStore.assignedDevelopmentPort(profileRoot: profileA.path, claimedPorts: [])
+        try writeSettings(port: siblingPort, atProfileRoot: profileB)
+
+        let claimed = SpacesDeviceAPISettingsStore.portsClaimedBySiblingProfiles(profileRoot: profileA.path)
+
+        XCTAssertEqual(claimed, [siblingPort], "A sibling under the shared container must still be found.")
+    }
+
+    /// A profile root whose parent is NOT the shared dev-profiles container — an ephemeral `SPACES_DB_PATH`
+    /// profile, whose parent is an arbitrary directory such as the system temp dir — must never be scanned:
+    /// enumerating an arbitrary directory's entries (which on the reporting machine held 129k unrelated
+    /// temp-dir siblings) is what made first daemon start take ~21s and timed out e2e's 15s socket wait.
+    func testPortsClaimedBySiblingProfilesSkipsNonContainerProfilesEntirely() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let arbitraryParent = base.appendingPathComponent("arbitrary-parent", isDirectory: true)
+        let profile = arbitraryParent.appendingPathComponent("profile", isDirectory: true)
+        let otherEntry = arbitraryParent.appendingPathComponent("other-entry", isDirectory: true)
+        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: otherEntry, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let derivedPort = SpacesDeviceAPISettingsStore.assignedDevelopmentPort(profileRoot: profile.path, claimedPorts: [])
+        try writeSettings(port: derivedPort, atProfileRoot: otherEntry)
+
+        let claimed = SpacesDeviceAPISettingsStore.portsClaimedBySiblingProfiles(profileRoot: profile.path)
+
+        XCTAssertTrue(claimed.isEmpty, "A profile outside the shared dev-profiles container must not be scanned at all.")
+    }
+
+    private func writeSettings(port: Int, atProfileRoot profileRoot: URL) throws {
+        let settingsURL = profileRoot.appendingPathComponent("runtime/terminal/device-api.json")
+        try FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        try encoder.encode(SpacesDeviceAPISettings(host: SpacesDeviceAPIDefaults.host, port: port)).write(to: settingsURL)
+    }
+
     private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

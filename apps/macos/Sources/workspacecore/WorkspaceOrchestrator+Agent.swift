@@ -6,6 +6,10 @@ extension WorkspaceOrchestrator {
     @discardableResult public func reconcileTerminalForegroundAgentClassifications() throws -> Bool {
         let liveSessions = try TerminalSessionCatalog.listLiveSessions()
         let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        // Built once, at pass start, and read by every session below. A row this pass inserts for session
+        // A is deliberately not in it: the only rows a later session's lookup must see are the ones that
+        // decide session B's own owner, and no pass ever makes one session the owner of another's row.
+        let ownershipIndex = try builtInTerminalOwnershipIndex()
         var didMutate = false
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
@@ -18,7 +22,7 @@ extension WorkspaceOrchestrator {
             // and the exit block would name an anonymous "coding agent" for an agent listings had
             // identified all along.
             if try refreshPersistedDetectedAgentKind(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
-            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+            let ownership = builtInTerminalSessionOwnership(sessionID: sessionID, index: ownershipIndex)
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
@@ -50,7 +54,7 @@ extension WorkspaceOrchestrator {
                 didMutate = true
             }
         }
-        if try reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
+        if try reconcileExitedSessionBackedAgentRows(index: ownershipIndex, excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
     }
 
@@ -109,15 +113,14 @@ extension WorkspaceOrchestrator {
         let now = nowISO8601()
         let agentID = adHocDetectedAgentID(sessionID: sessionID)
         // Exclude this row's own deterministic id from both the label scan and the validation snapshot.
-        // Overlapping reconcile passes (TerminalForegroundAgentReconciler and ProcessExitMonitorService, both
-        // detached) can each observe no existing row and both call this for the same session; the row id is
-        // deterministic, so the later pass's upsert must never treat the earlier pass's already-inserted row
-        // — carrying the SAME detected label — as a name conflict with itself and rename it "-2".
+        // Passes are serialized (one in flight plus one trailing re-run), so a re-run reaches this call for
+        // a session whose row the previous pass just inserted; the row id is deterministic, so this upsert
+        // must never treat that row — carrying the SAME detected label — as a name conflict with itself and
+        // rename it "-2".
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
         // Detection only ever creates or refreshes the label/command/runtime-target binding; it never owns
-        // lifecycle state. Two overlapping reconciler passes (TerminalForegroundAgentReconciler and
-        // ProcessExitMonitorService) can both observe no existing row and both reach this call for the same
-        // deterministic id, and a hook signal can commit newer status/session-key state between this pass's
+        // lifecycle state. A trailing re-run reaches this call for the same deterministic id the pass before
+        // it inserted, and a hook signal can commit newer status/session-key state between this pass's
         // reads and its upsert. So the record carries only fresh initial lifecycle values, and preserving
         // any already-committed status, session key, and lifecycle timestamps is enforced
         // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
@@ -227,34 +230,34 @@ extension WorkspaceOrchestrator {
     /// agent sitting `.done` between turns has no exit event yet, so it is not treated as finalized — but
     /// the liveness check below leaves it untouched while its session is alive; only once its terminal has
     /// ended does this sweep finalize it and deliver the notice.
-    @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
+    @discardableResult func reconcileExitedSessionBackedAgentRows(
+        index: BuiltInTerminalOwnershipIndex, excludingLiveSessionIDs liveSessionIDs: Set<String>
+    ) throws -> Bool {
         var didMutate = false
-        for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id) {
-                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
-                    // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
-                    // recorded on a previous pass). A live turn-complete `.done` row is NOT finalized: a
-                    // hookless codex/opencode agent that completed a turn and then had its terminal closed
-                    // sits `.done` with no exit event, and this sweep must finalize it (delivering the
-                    // exited notice) rather than leaving it stale forever. A still-live `.done` row is
-                    // filtered by the liveness and runtime-state checks below.
-                    if try agentRowIsFinalized(agent) { continue }
-                    guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
-                    // A `.shell`-launch-kind row is only ever an ad-hoc foreground-detected agent, which
-                    // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned session.
-                    // Any other launch kind is not a coding agent and is left alone.
-                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID),
-                        launchConfiguration.kind == .agent || launchConfiguration.kind == .shell
-                    else { continue }
-                    // Finalize only on unambiguous evidence the session ended: a present runtime state that
-                    // is non-interactive. A missing runtime-state file is ambiguous (e.g. a just-launched
-                    // session before its first write) and is left for a later sweep.
-                    guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
-                        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
-                    else { continue }
-                    try finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
-                    didMutate = true
-                }
+        for workspaceID in index.workspaceIDs {
+            for agent in index.agentWindows(workspaceID: workspaceID) where agent.provider == .spaces {
+                // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
+                // recorded on a previous pass). A live turn-complete `.done` row is NOT finalized: a
+                // hookless codex/opencode agent that completed a turn and then had its terminal closed
+                // sits `.done` with no exit event, and this sweep must finalize it (delivering the
+                // exited notice) rather than leaving it stale forever. A still-live `.done` row is
+                // filtered by the liveness and runtime-state checks below.
+                if try agentRowIsFinalized(agent) { continue }
+                guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
+                // A `.shell`-launch-kind row is only ever an ad-hoc foreground-detected agent, which
+                // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned session.
+                // Any other launch kind is not a coding agent and is left alone.
+                guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID),
+                    launchConfiguration.kind == .agent || launchConfiguration.kind == .shell
+                else { continue }
+                // Finalize only on unambiguous evidence the session ended: a present runtime state that
+                // is non-interactive. A missing runtime-state file is ambiguous (e.g. a just-launched
+                // session before its first write) and is left for a later sweep.
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
+                else { continue }
+                try finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+                didMutate = true
             }
         }
         return didMutate

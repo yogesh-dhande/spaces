@@ -180,15 +180,13 @@ struct TerminalDetailView: View {
                 anchor: placement.anchor, pillSize: selectionCopyPillSize, gap: Self.selectionCopyPillGap, contentOrigin: placement.contentOrigin,
                 gridSize: placement.gridSize)
             TerminalSelectionCopyPill(isCopied: isSelectionCopyPillShowingCopied) { performCopySelection() }.background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: SelectionCopyPillSizePreferenceKey.self, value: proxy.size)
-                }
+                GeometryReader { proxy in Color.clear.preference(key: SelectionCopyPillSizePreferenceKey.self, value: proxy.size) }
             ).onPreferenceChange(SelectionCopyPillSizePreferenceKey.self) { selectionCopyPillSize = $0 }.offset(x: origin.x, y: origin.y)
-            // The anchor is a point in the terminal view's own top-leading coordinate space, so the pill
-            // must start from the stack's top-leading corner before the offset places it; the enclosing
-            // ZStack's default center alignment would otherwise shift the whole placement by half the
-            // stack minus half the pill.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // The anchor is a point in the terminal view's own top-leading coordinate space, so the pill
+                // must start from the stack's top-leading corner before the offset places it; the enclosing
+                // ZStack's default center alignment would otherwise shift the whole placement by half the
+                // stack minus half the pill.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -444,12 +442,21 @@ struct TerminalDetailView: View {
             .accessibilityIdentifier("terminal.previewStatus")
     }
 
-    /// Change identity for the e2e dump task, and nothing else. Building it reads seventeen model
+    /// Change identity for the e2e dump task, and nothing else. Building it reads twenty model
     /// properties and joins them, on every body evaluation of a view that re-evaluates at the session's
     /// flush rate; `writeE2EDumpIfNeeded` is gated on the same condition, so outside an e2e run the key
     /// collapses to a constant and the task never re-runs.
     private var e2eDumpStateKey: String {
         guard shouldCaptureRenderedText else { return "" }
+        // Broken out of the array literal below: folding either back in makes the whole expression too
+        // complex for the type checker to solve in reasonable time.
+        let appliedFrameSize: String = model.ownerRenderEpoch?.bootstrapSnapshot.map { "\($0.columns)x\($0.rows)" } ?? ""
+        // The viewport can change (a resize round trip settling, a keyboard transition) with neither the
+        // owner's applied frame nor the rendered text moving — dropped columns can be blank, and a
+        // narrower grid can still show the same visible characters. `showsCroppedHostGrid` in the e2e UI
+        // tests compares the applied frame against this viewport, so the dump has to refresh on it too, or
+        // that comparison runs against a value this task never updated.
+        let viewportSize: String = "\(model.viewportColumns.map(String.init) ?? "?")x\(model.viewportRows.map(String.init) ?? "?")"
         return [
             model.title, model.renderStateKey, model.isOwner ? "owner" : "viewer", model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady", model.isBusy ? "busy" : "idle",
@@ -457,7 +464,7 @@ struct TerminalDetailView: View {
             model.isPreparingInput ? "preparing" : "prepared", model.isInputSurfaceReady ? "inputReady" : "inputPending", model.errorMessage ?? "",
             model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle", model.linkPreview?.title ?? "",
             model.linkPreview?.kind?.rawValue ?? "", model.linkPreview?.content.caseName ?? "", model.linkPreviewErrorMessage ?? "",
-            model.linkNotice ?? "", renderedText,
+            model.linkNotice ?? "", renderedText, appliedFrameSize, viewportSize,
         ].joined(separator: "|")
     }
 
@@ -472,7 +479,8 @@ struct TerminalDetailView: View {
                 isInputSurfaceReady: model.isInputSurfaceReady, viewportColumns: model.viewportColumns, viewportRows: model.viewportRows,
                 lastSentResizeColumns: model.lastSentResizeColumns, lastSentResizeRows: model.lastSentResizeRows,
                 runtimeColumns: model.runtimeColumns, runtimeRows: model.runtimeRows, snapshotColumns: model.snapshotColumns,
-                snapshotRows: model.snapshotRows, snapshotText: model.snapshotText, errorMessage: model.errorMessage,
+                snapshotRows: model.snapshotRows, appliedFrameColumns: model.ownerRenderEpoch?.bootstrapSnapshot?.columns,
+                appliedFrameRows: model.ownerRenderEpoch?.bootstrapSnapshot?.rows, snapshotText: model.snapshotText, errorMessage: model.errorMessage,
                 isPreparingLinkPreview: model.isPreparingLinkPreview, linkPreviewTitle: model.linkPreview?.title,
                 linkPreviewArtifactKind: model.linkPreview?.kind, linkPreviewContentKind: model.linkPreview?.content.caseName,
                 linkPreviewErrorMessage: model.linkPreviewErrorMessage, linkNotice: model.linkNotice, visibleText: model.visibleText,
