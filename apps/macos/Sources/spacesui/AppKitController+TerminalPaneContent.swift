@@ -51,7 +51,7 @@ extension AppKitController {
             switch result {
             case .terminal(let request): self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
             case .codePane(let deviceID, let paneWorkspaceID, let mode):
-                self.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: paneWorkspaceID, initialMode: mode, in: scope)
+                self.panelCoordinator.openOrReuseCodePaneInNewTab(deviceID: deviceID, workspaceID: paneWorkspaceID, mode: mode, in: scope)
             }
         }
     }

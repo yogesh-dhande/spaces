@@ -681,10 +681,13 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// When a workspace's own panel already holds a code pane for it and a `.globalWindow` monitor is
-        /// also retargeted onto the same workspace, `openOrFocusCodePane` still prefers the workspace
-        /// panel's pane (`scopeSortKey` sorts `.workspace` before `.globalWindow`) — a monitor existing
-        /// alongside the workspace's own pane must not change which one "Review changes" focuses.
-        @Test func openOrFocusCodePanePrefersTheWorkspacesOwnPanelPaneOverAGlobalWindowMonitor() throws {
+        /// also open — already showing that same workspace — `openOrFocusCodePane` prefers the global
+        /// monitor over the workspace's own pane (`resolveCodePaneForNavigation`'s `.reuseGlobal` case
+        /// wins before `.focusLocal` is even considered): the "one global pane, one local pane per
+        /// workspace" cap is enforced by always routing a gesture to the global pane first, not by which
+        /// scope sorts first. Since the monitor already targets `workspace-1`, no retarget is needed —
+        /// the same controller instance is reused, only focused.
+        @Test func openOrFocusCodePanePrefersAGlobalWindowMonitorOverTheWorkspacesOwnPanelPane() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
@@ -698,20 +701,148 @@ extension ProcessProfileEnvironmentSuites {
             let globalLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
+            let monitorContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
 
             let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
 
             #expect(focused)
             #expect(
-                controller.panelCoordinator.layout(for: workspaceScope).focusedPaneID == "owned",
-                "the workspace's own panel pane is focused, not the global-window monitor")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
-                "no duplicate pane is installed in the workspace's own panel")
+                controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1")).focusedPaneID == "monitor",
+                "the global-window monitor is focused, not the workspace's own panel pane")
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1"))).map(\.id) == [
                     "monitor"
-                ], "the global-window monitor is left exactly as it was")
+                ], "no duplicate pane is installed in the global panel window")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
+                "the workspace's own panel pane is left exactly as it was")
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContentBefore as AnyObject?),
+                "reusing a monitor already showing the gesture's workspace does not retarget it — same controller instance")
+        }
+
+        /// Reusing a global monitor for a gesture whose workspace it does not currently show retargets it
+        /// — closing and reinstalling on the same pane id (`retargetCodePane`, shared with
+        /// `retargetGlobalWindowCodePanes`) — and, unlike that sidebar-follow path (always `.diff`), the
+        /// fresh controller lands directly in the navigation gesture's own requested mode.
+        @Test func openOrFocusCodePaneRetargetsAGlobalMonitorAndAppliesTheGesturesMode() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let originalContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+
+            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
+
+            #expect(focused)
+            let retargetedContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "the monitor's pane id keeps a live controller after retargeting")
+            #expect(
+                (retargetedContent as AnyObject?) !== (originalContent as AnyObject?), "retarget installs a fresh controller instance")
+            #expect(retargetedContent.workspaceID == "workspace-1", "the new controller is scoped to the gesture's workspace")
+            #expect(retargetedContent.initialMode == .editor, "the fresh controller lands directly in the gesture's mode, not always diff")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the layout's pane descriptor moves to the gesture's workspace")
+            #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "monitor", "the retargeted monitor is focused")
+        }
+
+        /// Reusing a global monitor already showing the gesture's workspace does not retarget it (same
+        /// controller instance, per the inverted-priority test above), but its mode still switches to
+        /// match the gesture: `requestMode`'s live-push path pushes a `spaces:setMode` script into the
+        /// page — the same push a toolbar click's echo would confirm — rather than silently dropping the
+        /// gesture's mode just because a pane already happened to be open.
+        @Test func openOrFocusCodePaneReusingAnAlreadyTargetedGlobalMonitorSwitchesItsModeWithoutRetargeting() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let monitorContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController)
+            monitorContent.activate(focus: false)
+            let evaluator = RecordingCodePaneScriptEvaluator()
+            monitorContent.scriptEvaluator = evaluator
+            monitorContent.handleReady()
+
+            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
+
+            #expect(focused)
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContent as AnyObject?),
+                "reusing a monitor already on the gesture's workspace does not retarget it")
+            #expect(
+                evaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") && $0.contains(#""mode":"editor""#) },
+                "the gesture's mode is pushed into the already-live pane instead of being dropped")
+        }
+
+        /// A workspace's own local pane is reused when no global monitor is open anywhere, and its mode
+        /// switches to match the gesture — the same "focus, then apply mode" shape `reuseGlobalCodePane`
+        /// follows for a global monitor above.
+        @Test func openOrFocusCodePaneReusesTheWorkspacesOwnPaneAndAppliesTheGesturesModeWhenNoGlobalMonitorIsOpen() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            let ownedContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "owned") as? CodePaneContentController)
+            ownedContent.activate(focus: false)
+            let evaluator = RecordingCodePaneScriptEvaluator()
+            ownedContent.scriptEvaluator = evaluator
+            ownedContent.handleReady()
+
+            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
+
+            #expect(focused)
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "owned") as AnyObject?) === (ownedContent as AnyObject?),
+                "the workspace's own pane is reused, not recreated")
+            #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "owned", "the reused pane is focused")
+            #expect(
+                evaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") && $0.contains(#""mode":"editor""#) },
+                "the gesture's mode is pushed into the reused local pane")
+        }
+
+        /// `openOrReuseCodePaneInNewTab` is the new-tab picker's "Diff"/"Open file…" row completion
+        /// (`AppKitController+TerminalPaneContent.presentNewTabSessionPicker`, which only has
+        /// `host`/`panelCoordinator` access): it must route through the same reuse-before-create
+        /// resolution order as `openOrFocusCodePane`, not create unconditionally — an already-open
+        /// global monitor is reused instead of installing a duplicate in the panel the picker was
+        /// invoked from.
+        @Test func openOrReuseCodePaneInNewTabReusesAnAlreadyOpenGlobalMonitorInsteadOfCreatingADuplicate() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let monitorContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+
+            controller.panelCoordinator.openOrReuseCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff, in: workspaceScope)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["monitor"],
+                "no duplicate pane is installed in the global panel window")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).isEmpty,
+                "the workspace's own panel, where the new-tab picker was invoked, gains no code pane")
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContentBefore as AnyObject?),
+                "the existing global monitor is reused, not retargeted or recreated")
         }
 
         /// Deleting (or otherwise retiring) a monitor's target workspace closes its pane through the

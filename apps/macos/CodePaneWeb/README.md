@@ -134,6 +134,13 @@ branch on `.code`.
     `{agents}`, the full replacement list (no web-side dedupe). If the currently selected agent id
     is no longer present, `CommentsController` re-runs the same auto-default rule used at init
     (`selectDefaultAgentId`); if it is still present, the selection is left alone.
+  - `spaces:setMode` (any time the host wants an already-open pane to switch its live Diff/Editor
+    mode, e.g. reusing the pane for a different navigation gesture): detail is `{mode}`. The
+    counterpart to `modeChanged` (JS -> Swift, see above): the listener dispatches the exact same
+    `setMode` action a toolbar click does, so `notifyModeChanged` echoes back out to the host the
+    same way, keeping the host's own mirror of this pane's mode a read of the page's own report
+    rather than something the host sets speculatively. A no-op when `mode` already matches the
+    pane's current mode.
   - `spaces:theme` (any time the host's effective appearance changes thereafter): detail is
     `{theme}` (`"light"` \| `"dark"`). A separate event from `spaces:init` because the plugin's
     `spaces:init` listener is one-shot; a later appearance change re-dispatching `spaces:init`

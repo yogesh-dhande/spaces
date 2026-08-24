@@ -57,8 +57,10 @@ import spacesterminalcore
 }
 
 /// Records every script it's asked to evaluate, standing in for the live `WKWebView` so a test can
-/// observe exactly what a reply/pushed event would have sent without a real page running.
-@MainActor private final class RecordingCodePaneScriptEvaluator: CodePaneScriptEvaluator {
+/// observe exactly what a reply/pushed event would have sent without a real page running. Internal
+/// (not `private`) so `CodePanePlumbingTests` can reuse it to observe `requestMode`'s live-push path
+/// at the `PanelCoordinator` level.
+@MainActor final class RecordingCodePaneScriptEvaluator: CodePaneScriptEvaluator {
     private(set) var evaluatedScripts: [String] = []
     /// Canned answers for the value-returning variant, consumed FIFO by the next call that has none
     /// captured as a pending completion yet — set via `enqueueCollectResult` before whatever
@@ -2100,6 +2102,83 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(
             evaluator.evaluatedScripts.contains { $0.contains(#""initialMode":"diff""#) },
             "close() must reset the live mode back to initialMode, not carry a toggled mode forward")
+    }
+
+    // MARK: - requestMode: host-initiated mode switch (Diff/Editor navigation-gesture plumbing)
+
+    @Test func requestModeOnALivePagePushesASetModeScriptAndOnlyUpdatesCurrentModeOnceTheEchoLands() {
+        let content = makeController() // initialMode: .diff
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.requestMode(.editor)
+
+        let setModeScripts = evaluator.evaluatedScripts.filter { $0.contains("spaces:setMode") }
+        #expect(setModeScripts.count == 1)
+        #expect(setModeScripts[0].contains(#""mode":"editor""#))
+
+        // currentMode hasn't flipped on the Swift side yet — only the page's own `modeChanged` echo
+        // (not the push itself) updates it (see requestMode's doc comment), so a second request for
+        // the same mode still pushes again rather than treating the first push as already applied.
+        content.requestMode(.editor)
+        #expect(evaluator.evaluatedScripts.filter { $0.contains("spaces:setMode") }.count == 2)
+
+        // Simulate the echo landing, then hibernate and reload: only now does the next spaces:init
+        // report the switched mode, matching modeChangedPushUpdatesCurrentModeAndSurvivesHibernation
+        // above (a toolbar-driven modeChanged push and this echo update currentMode identically).
+        content.handleModeChanged(.editor, senderWebView: liveWebView(content))
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult(nil)
+        teardownEvaluator.enqueueCollectResult("__none__")
+        content.deactivate()
+        content.activate(focus: false)
+        let reloadEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = reloadEvaluator
+        content.handleReady()
+        #expect(reloadEvaluator.evaluatedScripts.contains { $0.contains(#""initialMode":"editor""#) })
+    }
+
+    @Test func requestModeOnANotLivePageSetsCurrentModeDirectlyWithoutEvaluatingAScript() {
+        let content = makeController() // initialMode: .diff, never activated: no scriptEvaluator, isReady false
+
+        content.requestMode(.editor)
+
+        // No live page to receive a push into; confirm currentMode was still set directly by
+        // observing it seed the next load's spaces:init.
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        #expect(!evaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") }, "no page was live to push into")
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains(#""initialMode":"editor""#) },
+            "currentMode is set directly when there is no live page to echo back from")
+    }
+
+    @Test func requestModeAlreadyMatchingCurrentModeIsANoOpWhetherOrNotThePageIsLive() {
+        let live = makeController() // initialMode: .diff
+        live.activate(focus: false)
+        let liveEvaluator = RecordingCodePaneScriptEvaluator()
+        live.scriptEvaluator = liveEvaluator
+        live.handleReady()
+
+        live.requestMode(.diff)
+        #expect(liveEvaluator.evaluatedScripts.filter { $0.contains("spaces:setMode") }.isEmpty)
+
+        let notLive = makeController() // initialMode: .diff, never activated
+        notLive.requestMode(.diff)
+        notLive.activate(focus: false)
+        let reloadEvaluator = RecordingCodePaneScriptEvaluator()
+        notLive.scriptEvaluator = reloadEvaluator
+        notLive.handleReady()
+        #expect(!reloadEvaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") })
+        #expect(
+            reloadEvaluator.evaluatedScripts.contains { $0.contains(#""initialMode":"diff""#) },
+            "requesting the already-current mode never disturbs currentMode")
     }
 
     // MARK: - Sender-identity guard at the message-handler boundary (round-8 Fix 3)

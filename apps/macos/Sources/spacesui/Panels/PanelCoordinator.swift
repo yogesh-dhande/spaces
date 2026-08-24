@@ -1088,7 +1088,9 @@ import spacesterminalcore
             switch result {
             case .terminal(let request): self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
             case .codePane(let deviceID, let workspaceID, let mode):
-                self.fillSplitWithCodePane(scope: scope, paneID: paneID, direction: direction, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+                self.resolveCodePanePickerChoice(deviceID: deviceID, workspaceID: workspaceID, mode: mode) {
+                    self.fillSplitWithCodePane(scope: scope, paneID: paneID, direction: direction, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+                }
             }
         }
     }
@@ -1140,32 +1142,41 @@ import spacesterminalcore
 
     // MARK: - Code panes
 
-    /// Focuses the workspace's existing code pane wherever it lives — its own panel first, then global
-    /// panel windows — or opens a fresh one in `mode` in the workspace's own panel when none is open
-    /// anywhere — the "Review changes" shortcut's action. Mirrors the terminal convention
-    /// (`placement(forSessionID:)`, `openOrFocusTerminalPane`): a code pane opened via the split/new-tab
-    /// picker in a global panel window, or restored there at startup, is the same pane as one opened from
-    /// this shortcut, so the shortcut must find and focus it instead of installing a duplicate.
-    @discardableResult func openOrFocusCodePane(deviceID: String, workspaceID: String, mode: CodePaneMode) -> Bool {
-        guard let scope = workspaceScope(forWorkspaceID: workspaceID) else { return false }
-        restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
-        if let placement = codePanePlacement(deviceID: deviceID, workspaceID: workspaceID) {
-            focus(placement: placement)
-            return true
-        }
-        return openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
+    /// Where a code-pane navigation gesture (the "Review changes" shortcut, and the "Diff"/"Open
+    /// file…" picker rows in both the new-tab and split pickers) should land.
+    enum CodePaneNavigationTarget {
+        /// A code pane already open in some `.globalWindow` panel — reuse it, retargeting first if it
+        /// isn't already showing the gesture's workspace.
+        case reuseGlobal(PanePlacement)
+        /// No global pane open anywhere, but the gesture's own workspace already has one in its own
+        /// panel — reuse that.
+        case focusLocal(PanePlacement)
+        /// Nothing open anywhere — the gesture creates its own pane at its own placement.
+        case none
     }
 
-    /// Where a workspace's code pane lives across every panel scope, if it is open anywhere. Scopes are
-    /// searched in `scopeSortKey` order so the workspace's own panel wins over a global panel window when
-    /// (in principle) more than one is open, and the result is otherwise deterministic.
-    private func codePanePlacement(deviceID: String, workspaceID: String) -> PanePlacement? {
+    /// Resolution order for every code-pane navigation gesture: a global-window pane, if one is open
+    /// anywhere, is reused before a workspace's own pane, which is reused before creating anything
+    /// fresh. This is how the "one global pane, one local pane per workspace" caps are enforced — by
+    /// resolution order always preferring reuse over creation, never by closing an existing pane (a
+    /// stale layout left over with more than one global pane is left alone; this only decides which one
+    /// a gesture routes to).
+    private func resolveCodePaneForNavigation(deviceID: String, workspaceID: String) -> CodePaneNavigationTarget {
+        if let placement = anyGlobalCodePanePlacement() { return .reuseGlobal(placement) }
+        if let placement = localCodePanePlacement(deviceID: deviceID, workspaceID: workspaceID) { return .focusLocal(placement) }
+        return .none
+    }
+
+    /// The first code pane open in any `.globalWindow` panel, in `scopeSortKey` order (deterministic in
+    /// the case, against convention, that more than one is open). Workspace-agnostic on purpose: any
+    /// open global pane is the one navigation-gesture reuse targets, retargeting it to the gesture's
+    /// workspace when it isn't already showing it.
+    private func anyGlobalCodePanePlacement() -> PanePlacement? {
         for (scope, state) in panels.sorted(by: { scopeSortKey($0.key) < scopeSortKey($1.key) }) {
+            guard case .globalWindow = scope else { continue }
             for tab in state.layout.tabs {
                 for pane in PanelLayoutEngine.panes(in: tab) {
-                    guard case .codePane(let paneDeviceID, let paneWorkspaceID) = pane.content, paneDeviceID == deviceID,
-                        paneWorkspaceID == workspaceID
-                    else { continue }
+                    guard case .codePane = pane.content else { continue }
                     return PanePlacement(scope: scope, tabID: tab.id, paneID: pane.id)
                 }
             }
@@ -1173,12 +1184,87 @@ import spacesterminalcore
         return nil
     }
 
-    /// Opens a fresh code pane as a new tab in the workspace's panel (the "Diff" and "Open file…"
-    /// picker rows), in its workspace's panel by default or an explicit scope (mirrors
-    /// `openSessionInNewTab`). This is the single choke point both `openOrFocusCodePane` (the
-    /// "Review changes" shortcut's creation branch) and the new-tab picker's "Diff"/"Open
-    /// file…" rows funnel through, so the `mayCreateCodePane` gate below covers both callers
-    /// at once.
+    /// Where a workspace's own code pane lives in its `.workspace(deviceID, workspaceID)` panel, if one
+    /// is open there.
+    private func localCodePanePlacement(deviceID: String, workspaceID: String) -> PanePlacement? {
+        guard let state = panels[.workspace(deviceID: deviceID, workspaceID: workspaceID)] else { return nil }
+        for tab in state.layout.tabs {
+            for pane in PanelLayoutEngine.panes(in: tab) {
+                guard case .codePane = pane.content else { continue }
+                return PanePlacement(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID), tabID: tab.id, paneID: pane.id)
+            }
+        }
+        return nil
+    }
+
+    /// Focuses the workspace's existing code pane per `resolveCodePaneForNavigation`'s resolution
+    /// order — a global panel window first, then the workspace's own panel — applying `mode` to
+    /// whichever pane it finds, or opens a fresh one in `mode` in the workspace's own panel when none is
+    /// open anywhere. The "Review changes" shortcut's action. Mirrors the terminal convention
+    /// (`placement(forSessionID:)`, `openOrFocusTerminalPane`): a code pane opened via the split/new-tab
+    /// picker, or restored at startup, is the same pane as one opened from this shortcut, so the
+    /// shortcut must find and focus it instead of installing a duplicate.
+    @discardableResult func openOrFocusCodePane(deviceID: String, workspaceID: String, mode: CodePaneMode) -> Bool {
+        guard let scope = workspaceScope(forWorkspaceID: workspaceID) else { return false }
+        restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
+        switch resolveCodePaneForNavigation(deviceID: deviceID, workspaceID: workspaceID) {
+        case .reuseGlobal(let placement):
+            reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+            return true
+        case .focusLocal(let placement):
+            focus(placement: placement)
+            (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
+            return true
+        case .none:
+            return openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
+        }
+    }
+
+    /// Routes a code-pane picker row (the split picker's and new-tab picker's "Diff"/"Open file…" rows)
+    /// through the same reuse-before-create resolution order as `openOrFocusCodePane`, falling through
+    /// to `createIfNothingToReuse` only when nothing is open anywhere to reuse.
+    private func resolveCodePanePickerChoice(
+        deviceID: String, workspaceID: String, mode: CodePaneMode, createIfNothingToReuse: () -> Void
+    ) {
+        switch resolveCodePaneForNavigation(deviceID: deviceID, workspaceID: workspaceID) {
+        case .reuseGlobal(let placement):
+            reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+        case .focusLocal(let placement):
+            focus(placement: placement)
+            (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
+        case .none:
+            createIfNothingToReuse()
+        }
+    }
+
+    /// Reuses an already-open global-window code pane for a navigation gesture: retargets it first if
+    /// it isn't already showing `(deviceID, workspaceID)`, then focuses it and applies `mode`.
+    ///
+    /// A retarget's close-and-reinstall (see `retargetCodePane`) keeps the same pane id but is a brand
+    /// new controller instance, installed directly in `mode` — so the trailing `requestMode(mode)` call
+    /// below is a guarded no-op in that case, and only does real work when no retarget was needed (the
+    /// pane was already showing the gesture's workspace, so the live page has to be pushed to switch).
+    /// Calling it unconditionally, rather than branching, keeps this in step with `focusLocal`'s
+    /// identical "focus, then apply mode" shape in `openOrFocusCodePane`/`resolveCodePanePickerChoice`.
+    private func reuseGlobalCodePane(_ placement: PanePlacement, deviceID: String, workspaceID: String, mode: CodePaneMode) {
+        let needsRetarget: Bool
+        switch PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope))?.content {
+        case .codePane(let paneDeviceID, let paneWorkspaceID): needsRetarget = paneDeviceID != deviceID || paneWorkspaceID != workspaceID
+        default: needsRetarget = false
+        }
+        if needsRetarget {
+            retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID, mode: mode)
+        }
+        focus(placement: placement)
+        (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
+    }
+
+    /// Opens a fresh code pane as a new tab, in its workspace's panel by default or an explicit scope
+    /// (mirrors `openSessionInNewTab`). The creation arm every code-pane navigation gesture reaches
+    /// once `resolveCodePaneForNavigation` finds nothing to reuse: `openOrFocusCodePane`'s `.none`
+    /// case, and the new-tab picker's "Diff"/"Open file…" rows via
+    /// `openOrReuseCodePaneInNewTab`'s `createIfNothingToReuse`. The `mayCreateCodePane` gate below
+    /// covers both callers at once.
     @discardableResult func openCodePaneInNewTab(
         deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil
     ) -> Bool {
@@ -1191,6 +1277,17 @@ import spacesterminalcore
         host.showPanelScope(resolvedScope)
         activateFocusedPane(scope: resolvedScope)
         return true
+    }
+
+    /// The new-tab picker's "Diff"/"Open file…" row entry point (`presentNewTabSessionPicker` in
+    /// `AppKitController+TerminalPaneContent`, which only has `host`/`panelCoordinator` access, not
+    /// `PanelCoordinator`'s privates): routes through `resolveCodePanePickerChoice`'s
+    /// reuse-before-create order, falling back to a fresh pane in `scope` when nothing is open
+    /// anywhere to reuse.
+    func openOrReuseCodePaneInNewTab(deviceID: String, workspaceID: String, mode: CodePaneMode, in scope: PanelScope) {
+        resolveCodePanePickerChoice(deviceID: deviceID, workspaceID: workspaceID, mode: mode) {
+            self.openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
+        }
     }
 
     /// Fills a split with a fresh code pane, the code-pane counterpart of `fillSplit`. Reached
@@ -1225,29 +1322,41 @@ import spacesterminalcore
         return content
     }
 
+    /// Retargets a single code pane to `(deviceID, workspaceID)` in `mode` — close-and-reinstall on the
+    /// same pane id, not a live descriptor edit: `CodePaneContentController.descriptor`/`workspaceID`
+    /// are `let`, so a new controller instance is the only way to point a pane at a different
+    /// workspace. Closing the old controller first discards its in-memory editor buffer and
+    /// pending-review-comment snapshot exactly as an ordinary pane close does — safe, since comment
+    /// drafts are persisted per workspace in the daemon DB and an unsaved editor buffer gets no
+    /// confirmation on an ordinary close either.
+    ///
+    /// The old controller is removed from `codePaneControllers` *before* installing the replacement:
+    /// `installCodePaneController` is idempotent and returns the existing controller for an
+    /// already-populated pane id, so installing first would hand back the very controller this is
+    /// trying to replace. The replacement is installed before `mutateLayout` runs, because
+    /// `mutateLayout` synchronously calls `render(scope:)`, which reads the new title off
+    /// `codePaneControllers[pane.id]` — it has to already be the new controller when that happens.
+    /// `mutateLayout`'s own activation scan only re-activates panes when the selected tab changes,
+    /// which a same-tab retarget never does, so `activateContentIfVisible` is called explicitly after,
+    /// mirroring `claimReplacedPane`'s terminal-pane retarget precedent.
+    ///
+    /// Shared by `retargetGlobalWindowCodePanes` (always `.diff`, the "workspace-following review
+    /// monitor" behavior) and `reuseGlobalCodePane` (the navigation gesture's own mode).
+    private func retargetCodePane(paneID: String, scope: PanelScope, toDeviceID deviceID: String, workspaceID: String, mode: CodePaneMode) {
+        codePaneControllers.removeValue(forKey: paneID)?.close()
+        let content = installCodePaneController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode)
+        mutateLayout(scope: scope) { PanelLayoutEngine.retargetPane(paneID: paneID, to: content.descriptor, in: $0) }
+        if let retargetedPane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) {
+            activateContentIfVisible(scope: scope, pane: retargetedPane)
+        }
+    }
+
     /// Retargets every open code pane in a `.globalWindow` panel to `(deviceID, workspaceID)` — the
     /// "workspace-following review monitor" behavior: a code pane placed in a panel window (as
     /// opposed to a workspace's own panel, which never retargets — see `showWorkspaceDetail`'s call
     /// site) tracks whichever workspace the main window's sidebar has selected, so switching
     /// workspaces there switches every open monitor's diff along with it. Always lands in `.diff`
     /// mode, the same entry point a freshly opened monitor gets.
-    ///
-    /// Retarget is close-and-reinstall on the same pane id, not a live descriptor edit:
-    /// `CodePaneContentController.descriptor`/`workspaceID` are `let`, so a new controller instance
-    /// is the only way to point a pane at a different workspace. Closing the old controller first
-    /// discards its in-memory editor buffer and pending-review-comment snapshot exactly as an
-    /// ordinary pane close does — safe, since comment drafts are persisted per workspace in the
-    /// daemon DB and an unsaved editor buffer gets no confirmation on an ordinary close either.
-    ///
-    /// The old controller is removed from `codePaneControllers` *before* installing the
-    /// replacement: `installCodePaneController` is idempotent and returns the existing controller
-    /// for an already-populated pane id, so installing first would hand back the very controller
-    /// this is trying to replace. The replacement is installed before `mutateLayout` runs, because
-    /// `mutateLayout` synchronously calls `render(scope:)`, which reads the new title off
-    /// `codePaneControllers[pane.id]` — it has to already be the new controller when that happens.
-    /// `mutateLayout`'s own activation scan only re-activates panes when the selected tab changes,
-    /// which a same-tab retarget never does, so `activateContentIfVisible` is called explicitly
-    /// after, mirroring `claimReplacedPane`'s terminal-pane retarget precedent.
     ///
     /// Deliberately unconditional on device reachability — `mayCreateCodePane`'s "install door" gate
     /// is not applied here — because an unreachable device's monitor still has to retarget locally so
@@ -1265,12 +1374,7 @@ import spacesterminalcore
                     // retargeted to it) is left untouched rather than closed and reinstalled for
                     // nothing.
                     guard paneDeviceID != deviceID || paneWorkspaceID != workspaceID else { continue }
-                    codePaneControllers.removeValue(forKey: pane.id)?.close()
-                    let content = installCodePaneController(paneID: pane.id, deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff)
-                    mutateLayout(scope: scope) { PanelLayoutEngine.retargetPane(paneID: pane.id, to: content.descriptor, in: $0) }
-                    if let retargetedPane = PanelLayoutEngine.pane(withID: pane.id, in: layout(for: scope)) {
-                        activateContentIfVisible(scope: scope, pane: retargetedPane)
-                    }
+                    retargetCodePane(paneID: pane.id, scope: scope, toDeviceID: deviceID, workspaceID: workspaceID, mode: .diff)
                 }
             }
         }

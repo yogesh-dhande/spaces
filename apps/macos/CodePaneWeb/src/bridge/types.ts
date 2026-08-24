@@ -349,6 +349,13 @@ export interface CodePaneAgentsChangedEvent {
   agents: CodePaneAgentSummary[];
 }
 
+/** Detail of the `spaces:setMode` event (see README.md), dispatched whenever the host wants this
+ *  pane to switch its live Diff/Editor mode (e.g. reusing an already-open pane for a different
+ *  navigation gesture). */
+export interface CodePaneSetModeEvent {
+  mode: CodePaneMode;
+}
+
 declare global {
   interface Window {
     spaces?: SpacesBridge;

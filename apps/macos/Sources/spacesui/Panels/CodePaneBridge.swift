@@ -549,6 +549,13 @@ enum CodePaneBridge {
     /// startup (`spaces:init` itself only ever fires once — see `CodePaneWeb/src/app/root.ts`).
     struct ThemePayload: Encodable, Equatable { let theme: String }
 
+    /// `spaces:setMode`'s detail, dispatched to ask an already-loaded pane to switch its live
+    /// Diff/Editor mode. Counterpart to `modeChanged` (JS -> Swift): the JS listener dispatches the
+    /// same `setMode` action a toolbar click does, so `modeChanged` echoes back and
+    /// `CodePaneContentController.currentMode` still only ever changes from the page's own report —
+    /// see `requestMode`'s doc comment.
+    struct SetModePayload: Encodable, Equatable { let mode: String }
+
     /// `spaces:diffSignature`'s detail, dispatched whenever the subscribed scope's git state changes.
     struct DiffSignaturePayload: Encodable, Equatable { let scopeSignature: String }
 

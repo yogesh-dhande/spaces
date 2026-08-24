@@ -903,6 +903,82 @@ describe("mountRoot's mode toggle — notifyModeChanged push (round-5 hibernatio
   });
 });
 
+describe("mountRoot's spaces:setMode wiring", () => {
+  let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  // `window.dispatchEvent` is global and every pane mounted anywhere in this test file (jsdom
+  // shares one `window` for the whole run — real usage is one pane per WKWebView, each with its
+  // own `window`) keeps its `spaces:setMode` listener attached forever, so a dispatch here also
+  // reaches every stale pane from earlier tests. Every stale pane is left in `initialMode: "diff"`
+  // (nothing before this describe block ever switches a pane to editor and leaves it there — see
+  // the mode-toggle block above, which always ends back on "diff"), so this no-op case is ordered
+  // BEFORE the real-switch case below: dispatching `{mode: "diff"}` while every currently-attached
+  // pane (including this test's own) is already in "diff" is a true zero-calls no-op for all of
+  // them, not just this test's pane. Reversing the order would poison every later pane's mode and
+  // make this assertion meaningless (see the real-switch test's own comment on the same issue).
+  it("no-ops when the pane is already in the requested mode", async () => {
+    const mounted = mountRoot(container); // INIT_PAYLOAD.initialMode === "diff"
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    const modeCallsBefore = hoisted.notifyModeChanged.mock.calls.length;
+    const diffCallsBefore = hoisted.workspaceDiff.mock.calls.length;
+
+    window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
+
+    expect(hoisted.notifyModeChanged.mock.calls.length).toBe(modeCallsBefore);
+    expect(hoisted.workspaceDiff.mock.calls.length).toBe(diffCallsBefore); // no extra refreshDiff
+  });
+
+  it("switches the live mode and pushes notifyModeChanged, the same as a toolbar click, leaving in-progress editor state untouched", async () => {
+    const dirtyEditorState: CodePaneEditorState = {
+      path: "/repo/src/foo.ts",
+      baseSHA256: "deadbeef",
+      baseContent: "let x = 0;\n",
+      content: "let x = 1;\n",
+      dirty: true,
+      conflict: false,
+    };
+    INIT_PAYLOAD = { ...defaultInitPayload, editorState: dirtyEditorState };
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    // This dispatch also reaches every stale pane still attached from earlier tests (see the
+    // no-op test's comment above), so it fires more than once — but `addEventListener` invokes
+    // listeners in registration order, and this pane is always the most-recently mounted, so its
+    // call is always the LAST one recorded for this dispatch regardless of how many stale panes
+    // also fire.
+    window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "editor" } }));
+
+    expect(hoisted.notifyModeChanged).toHaveBeenCalled();
+    expect(hoisted.notifyModeChanged.mock.calls.at(-1)).toEqual(["editor"]);
+    expect(container.querySelector(".file-list")).toBeNull(); // diff body swapped out for editor
+
+    // The dirty snapshot restored at startup is still live in EditorView, untouched by the mode
+    // switch — collectStateForFlush would return null/empty if the switch had reset it.
+    // `window.__spacesCollectEditorState` is instance-safe even under the shared-`window` pollution
+    // above: every mount overwrites it to point at that exact instance (see its wiring in root.ts).
+    const collected = window.__spacesCollectEditorState?.();
+    expect(JSON.parse(collected!)).toEqual(dirtyEditorState);
+  });
+});
+
 describe("mountRoot's init ordering — the hibernated editor snapshot is restored before any teardown-vulnerable await (round-11 Fix 1)", () => {
   let container: HTMLElement;
   const defaultInitPayload = INIT_PAYLOAD;

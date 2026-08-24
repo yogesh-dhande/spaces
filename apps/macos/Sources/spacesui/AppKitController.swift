@@ -5025,9 +5025,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// no daemon-side session to attach, but building its content still means installing a
     /// pane into the layout and persisting it, so a device that cannot act right now must
     /// not have one added on its behalf. Both `PanelCoordinator` call sites that create a
-    /// code pane (`openCodePaneInNewTab`, `fillSplitWithCodePane`) are only reached once
-    /// their caller has already established no placement exists for this device/workspace
-    /// pair — `openOrFocusCodePane`'s own existing-placement branch focuses and returns
+    /// code pane (`openCodePaneInNewTab`, `fillSplitWithCodePane`) are reached only through
+    /// `resolveCodePaneForNavigation`'s `.none` case — its `.reuseGlobal`/`.focusLocal`
+    /// cases focus (and, for `.reuseGlobal`, possibly retarget) an existing pane and return
     /// before creation is even considered — so this only ever needs to ask "can we create,"
     /// never "can we create or is one already there." Pure for the same test-seam reason as
     /// `canOpenOrFocusTerminalPane`.

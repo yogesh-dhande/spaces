@@ -2,6 +2,7 @@ import { createBridge } from "../bridge";
 import {
   CodePaneAgentsChangedEvent,
   CodePaneInitPayload,
+  CodePaneSetModeEvent,
   CodePaneThemeChangedEvent,
   DiffFileEntry,
   SpacesBridgeError,
@@ -18,6 +19,7 @@ import { renderToolbar } from "./toolbar";
 const INIT_EVENT = "spaces:init";
 const THEME_EVENT = "spaces:theme";
 const AGENTS_EVENT = "spaces:agents";
+const SET_MODE_EVENT = "spaces:setMode";
 
 /**
  * Wires the bridge, toolbar, file list, and diff/editor views together.
@@ -128,6 +130,16 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // lifetime of the pane rather than being read once at startup like `initPayload.agents`.
   window.addEventListener(AGENTS_EVENT, (event) => {
     comments.onAgentsChanged((event as CustomEvent<CodePaneAgentsChangedEvent>).detail.agents);
+  });
+
+  window.addEventListener(SET_MODE_EVENT, (event) => {
+    const { mode } = (event as CustomEvent<CodePaneSetModeEvent>).detail;
+    // The host doesn't know this pane's live JS state before pushing (see `currentMode`'s doc
+    // comment in the Swift host); redundantly dispatching the mode it's already in would still
+    // fire `bridge.notifyModeChanged` and possibly `refreshDiff` for nothing (see `dispatch`'s
+    // `setMode` branch below), so bail here rather than there.
+    if (mode === state.mode) return;
+    dispatch({ type: "setMode", mode });
   });
 
   /** Folds the toolbar's own mode/scope/layout state together with the comments controller's

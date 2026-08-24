@@ -34,6 +34,7 @@ enum CodePaneMode: Equatable {
     private static let diffSignatureEventName = "spaces:diffSignature"
     private static let fileSignatureEventName = "spaces:fileSignature"
     private static let agentsEventName = "spaces:agents"
+    private static let setModeEventName = "spaces:setMode"
 
     let descriptor: PaneContentDescriptor
     let initialMode: CodePaneMode
@@ -407,6 +408,28 @@ enum CodePaneMode: Equatable {
         guard isReady, let scriptEvaluator else { return }
         let payload = CodePaneBridge.AgentsPayload(agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.agentsEventName, detail: payload) else { return }
+        scriptEvaluator.evaluateCodePaneScript(script)
+    }
+
+    /// Pushes a mode switch into the page, or — if the page isn't live to receive a push — arranges
+    /// for the pane's next load to open directly in `mode`. Called by `PanelCoordinator`'s navigation
+    /// resolver to apply a reused/focused pane's requested mode (see docs/implementation.md).
+    ///
+    /// Deliberately does not set `currentMode` on the live-push path: `currentMode` is a
+    /// single-source-of-truth mirror of the page's own live state (see its doc comment), fed only by
+    /// `handleModeChanged`'s `modeChanged` echo — this method just asks the page to switch, the same
+    /// way a toolbar click does, and waits for that same echo to confirm it landed. The not-live path
+    /// (page torn down, or never loaded yet) has no page to echo back from, so it sets `currentMode`
+    /// directly — exactly what `close()` already does when resetting to `initialMode`, and what
+    /// `sendInitPayload` already reads (`currentMode`, not `initialMode`) to seed the next load.
+    func requestMode(_ mode: CodePaneMode) {
+        guard currentMode != mode else { return }
+        guard isReady, let scriptEvaluator else {
+            currentMode = mode
+            return
+        }
+        guard let script = CodePaneBridge.dispatchEventScript(name: Self.setModeEventName, detail: CodePaneBridge.SetModePayload(mode: mode.wireValue))
+        else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 
