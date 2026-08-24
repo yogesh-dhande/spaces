@@ -232,6 +232,22 @@ export class CommentsController {
   private readonly trayCaret: HTMLElement;
   private trayExpanded = true;
 
+  /**
+   * round-15 Fix: press-scoped rebuild gate. `refresh()`/`refreshCardsOnly()` route through
+   * `@pierre/diffs`' `setComments`, which does a WHOLESALE DOM rebuild on every call, creating fresh
+   * button/textarea nodes each time. A card's Send/Add-to-batch/Delete buttons (and the tray's row
+   * and remove button) all fire the textarea's `blur` before their own `click` (standard blur-before-
+   * click ordering), and that `blur` can trigger a persist whose success callback calls `refresh()`.
+   * If that persist resolves during the mousedown-to-mouseup window of the very button press that
+   * triggered it, the rebuild replaces the pressed button with a fresh, detached node before `click`
+   * fires on it, and the click is silently dropped. `pointerPressActive` tracks whether such a window
+   * is currently open; `deferredRefreshDuringPress` records the strongest refresh a caller tried to
+   * run while it was open, so it can be replayed once the press ends instead of running the rebuild
+   * mid-press.
+   */
+  private pointerPressActive = false;
+  private deferredRefreshDuringPress: "none" | "cardsOnly" | "full" = "none";
+
   constructor(bridge: SpacesBridge, agents: readonly CodePaneAgentSummary[], callbacks: CommentsControllerCallbacks) {
     this.bridge = bridge;
     this.agents = agents;
@@ -272,6 +288,63 @@ export class CommentsController {
 
     this.tray.style.display = "none"; // hidden until there is at least one sendable draft
     this.updateTrayExpansion();
+
+    // round-15 Fix: press-scoped rebuild gate (see `pointerPressActive`'s doc comment). Listeners are
+    // attached on `window` in the CAPTURE phase so a card's own bubble-phase `event.stopPropagation()`
+    // (e.g. the tray remove button, below) can never hide a press from this gate — a capture-phase
+    // `window` listener always fires before any bubble-phase `stopPropagation` anywhere in the tree
+    // can block it.
+    window.addEventListener(
+      "mousedown",
+      () => {
+        this.pointerPressActive = true;
+      },
+      { capture: true },
+    );
+    window.addEventListener(
+      "mouseup",
+      () => {
+        this.pointerPressActive = false;
+        if (this.deferredRefreshDuringPress !== "none") {
+          // Must be a macrotask, not a microtask. WebKit dispatches `mouseup` and the synthesized
+          // `click` synchronously within the same native mouse-release handling, so a `setTimeout`
+          // queued from here is guaranteed not to run until after `click` has already fired on
+          // whatever node is live at that moment. A microtask (`Promise.resolve().then(...)` /
+          // `queueMicrotask`) would drain before `click` fires and rebuild the DOM out from under the
+          // click again, reintroducing the exact bug this gate exists to prevent.
+          setTimeout(() => this.flushDeferredRefresh(), 0);
+        }
+      },
+      { capture: true },
+    );
+    window.addEventListener(
+      "blur",
+      (event) => {
+        // Handles a press abandoned without a visible `mouseup` (e.g. an app switch or window
+        // deactivation mid-press) — same end-of-press handling and same macrotask reasoning as
+        // `mouseup` above.
+        //
+        // The `event.target === event.currentTarget` guard is required: "blur"/"focus" don't
+        // bubble, but — unlike a non-capturing listener — a CAPTURE-phase listener on `window` still
+        // sees them on the way down to their real target, since the capturing phase runs regardless
+        // of the `bubbles` flag. Without this check, every ordinary in-page focus change (most
+        // importantly, a card's own textarea blurring as part of the blur-before-click sequence that
+        // starts the very persist this gate exists to protect) would ALSO be caught here, clearing
+        // `pointerPressActive` right at the start of the press instead of at its end — reopening the
+        // exact race this fix exists to close. Only a genuine top-level window/app blur is dispatched
+        // AT `window` itself, where `target` and `currentTarget` coincide (comparing `target` against
+        // the module's own `window` reference is deliberately avoided: it is not a reliable test for
+        // "this event's target is the window", since a same-realm `window` reference obtained a
+        // different way is not guaranteed to be `===` the value the DOM dispatch algorithm assigns to
+        // `event.target`/`event.currentTarget` for that event).
+        if (event.target !== event.currentTarget) return;
+        this.pointerPressActive = false;
+        if (this.deferredRefreshDuringPress !== "none") {
+          setTimeout(() => this.flushDeferredRefresh(), 0);
+        }
+      },
+      { capture: true },
+    );
   }
 
   /** Appends this controller's DOM (error banner, batch tray) into `container`. Called after
@@ -1205,6 +1278,10 @@ export class CommentsController {
   /** Re-anchors, re-renders the tray, and pushes the toolbar state — the full pipeline, run after
    *  any change to `drafts`, `files`, or `collapsedIds`. */
   private refresh(): void {
+    if (this.pointerPressActive) {
+      this.deferredRefreshDuringPress = "full";
+      return;
+    }
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
     const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
@@ -1217,10 +1294,26 @@ export class CommentsController {
    *  draft set or anchoring itself — still needs the cards re-rendered (their Send button's label
    *  and disabled state depend on the selected agent), but the tray rows don't. */
   private refreshCardsOnly(): void {
+    if (this.pointerPressActive) {
+      // Don't downgrade an already-queued full refresh to this cheaper one.
+      if (this.deferredRefreshDuringPress !== "full") this.deferredRefreshDuringPress = "cardsOnly";
+      return;
+    }
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
     const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
     this.diffView?.setComments(visible);
+  }
+
+  /** Replays whichever refresh was deferred by the press-scoped rebuild gate once the press ends
+   *  (see `pointerPressActive`'s doc comment). Resets the deferred marker BEFORE calling into
+   *  `refresh()`/`refreshCardsOnly()` so that if a new press has already started by the time this
+   *  runs, those gated methods simply re-defer on their own — no extra guard is needed here. */
+  private flushDeferredRefresh(): void {
+    const pending = this.deferredRefreshDuringPress;
+    this.deferredRefreshDuringPress = "none";
+    if (pending === "full") this.refresh();
+    else if (pending === "cardsOnly") this.refreshCardsOnly();
   }
 
   private pushToolbarState(): void {

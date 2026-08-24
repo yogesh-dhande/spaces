@@ -3192,3 +3192,124 @@ describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server i
     await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
   });
 });
+
+// This file never tears a `CommentsController` instance down (no `dispose`/`removeEventListener`
+// exists on the class), so every controller created above also has live `mousedown`/`mouseup`/
+// `blur` capture listeners on `window` that fire when the tests below dispatch those events. That's
+// safe: every assertion below reads only its own `bridge`/`controller`/`diffViewFake` locals, so a
+// stale prior controller reacting to a dispatched event only touches its own now-irrelevant fake.
+describe("CommentsController — round-15: press-scoped rebuild gate", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  /** Types a body into a freshly-opened draft's card, connects the card to `document` (existing
+   *  round-2 Fix 2 tests do the same — jsdom only tracks `document.activeElement`/live nodes for a
+   *  connected element), and returns the card, its textarea, and its Send button. */
+  function openDraftWithText(controller: CommentsController, diffViewFake: ReturnType<typeof makeFakeDiffView>, body: string) {
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    document.body.appendChild(card);
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = body;
+    textarea.dispatchEvent(new Event("input"));
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    return { card, textarea, sendBtn };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a blur-triggered persist that resolves mid-press does not rebuild until mouseup, and the pressed Send button still fires", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { card, textarea, sendBtn } = openDraftWithText(controller, diffViewFake, "Needs a null check");
+    const callsBeforeGesture = diffViewFake.setComments.mock.calls.length;
+
+    bridge.holdNextUpsert = true;
+    window.dispatchEvent(new Event("mousedown")); // press starts: the rebuild gate opens
+    textarea.dispatchEvent(new Event("blur")); // blur-before-click: starts the held persist mid-press
+
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    bridge.releaseHeldUpsert?.(); // the persist resolves WHILE the press is still open
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1)); // persist has landed server-side
+    // Let `doPersistBody`'s own continuation (which calls `refresh()`) actually run. This is pure
+    // microtask work and is unaffected by fake timers (those only fake macrotasks like `setTimeout`).
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The rebuild was gated: no additional `setComments` call happened even though the persist
+    // that would normally trigger one already landed. (A `document.contains(sendBtn)` check would
+    // add no signal here: this harness's `diffViewFake.setComments` is a plain `vi.fn()` mock, not a
+    // real `@pierre/diffs` that actually tears down and replaces DOM nodes, so the card is never
+    // actually detached in this test regardless of gating — the call-count gate above is what
+    // exercises the actual mechanism under test.)
+    expect(diffViewFake.setComments.mock.calls.length).toBe(callsBeforeGesture);
+
+    window.dispatchEvent(new Event("mouseup")); // press ends: schedules the deferred flush's setTimeout(0)
+    sendBtn.click(); // click fires on the SAME node the user pressed, proving nothing detached it
+
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+    expect(bridge.sendCalls[0]!.text).toContain("Needs a null check");
+
+    // The rebuild is no longer stuck: by now — via `sendOne`'s own unrelated, ungated refresh (see
+    // the class doc comment) and/or the deferred flush `mouseup` scheduled — the diff view has been
+    // rebuilt again, so the UI is not left permanently stale behind the gate. `vi.waitFor` advances
+    // fake timers as needed while polling, so this also exercises the deferred flush's own
+    // `setTimeout(0)` if `sendOne`'s refresh alone hasn't already satisfied it.
+    await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeGesture));
+
+    card.remove();
+  });
+
+  it("with no mouse press in progress, a blur's persist rebuilds immediately, needing no mouseup", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { card, textarea } = openDraftWithText(controller, diffViewFake, "Keyboard focus-away, no mouse press");
+    const callsBeforeBlur = diffViewFake.setComments.mock.calls.length;
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // no mousedown preceded this — nothing gates the rebuild
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    bridge.releaseHeldUpsert?.();
+
+    await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeBlur));
+
+    card.remove();
+  });
+
+  it("a press abandoned without a visible mouseup (e.g. an app switch) still flushes, via window blur", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { card, textarea } = openDraftWithText(controller, diffViewFake, "Abandoned press");
+    const callsBeforeGesture = diffViewFake.setComments.mock.calls.length;
+
+    bridge.holdNextUpsert = true;
+    window.dispatchEvent(new Event("mousedown"));
+    textarea.dispatchEvent(new Event("blur")); // starts the held persist mid-press
+
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Still gated: no visible `mouseup` has happened yet.
+    expect(diffViewFake.setComments.mock.calls.length).toBe(callsBeforeGesture);
+
+    window.dispatchEvent(new Event("blur")); // e.g. an app switch mid-press — no `mouseup` ever fires
+    await vi.advanceTimersByTimeAsync(0); // flush the deferred setTimeout(0)
+
+    expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeGesture);
+
+    card.remove();
+  });
+});
