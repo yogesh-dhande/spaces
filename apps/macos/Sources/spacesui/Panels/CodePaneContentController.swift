@@ -937,6 +937,21 @@ enum CodePaneMode: Equatable {
         // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment), and the success arm further
         // down uses it to pick which "am I still current" guard applies.
         let pathChanged = subscribedFilePath != path
+        // Known accepted gap: a return-navigation to this same path, dispatched while a DIFFERENT
+        // file's navigation is still in flight (open A → open B → re-open A within B's read RTT), is
+        // indistinguishable here from a same-path reread of A — both arrive with `pathChanged == false`,
+        // since `subscribedFilePath` is still A at dispatch time. Classified as a reread, the
+        // return-navigation claims no fresh `latestFileNavigationToken` below, so B's still-in-flight
+        // navigation wins the file-signature subscription once it completes, while the web app's own
+        // latest-request-wins guard displays the return-navigation's (A's) reply — the editor shows A
+        // while external-change monitoring points at B. Left as-is: distinguishing the two would need a
+        // navigation-vs-reread intent flag threaded from the web layer (only `EditorView.open` vs.
+        // `EditorView.handleExternalChange` know which this dispatch actually is), a bridge-protocol
+        // change disproportionate to a one-file-read-RTT edge that self-heals on the very next
+        // `performFileRead` for a genuinely different path, drops a wrong-path signature frame harmlessly
+        // via the web app's own path guard, and still routes a save of the shown file through the
+        // existing CAS-conflict arm — so no data is ever lost, only proactive external-change detection
+        // is delayed for that one window.
         // Only a navigation (an actual path change) claims a fresh "latest navigation wins" token — a
         // same-path reread of the file already open (`EditorView.handleExternalChange`'s live-reload
         // re-read) must NOT bump this, or a slower navigation to a different path in flight at the same

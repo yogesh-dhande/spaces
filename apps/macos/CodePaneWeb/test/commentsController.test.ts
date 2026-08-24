@@ -109,6 +109,14 @@ function makeBridge(): SpacesBridge & {
           bridge.releaseHeldUpsert = resolve;
         });
       }
+      // Mirrors the real daemon (see `reviewCommentUpsert`'s JSDoc in ../src/bridge/types.ts): an
+      // explicit id that doesn't already name a row is rejected, never recreated. Without this, a
+      // stale post-delete upsert would silently resurrect the deleted row instead of failing the way
+      // the real daemon does, making the round-23 divergent-commit-loop regression test impossible to
+      // write correctly.
+      if (input.id !== undefined && !drafts.has(input.id)) {
+        throw new SpacesBridgeError("notFound", `no such draft: ${input.id}`);
+      }
       const now = "2026-08-20T00:00:00.000Z";
       const id = input.id ?? `c${++nextId}`;
       const existing = drafts.get(id);
@@ -3887,5 +3895,135 @@ describe("CommentsController — round-19 Fix 2 (P2): batch tray membership and 
     textarea.value = "";
     textarea.dispatchEvent(new Event("input"));
     expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(0); // emptied back out, still no blur
+  });
+});
+
+describe("CommentsController — round-23 Fix: divergent-commit loop revalidates each entry per iteration", () => {
+  // The plain "stays divergent the whole time, gets committed then sent" path is already pinned by
+  // the round-19 Fix 1 (P1) tests above and by Fix 1 (P2)'s "sendBatch: commits a still-focused
+  // card's live-divergent text..." test — no separate control test is added here. In both tests
+  // below, draft A stays divergent across the whole held window and is still committed and sent,
+  // which re-proves that path is unchanged by this fix's added per-entry revalidation.
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("a delete still in flight for a LATER divergent entry when the loop reaches it is skipped, not re-upserted — the earlier entry still sends", async () => {
+    const { bridge, controller } = setup();
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted B",
+    });
+    await controller.loadInitial();
+
+    // Both cards mid-edit: live text ahead of their persisted body, neither has blurred — same shape
+    // the round-19 Fix 1 (P1) tests use (a still-focused/hibernation-restored card), just with two
+    // cards so the commit loop has a second entry to reach mid-drain. Creation order (A before B)
+    // makes A the divergent loop's first entry.
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const textareaA = cardA.querySelector("textarea")!;
+    textareaA.value = "persisted A plus more";
+    textareaA.dispatchEvent(new Event("input"));
+
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+    textareaB.value = "persisted B plus more";
+    textareaB.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    const sendPromise = controller.sendBatch();
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined()); // A's commit-persist is in flight
+
+    // While A's commit is still open, delete B through the real click flow (`doDeleteDraft`'s
+    // non-provisional arm) and hold ITS RPC open too, so B's delete is still in flight — not yet
+    // resolved — at the moment the loop reaches B's entry.
+    bridge.holdNextDelete = true;
+    const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnB.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined()); // B's delete RPC is in flight
+
+    bridge.releaseHeldUpsert?.(); // A's commit resolves; the loop's next entry is B, whose delete is still pending
+    await new Promise((resolve) => setTimeout(resolve, 0)); // flush pending microtasks
+
+    // The loop skipped B (pendingDeleteById still holds it) instead of re-upserting a row the daemon
+    // would reject as an unknown explicit id — no fourth upsert call, and the batch has not aborted.
+    expect(bridge.upsertCallCount).toBe(3); // A's create, B's create, A's commit — never a fourth for B
+    expect(bridge.sendCalls).toHaveLength(0); // not sent yet — the outer drain loop is now awaiting B's delete
+
+    bridge.releaseHeldDelete?.();
+    await sendPromise;
+
+    expect(bridge.upsertCallCount).toBe(3); // still no upsert was ever attempted for B
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.sendCalls[0]!.text).toContain("persisted A plus more");
+    expect(bridge.sendCalls[0]!.comments.map((c) => c.id)).toEqual([a.id]); // B excluded, not aborting the batch
+    expect(bridge.drafts.has(a.id)).toBe(false); // A sent, archived server-side
+    expect(bridge.drafts.has(b.id)).toBe(false); // B deleted, not resurrected
+  });
+
+  it("a live text emptied for a LATER divergent entry while an earlier entry's commit is held is skipped, not upserted with a blank body", async () => {
+    const { bridge, controller } = setup();
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted B",
+    });
+    await controller.loadInitial();
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const textareaA = cardA.querySelector("textarea")!;
+    textareaA.value = "persisted A plus more";
+    textareaA.dispatchEvent(new Event("input"));
+
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+    textareaB.value = "persisted B plus more";
+    textareaB.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    const sendPromise = controller.sendBatch();
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined()); // A's commit-persist is in flight
+
+    // While A's commit is still open, empty B's textarea (typing, no blur) — the same no-blur input
+    // path the tray-liveness tests above use — so B is no longer divergent (blank) by the time the
+    // loop reaches its entry.
+    textareaB.value = "";
+    textareaB.dispatchEvent(new Event("input"));
+
+    bridge.releaseHeldUpsert?.();
+    await sendPromise;
+
+    // No upsert was ever attempted for B's now-blank body — the daemon rejects a blank upsert
+    // `invalidArgument`, which would otherwise have aborted the whole batch.
+    expect(bridge.upsertCallCount).toBe(3); // A's create, B's create, A's commit only
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.sendCalls[0]!.text).toContain("persisted A plus more");
+    expect(bridge.sendCalls[0]!.comments.map((c) => c.id)).toEqual([a.id]); // B excluded, not aborting the batch
+    expect(bridge.drafts.has(a.id)).toBe(false); // A sent, archived server-side
+    expect(bridge.drafts.get(b.id)?.body).toBe("persisted B"); // B's server row untouched — never upserted
   });
 });

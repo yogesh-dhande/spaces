@@ -783,7 +783,20 @@ export class CommentsController {
         });
         if (divergent.length === 0) break;
         for (const d of divergent) {
-          const ok = await this.persistBody(d.id, this.liveBodies.get(d.id)!);
+          // `divergent` is a quiescent-time snapshot and every awaited persist inside this loop is a
+          // window for the user to delete, empty, or blur a LATER entry — without revalidating right
+          // here, the loop would upsert a deleted row (the daemon rejects an unknown explicit id
+          // `.notFound`, it never recreates) or a blanked body (`.invalidArgument`), aborting the WHOLE
+          // batch with a misleading save-failed toast. Skipped entries are never silently dropped work: a
+          // pending delete is drained by the enclosing loop's next pass, and the send-time sendability
+          // filter below judges live text, so an emptied card is excluded from the batch either way.
+          const resolvedId = this.resolveId(d.id);
+          const draft = this.drafts.find((existing) => existing.id === resolvedId);
+          if (!draft) continue; // gone since the snapshot
+          if (this.pendingDeleteById.has(d.id) || this.pendingDeleteById.has(resolvedId)) continue; // delete pending; next pass awaits it
+          const live = this.liveBodies.get(d.id) ?? this.liveBodies.get(resolvedId);
+          if (live === undefined || live.trim().length === 0 || live === draft.body) continue; // no longer divergent
+          const ok = await this.persistBody(d.id, live);
           if (!ok) {
             // Same abort shape as the pending-persist-drain failure below: doPersistBody's catch
             // already surfaced the underlying error via surfaceError, this is the sendBatch-specific
