@@ -398,18 +398,30 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-once")
         defer { fixture.tearDown() }
 
-        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"))
+        // Served behind the fence pattern `setPayloads` documents: the recorder hands the clipboard
+        // payload to exactly one `.state` request and every later fetch gets "later", so a fetch landing
+        // between the clear below and the next arrival cannot re-serve the write. Re-serving is a fixture
+        // artifact anyway — a real daemon clears a one-shot clipboard event after delivering it.
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"),
+        ])
         waitForCondition("owner applies the clipboard write") {
             _ = fixture.host.effectiveTitle
             return fixture.pasteboard.string(forType: .string) == "copied once"
         }
 
         fixture.pasteboard.clearContents()
-        fixture.recorder.setPayload(
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"))
         waitForCondition("the later payload is applied") {
             _ = fixture.host.effectiveTitle
             return fixture.host.effectiveTitle == "later"
+        }
+        // One more observed apply past the clear proves later payloads leave the pasteboard alone.
+        fixture.recorder.setPayload(
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "settled"))
+        waitForCondition("the payload after the clear is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
         }
         XCTAssertNil(fixture.pasteboard.string(forType: .string))
     }
@@ -761,8 +773,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// that is not yet key, and `focusWindow()` safely no-ops on a nil `window`.
     @MainActor func testMirrorClearsSharedSelectionOnPlainLeftClickAfterAppliedSelection() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-            command: nil, createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
         var clearCount = 0

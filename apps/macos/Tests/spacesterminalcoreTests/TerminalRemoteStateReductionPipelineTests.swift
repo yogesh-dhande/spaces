@@ -21,6 +21,12 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let requestsResync: Bool
         let coalescedAwayCount: Int
         let didReduce: Bool
+        /// The reasons this apply collapsed away, in collapse order. Empty for every existing test that
+        /// predates coalescing-by-full-frame; only the new tests that exercise it populate this.
+        let coalescedReasons: [String]
+        /// `Notification.Name.rawValue` for every notification this apply posts, which is the union
+        /// across its own reason and `coalescedReasons`. See `RemoteGhosttySessionHost.postLocalNotifications`.
+        let notificationNames: [String]
     }
 
     private final class OutputCollector: @unchecked Sendable {
@@ -40,7 +46,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         }
     }
 
-    /// Counts payloads as they reach the apply mailbox, via the pipeline's `didSubmitForTesting` hook.
+    /// Counts payloads as they reach the apply mailbox, via the pipeline's `didSubmit` hook.
     /// It is what lets a test know every payload it submitted has been handed to the mailbox — and so
     /// is safe to release the main thread it is deliberately holding — without waiting on the main actor
     /// itself. `shouldUseFrame` is not a safe signal for this: it runs *during* reduction, before the
@@ -85,7 +91,8 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
                 emittedAt: output.incomingPayload.emittedAt, reason: output.incomingPayload.reason,
                 renderText: output.reduction?.storedPayload.renderText, frameText: output.reduction?.frameToApply.map(frameText),
                 dropReason: output.reduction?.dropReason, didRequestResync: output.reduction?.didRequestResync ?? false,
-                requestsResync: output.requestsResync, coalescedAwayCount: output.coalescedAwayCount, didReduce: output.reduction != nil)
+                requestsResync: output.requestsResync, coalescedAwayCount: output.coalescedAwayCount, didReduce: output.reduction != nil,
+                coalescedReasons: output.coalescedReasons, notificationNames: output.notificationNames.map(\.rawValue))
         }
 
         /// The frame's first row, which is the only one the fixtures vary.
@@ -218,8 +225,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for entry in series { pipeline.submit(entry.payload) }
@@ -244,8 +250,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for entry in series { pipeline.submit(entry.payload) }
@@ -263,11 +268,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     /// A delta that cannot apply asks for a resync. That request is a one-shot the session needs even
     /// when the payload carrying it is superseded before it reaches the screen, so it rides onto the
-    /// output that replaced it — but only when that replacement carries its own frame:
-    /// `ApplyMailbox.mayCollapse` never lets the frameless, failed delta absorb the full frame ahead of
-    /// it (`alpha`), so `alpha` stays queued on its own and is applied first. The full frame behind it
-    /// (`charl`) *does* collapse the failed delta away, since `charl` carries its own frame and so loses
-    /// nothing by replacing it, and it inherits the failed delta's resync request in the process.
+    /// output that replaces it. `alpha` (a full frame) and the failed delta between it and `charl` are
+    /// different reasons in reason-shape terms only by coincidence here (both are `output`); what makes
+    /// this collapse legal either way is `charl` carrying a materialized FULL frame: a full frame renders
+    /// everything an older output's screen content would have, so `ApplyMailbox.mayCollapse` lets it
+    /// absorb the failed delta immediately ahead of it, and the cascade in `ApplyMailbox.submit` then
+    /// keeps walking backwards and absorbs `alpha` too — `alpha`'s screen is entirely superseded by
+    /// `charl`'s materialized frame. The result is a single apply carrying `charl`'s frame, with the
+    /// failed delta's resync request still riding along onto it.
     func testResyncRequestFromACoalescedOutputStillArrives() async throws {
         let sessionID = "pipeline-coalesced-resync"
         let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
@@ -286,22 +294,204 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for payload in payloads { pipeline.submit(payload) }
         try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
         release.signal()
 
-        try await waitUntil("both surviving entries applied") { collector.recorded.count == 2 }
+        try await waitUntil("the cascade's single apply landed") { !collector.recorded.isEmpty }
         try await settle()
-        XCTAssertEqual(collector.recorded.count, 2, "the leading full frame must survive; the frameless failed delta cannot coalesce it away")
-        XCTAssertEqual(collector.recorded.map(\.frameText), ["alpha", "charl"])
-        XCTAssertEqual(collector.recorded.map(\.didRequestResync), [false, false], "both surviving full frames reduced cleanly on their own")
         XCTAssertEqual(
-            collector.recorded.map(\.requestsResync), [false, true], "the coalesced-away delta's resync request must still ride onto its replacement")
-        XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 1])
+            collector.recorded.count, 1, "charl's full frame supersedes alpha's screen entirely, so the cascade collapses all three into one apply")
+        XCTAssertEqual(collector.recorded.map(\.frameText), ["charl"])
+        XCTAssertEqual(collector.recorded.first?.didRequestResync, false, "the surviving full frame reduced cleanly on its own")
+        XCTAssertEqual(
+            collector.recorded.first?.requestsResync, true, "the coalesced-away delta's resync request must still ride onto its replacement")
+        XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 2)
+    }
+
+    /// A newer full frame collapses an older pending output even when the two reasons are unrelated and
+    /// the older one is a barrier reason by shape: `state_change` (full) is followed by a frameless
+    /// `runtime_state` payload — a barrier a run of screen-content output could never absorb — and then a
+    /// `resize` (full). `resize`'s materialized frame renders everything the `state_change` frame and the
+    /// no-op `runtime_state` barrier between them would have, so `ApplyMailbox.mayCollapse`'s
+    /// `carriesFullFrame` branch lets it absorb the barrier first, and the cascade in `ApplyMailbox.submit`
+    /// then keeps walking backwards onto `state_change` too. The survivor still owes `runtime_state`'s
+    /// consumer a refresh even though its own apply never runs, which is why the surviving output posts
+    /// the union of every reason it collapsed (`notificationNames`).
+    func testFullFrameCollapsesAnOlderFramelessBarrierOfADifferentReason() async throws {
+        let sessionID = "pipeline-full-frame-collapses-barrier"
+        let stateChangeFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "one"))
+        let resizeFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "two"))
+        let payloads = [
+            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(stateChangeFrame)),
+            framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState),
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.resize, update: .full(resizeFrame)),
+        ]
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        let release = blockMainThread()
+        for payload in payloads { pipeline.submit(payload) }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
+        release.signal()
+
+        try await waitUntil("the cascade's single apply landed") { !collector.recorded.isEmpty }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "the trailing full frame must collapse both the barrier and the leading full frame ahead of it")
+        XCTAssertEqual(collector.recorded.first?.frameText, "two", "the surviving apply must carry the newest frame")
+        XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 2)
+        let names = try XCTUnwrap(collector.recorded.first?.notificationNames)
+        XCTAssertTrue(
+            names.contains(Notification.Name.spacesTerminalOutputDidChange.rawValue), "state_change/resize still owe the output-shaped refresh")
+        XCTAssertTrue(
+            names.contains(Notification.Name.spacesTerminalRuntimeStateDidChange.rawValue),
+            "the collapsed-away runtime_state still owes its consumer a refresh even though it never applies on its own")
+    }
+
+    /// The full-frame collapse rule applies just as much when BOTH the surviving and the collapsed output
+    /// carry their own full frame and are barrier reasons by shape: `attachment_state` (full) followed by
+    /// `output` (full, newer). `output`'s frame renders everything `attachment_state`'s did, so it
+    /// collapses it away, and the survivor posts both reasons' notifications — `attachment_state` routes
+    /// to two of its own.
+    func testFullFrameCollapsesAnOlderFullFrameOfADifferentReasonAndPostsBothNotifications() async throws {
+        let sessionID = "pipeline-full-frame-collapses-full-frame"
+        let attachmentFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "one"))
+        let outputFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "two"))
+        let payloads = [
+            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.attachmentState, update: .full(attachmentFrame)),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(outputFrame)),
+        ]
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        let release = blockMainThread()
+        for payload in payloads { pipeline.submit(payload) }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
+        release.signal()
+
+        try await waitUntil("the collapsed apply landed") { !collector.recorded.isEmpty }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "the newer full frame must collapse the older full frame despite the reason mismatch")
+        XCTAssertEqual(collector.recorded.first?.frameText, "two")
+        XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 1)
+        let names = try XCTUnwrap(collector.recorded.first?.notificationNames)
+        XCTAssertTrue(names.contains(Notification.Name.spacesTerminalAttachmentStateDidChange.rawValue))
+        XCTAssertTrue(names.contains(Notification.Name.spacesTerminalRuntimeStateDidChange.rawValue), "attachment_state routes to both")
+        XCTAssertTrue(names.contains(Notification.Name.spacesTerminalOutputDidChange.rawValue))
+    }
+
+    /// A delta is never a barrier-collapsing full frame, even when it reduces cleanly and yields its own
+    /// frame: `carriesFullFrame` requires `decodedUpdate.kind == .full`, so a frameless `runtime_state`
+    /// barrier ahead of a delta-derived output must survive, exactly as it did before this feature — only
+    /// a materialized FULL frame earns the new collapse.
+    func testDeltaDoesNotCollapseAcrossABarrier() async throws {
+        let sessionID = "pipeline-delta-does-not-cross-barrier"
+        let seed = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "seed"))
+        let target = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "delta-frame"))
+        let seedToTarget = GhosttyRenderUpdateFactory.makeUpdate(target: target, baseline: GhosttyRenderUpdateBaseline(frame: seed))
+        XCTAssertEqual(seedToTarget.kind, .delta)
+
+        let collector = OutputCollector()
+        let applyTarget = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak applyTarget] output in applyTarget?.apply(output) },
+            didSubmit: { probe.recordSubmission() })
+
+        // The seed applies on its own so the reducer's baseline is set before the delta below chains off
+        // it; whether it applies before or during the block below is irrelevant to the reducer's chain,
+        // but keeping it outside makes the two applies this test actually cares about unambiguous.
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seed)))
+        try await waitUntil("the seed applied") { collector.recorded.count == 1 }
+
+        let release = blockMainThread()
+        pipeline.submit(framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: seedToTarget))
+        try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("both entries applied") { collector.recorded.count == 3 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 3, "the barrier must survive; a delta never carries a full frame")
+        XCTAssertEqual(
+            collector.recorded.dropFirst().map(\.reason), [TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.output])
+        XCTAssertEqual(collector.recorded.last?.frameText, "delta-frame", "the delta must still have reduced and applied its own frame")
+        XCTAssertEqual(collector.recorded.dropFirst().map(\.coalescedAwayCount), [0, 0])
+    }
+
+    /// An out-of-band response (the answer to a direct `.state` read) keeps its own apply no matter what
+    /// arrives around it: `TerminalViewerModel.applyLatestState` and `RemoteGhosttySessionHost` read a
+    /// waiting fetch's verdict off the output that accounted for that submission, so
+    /// `ApplyMailbox.mayCollapse` refuses to fold an out-of-band output into anything, or anything into
+    /// it — even a newer full frame, which would otherwise be free to absorb it.
+    func testOutOfBandResponseIsNeverCollapsedAway() async throws {
+        let sessionID = "pipeline-out-of-band-never-collapsed"
+        let seed = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "seed"))
+        let outOfBand = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "oob"))
+        let stream = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "stream"))
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seed)))
+        try await waitUntil("the seed applied") { collector.recorded.count == 1 }
+
+        let release = blockMainThread()
+        pipeline.submit(
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.initial, update: .full(outOfBand)), isOutOfBand: true)
+        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: .full(stream)))
+        try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("both entries applied") { collector.recorded.count == 3 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 3, "the out-of-band response must keep its own apply, never folded into the stream frame around it")
+        XCTAssertEqual(collector.recorded.dropFirst().map(\.frameText), ["oob", "stream"], "each apply must carry its own frame, in order")
+        XCTAssertEqual(collector.recorded.dropFirst().map(\.coalescedAwayCount), [0, 0])
+    }
+
+    /// A clipboard write's pasteboard one-shot is read from the payload that carried it at apply time, so
+    /// it is never collapsed away — not even by a newer full frame, which would otherwise be free to
+    /// absorb any other pending output regardless of reason.
+    func testClipboardWriteIsNeverCollapsedAwayByAFullFrame() async throws {
+        let sessionID = "pipeline-clipboard-never-collapsed-by-full-frame"
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "after-copy"))
+        let payloads: [GhosttyRemoteSessionStatePayload] = [
+            clipboardPayload(sessionID: sessionID, sequence: 0),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)),
+        ]
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        let release = blockMainThread()
+        for payload in payloads { pipeline.submit(payload) }
+        try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == payloads.count }
+        release.signal()
+
+        try await waitUntil("both entries applied") { collector.recorded.count == 2 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 2, "the clipboard write must survive; a full frame must not silently absorb its one-shot")
+        XCTAssertEqual(collector.recorded.map(\.reason), [TerminalRemoteSessionStateReason.clipboardWrite, TerminalRemoteSessionStateReason.output])
+        XCTAssertEqual(collector.recorded.map(\.frameText), [nil, "after-copy"])
+        XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 0])
     }
 
     /// Coalescing must never let a frameless output silently absorb a pending frame-carrying one.
@@ -322,8 +512,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         // Both submissions land in the mailbox while the main thread is held, which is exactly the
         // situation `ApplyMailbox.submit` collapses runs in: without the frame check, the frameless
@@ -359,8 +548,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         // All five land in the mailbox while the main thread is held, so nothing can apply until the
         // release below — exactly the burst a pure input storm produces when the main actor is busy.
@@ -428,7 +616,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let collector = RawOutputCollector()
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmit: { probe.recordSubmission() })
 
         // Seed the baseline on its own so the two deltas below are the only entries in the mailbox when
         // the main actor is held, which is what makes the second collapse onto the first deterministic.
@@ -481,7 +669,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let collector = RawOutputCollector()
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { output in collector.record(output) }, didSubmit: { probe.recordSubmission() })
 
         pipeline.submit(seedPayload)
         try await waitUntil("seed applied") { collector.recorded.count == 1 }
@@ -612,8 +800,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         // The pane is on screen for the first frame: a pane holds nothing until it has something to show.
         pipeline.submit(series[0].payload)
@@ -646,8 +833,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         pipeline.submit(series[0].payload)
         try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
@@ -694,6 +880,51 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertTrue(collector.recorded[1].requestsResync, "the off-screen pane swallowed the request that repairs its chain")
     }
 
+    /// A screen-shaped output (`state_change`, coalescible on its own reason) can still absorb a barrier
+    /// reason ahead of it via `ApplyMailbox.mayCollapse`'s `carriesFullFrame` branch, which collapses
+    /// regardless of reason shape whenever the newer output carries a materialized FULL frame. Before this
+    /// fix, `defersDrain` classified the survivor by its own `incomingPayload.reason` alone, so an output
+    /// that absorbed `attachment_state`'s transition still deferred the drain because its own reason
+    /// (`state_change`) is screen-shaped — stranding that transition behind the pane's hold instead of
+    /// draining like a barrier, the way it would have applied on its own. Blocking the main actor is what
+    /// makes both submissions land, and the second's cascade collapse the first, before any drain can run.
+    func testHeldPaneDrainsAnOutputThatAbsorbedAnAttachmentTransition() async throws {
+        let sessionID = "pipeline-held-absorbed-transition"
+        let seedFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "seed"))
+        let attachmentFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "one"))
+        let stateChangeFrame = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "two"))
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seedFrame)))
+        try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
+
+        pipeline.setHoldsScreenUpdates(true)
+
+        let release = blockMainThread()
+        pipeline.submit(
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.attachmentState, update: .full(attachmentFrame)))
+        pipeline.submit(
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(stateChangeFrame)))
+        try await waitUntil("both payloads reached the mailbox") { probe.submissions == 3 }
+        release.signal()
+
+        try await waitUntil("the collapsed output applied while still holding") { collector.recorded.count == 2 }
+        try await settle()
+        XCTAssertEqual(
+            collector.recorded.count, 2, "an output that absorbed an attachment transition must drain like a barrier, not wait for the hold to end")
+        let applied = collector.recorded[1]
+        XCTAssertEqual(applied.frameText, "two")
+        XCTAssertEqual(applied.coalescedAwayCount, 1)
+        XCTAssertTrue(
+            applied.notificationNames.contains(Notification.Name.spacesTerminalAttachmentStateDidChange.rawValue),
+            "the absorbed attachment_state transition must still reach its consumer even though it never applies on its own")
+    }
+
     /// A remote owner (the phone, say) driving a session whose Mac pane is off screen alternates
     /// frameless `input` payloads with frame-carrying output. `ApplyMailbox.mayCollapse` on its own
     /// cannot fold a frameless output onto a frame-carrying entry, so every cycle would append one more
@@ -707,8 +938,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let target = ApplyTarget(collector: collector)
         let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
-            didSubmitForTesting: { probe.recordSubmission() })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
         pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)))
@@ -855,9 +1085,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
                     scrollRectsOverflowed = true
                 }
                 let frame = GhosttyRenderFrame(
-                    sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot,
-                    scrollRects: scrollRects, scrollRectsOverflowed: scrollRectsOverflowed)
-                let storedFrame = GhosttyRenderFrame(sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot)
+                    sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot, scrollRects: scrollRects,
+                    scrollRectsOverflowed: scrollRectsOverflowed)
+                let storedFrame = GhosttyRenderFrame(
+                    sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot)
                 guard let encoded = try? GhosttyRenderUpdateBinaryCodec.encode(.full(storedFrame)) else {
                     return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, nil)
                 }
@@ -998,6 +1229,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.input, emittedAt: emittedAt(sequence),
             sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
             title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
+    }
+
+    /// A payload for an arbitrary reason that carries no render update, e.g. `runtime_state`: the daemon
+    /// never attaches screen content to a barrier reason, so the reduction always resolves to no frame.
+    private func framelessPayload(sessionID: String, sequence: Int, reason: String) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt(sequence), sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
     }
 
     private func emittedAt(_ sequence: Int) -> String { String(format: "2026-05-20T00:%02d:%02dZ", sequence / 60, sequence % 60) }

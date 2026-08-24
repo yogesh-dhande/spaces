@@ -187,6 +187,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     @ObservationIgnored private var localLinkPreviewDownloadTask: Task<Int64, Error>?
 
     private let bridgeClient: SpacesDeviceAPIClient
+    /// The one command connection this viewer's requests ride: attach, the state reads, takeover, the
+    /// foreground heartbeat, the ownership-sync resize, and every input send. The transport caches its
+    /// pinned-TLS connection, so passing this channel to a request is what keeps a cold open to two dials
+    /// (this channel and the session stream) instead of one per call, which over a LAN or a tunnel is a
+    /// TCP plus TLS handshake each.
     private var commandChannel: SpacesDeviceAPICommandChannel
     @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL
     @ObservationIgnored private let linkPreviewCacheDirectory: URL
@@ -213,6 +218,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var hasSentStopDetach = false
     private var hasAttachedToSession = false
     private var viewerAttachmentLifecycle: UInt64 = 0
+    /// `viewerAttachmentLifecycle` at the moment `latestState` last received a payload that actually
+    /// contributed a frame (`reduction.frameToApply != nil`), not every `latestState = reduction.storedPayload`
+    /// assignment and not the ownership-loss scrub that only clears screen state. A frameless or refused
+    /// reduce carries the prior snapshot forward unchanged, so it must not advance this stamp: doing so
+    /// would credit the current lifecycle with a snapshot an earlier lifecycle actually produced. A
+    /// retained detail's model survives `stop()`/`start()`: `beginStop` bumps the lifecycle but, for a
+    /// non-owner, leaves `latestState` holding the previous lifecycle's render snapshot so the retained
+    /// view keeps something to draw while stopped. This stamp is how a hold-release decision on restart
+    /// can tell that snapshot apart from one the new lifecycle actually produced.
+    private var latestStateLifecycle: UInt64 = 0
     @ObservationIgnored private var viewerAttachmentOperation: ViewerAttachmentOperation?
     private var automaticTakeoverGeneration: UInt64 = 0
     @ObservationIgnored private var automaticTakeoverTask: Task<Void, Never>?
@@ -242,7 +257,33 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Every materialized frame is rendered. The mac mirror gates frames against the surface it is
         // resizing underneath; this viewer has no such local surface race — it renders whatever grid the
         // daemon exports and re-measures its own viewport from the frame that arrives.
-        shouldUseFrame: { _, _ in true }, apply: { [weak self] output in self?.applyReducedState(output) })
+        //
+        // The open hold reads every frame here rather than at apply because this is the last point before
+        // the mailbox: ending the hold from here leaves the rest of the open burst still queued, so it
+        // collapses onto the frame that ended it instead of painting ahead of it. The release itself
+        // still waits for `didSubmit`, below: `shouldUseFrame` runs before this frame's own output has
+        // reached the mailbox, and releasing here would risk the mailbox draining an older held frame
+        // first.
+        //
+        // Two narrow races on this seam are accepted rather than closed. A viewport report can land in
+        // the gap between the post-submit release and the released frame's main-actor apply, so the
+        // first paint can be at a grid the surface just moved past; and because this pipeline spans
+        // `beginStop()`/`start()`, a payload still draining from the previous lifecycle can match a
+        // freshly re-armed hold whose apply then rejects it as stale, leaving the new lifecycle's first
+        // frame unheld. Both windows are milliseconds wide against events that occur once per open,
+        // both cost at most one transient reflow that the ordinary viewport-report → resize path
+        // corrects in the next round trip, and neither can strand the hold; closing them would need a
+        // revocable release re-validated at apply time, which puts bookkeeping on the apply hot path
+        // for a race the bounded timeout already caps.
+        shouldUseFrame: { [openScreenHold] frame, _ in
+            openScreenHold.noteReducedFrame(frame)
+            return true
+        }, apply: { [weak self] output in self?.applyReducedState(output) },
+        didSubmit: { [openScreenHold] in openScreenHold.releasePendingAfterSubmit() })
+    /// The viewer paints once per open, at the phone's grid: see `TerminalViewerOpenScreenHold`.
+    @ObservationIgnored private let openScreenHold = TerminalViewerOpenScreenHold()
+    /// Bounds the open hold. Armed with the hold and cancelled by whatever releases it.
+    @ObservationIgnored private var openScreenHoldTimeoutTask: Task<Void, Never>?
     /// Payloads handed to the pipeline, and how many of those the main actor has accounted for. The
     /// apply mailbox collapses runs of consecutive frames, so one apply stands for itself plus every
     /// submission it superseded; counting that way is what lets `applyLatestState` wait on a payload
@@ -301,6 +342,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private static let ownershipSyncDebounce: Duration = .milliseconds(120)
     private static let postResizeStateSettleStep: Duration = .milliseconds(50)
     private static let postResizeStateSettleIterations = 6
+    /// How long the open hold waits for a frame at this viewer's grid before painting whatever is newest.
+    /// The wait it bounds is the ownership-sync resize round trip, so it is that request's own timeout: a
+    /// resize that has not been answered by then is not going to produce the frame the hold waits for.
+    /// Only a test overrides it (`openScreenHoldTimeoutForTesting`), so a suite can drive the expiry
+    /// instead of waiting out the real one.
+    private static let defaultOpenScreenHoldTimeout: Duration = inputRequestTimeout
+    var openScreenHoldTimeoutForTesting: Duration?
+    private var openScreenHoldTimeout: Duration { openScreenHoldTimeoutForTesting ?? Self.defaultOpenScreenHoldTimeout }
+    /// Whether the open hold is still waiting for a frame at this viewer's grid. Read by tests, which
+    /// assert the release conditions directly rather than inferring them from what happened to paint.
+    var isHoldingOpenScreenUpdatesForTesting: Bool { openScreenHold.isHolding }
+    /// This viewer's own client record, so a suite can build the attachment snapshot that makes this
+    /// viewer the session's owner exactly as the daemon's payload does. `configureOwnerInteractiveForTesting`
+    /// cannot stand in for it here: it injects an owner render epoch along with the ownership, and whether
+    /// that epoch begins at all is what the open-paint rules are about.
+    var remoteClientForTesting: TerminalClient { remoteClient }
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     /// Text-family previews (text/markdown/html) download the whole file into memory-adjacent local
     /// storage before rendering, unlike image/video/PDF which QuickLook streams from disk; this caps
@@ -503,7 +560,118 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             reconnectTask = Task { [weak self] in await self?.loadEndedState() }
             return
         }
+        beginOpenScreenHold()
         scheduleReconnect(after: .zero)
+    }
+
+    /// Holds this viewer's screen updates until a frame at its own grid has reduced, so opening a
+    /// terminal paints once, already at the phone's size, instead of painting the daemon's grid and
+    /// repainting after the ownership-sync resize round trip.
+    ///
+    /// Only the paint waits. Every payload still reduces in order, and every reason that carries a state
+    /// transition still applies as it arrives (see `TerminalRemoteStateReductionPipeline`), so ownership,
+    /// runtime state and the ended transition keep up with the session while the screen waits.
+    ///
+    /// Demo Mode never holds: it takes no ownership, so it issues no resize and the recorded frame it
+    /// serves for the reported viewport is the only frame it will ever paint.
+    private func beginOpenScreenHold() {
+        guard !isDemoMode, !isEndedState else { return }
+        guard !openScreenHold.isHolding else { return }
+        let pipeline = statePipeline
+        // Weakly, because the pipeline's own `shouldUseFrame` holds the box: a strong capture here would
+        // make the two retain each other for as long as the hold is armed, outliving the model that owns
+        // them if it is torn down before anything releases the hold.
+        openScreenHold.begin(viewport: viewportSize) { [weak pipeline] in pipeline?.setHoldsScreenUpdates(false) }
+        pipeline.setHoldsScreenUpdates(true)
+        trace("open_screen_hold_begin viewport=\(traceSize(columns: viewportSize?.columns, rows: viewportSize?.rows))")
+        openScreenHoldTimeoutTask?.cancel()
+        // One bound for the whole open rather than one per viewport report: the reports all land inside
+        // the first second, so restarting this with each of them would only ever move the deadline by
+        // less than it already allows, at the cost of a second thing to reason about.
+        let timeout = openScreenHoldTimeout
+        openScreenHoldTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self else { return }
+            releaseOpenScreenHold(reason: "timeout")
+            paintFirstScreenAfterOpenScreenHoldRelease()
+        }
+    }
+
+    /// Ends the open hold and the timeout that bounds it. Idempotent, and safe to call after the reduce
+    /// loop has already ended the hold by matching a frame: the timer still has to be retired there.
+    private func releaseOpenScreenHold(reason: String) {
+        guard openScreenHoldTimeoutTask != nil || openScreenHold.isHolding else { return }
+        cancelOpenScreenHoldTimers()
+        openScreenHold.end()
+        trace("open_screen_hold_release reason=\(reason)")
+    }
+
+    /// Paints the screen the first-paint gate suppressed, once the hold that suppressed it is over.
+    ///
+    /// A payload whose reason is a barrier applies even while the pipeline holds its screen updates, so
+    /// its frame is consumed by the apply the gate refused to paint from and is left queued nowhere. When
+    /// the hold then ends on something other than a newly reduced frame — the surface reporting a grid the
+    /// stored screen already matches, or the bounded wait expiring — nothing is left to wake the screen,
+    /// and a quiet session would sit on its preparing state until a payload that may never come. The
+    /// stored state is that frame, so this paints from it, and when there is no usable one the ownership
+    /// handshake runs again and its own bootstrap read fetches one.
+    ///
+    /// Runs as its own main-actor task so it lands after the drain the release just triggered: when that
+    /// drain painted, there is an owner render epoch by the time this reads one and it does nothing.
+    private func paintFirstScreenAfterOpenScreenHoldRelease() {
+        Task { @MainActor [weak self] in
+            guard let self, !openScreenHold.isHolding, ownerRenderEpochState == nil, isOwner, !isEndedState else { return }
+            // The timeout release (the other caller of this method) ends the hold without regard to
+            // `latestState` at all, so a retained detail's leftover snapshot from a previous
+            // `stop()`/`start()` lifecycle can still be sitting here and coincidentally match this
+            // lifecycle's reported grid. Painting from it would draw a frame this restarted subscription
+            // never produced, so the lifecycle stamp gates this the same way it gates the hold release.
+            if latestStateLifecycle == viewerAttachmentLifecycle, let latestState, latestState.renderSnapshot != nil,
+                matchesReportedViewport(latestState)
+            {
+                trace("open_screen_paint_from_stored_state")
+                beginOwnerRenderEpoch(from: latestState)
+                return
+            }
+            trace("open_screen_bootstrap_after_release")
+            scheduleOwnershipSynchronization()
+        }
+    }
+
+    private func cancelOpenScreenHoldTimers() {
+        openScreenHoldTimeoutTask?.cancel()
+        openScreenHoldTimeoutTask = nil
+    }
+
+    /// Releases the open hold once nothing can produce the frame it waits for: an ended session paints
+    /// its final transcript, and a session another client owns exports its owner's grid and will never
+    /// answer a resize from here. Called after `attemptAutomaticTakeoverIfNeeded`, so a viewer that is
+    /// about to take the session over is still counted as an owner-to-be rather than released early.
+    private func releaseOpenScreenHoldIfNoViewportFrameIsComing() {
+        guard openScreenHold.isHolding else { return }
+        if isEndedState {
+            releaseOpenScreenHold(reason: "session_ended")
+            return
+        }
+        guard !isOwner else { return }
+        guard !isBusy, !isAwaitingTakeoverConfirmation, automaticTakeoverTask == nil else { return }
+        releaseOpenScreenHold(reason: "not_owner")
+    }
+
+    /// Ends the open hold when the ownership handshake settled without producing a frame at this viewer's
+    /// grid. True when this call is what ended it.
+    @discardableResult private func releaseOpenScreenHoldIfTheHandshakeProducedNoFrame() -> Bool {
+        guard openScreenHold.releaseIfNoMatchingFrameArrived() else { return false }
+        cancelOpenScreenHoldTimers()
+        trace("open_screen_hold_release reason=handshake_without_frame")
+        return true
+    }
+
+    /// Whether `payload`'s screen is at the grid this viewer reported, which is the frame the open hold
+    /// waits for. A viewer that has not measured its surface yet has no grid to match, so nothing does.
+    private func matchesReportedViewport(_ payload: GhosttyRemoteSessionStatePayload) -> Bool {
+        guard let viewportSize, let snapshot = payload.renderSnapshot else { return false }
+        return snapshot.columns == viewportSize.columns && snapshot.rows == viewportSize.rows
     }
 
     /// Arms the one foreground ownership evaluation for a detail that stays open while iOS suspends the
@@ -538,7 +706,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
             var hasLiveAttachment = true
             do {
-                try await self.bridgeClient.heartbeat(sessionID: self.session.id, clientID: self.remoteClient.id, timeout: Self.stateRequestTimeout)
+                try await self.bridgeClient.heartbeat(
+                    sessionID: self.session.id, clientID: self.remoteClient.id, timeout: Self.stateRequestTimeout, commandChannel: self.commandChannel
+                )
                 self.trace("foreground_resume_heartbeat_success cycle=\(resumeCycle)")
             } catch {
                 if Self.isAttachmentNotFound(error) {
@@ -622,6 +792,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         reconnectTask = nil
         streamHandle?.cancel()
         streamHandle = nil
+        releaseOpenScreenHold(reason: "stop")
         cancelTrailingRenderUpdateResync()
         isRenderUpdateResyncFetchInFlight = false
         bufferedInputFlushTask?.cancel()
@@ -718,7 +889,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             let takeoverState = try await takeOverTerminal(clientID: clientID, timeout: Self.inputRequestTimeout)
             guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
-            replaceCommandChannel()
             // This await sits behind the reduction pipeline's strict FIFO: whatever the live subscription
             // already submitted ahead of this response reduces first, and only then does the takeover
             // response reduce and apply. That is accepted rather than worked around: reduction is off the
@@ -777,7 +947,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func takeOverTerminal(clientID: String, timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
-        try await bridgeClient.takeOver(sessionID: session.id, clientID: clientID, timeout: timeout)
+        try await bridgeClient.takeOver(sessionID: session.id, clientID: clientID, timeout: timeout, commandChannel: commandChannel)
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
@@ -798,6 +968,25 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         guard !isEndedState else { return }
         viewportSize = resolved
+        // The surface reports its grid after the first payloads have already been reduced, so a session
+        // already running at this grid delivered the frame the hold waits for before there was anything to
+        // match it against; `matchesLatestFrame` is how that frame still counts, and it ends the hold here
+        // because no later frame would match it either and a quiet session sends no later frame at all.
+        //
+        // `latestStateLifecycle == viewerAttachmentLifecycle` gates this: a retained detail's model
+        // survives `stop()`/`start()`, and for a non-owner viewer `beginStop` leaves `latestState` holding
+        // the previous lifecycle's render snapshot so the view still has something to draw while stopped.
+        // A frame stored by a previous lifecycle says nothing about what the restarted subscription will
+        // deliver, so it must not release this lifecycle's hold just because its grid happens to match.
+        if openScreenHold.isHolding,
+            openScreenHold.setViewport(
+                columns: resolved.columns, rows: resolved.rows,
+                matchesLatestFrame: latestStateLifecycle == viewerAttachmentLifecycle ? latestState.map(matchesReportedViewport) ?? false : false)
+        {
+            cancelOpenScreenHoldTimers()
+            trace("open_screen_hold_release reason=viewport_matches_stored_frame")
+            paintFirstScreenAfterOpenScreenHoldRelease()
+        }
         trace(
             "viewport_update columns=\(resolved.columns) rows=\(resolved.rows) owner=\(isOwner ? 1 : 0) busy=\(isBusy ? 1 : 0) syncing=\(isSynchronizingOwnership ? 1 : 0) sync_scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)"
         )
@@ -1513,6 +1702,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// Drops this viewer's command connection and dials a new one. The transport caches its pinned-TLS
+    /// connection for the channel's life, so a connection that failed mid-request stays failed until it is
+    /// replaced; this is that replacement, and the input retry above is its only caller. A takeover needs
+    /// none of it: the channel carries no ownership of its own, since every request names its client ID and
+    /// owner epoch, so replacing a warm connection after a successful takeover only costs another dial.
     private func replaceCommandChannel() {
         let previousChannel = commandChannel
         commandChannel = bridgeClient.makeCommandChannel()
@@ -1768,7 +1962,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func fetchTerminalState(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload {
-        try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout)
+        try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout, commandChannel: commandChannel)
     }
 
     private func handleDisconnect(_ error: Error?) async {
@@ -2028,9 +2222,41 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// How a `synchronizeOwnershipState` run concluded, which is what tells `runOwnershipSynchronization`'s
+    /// defer whether releasing the open-screen hold is safe.
+    ///
+    /// - `noViewportTarget`: `awaitViewportSizeIfNeeded()` returned nil, so the run had no grid to test
+    ///   against and issued no resize. The surface's report, the sync it triggers, and the frame that
+    ///   would match it are all still coming; releasing here paints whatever stale grid the daemon last
+    ///   reported instead.
+    /// - `resizedAwaitingFrame`: the resize succeeded (`ownership_resize_success`) but
+    ///   `awaitOwnerStateFromStream`'s bounded wait returned nil before the resized frame reduced. That
+    ///   frame is en route; releasing paints the stale content it would have replaced.
+    /// - `settled`: nothing further is coming from this run, so it is safe to ask the hold whether a
+    ///   matching frame ever reduced. Covers a failed or skipped resize, a stream wait that did find a
+    ///   fresh state, and every early return (lifecycle mismatch, ended-state recovery, an authentication
+    ///   failure) — none of those leave a frame in flight either.
+    private enum OwnershipSynchronizationOutcome {
+        case noViewportTarget
+        case resizedAwaitingFrame
+        case settled
+    }
+
     private func runOwnershipSynchronization() async {
         var shouldScheduleFollowUp = false
+        var outcome = OwnershipSynchronizationOutcome.settled
         defer {
+            // Releasing only makes sense when this run had a grid to test and confirmed nothing else is
+            // going to produce a frame for it: `.noViewportTarget` never had one to test, and
+            // `.resizedAwaitingFrame` has one en route from the resize this run just sent. Only `.settled`
+            // asks the hold whether a matching frame ever reduced — and `releaseIfNoMatchingFrameArrived`
+            // is already a no-op once one has, so calling it here for an already-satisfied or
+            // already-released hold costs nothing. Once it does release, nothing else is going to produce
+            // the frame the hold waited for, so the run that follows bootstraps the screen the ordinary
+            // way rather than leaving the viewer preparing until the bounded wait expires.
+            if case .settled = outcome, !shouldScheduleFollowUp, releaseOpenScreenHoldIfTheHandshakeProducedNoFrame(), ownerRenderEpochState == nil {
+                shouldScheduleFollowUp = true
+            }
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
             isOwnershipSynchronizationScheduled = false
@@ -2053,7 +2279,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace(
             "ownership_sync_begin viewport=\(traceSize(columns: targetViewportSize?.columns, rows: targetViewportSize?.rows)) runtime_before=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))"
         )
-        await synchronizeOwnershipState(targetViewportSize: targetViewportSize)
+        outcome = await synchronizeOwnershipState(targetViewportSize: targetViewportSize)
         logPerformanceEvent(
             name: "resize_reconciliation_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: [
@@ -2083,14 +2309,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return viewportSize
     }
 
-    private func synchronizeOwnershipState(targetViewportSize: (columns: Int, rows: Int)?) async {
+    private func synchronizeOwnershipState(targetViewportSize: (columns: Int, rows: Int)?) async -> OwnershipSynchronizationOutcome {
         let lifecycle = viewerAttachmentLifecycle
         let clientID = remoteClient.id
-        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return .settled }
         let previousEmittedAt = latestState?.emittedAt
         let previousScreenRevision = latestState?.screenStateRevision
         let previousRuntimeSize = latestState.map { ($0.runtimeState?.columns, $0.runtimeState?.rows) }
         let stateWaitTargetViewportSize: (columns: Int, rows: Int)?
+        // Nil until this run has a grid to test against, which is the run's default outcome: nothing
+        // resized, so nothing in flight from this run either.
+        var outcome: OwnershipSynchronizationOutcome = targetViewportSize == nil ? .noViewportTarget : .settled
         if let targetViewportSize {
             if shouldResizeOwnerRuntime(to: targetViewportSize) {
                 trace("ownership_resize_begin columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
@@ -2101,19 +2330,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     let currentResizeSerial = resizeSerial
                     try await bridgeClient.resize(
                         sessionID: session.id, clientID: clientID, columns: targetViewportSize.columns, rows: targetViewportSize.rows,
-                        ownerEpoch: currentOwnerEpoch, resizeSerial: currentResizeSerial, timeout: Self.inputRequestTimeout)
+                        ownerEpoch: currentOwnerEpoch, resizeSerial: currentResizeSerial, timeout: Self.inputRequestTimeout,
+                        commandChannel: commandChannel)
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
+                    // Provisional: a matching frame reducing before the stream wait ends downgrades this
+                    // to `.settled` below. Left as `.resizedAwaitingFrame` it means the wait is what times
+                    // out, and that frame is still en route.
+                    outcome = .resizedAwaitingFrame
                 } catch {
                     trace(
                         "ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))"
                     )
-                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") { return }
+                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") { return .settled }
                     if !Self.isTransientReconnectError(error) {
-                        if handleAuthenticationFailure(error) { return }
+                        if handleAuthenticationFailure(error) { return .settled }
                         errorMessage = error.localizedDescription
                     }
                 }
-                guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+                guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return .settled }
             } else {
                 lastSentResizeSize = targetViewportSize
                 stateWaitTargetViewportSize = nil
@@ -2125,22 +2359,30 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let streamedState = await awaitOwnerStateFromStream(
             targetViewportSize: stateWaitTargetViewportSize, previousEmittedAt: previousEmittedAt, previousScreenRevision: previousScreenRevision,
             previousRuntimeSize: previousRuntimeSize)
-        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), isOwner else { return }
-        if ownerRenderEpochState == nil {
+        // The provisional `.resizedAwaitingFrame` only holds if the wait is what timed out; a matching
+        // state found within it means the resize is no longer the reason nothing further is coming.
+        // `.noViewportTarget` is untouched by this: `stateWaitTargetViewportSize` is nil in that case, so
+        // `streamedState` is just whatever was already cached, not a resolution of the run's grid.
+        if case .resizedAwaitingFrame = outcome, streamedState != nil { outcome = .settled }
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), isOwner else { return .settled }
+        // While the open hold is on, the first paint belongs to the hold's release and not to this
+        // bootstrap: the grid this run targeted may already have been superseded by a newer report, and
+        // painting it here would put that superseded screen up exactly as if there were no hold.
+        if ownerRenderEpochState == nil, !openScreenHold.isHolding {
             if streamedState != nil {
                 trace("ownership_sync_using_streamed_state")
                 beginOwnerRenderEpoch(from: streamedState)
-                return
+                return outcome
             }
             if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) {
                 trace("ownership_sync_using_existing_state")
                 beginOwnerRenderEpoch(from: latestState)
-                return
+                return outcome
             }
             let refreshedState = await refreshLatestState(
                 timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "owner_bootstrap_refresh", lifecycle: lifecycle,
                 clientID: clientID)
-            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return .settled }
             trace(
                 "ownership_sync_using_fetched_state render_update=\(refreshedState?.renderUpdate == nil ? 0 : 1) output_bytes=\(refreshedState?.outputByteCount ?? 0)"
             )
@@ -2150,6 +2392,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 } else if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) { latestState } else { nil }
             beginOwnerRenderEpoch(from: fallbackState)
         }
+        return outcome
     }
 
     private func shouldResizeOwnerRuntime(to targetViewportSize: (columns: Int, rows: Int)) -> Bool {
@@ -2499,6 +2742,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             cancelTrailingRenderUpdateResync()
         }
         latestState = reduction.storedPayload
+        // A frameless or refused reduce carries the prior snapshot forward untouched, so it must not
+        // refresh the snapshot's provenance: only a payload whose own render update decoded and applied
+        // (`frameToApply != nil`) gets credit for this lifecycle, matching `latestStateLifecycle`'s doc.
+        if reduction.frameToApply != nil { latestStateLifecycle = viewerAttachmentLifecycle }
         // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
         // read was answered, which is before whatever superseded it — a handoff, or this device's own
         // attach. Reading it here would rewrite this client's attachment from that pre-handoff snapshot
@@ -2542,9 +2789,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Same rule for the screen: a refused payload's render snapshot belongs to a session generation
         // the reducer just refused, so feeding it to the owner render epoch would repaint this viewer with
         // stale geometry the pane has already moved past.
-        if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil {
+        // The open hold defers the FIRST paint until it releases, whatever grid the payload carries: the
+        // hold releases on the frame at the grid the surface last reported, so anything reaching here
+        // before that is a screen at a grid the viewer has moved past and painting it is the reflow this
+        // hold exists to remove. A barrier still
+        // applies while the pipeline holds, so this is where such a payload's screen is kept off the
+        // surface; everything else on it lands as usual.
+        let holdsFirstPaint = openScreenHold.isHolding && ownerRenderEpochState == nil
+        if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {
             if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }
         }
+        // The reduce loop ends the hold without going through the main actor, so the bound armed with it is
+        // retired here instead of being left to fire six seconds into a session that is already painting.
+        if openScreenHoldTimeoutTask != nil, !openScreenHold.isHolding { cancelOpenScreenHoldTimers() }
         if isOwnerAfterMerge, wasTakingOver {
             isAwaitingTakeoverConfirmation = false
             isBusy = false
@@ -2613,11 +2870,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace(
             "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderSnapshot?.columns, rows: latestState?.renderSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))"
         )
-        if isOwnerAfterMerge, !wasOwner || ownerRenderEpochState == nil {
+        // `ownerRenderEpochState` stays nil for as long as the open hold defers the first paint, so it is
+        // not on its own the "this owner still needs its handshake" signal it is outside the hold:
+        // rescheduling on it would cancel and restart the synchronization debounce on every payload of the
+        // open burst, and the resize the hold is waiting for would never be sent.
+        if isOwnerAfterMerge, !wasOwner || (ownerRenderEpochState == nil && !openScreenHold.isHolding) {
             beginOwnerRecoveryGracePeriod()
             scheduleOwnershipSynchronization()
         }
         attemptAutomaticTakeoverIfNeeded()
+        releaseOpenScreenHoldIfNoViewportFrameIsComing()
     }
 
     /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
