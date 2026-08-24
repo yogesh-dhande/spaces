@@ -167,7 +167,12 @@ export class EditorView {
    *  hibernation restore's `restoreState` re-runs `handleExternalChange`, which re-derives this from
    *  scratch — a still-unreadable file re-enters the catch and re-shows the banner on its own, and a
    *  now-readable file heals through the normal decoded-outcome path either way, so nothing is lost
-   *  by not carrying this flag across the snapshot. */
+   *  by not carrying this flag across the snapshot.
+   *
+   *  Round-24 Fix 3 (P2): also cleared by `open()`'s own success arm — a switch to a different file
+   *  must not carry this flag forward into that file's first `handleExternalChange` reconcile, which
+   *  would otherwise clear it AND hide whatever unrelated banner (discard consent, merge indicator)
+   *  that file has put up in the meantime. */
   private unreadableBannerVisible = false;
   private searchTimer: ReturnType<typeof setTimeout> | undefined;
   private editorStatePushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -469,6 +474,13 @@ export class EditorView {
     this.diskMissing = false;
     this.pendingMergeUndo = undefined;
     this.banner.style.display = "none";
+    // Fix 3 (round-24, P2): the flag scopes an unreadable-file error banner to the file that raised
+    // it (see the flag's own doc comment). A successful open establishes a fresh file context, so it
+    // must not leak into the next file's first decoded `handleExternalChange` reconcile, whose
+    // unconditional-on-this-flag clear (around line 582) would otherwise hide an unrelated banner
+    // (discard consent, merge indicator) that file put up, using state left over from a DIFFERENT
+    // file.
+    this.unreadableBannerVisible = false;
     this.saveBtn.disabled = true;
     // A successful open establishes a fresh file context: any execution-failure retry still
     // pending for the PREVIOUS file is already neutralized by the `openGeneration` bump above (its

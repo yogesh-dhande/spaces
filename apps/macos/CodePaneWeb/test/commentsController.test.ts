@@ -4027,3 +4027,191 @@ describe("CommentsController — round-23 Fix: divergent-commit loop revalidates
     expect(bridge.drafts.get(b.id)?.body).toBe("persisted B"); // B's server row untouched — never upserted
   });
 });
+
+describe("CommentsController — round-24 Fix 1 (P1): doSendOne recomputes the body at execution time, not the click-time snapshot", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  /** Seeds two already-persisted drafts at the same anchor and loads them into the controller —
+   *  mirrors the two-card seeding pattern used by the sendBatch commit-loop tests above. */
+  async function seedTwoCards(bridge: ReturnType<typeof makeBridge>, controller: CommentsController) {
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "v1",
+    });
+    await controller.loadInitial();
+    return { a, b };
+  }
+
+  /** Clicks A's Send button with its own send RPC held open, so A occupies `sendInFlight` for the
+   *  rest of the test. Returns once `releaseHeldSend` is available. B's own Send click (queued
+   *  behind A via the `sendInFlight` wait) must happen AFTER this, at each test's click-time body. */
+  async function holdCardASend(bridge: ReturnType<typeof makeBridge>, cardA: HTMLElement) {
+    bridge.holdNextSend = true;
+    const sendBtnA = [...cardA.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtnA.click(); // A's fast path (draft.body === body): no upsert, straight to the held send
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+  }
+
+  it("blurred-newer: a card queued behind another card's in-flight send delivers its blur-persisted body, not the stale click-time snapshot", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { a, b } = await seedTwoCards(bridge, controller);
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+
+    await holdCardASend(bridge, cardA);
+
+    const sendBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+    sendBtnB.click(); // captures B's click-time body, "v1", then parks behind A's in-flight send
+
+    // While B is queued, a newer body lands server-side via the normal blur-persist path.
+    textareaB.value = "v2";
+    textareaB.dispatchEvent(new Event("input"));
+    textareaB.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.get(b.id)?.body).toBe("v2"));
+
+    // From here on, any additional upsert would mean the fast path (draft.body === effective body)
+    // was missed — the send itself must not need to re-upsert what the blur already persisted.
+    const upsertSpy = vi.spyOn(bridge, "reviewCommentUpsert");
+    bridge.releaseHeldSend?.(); // A's send resolves, freeing `sendInFlight`; B's queued send now runs for real
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(2));
+
+    // Pre-fix, `doSendOne` sent the stale click-time `body` ("v1") verbatim, clobbering the blur's
+    // newer "v2" both in the upsert re-check and in the delivered text.
+    const sendForB = bridge.sendCalls.find((c) => c.comments.some((entry) => entry.id === b.id))!;
+    expect(sendForB.text).toContain("v2");
+    expect(sendForB.text).not.toContain("v1");
+    expect(upsertSpy).not.toHaveBeenCalled();
+    expect(bridge.drafts.has(b.id)).toBe(false); // archived server-side, never left stranded at "v1"
+  });
+
+  it("unblurred-newer: a card queued behind another card's in-flight send delivers its live (never-blurred) body, not the stale click-time snapshot", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { a, b } = await seedTwoCards(bridge, controller);
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+
+    await holdCardASend(bridge, cardA);
+
+    const sendBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+    sendBtnB.click(); // captures B's click-time body, "v1", then parks behind A's in-flight send
+
+    // While B is queued, type a newer body but never blur it — it lives only in `liveBodies`;
+    // `draft.body` stays "v1".
+    textareaB.value = "v2";
+    textareaB.dispatchEvent(new Event("input"));
+
+    const upsertSpy = vi.spyOn(bridge, "reviewCommentUpsert");
+    bridge.releaseHeldSend?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(2));
+
+    // The send itself must commit "v2" through the normal upsert branch (draft.body "v1" !==
+    // effective body "v2"), then deliver that same "v2" — never the stale click-time "v1".
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    expect(upsertSpy.mock.calls[0]![0]).toMatchObject({ id: b.id, body: "v2" });
+    const sendForB = bridge.sendCalls.find((c) => c.comments.some((entry) => entry.id === b.id))!;
+    expect(sendForB.text).toContain("v2");
+    expect(sendForB.text).not.toContain("v1");
+  });
+
+  it("emptied-during-wait: a card emptied out while queued is discarded via delete, never sent, and does not disturb the in-flight card ahead of it", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const { a, b } = await seedTwoCards(bridge, controller);
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+
+    await holdCardASend(bridge, cardA);
+
+    const sendBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+    sendBtnB.click(); // captures B's click-time body, "v1", then parks behind A's in-flight send
+
+    // While B is queued, empty its textarea entirely (typed, never blurred).
+    textareaB.value = "";
+    textareaB.dispatchEvent(new Event("input"));
+
+    bridge.releaseHeldSend?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1)); // A's own send only, ever
+
+    // Pre-fix, `doSendOne` would have re-sent the stale click-time "v1" body instead of discarding
+    // the now-empty card.
+    await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false)); // discarded via delete, not send
+    expect(bridge.sendCalls.some((c) => c.comments.some((entry) => entry.id === b.id))).toBe(false);
+    expect(bridge.drafts.has(a.id)).toBe(false); // A's own send completed normally, unaffected by B
+  });
+});
+
+describe("CommentsController — round-24 Fix 2 (P2): doSendOne's pre-send upsert catch reconciles a typed rejection", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container, onToolbarStateChange };
+  }
+
+  it("a typed (notFound) rejection from the send's own re-upsert reconciles the stale row out of the rendered mirror, mirroring doDeleteDraft", async () => {
+    const { bridge, controller, diffViewFake, container, onToolbarStateChange } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    // Typed but never blurred: `draft.body` ("original") diverges from the effective body ("edited
+    // text"), so `sendOne` must go through the upsert branch rather than the fast path.
+    textarea.value = "edited text";
+    textarea.dispatchEvent(new Event("input"));
+
+    // Simulates another surface having already sent/deleted this draft server-side since the last
+    // list — same setup as round-18 Fix 2's persistBody-catch test, but exercised through Send
+    // instead of blur.
+    bridge.drafts.delete(created.id);
+    bridge.failNextUpsert = new SpacesBridgeError("notFound", "already sent");
+
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click();
+
+    await vi.waitFor(() => {
+      const banner = container.querySelector(".banner") as HTMLElement;
+      expect(banner.style.display).toBe("flex");
+    });
+
+    // Pre-fix, `doSendOne`'s upsert catch only called `surfaceError` — the stale row would still be
+    // in the rendered mirror and the toolbar count. Fix 2 also reconciles the mirror, exactly like
+    // `doDeleteDraft`'s own catch does.
+    await vi.waitFor(() => {
+      const rendered = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+      expect(rendered.some((ac) => ac.comment.id === created.id)).toBe(false);
+    });
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
+    expect(bridge.sendCalls).toHaveLength(0); // rejected before any reviewCommentsSend call
+  });
+});

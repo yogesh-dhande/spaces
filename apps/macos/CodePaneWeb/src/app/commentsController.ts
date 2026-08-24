@@ -1230,7 +1230,8 @@ export class CommentsController {
   /** `body` is read live from the card's textarea at click time (not the last-persisted value),
    *  so clicking Send immediately after typing — before the textarea has had a chance to blur —
    *  still sends exactly what is on screen, persisting it first (creating it, if the card is still
-   *  provisional — see `persistBody`).
+   *  provisional — see `persistBody`). This is why Send-right-after-typing works when there is no
+   *  queue wait at all: `body`'s click-time snapshot IS the live text at that instant.
    *
    * Awaits any persist already in flight for `id` first, then re-resolves `id` through
    * `resolveId` — a Send click races a still-unresolved blur `persistBody` call the same way
@@ -1260,6 +1261,15 @@ export class CommentsController {
    * the window this covers to the full queued-wait duration (a send parked behind another in-flight
    * send can wait many seconds), which is still accepted behavior, not a new concern — it is the same
    * "session ended by send time" gap, just possibly longer.
+   *
+   * Round-24 Fix 1 (P1): the send does not commit to `body`'s click-time snapshot — it commits to
+   * `effectiveBody` (computed below), the text on screen at the moment this function actually
+   * EXECUTES. `sendOne`'s `sendInFlight` queue wait (which can span another card's entire send) or
+   * the pending-persist await just above can let a blur-persist (newer, landed in `draft.body`) or
+   * further unblurred typing (newer, sitting in `liveBodies`) arrive between click and execution.
+   * Previously this function used `body` verbatim, so a blur that persisted a newer edit during that
+   * wait was clobbered by the stale click-time text, which was then sent and archived — silent data
+   * loss. `effectiveBody` always wins with whatever is actually on screen now.
    */
   private async doSendOne(id: string, body: string, agent: CodePaneAgentSummary): Promise<void> {
     const pending = this.pendingPersistById.get(id);
@@ -1268,7 +1278,22 @@ export class CommentsController {
 
     const draft = this.drafts.find((d) => d.id === resolvedId);
     if (!draft) return;
-    if (body.trim().length === 0) {
+    // Fix 1 (round-24, P1): `body` above is what was on screen at CLICK time — by the time this
+    // actually runs (after the sendInFlight queue wait, which can span another card's entire send,
+    // plus the pending-persist await above), it can be stale. Recompute what is actually on screen
+    // right now: `liveBodies` (checked under both `resolvedId` and `id` — an in-flight persist may
+    // still be re-keying this draft, mirroring `doSendBatch`'s round-23 dual-key read) holds an
+    // unblurred divergence; `draft.body` is the card's committed text once a blur persist has landed
+    // and cleared the matching `liveBodies` entry. `body` IS still the necessary floor beneath both:
+    // a still-provisional card that was sent immediately after typing, with no `input` event ever
+    // reaching `liveBodies` (a real click handler reads `textarea.value` directly, which is always
+    // current regardless of whether any listener fired), has nothing in `liveBodies` and an empty
+    // `draft.body` (a draft is only ever persisted with a non-empty body — see `persistBody`'s
+    // discard-on-empty rule — so an empty `draft.body` reliably means "never yet persisted," never
+    // "legitimately blanked"). Without this floor, that exact click-immediately-after-typing case
+    // would see an empty `effectiveBody` and be discarded instead of sent.
+    const effectiveBody = this.liveBodies.get(resolvedId) ?? this.liveBodies.get(id) ?? (draft.body || body);
+    if (effectiveBody.trim().length === 0) {
       // Mirrors the blur-time rule: an emptied-out (or still-provisional, never-typed-into) draft
       // is discarded, never sent.
       void this.deleteDraft(resolvedId, true);
@@ -1276,7 +1301,7 @@ export class CommentsController {
     }
     const isProvisional = this.provisionalIds.has(resolvedId);
     let persisted: SpacesReviewComment;
-    if (!isProvisional && draft.body === body) {
+    if (!isProvisional && draft.body === effectiveBody) {
       persisted = draft;
     } else {
       try {
@@ -1286,10 +1311,20 @@ export class CommentsController {
           side: draft.side,
           lineNumber: draft.lineNumber,
           lineText: draft.lineText,
-          body,
+          body: effectiveBody,
         });
       } catch (err) {
         this.surfaceError(err, isProvisional ? "Failed to create the comment." : "Failed to save the comment.");
+        // Fix 2 (round-24, P2): reconciles through the same typed-rejection rule `doDeleteDraft`'s
+        // catch and `handleSendFailure` use (see `reconcileMirrorAfterRejection`'s doc comment) — this
+        // was the only rejection path in the class that never repaired the mirror, so a row another
+        // pane already sent/deleted stayed rendered here and every retry failed identically forever.
+        // No `failedPersistId`: unlike `doPersistBody`'s own upsert, this call never registers
+        // anything in `pendingPersistById` for `resolvedId` (only `persistBody` does that — see its
+        // `pendingPersistById.set` calls), so there is no dangling self-registration for that guard
+        // to suppress.
+        await this.reconcileMirrorAfterRejection(err);
+        this.refresh();
         return; // the draft stays exactly as it was — no optimistic removal before this resolves
       }
       // The upsert above already landed server-side, so fold it into the local mirror before
@@ -1309,7 +1344,7 @@ export class CommentsController {
       const liveAtSwap = this.liveBodies.get(resolvedId);
       if (liveAtSwap !== undefined) {
         this.liveBodies.delete(resolvedId);
-        if (liveAtSwap !== body) this.liveBodies.set(persisted.id, liveAtSwap);
+        if (liveAtSwap !== effectiveBody) this.liveBodies.set(persisted.id, liveAtSwap);
       }
       if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
       // Same follow-the-id rule as `pendingFocus` above — see `deleteDraft`'s doc comment and
@@ -1348,9 +1383,11 @@ export class CommentsController {
     // `reconcileMirrorAfterRejection` response already dispatched before this send completed still
     // carries this row.
     if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(persisted.id);
-    // `body` is the exact text this send delivered — a live entry equal to it means the user retyped
-    // the same thing (or typed nothing new since the click), so there is nothing to preserve.
-    if (live !== undefined && live !== body && live.trim().length > 0) this.preserveUnsentLiveText(persisted, live);
+    // `effectiveBody` is the exact text this send delivered — a live entry equal to it means the
+    // user retyped the same thing (or typed nothing new since the click), so there is nothing to
+    // preserve.
+    if (live !== undefined && live !== effectiveBody && live.trim().length > 0)
+      this.preserveUnsentLiveText(persisted, live);
     this.refresh();
   }
 

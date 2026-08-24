@@ -2944,6 +2944,91 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
   });
 });
 
+describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not leak across a file switch", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  // Traced against the actual source (both with and without this fix applied, run empirically):
+  // a merge-indicator-then-spurious-same-hash sequence on the switched-to file, as one might first
+  // guess, does NOT distinguish pre-fix from post-fix behavior. `handleExternalChange`'s
+  // `unreadableBannerVisible`-gated clear (around line 582) runs unconditionally on the FIRST decoded
+  // outcome it reaches — and the auto-merge that establishes the merge indicator is itself that first
+  // decoded outcome, so the leaked flag is consumed (harmlessly, since no banner is up yet for the new
+  // file) BEFORE the merge branch runs later in that same synchronous call and sets the merge banner.
+  // By the time a second, genuinely spurious same-hash event arrives, the flag is already false either
+  // way. The single-file "guard: a spurious same-hash event never clears an unrelated banner" test
+  // above (round-1 Fix 1) already proves this same-call ordering is safe when the flag was never true
+  // to begin with; it is not evidence one way or the other about the leak this fix addresses.
+  //
+  // The leak is only observable when the unrelated banner is put up by a path OTHER than
+  // `handleExternalChange` itself — so nothing has yet consumed the leaked-true flag — and a
+  // `handleExternalChange` call for the new file arrives afterward. `showDiscardBanner` (opening a
+  // third file while the second is dirty) is exactly such a path: it sets the banner directly, with no
+  // `handleExternalChange` call in between opening the second file and putting up that banner.
+  it("a discard-consent banner on the switched-to file survives a spurious same-hash event, even though the previous file left the unreadable flag set", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      // open a.ts
+      .mockResolvedValueOnce({ content: "a content\n", sha256: "sha-a1", size: 10 })
+      // a.ts's signature event: unreadable -- sets unreadableBannerVisible = true
+      .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"))
+      // open b.ts (clean, not dirty -- proceeds immediately, no gate)
+      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-b1", size: 12 })
+      // b.ts's spurious same-hash dedupe (matches its own unchanged baseline)
+      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-b1", size: 12 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
+    fireFileSignature({ path: "a.ts", sha256: "sha-a2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+    expect((container.querySelector(".banner") as HTMLElement).className).toBe("banner error");
+
+    pressEnter(input, "b.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+    // open()'s success arm always hides the banner unconditionally, whether or not this fix is
+    // applied -- this alone is not evidence the leaked flag was cleared.
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
+
+    // Dirty b.ts, then attempt to open a third file while dirty -- openGated's gate shows the
+    // discard-consent banner directly (no handleExternalChange call happens in between), so if the
+    // leaked flag from a.ts is still true, nothing has consumed it yet.
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
+    pressEnter(input, "c.ts");
+    const discardBanner = container.querySelector(".banner.conflict") as HTMLElement;
+    expect(discardBanner.style.display).toBe("flex");
+    expect(discardBanner.textContent).toContain("Unsaved changes in b.ts");
+
+    // A spurious same-hash dedupe for b.ts -- this is the FIRST handleExternalChange call to run for
+    // b.ts. Pre-fix, the leaked-true flag hits the gated clear at the top of the decoded-outcome
+    // handling (before the same-hash early return a few lines below it), wiping the discard banner it
+    // never put up. Post-fix, this fix already cleared the flag when b.ts was opened, so the gated
+    // clear block is skipped entirely and the banner is untouched.
+    fireFileSignature({ path: "b.ts", sha256: "sha-b1", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
+
+    expect(discardBanner.style.display).toBe("flex");
+    expect(discardBanner.textContent).toContain("Unsaved changes in b.ts");
+    // Sanity: the read genuinely was the spurious same-hash path (no reload happened).
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "b.ts",
+        baseSHA256: "sha-b1",
+        baseContent: "line1\nline2\n",
+        content: "line1 edited\nline2\n",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+  });
+});
+
 describe("EditorView — a standing conflict stays latched until explicit resolution (round-17 Fix 1)", () => {
   let container: HTMLElement;
 
