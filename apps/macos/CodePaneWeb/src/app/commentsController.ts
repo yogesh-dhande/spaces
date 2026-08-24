@@ -921,18 +921,25 @@ export class CommentsController {
    *  blur handler and `sendOne`) — the daemon rejects an empty body outright.
    *
    * Returns whether the persist succeeded: `true` once `this.drafts` reflects the new body/revision,
-   * `false` from the catch block below. The catch surfaces the failure via `surfaceError` (unchanged
-   * — still the only place a persist failure is shown to the user) but deliberately does NOT update
-   * `this.drafts`, so a caller cannot tell success from failure by inspecting the draft alone; the
-   * boolean is what lets `sendBatch` distinguish the two (see its doc comment) and abort rather than
-   * send a body/revision that never actually changed.
+   * `false` from the catch block below. The catch surfaces the failure via `surfaceError` (still the
+   * only place a persist failure is shown to the user) and, for a typed daemon rejection, reconciles
+   * the mirror (Fix 2 (P2) — see that block's comment) — but in neither case does it update
+   * `this.drafts` with the attempted body/revision, so a caller cannot tell success from failure by
+   * inspecting the draft's body alone; the boolean is what lets `sendBatch` distinguish the two (see
+   * its doc comment) and abort rather than send a body/revision that never actually changed.
    *
    * Re-resolves `id` at entry as a second line of defense — `persistBody` already re-resolves after
    * its own await before calling in here, so this is normally a no-op, but it keeps this method
    * correct on its own for any other caller. A draft still missing after that re-resolve is
    * genuinely gone (sent or deleted while this persist was queued behind a prior one — see
    * `doDeleteDraft`'s await of `pendingPersistById`), not merely looked up under a stale alias, so
-   * `true` (nothing to persist, not a failure) is the right answer. */
+   * `true` (nothing to persist, not a failure) is the right answer.
+   *
+   * This method's own returned promise is the value `persistBody` registers in `pendingPersistById`
+   * (before awaiting it) — the catch's two new `await`s (Fix 2 (P2)) delay that promise's settlement
+   * until the reconcile/refresh finish, which is correct: `doSendBatch`'s drain loop and
+   * `doDeleteDraft`'s own await of a pending persist both need to observe the mirror only after the
+   * reconcile has applied, not mid-reconcile. */
   private async doPersistBody(id: string, body: string): Promise<boolean> {
     const resolvedId = this.resolveId(id);
     const draft = this.drafts.find((d) => d.id === resolvedId);
@@ -950,6 +957,17 @@ export class CommentsController {
       });
     } catch (err) {
       this.surfaceError(err, isProvisional ? "Failed to create the comment." : "Failed to save the comment.");
+      // Fix 2 (P2): reconciles through the same typed-rejection rule `handleSendFailure` and
+      // `doDeleteDraft`'s catch (round-16 Fix 2) use — see `reconcileMirrorAfterRejection`'s doc
+      // comment. Without this, a row another client already sent/deleted server-side stays stuck in
+      // this mirror forever: every subsequent blur re-upserts it and rejects the same way, since
+      // nothing ever removes the stale row. `refresh()` (not `refreshCardsOnly()`) is used because it
+      // re-anchors, which is what makes the now-dead card actually disappear from the rendered output.
+      // `resolvedId` is passed as `failedPersistId` — see `reconcileMirrorAfterRejection`'s doc
+      // comment (Fix 2 (P2) / `failedPersistId` paragraph) for why this call's own still-registered
+      // `pendingPersistById` entry must not be read as protective of itself.
+      await this.reconcileMirrorAfterRejection(err, resolvedId);
+      this.refresh();
       return false;
     }
     // Carry any in-progress (unsaved) text forward across this id swap. If nothing was typed since
@@ -1350,7 +1368,13 @@ export class CommentsController {
   }
 
   private pushToolbarState(): void {
-    const draftCount = this.drafts.filter((d) => d.body.trim().length > 0).length;
+    // Fix 3 (P2): must agree with `doSendBatch`'s own sendable filter (see its doc comment, ~line
+    // 743) — live text with a persisted-body fallback, not `d.body` alone. A card mid-edit that has
+    // not blurred yet IS sendable (and so must be counted); a card emptied on screen but not yet
+    // auto-discarded (the blur-triggered silent delete hasn't landed yet) must not be. `liveBodies`
+    // is keyed by the draft's current (post-re-key) id, same assumption `doSendBatch`'s filter
+    // already relies on, so no `resolveId` call is needed here either.
+    const draftCount = this.drafts.filter((d) => (this.liveBodies.get(d.id) ?? d.body).trim().length > 0).length;
     this.onToolbarStateChange({ agents: [...this.agents], selectedAgentId: this.selectedAgentId, draftCount });
   }
 
@@ -1379,6 +1403,13 @@ export class CommentsController {
       // fires no `blur`, so without tracking every keystroke here, anything typed since the last
       // blur would be silently lost the moment `@pierre/diffs` re-renders (see `liveBodies`).
       this.liveBodies.set(comment.id, textarea.value);
+      // Fix 3 (P2): keeps the visible batch count live while typing. Blur-only persistence (see
+      // this handler's doc comment below) means nothing else pushes toolbar state until a commit
+      // point (blur or send) — without this, the toolbar's count would only catch up once the user
+      // tabs away, even though `pushToolbarState` (see its own Fix 3 comment) already counts live
+      // text and `doSendBatch`'s sendable filter already treats this card as sendable right now.
+      // Cheap: a filter over a handful of drafts, run once per keystroke.
+      this.pushToolbarState();
     });
     // Blur-only persistence, deliberately with no debounce timer at all (stricter than
     // editorView.ts's ~500ms debounce for editor buffer edits): a comment body is short and the
@@ -1405,8 +1436,24 @@ export class CommentsController {
         return;
       }
       if (body === lastSavedBody) return;
+      const priorSavedBody = lastSavedBody;
+      // Eager-advance (before the persist resolves), not "advance only on success": this is what
+      // suppresses a second identical upsert if the SAME text is refocused-and-reblurred while this
+      // persist is still in flight (the `body === lastSavedBody` check above would otherwise miss
+      // it). The cost is that a FAILED persist leaves the marker pointing at text that was never
+      // actually saved — rolled back below so the same refocus-and-blur gesture can retry it. If
+      // this card is wholesale-rebuilt while the persist is in flight, this closure (and its
+      // `lastSavedBody`) is dead; the rollback below then mutates a variable nothing reads anymore,
+      // which is harmless — the rebuilt card re-derives `lastSavedBody` fresh from `comment.body`
+      // (the still-persisted, i.e. correctly-reverted, value), so its next blur already retries
+      // correctly. The rollback specifically matters for the no-rebuild case.
       lastSavedBody = body;
-      void this.persistBody(comment.id, body);
+      void this.persistBody(comment.id, body).then((ok) => {
+        // Roll back only if no newer blur has advanced the marker past this persist's own value —
+        // otherwise this would clobber a later, still-in-flight or already-succeeded persist's own
+        // advance.
+        if (!ok && lastSavedBody === body) lastSavedBody = priorSavedBody;
+      });
     });
     card.appendChild(textarea);
 
@@ -1569,6 +1616,22 @@ export class CommentsController {
    * `resolveId`-resolved id, since either might be the key a concurrent `persistBody` registered
    * under). Every other absent row is real staleness and must be dropped.
    *
+   * Fix 2 (P2) / `failedPersistId`: `doPersistBody`'s own catch calls this method while its own
+   * promise is STILL the value registered in `pendingPersistById` for the row it just failed to
+   * persist (`persistBody` only clears that entry in its `finally`, which runs after this whole call
+   * — including this reconcile — settles; see `doPersistBody`'s doc comment). Left unguarded, the
+   * `pendingPersistById` half of the keep-rule above would see that dangling self-registration and
+   * wrongly treat the just-rejected row as still possibly-about-to-succeed, defeating the very
+   * removal Fix 2 exists to do. This is always a false positive at that specific call site:
+   * `persistBody` serializes retries for the same id (`await priorPersist`), so nothing else can be
+   * concurrently registered under this id while this call's own promise is still unsettled — an
+   * entry present here can only be this failed call's own residue, never a genuinely different
+   * still-in-flight attempt. `failedPersistId`, passed only from that call site, tells this method to
+   * ignore `pendingPersistById` (but not `provisionalIds`) for exactly that one row. The entry itself
+   * is deliberately left in the map (not deleted) so `doSendBatch`'s drain loop and `doDeleteDraft`'s
+   * own pending-persist await still see it and keep waiting for this whole call, including this
+   * reconcile, to finish before either reads the mirror.
+   *
    * This keep-rule is sufficient because both the rejected mutation and this relist run through the
    * daemon's serial `reviewCommentQueue` (see docs/implementation.md / SpacesDeviceAPIServer.swift),
    * and this relist is only issued *after* the rejection has already arrived. Any create that
@@ -1595,7 +1658,7 @@ export class CommentsController {
    * response is itself daemon-issued proof that THIS PARTICULAR row is newer than the snapshot, not
    * part of the wrongness this reconcile is correcting for.
    */
-  private async reconcileMirrorAfterRejection(err: unknown): Promise<void> {
+  private async reconcileMirrorAfterRejection(err: unknown, failedPersistId?: string): Promise<void> {
     if (
       !(err instanceof SpacesBridgeError) ||
       (err.code !== "conflict" && err.code !== "invalidArgument" && err.code !== "notFound")
@@ -1630,10 +1693,13 @@ export class CommentsController {
       // response rows win, same as loadInitial (including its revision exception — see the
       // localByResolvedId/mergedResponse substitution just below, and loadInitial's doc comment)
       if (responseIds.has(resolvedId)) return false;
+      // Fix 2 (P2): `failedPersistId` names the row whose own failed persist triggered this call —
+      // see this method's doc comment (Fix 2 (P2) / `failedPersistId` paragraph) for why its
+      // `pendingPersistById` entry must be ignored here rather than treated as protective.
+      const isSelfFailedPersist = failedPersistId !== undefined && (resolvedId === failedPersistId || d.id === failedPersistId);
       return (
         this.provisionalIds.has(resolvedId) ||
-        this.pendingPersistById.has(resolvedId) ||
-        this.pendingPersistById.has(d.id)
+        (!isSelfFailedPersist && (this.pendingPersistById.has(resolvedId) || this.pendingPersistById.has(d.id)))
       );
     });
     // Fix 3 (P2): same locally-newer-wins-by-revision substitution as loadInitial — see this method's

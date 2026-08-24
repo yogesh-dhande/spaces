@@ -1100,9 +1100,13 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     await new Promise((resolve) => setTimeout(resolve, 0)); // flush the catch → addToBatch's no-op chain
 
     expect(bridge.drafts.size).toBe(0); // the persist never actually landed server-side
-    // Neither the failed persist nor addToBatch's no-op re-renders anything: the card is still the
-    // one inline render from `renderCard` above, still keyed by the (never re-keyed) provisional id.
-    expect(diffViewFake.setComments.mock.calls.length).toBe(rendersBeforeFailure);
+    // round-18 Fix 2: `doPersistBody`'s catch now always calls `refresh()` after
+    // `reconcileMirrorAfterRejection` — the same unconditional shape `handleSendFailure` already
+    // uses for a send failure — regardless of whether the rejection was a typed one the reconcile
+    // actually acts on (this `internalError` isn't, so the mirror itself is untouched; only the
+    // render count changes). So exactly one more render happens here versus the old surfaceError-only
+    // catch, even though the card is still keyed by the same (never re-keyed) provisional id.
+    expect(diffViewFake.setComments.mock.calls.length).toBe(rendersBeforeFailure + 1);
   });
 });
 
@@ -3481,5 +3485,202 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
     expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeGesture);
 
     card.remove();
+  });
+});
+
+describe("CommentsController — round-18 Fix 1 (P2): a failed blur persist stays eligible for retry", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container, onToolbarStateChange };
+  }
+
+  it("refocusing and re-blurring the SAME text after a failed persist retries it, instead of silently no-op'ing", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "edited text";
+    textarea.dispatchEvent(new Event("input"));
+
+    // A transport-shaped rejection (not a typed `SpacesBridgeError`) — isolates this test to Fix 1's
+    // rollback mechanism, keeping it clear of Fix 2's reconcile (which must NOT fire here — see the
+    // control test below).
+    const upsertSpy = vi.spyOn(bridge, "reviewCommentUpsert").mockImplementationOnce(() => Promise.reject(new Error("network hiccup")));
+
+    textarea.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => {
+      const banner = container.querySelector(".banner") as HTMLElement;
+      expect(banner.style.display).toBe("flex");
+    });
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    // The row survives — an untyped rejection must not trigger Fix 2's reconcile/removal.
+    const renderedAfterFailure = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[])[0]!.comment;
+    expect(renderedAfterFailure.body).toBe("original");
+
+    // Refocus + re-blur with the SAME (still-unsaved) text. jsdom doesn't require a literal focus
+    // cycle to prove the retry — dispatching `blur` again is enough, matching this file's other
+    // blur-driven tests. Without Fix 1, `lastSavedBody` would have already been eagerly advanced to
+    // "edited text" by the first (failed) blur, so this second blur's `body === lastSavedBody` check
+    // would silently no-op — no second RPC, forever.
+    textarea.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => expect(upsertSpy).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(bridge.drafts.get(created.id)?.body).toBe("edited text"));
+    const renderedAfterRetry = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[])[0]!.comment;
+    expect(renderedAfterRetry.body).toBe("edited text");
+  });
+
+  it("re-blurring the SAME text while the first persist is still in flight does not register a second upsert", async () => {
+    const { bridge, controller } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "edited text";
+    textarea.dispatchEvent(new Event("input"));
+
+    // `created` above already issued one upsert call of its own — count from here.
+    const upsertCallsBeforeBlur = bridge.upsertCallCount;
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
+
+    // Re-blur the SAME text while the first persist is still parked — the eager-advance in Fix 1's
+    // rollback logic must still suppress this as a duplicate in-flight persist.
+    textarea.dispatchEvent(new Event("blur"));
+    expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.drafts.get(created.id)?.body).toBe("edited text"));
+    expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
+  });
+});
+
+describe("CommentsController — round-18 Fix 2 (P2): a typed upsert rejection reconciles the mirror", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container, onToolbarStateChange };
+  }
+
+  it("a typed (notFound) upsert rejection removes the stale row from the rendered mirror and the toolbar count", async () => {
+    const { bridge, controller, diffViewFake, container, onToolbarStateChange } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "edited text";
+    textarea.dispatchEvent(new Event("input"));
+
+    // Simulates another surface having already sent/deleted this draft server-side since the last
+    // list — the same setup round-16 Fix 2's tests use. `reviewCommentList` (used by the reconcile's
+    // relist) now returns `[]`.
+    bridge.drafts.delete(created.id);
+    bridge.failNextUpsert = new SpacesBridgeError("notFound", "already sent");
+    textarea.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => {
+      const banner = container.querySelector(".banner") as HTMLElement;
+      expect(banner.style.display).toBe("flex");
+    });
+
+    await vi.waitFor(() => {
+      const rendered = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+      expect(rendered.some((ac) => ac.comment.id === created.id)).toBe(false);
+    });
+    // `refresh()` (called from the catch) pushes toolbar state as part of its pipeline.
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
+  });
+
+  it("a transport-shaped (untyped) upsert rejection does not relist, and the row survives", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "edited text";
+    textarea.dispatchEvent(new Event("input"));
+
+    const listSpy = vi.spyOn(bridge, "reviewCommentList");
+    vi.spyOn(bridge, "reviewCommentUpsert").mockImplementationOnce(() => Promise.reject(new Error("network hiccup")));
+    textarea.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => {
+      const rendered = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+      expect(rendered.some((ac) => ac.comment.id === created.id)).toBe(true);
+    });
+    expect(listSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("CommentsController — round-18 Fix 3 (P2): toolbar batch count reflects live text", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake, onToolbarStateChange };
+  }
+
+  it("typing into a sole provisional draft's card counts it before any blur, and emptying it drops the count back to 0", async () => {
+    const { controller, diffViewFake, onToolbarStateChange } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+
+    textarea.value = "a comment, not yet blurred";
+    textarea.dispatchEvent(new Event("input"));
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(1);
+
+    textarea.value = "";
+    textarea.dispatchEvent(new Event("input"));
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
   });
 });
