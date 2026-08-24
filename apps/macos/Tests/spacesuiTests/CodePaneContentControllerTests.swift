@@ -477,6 +477,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     private(set) var reviewCommentDeleteCalls: [(workspaceID: String, id: String)] = []
     private var reviewCommentDeleteResult: Result<SpacesDeviceAPIResponse, any Error> = .success(SpacesDeviceAPIResponse(ok: true, message: "Deleted."))
+    /// round-12: `workspaceReviewCommentDelete` calls to hold open rather than answering right away,
+    /// counted down on each arrival — mirrors `holdNextUpsertAttempts`'s shape exactly.
+    private var holdNextDeleteAttempts = 0
+    private var pendingDeleteCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceAPIResponse, any Error>)] = []
+    private var deleteCallArrivalCount = 0
 
     private(set) var reviewCommentsSendCalls: [(workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry])] = []
     private var reviewCommentsSendResult: Result<SpacesDeviceAPIResponse, any Error> = .success(SpacesDeviceAPIResponse(ok: true, message: "Sent."))
@@ -538,7 +543,37 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func workspaceReviewCommentDelete(workspaceID: String, id: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
         reviewCommentDeleteCalls.append((workspaceID, id))
+        if holdNextDeleteAttempts > 0 {
+            holdNextDeleteAttempts -= 1
+            let arrivalIndex = deleteCallArrivalCount
+            deleteCallArrivalCount += 1
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceAPIResponse, any Error>) in
+                pendingDeleteCalls.append((arrivalIndex, continuation))
+            }
+        }
         return try reviewCommentDeleteResult.get()
+    }
+
+    /// round-12: makes the next `count` `workspaceReviewCommentDelete` calls suspend instead of
+    /// resolving immediately, so a test can observe the RPC still in flight (e.g. across a teardown)
+    /// before completing it via `completeHeldDeleteCall`. Mirrors `holdNextUpsertAttempts`.
+    func holdNextDeleteAttempts(_ count: Int) { holdNextDeleteAttempts = count }
+
+    /// Resolves the held `workspaceReviewCommentDelete` call at `index` (0-based, arrival order among
+    /// held calls only) with `result`.
+    func completeHeldDeleteCall(at index: Int, result: SpacesDeviceAPIResponse) {
+        guard let position = pendingDeleteCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceReviewCommentDelete call at arrival index \(index)")
+        }
+        pendingDeleteCalls.remove(at: position).continuation.resume(returning: result)
+    }
+
+    /// Fails the held `workspaceReviewCommentDelete` call at `index`, mirroring `completeHeldDeleteCall`.
+    func failHeldDeleteCall(at index: Int, error: any Error) {
+        guard let position = pendingDeleteCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceReviewCommentDelete call at arrival index \(index)")
+        }
+        pendingDeleteCalls.remove(at: position).continuation.resume(throwing: error)
     }
 
     func workspaceReviewCommentsSend(
@@ -2819,6 +2854,138 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             "an UPDATE completion must never reconcile pendingReviewCommentState, even when its anchor and body match a stored entry exactly")
     }
 
+    // MARK: - DELETE-success reconcile of a stale pendingReviewCommentState entry (round-12)
+    //
+    // These cover `reconcilePendingReviewCommentStateAfterDelete(commentID:)`: a delete RPC still in
+    // flight when hibernation snapshots the (still server-listed) entry into `pendingReviewCommentState`
+    // must correct that snapshot once the delete resolves, or the replacement page's `spaces:init` would
+    // revive the deleted comment as a fresh provisional draft even though `loadInitial()` finds no
+    // server row for it — silently undoing the user's explicit deletion.
+
+    private struct InjectedDeleteFailure: Error {}
+
+    /// The round-12 regression: a delete dispatched before hibernation is still in flight when the
+    /// teardown flush snapshots the (about-to-be-deleted) entry, and the replacement page's `ready`
+    /// arrives before the delete settles. Once the delete completes, the held `spaces:init` must not
+    /// carry the deleted entry.
+    @Test func aDeleteThatCommitsAfterTeardownRemovesItsEntryFromThePendingSnapshot() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextDeleteAttempts(1)
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "reviewCommentDelete", params: ["id": "c1"]))
+
+        while await gateway.reviewCommentDeleteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending — the delete RPC stays outstanding
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with:
+                #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"}]"#
+        ) // comment-state flush: still lists the entry the in-flight delete is about to remove server-side
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady() // deferred: the delete RPC dispatched before teardown has not resolved
+
+        await gateway.completeHeldDeleteCall(at: 0, result: SpacesDeviceAPIResponse(ok: true, message: "Deleted."))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            !(nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"c1""#) }),
+            "a delete that commits after teardown must remove its entry from the pending snapshot rather than let it revive as a provisional draft")
+    }
+
+    /// Control: the delete FAILS. Nothing committed server-side, so the stale-looking snapshot entry is
+    /// in fact still correct — the reconcile must not run, leaving the entry in place.
+    @Test func aFailedDeleteAcrossHibernationLeavesTheStaleSnapshotEntryUntouched() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextDeleteAttempts(1)
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "reviewCommentDelete", params: ["id": "c1"]))
+
+        while await gateway.reviewCommentDeleteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with:
+                #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"}]"#
+        )
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.failHeldDeleteCall(at: 0, error: InjectedDeleteFailure())
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"c1""#) },
+            "a failed delete must leave the stale-looking snapshot entry exactly as the teardown flush wrote it — it is still correct")
+    }
+
+    /// Control: an unrelated entry in the same snapshot must survive a delete that targets a different
+    /// id — the reconcile touches at most the one matching entry.
+    @Test func aDeleteOnlyRemovesItsOwnEntryLeavingAnUnrelatedOneInPlace() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextDeleteAttempts(1)
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "reviewCommentDelete", params: ["id": "c1"]))
+
+        while await gateway.reviewCommentDeleteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__") // editor-state flush
+        evaluator.completeOldestPending(
+            with:
+                #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"},{"id":"c2","provisional":false,"filePath":"b.ts","side":"new","lineNumber":2,"lineText":"y","body":"unrelated"}]"#
+        ) // comment-state flush: two non-provisional entries, only "c1" is being deleted
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.completeHeldDeleteCall(at: 0, result: SpacesDeviceAPIResponse(ok: true, message: "Deleted."))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        #expect(
+            !(nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"c1""#) }),
+            "the deleted entry's id must not appear in the rehydrated snapshot")
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"c2""#) },
+            "an unrelated entry in the same snapshot must survive a delete that targets a different id")
+    }
+
     // MARK: - Committed workspaceFileWrite adopted into a flushed editorState snapshot (round-10)
     //
     // A save click issues `workspaceFileWrite` against the baseline the editor had open. If hibernation
@@ -3072,5 +3239,77 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             initScript?.contains(#""baseSHA256":"sha-different""#) ?? false,
             "a snapshot on a baseline other than the one the write was issued against must not be patched")
         #expect(!(initScript?.contains(#""baseSHA256":"sha-new-1""#) ?? false), "the write's sha must not appear: the CAS-chain guard must block adoption")
+    }
+
+    // MARK: - lastCommittedFileWrite settlement scoping — ABA regression (round-12 Fix 1)
+    //
+    // `lastCommittedFileWrite` used to live forever, relying solely on the CAS-chain guard inside
+    // `adoptCommittedWriteIntoEditorState` to keep a stale record inert. That guard is not sufficient
+    // across time: hash values can recur. This reproduces the ABA hazard `clearCommittedFileWriteIfSettled`'s
+    // doc comment describes — a save takes the file from H0 to H1, something outside the pane (a `git
+    // checkout`, an agent revert) restores disk back to H0, the pane reloads cleanly at that baseline,
+    // the user types (dirty), and a LATER teardown flush reports a snapshot back at baseline H0 — the
+    // same `expectedBase` the old write record still carries. Without `clearCommittedFileWriteIfSettled`
+    // clearing the record once the write settled with nothing else outstanding, that later, unrelated
+    // snapshot would be wrongly rewritten to the false H1 ancestry.
+
+    /// The write here is held and then explicitly completed (rather than left to resolve immediately)
+    /// so the test can deterministically observe its completion — via the reply script it evaluates —
+    /// before proceeding to a completely separate `deactivate()`/flush cycle. Nothing else is
+    /// outstanding when the write settles, so `clearCommittedFileWriteIfSettled()`'s own call (from the
+    /// write completion's decrement) clears `lastCommittedFileWrite` immediately, well before the later
+    /// teardown flush below ever runs.
+    @Test func aSettledWritesRecordDoesNotFalselyAdoptALaterUnrelatedSnapshotAtTheSameBaseline() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        // A live save: H0 -> H1, with nothing else outstanding at the time it settles.
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "H0"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        await gateway.completeHeldFileWriteCall(at: 0, result: SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "H1"))
+
+        // Wait for the write's completion to actually run its reply — by the time that reply script has
+        // been recorded, `outstandingFileWriteCount` has already been decremented back to zero and
+        // `clearCommittedFileWriteIfSettled()` has already cleared `lastCommittedFileWrite`, since no
+        // `await` separates those statements from the reply call in `performFileWrite`'s completion.
+        while evaluator.evaluatedScripts.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // a later, unrelated teardown — the write above is long settled, its record cleared
+        evaluator.completeOldestPending(
+            with:
+                #"{"path":"foo.ts","baseSHA256":"H0","baseContent":"whatever original","content":"dirty edit at H0","dirty":true}"#
+        ) // editor-state flush: an ABA snapshot — baseSHA256 coincidentally back at "H0", the old write's expectedBase
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(
+            initScript?.contains(#""baseSHA256":"H0""#) ?? false,
+            "the cleared record must not falsely adopt this later, unrelated snapshot — baseSHA256 must stay H0")
+        #expect(
+            !(initScript?.contains(#""baseSHA256":"H1""#) ?? false),
+            "if the stale record had survived, it would wrongly rewrite baseSHA256 to H1 (the ABA hazard)")
     }
 }

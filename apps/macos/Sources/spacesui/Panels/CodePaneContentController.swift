@@ -191,11 +191,35 @@ enum CodePaneMode: Equatable {
 
     /// round-10: the most recently committed `workspaceFileWrite`'s outcome, used to fold that write
     /// into a teardown-flushed `editorState` snapshot that still carries the pre-write baseline — see
-    /// `adoptCommittedWriteIntoEditorState`. Deliberately never cleared: the CAS-chain guard inside that
-    /// method makes a stale record inert on its own (its `expectedBase` will no longer match any live
-    /// snapshot's `baseSHA256` once something newer has applied), so there is no separate invalidation
-    /// to maintain.
+    /// `adoptCommittedWriteIntoEditorState`. round-12: lives only for the duration of the write/flush
+    /// race it bridges — cleared by `clearCommittedFileWriteIfSettled()` once both
+    /// `outstandingFileWriteCount` and `outstandingTeardownFlushCount` are back at zero. The CAS-chain
+    /// guard inside `adoptCommittedWriteIntoEditorState` is not sufficient on its own across time:
+    /// hashes can recur (an ABA hazard — see `clearCommittedFileWriteIfSettled`'s doc comment for the
+    /// full scenario), so the record must not survive past the race window it exists to bridge.
     private var lastCommittedFileWrite: (path: String, expectedBase: String?, sha256: String, content: String)?
+
+    /// Clears `lastCommittedFileWrite` once neither an in-flight `workspaceFileWrite` nor an in-flight
+    /// teardown flush remains outstanding — i.e. once every party that could legitimately consume the
+    /// record to bridge their settle-order race against each other has already had its adoption attempt
+    /// (see `adoptCommittedWriteIntoEditorState`'s doc comment for the two call sites and why both are
+    /// needed). Once both counters are back at zero, the CAS-chain guard alone is NOT sufficient to keep
+    /// a stale record inert across time: hash values can recur — a save from H0 records
+    /// `(expectedBase: H0, sha256: H1, content: C1)`, a later `git checkout` (or an agent revert)
+    /// restores disk to H0, the live pane reloads cleanly at baseline H0, the user types (dirty), and a
+    /// later teardown flush stores a snapshot with `baseSHA256 == H0` — the stale record would still
+    /// match that guard and wrongly rewrite the snapshot to the false H1/C1 ancestry (an ABA hazard), so
+    /// the record must not survive past the race window it was created to bridge.
+    ///
+    /// Safe to call unconditionally at every settlement site: a flush or write that starts after this
+    /// point can never legitimately need the cleared record anyway — `evaluateJavaScript` calls execute
+    /// in issue order and a write's success reply is issued before any subsequent flush's collect, so a
+    /// later flush's snapshot already carries the post-save baseline on its own.
+    private func clearCommittedFileWriteIfSettled() {
+        if outstandingFileWriteCount == 0, outstandingTeardownFlushCount == 0 {
+            lastCommittedFileWrite = nil
+        }
+    }
 
     /// round-16 Fix 1a: the web app's last-known teardown snapshot of comment text typed but not yet
     /// persisted (see `CodePaneBridge.ReviewCommentEntryPayload`) — mirrors `editorState` above exactly,
@@ -486,6 +510,7 @@ enum CodePaneMode: Equatable {
             withExtendedLifetime(webView) {
                 self?.storeFlushedEditorState(CodePaneBridge.decodeCollectedEditorState(result), generation: flushGeneration)
                 self?.outstandingTeardownFlushCount -= 1
+                self?.clearCommittedFileWriteIfSettled()
                 // A `handleReady()` deferred behind this flush (see `deferredReadyGeneration`) can now
                 // go out — `editorState` above has just been settled for this flush's generation, so a
                 // now-built `spaces:init` payload reads whatever it actually was, not a stale pre-flush
@@ -507,6 +532,7 @@ enum CodePaneMode: Equatable {
                 self?.storeFlushedReviewCommentState(
                     CodePaneBridge.decodeCollectedReviewCommentState(result), generation: flushGeneration)
                 self?.outstandingTeardownFlushCount -= 1
+                self?.clearCommittedFileWriteIfSettled()
                 self?.resumeDeferredReadyIfNeeded()
             }
         }
@@ -540,9 +566,10 @@ enum CodePaneMode: Equatable {
     /// an external change. CAS-chain guard: the snapshot is patched only when its `baseSHA256` equals
     /// the base the write was issued against — a snapshot at that baseline provably predates the
     /// write's landing, while any other baseline already reflects the write or something newer and must
-    /// be left alone. The record is deliberately never cleared: this guard makes a stale record inert
-    /// on its own. Called from both the write completion and `storeFlushedEditorState`, because the
-    /// flush and the write settle in either order — patching only at completion would be overwritten by
+    /// be left alone. round-12: the record's lifetime is bounded separately by
+    /// `clearCommittedFileWriteIfSettled()` (see its doc comment for why the CAS-chain guard alone is
+    /// not enough across time). Called from both the write completion and `storeFlushedEditorState`,
+    /// because the flush and the write settle in either order — patching only at completion would be overwritten by
     /// a later-arriving flush that stored the pre-write snapshot; patching only at flush time would miss
     /// a write that completes and commits its baseline AFTER the flush already stored a snapshot at
     /// that exact pre-write baseline.
@@ -1084,10 +1111,12 @@ enum CodePaneMode: Equatable {
                     self?.reply(id: id, generation: generation, error: error)
                 }
                 self?.outstandingFileWriteCount -= 1
+                self?.clearCommittedFileWriteIfSettled()
                 self?.resumeDeferredReadyIfNeeded()
             } catch {
                 self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
                 self?.outstandingFileWriteCount -= 1
+                self?.clearCommittedFileWriteIfSettled()
                 self?.resumeDeferredReadyIfNeeded()
             }
         }
@@ -1202,6 +1231,31 @@ enum CodePaneMode: Equatable {
         pendingReviewCommentState = entries
     }
 
+    /// round-12: the DELETE-side analog of `reconcilePendingReviewCommentStateAfterCreate` — corrects a
+    /// stale `pendingReviewCommentState` snapshot after a delete commits server-side. The race: a
+    /// deleted comment's entry is still present in a teardown-flushed snapshot taken before the delete
+    /// RPC replied (the page looked like it still had the row at that instant), the pane hibernates, and
+    /// the delete then lands. Left uncorrected, the replacement page's `spaces:init` would restore that
+    /// stale entry even though `loadInitial()` finds no server row for it — reviving an explicitly
+    /// deleted comment as a fresh provisional draft (the same round-10 Fix 1 path in
+    /// `commentsController.ts` that a live page uses to keep unsaved local text alive across a reload),
+    /// silently undoing the user's deletion.
+    ///
+    /// Matches only a non-provisional entry whose `id` equals `commentID`: a non-provisional entry's
+    /// `id` is the server-assigned id (see `reconcilePendingReviewCommentStateAfterCreate`, which writes
+    /// it in when converting a match), so it is the only field a delete's server-issued `commentID` can
+    /// legitimately be compared against. A provisional entry's `id` is a client-generated placeholder,
+    /// never a real server id, so it is excluded even on a coincidental match.
+    private func reconcilePendingReviewCommentStateAfterDelete(commentID: String) {
+        guard var entries = pendingReviewCommentState else { return }
+        guard let index = entries.firstIndex(where: { !$0.provisional && $0.id == commentID }) else { return }
+        entries.remove(at: index)
+        // Deliberately not touched: mirrors `reconcilePendingReviewCommentStateAfterCreate`'s own
+        // generation rationale — this corrects content already stored under the current generation, it
+        // does not answer a new teardown flush.
+        pendingReviewCommentState = entries.isEmpty ? nil : entries
+    }
+
     private func performReviewCommentDelete(commentID: String, id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -1216,6 +1270,7 @@ enum CodePaneMode: Equatable {
             do {
                 _ = try await deviceGateway.workspaceReviewCommentDelete(workspaceID: workspaceID, id: commentID, device: device)
                 self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+                self?.reconcilePendingReviewCommentStateAfterDelete(commentID: commentID)
                 self?.outstandingReviewCommentMutationCount -= 1
                 self?.resumeDeferredReadyIfNeeded()
             } catch {

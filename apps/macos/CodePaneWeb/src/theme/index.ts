@@ -76,6 +76,17 @@ export function preloadCodePaneHighlighter(): Promise<void> {
     // No variableDefaults: styles/tokens.css defines every `--shiki-*`
     // variable this theme reads directly, for both light and dark.
     registerCustomCSSVariableTheme(CODE_PANE_THEME_NAME, {}, true);
+    // @pierre/diffs references Shiki's full dynamic-import grammar/theme
+    // registry, so Vite's build emits every Shiki grammar and theme as its
+    // own lazy chunk into the dist output (this is why the checked-in dist
+    // under Resources/CodePane carries roughly 320 assets / 11 MB of Shiki
+    // chunks). The call below only ever requests the LANGUAGES allowlist
+    // above, so none of those extra chunks are fetched at runtime — the
+    // cost this imposes is app-bundle disk size only, not memory or
+    // startup time. Accepted as v1 behavior: constraining Shiki to a
+    // static grammar/theme registry, or build-time filtering the emitted
+    // chunks, is disproportionate complexity right now. Revisit if bundle
+    // size becomes a shipping concern.
     preloadPromise = preloadHighlighter({ themes: [CODE_PANE_THEME_NAME], langs: LANGUAGES });
   }
   return preloadPromise;
