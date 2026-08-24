@@ -242,6 +242,19 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return min(gitCommandTimeout, remaining)
     }
 
+    /// `git rev-parse --show-prefix` terminates its output with exactly one trailing newline, but a leading
+    /// space or tab in its output is not incidental whitespace to discard — it is part of the subtree path
+    /// itself (a repo-relative directory can legitimately be named e.g. `" sub"`). `scopeSignature` and
+    /// `buildDiff`'s identical `--show-prefix` probes both use this instead of
+    /// `.trimmingCharacters(in: .whitespacesAndNewlines)`, which would strip that leading whitespace and
+    /// make `subtreeScoped` compare porcelain paths against a mismatched prefix, silently rejecting the
+    /// workspace's own entries as apparently outside its subtree.
+    private static func strippingTrailingNewline(_ output: String) -> String {
+        var result = output
+        if result.hasSuffix("\n") { result.removeLast() }
+        return result
+    }
+
     /// Normalizes a client-supplied `refName` the same way for every pull-side consumer here
     /// (`scopeSignature`, `buildDiff`) — nil, empty, or whitespace-only all mean "no ref: diff against
     /// HEAD", never an empty argument handed to `git merge-base`. This must agree with
@@ -375,10 +388,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // prefix, which git also produces on a plain SUCCESS (a workspace rooted exactly at its repo root).
         // Those are two different outcomes; collapsing them together previously let a transient failure
         // here silently blend into the "no scoping needed" case rather than surfacing as a retryable error.
-        let prefix = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--show-prefix"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only the trailing newline git appends is stripped here — see `strippingTrailingNewline`'s doc
+        // comment for why a leading space/tab must survive.
+        let prefix = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(
+                ["-C", workspaceDir, "rev-parse", "--show-prefix"],
+                timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
+            ))
 
         var input = Data((headSHA + "\n").utf8)
         // The common case — a workspace rooted AT the repository root, `prefix.isEmpty` — must hash
@@ -620,9 +636,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // the whole repo, not just the workspace's subtree, resolved against the wrong root) instead of a
         // visible, retryable error. Let it throw and propagate as the existing `gitCommandFailed` →
         // `.internalError` shape instead.
-        let prefix = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only the trailing newline git appends is stripped here — see `strippingTrailingNewline`'s doc
+        // comment for why a leading space/tab must survive.
+        let prefix = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(
+                ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start)))
         let scopedStatusEntries =
             prefix.isEmpty ? changedEntries(fromPorcelainZ: statusOutput) : subtreeScoped(changedEntries(fromPorcelainZ: statusOutput), prefix: prefix)
         // `--untracked-files=all` should mean every `??` record is already a file, never a directory, but

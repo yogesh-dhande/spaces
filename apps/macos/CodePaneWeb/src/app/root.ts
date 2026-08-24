@@ -253,6 +253,13 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             onSelect: (path) => diffView.scrollToFile(path),
           });
           diffView.setError(err.message);
+          // The comments controller re-anchors drafts against whatever file list it was last
+          // given; since the rendered diff is being cleared for this typed error, its anchor
+          // input must clear too, or a batch sent while the error is showing would carry line
+          // numbers from a diff the UI no longer displays. (The untyped/transport branch below
+          // deliberately does NOT do this — it keeps the old diff rendered while it silently
+          // retries, so the old anchors are still correct.)
+          comments.setFiles([]);
           scheduleDiffRetry(preserveScroll, token);
           return;
         }
@@ -265,6 +272,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           onSelect: (path) => diffView.scrollToFile(path),
         });
         diffView.setError(err.message);
+        // Same re-anchor reasoning as the retryable branch above: this is a durable rejection
+        // (e.g. a bad ref), so the diff stays cleared indefinitely and comments' anchor state
+        // must match what's on screen (nothing).
+        comments.setFiles([]);
         return;
       }
       scheduleDiffRetry(preserveScroll, token);

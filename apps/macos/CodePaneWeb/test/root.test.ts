@@ -650,6 +650,127 @@ describe("mountRoot's refreshDiff — `internalError` joins `unavailable` as a r
   });
 });
 
+describe("mountRoot's refreshDiff — a typed error that clears the diff also clears the comments controller's anchor input (round-21 Fix 1)", () => {
+  let container: HTMLElement;
+  let setCommentsSpy: ReturnType<typeof vi.spyOn>;
+  const defaultInitPayload = INIT_PAYLOAD;
+  // A provisional (never round-tripped) draft anchored to "a.ts" — same seeding shape as the
+  // round-16 Fix 1a test above (`comments.restorePendingState` runs synchronously during init, so
+  // this draft exists in the controller's mirror before the first `workspaceDiff` call settles).
+  const pendingEntry: PendingReviewCommentEntry = {
+    id: "pending-1",
+    provisional: true,
+    filePath: "a.ts",
+    side: "new",
+    lineNumber: 3,
+    lineText: "const x = 1;",
+    body: "seed comment",
+  };
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    container = document.createElement("div");
+    INIT_PAYLOAD = { ...defaultInitPayload, pendingReviewComments: [pendingEntry] };
+    // Not mocked at the module level (only @pierre/diffs's CodeView is faked): spying on the real
+    // CommentsController's own `DiffView.setComments` calls (round-16 Fix 1's same technique, see
+    // its doc comment above) is the only place `comments.setFiles([])`'s effect is externally
+    // observable — `CommentsController.files` itself is a private field with no getter, and
+    // `reanchorComments` only clears a draft's `position` (not its body/tray visibility) when its
+    // `filePath` is missing from the file list it was last given.
+    setCommentsSpy = vi.spyOn(DiffView.prototype, "setComments");
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    setCommentsSpy.mockRestore();
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  /** `undefined` means "a.ts" is missing from whatever file list `comments.setFiles` was last
+   *  called with (i.e. the clearing branch under test ran); any defined `position` — even an
+   *  "outdated" one — means "a.ts" is still in the controller's file list (`reanchorComments`
+   *  only produces `position: undefined` when the file itself isn't present at all). */
+  function seededDraftPosition(): unknown {
+    const lastCall = setCommentsSpy.mock.calls[setCommentsSpy.mock.calls.length - 1]!;
+    const anchored = lastCall[0] as Array<{ comment: { filePath: string }; position: unknown }>;
+    return anchored.find((ac) => ac.comment.filePath === "a.ts")?.position;
+  }
+
+  it("clears comments' anchor input on the retryable branch (unavailable/internalError), then restores it once the retry succeeds", async () => {
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    expect(container.textContent).toContain("a.ts");
+    expect(seededDraftPosition()).toBeDefined(); // anchored against the loaded "a.ts"
+
+    fireDiffSignature(); // e.g. an agent editing the workspace while this pane is open
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+
+    rejectDiff(1, new SpacesBridgeError("internalError", "git command timed out"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The seeded draft's own filePath still appears in the tray row's location text (the tray
+    // shows a comment's `comment.filePath` regardless of anchoring — see `renderTray`), so "a.ts"
+    // presence/absence in `container.textContent` is not a reliable signal here; the file-list/diff
+    // area's own clearing is already covered by the round-8/round-12 describe blocks above. What
+    // this fix changes is `seededDraftPosition()` below.
+    expect(container.textContent).toContain("git command timed out");
+    expect(seededDraftPosition()).toBeUndefined(); // comments' anchor input cleared alongside the diff
+
+    await vi.advanceTimersByTimeAsync(1000); // the scheduled retry fires at the floor
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
+    resolveDiff(2, [makeFile("a.ts")], "sig-a2");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(seededDraftPosition()).toBeDefined(); // re-anchored once the files came back
+  });
+
+  it("clears comments' anchor input on the durable branch (invalidArgument), and schedules no retry", async () => {
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    expect(seededDraftPosition()).toBeDefined();
+
+    fireDiffSignature();
+    await vi.advanceTimersByTimeAsync(0);
+    rejectDiff(1, new SpacesBridgeError("invalidArgument", "Ref 'nope' could not be resolved in this workspace."));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.textContent).toContain("could not be resolved");
+    expect(seededDraftPosition()).toBeUndefined(); // comments' anchor input cleared
+
+    // Existing durable-branch expectation (round-8/round-12 blocks above): no retry is scheduled.
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2); // still never retried
+  });
+
+  it("does NOT clear comments' anchor input on an untyped/transport error (the silent retry keeps the old diff and anchors as-is)", async () => {
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    expect(seededDraftPosition()).toBeDefined();
+
+    fireDiffSignature();
+    await vi.advanceTimersByTimeAsync(0);
+    rejectDiff(1, new Error("transient transport failure"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.textContent).toContain("a.ts"); // old diff stays rendered while it silently retries
+    expect(seededDraftPosition()).toBeDefined(); // anchors untouched
+
+    await vi.advanceTimersByTimeAsync(1000); // the silent retry fires
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("mountRoot's dispatch — a scope switch synchronously clears the previous scope's diff (round-13 Fix 2)", () => {
   let container: HTMLElement;
 

@@ -976,6 +976,32 @@ import spacesruntimecore
         #expect(file.patch?.contains("new inside content") == true)
     }
 
+    // Round-21 Fix 2: `--show-prefix`'s output is a repo-relative path (plus a trailing slash and git's
+    // own trailing newline), and a repo-relative directory can legitimately start with whitespace (e.g. a
+    // subpackage literally named " sub"). Before the fix, `.trimmingCharacters(in: .whitespacesAndNewlines)`
+    // stripped that leading space along with the trailing newline, so the trimmed prefix (`"sub/"`) no
+    // longer matched any of this workspace's own porcelain paths (all reported as `" sub/…"`) and
+    // `subtreeScoped` rejected every one of them as apparently outside the subtree — silently reporting an
+    // empty diff for a workspace rooted at a leading-space subdirectory. Reuses
+    // `makeRepoWithSubdirWorkspace`'s exact shape (an `other/` sibling and a root-level file, both outside
+    // the workspace, to prove scoping still excludes them) with only the subdir's name swapped for one that
+    // starts with a space.
+    @Test func untrackedFileInsideALeadingSpaceSubdirWorkspaceIsReported() throws {
+        let (root, workspace) = try makeRepoWithLeadingSpaceSubdirWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = RemoteWorkspaceGitClient()
+
+        try "new inside content".write(to: workspace.appendingPathComponent("NEWINSIDE.md"), atomically: true, encoding: .utf8)
+        try "new outside content".write(to: root.appendingPathComponent("other/NEWOUTSIDE.md"), atomically: true, encoding: .utf8)
+
+        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        #expect(result.files.count == 1)
+        let file = try #require(result.files.first)
+        #expect(file.path == "NEWINSIDE.md")
+        #expect(file.status == .untracked)
+        #expect(file.patch?.contains("new inside content") == true)
+    }
+
     @Test func aStagedRenameFullyInsideTheSubtreeReportsBothPathsWorkspaceRelative() throws {
         let (root, workspace) = try makeRepoWithSubdirWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1035,6 +1061,23 @@ import spacesruntimecore
         try runGit(["add", "-A"], cwd: root.path)
         try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: root.path)
         return (root, root.appendingPathComponent("packages/app"))
+    }
+
+    /// Same shape as `makeRepoWithSubdirWorkspace` (an `other/` sibling and a root-level file, both outside
+    /// the workspace), except the workspace subdirectory's own name starts with a space — the round-21 Fix 2
+    /// regression case for the `--show-prefix` probes' trimming.
+    private func makeRepoWithLeadingSpaceSubdirWorkspace() throws -> (root: URL, workspace: URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-diff-engine-space-subdir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(" sub"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("other"), withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: root.path)
+        try "app file".write(to: root.appendingPathComponent(" sub/APP.md"), atomically: true, encoding: .utf8)
+        try "other file".write(to: root.appendingPathComponent("other/OTHER.md"), atomically: true, encoding: .utf8)
+        try "root file".write(to: root.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "-A"], cwd: root.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: root.path)
+        return (root, root.appendingPathComponent(" sub"))
     }
 
     @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
