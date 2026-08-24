@@ -1944,6 +1944,133 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
   });
 });
 
+describe("EditorView — a disk read matching an in-flight save's submitted content adopts the baseline and keeps the buffer dirty (against-main round-5 Fix 1)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("further typing during the flight is preserved: disk matching the submitted content adopts the baseline but leaves dirty true", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
+      // handleExternalChange's own read: the signature poll picked up this save's own CAS write
+      // (submitted content "v1\n"), while the buffer has already moved on to "v2\n" underneath it —
+      // so this does NOT match `disk.content === this.latestContent` (the round-4 branch), only
+      // `disk.content === this.pendingSaveSubmitted` (Fix 1's branch).
+      .mockResolvedValueOnce({ content: "v1\n", sha256: "sha-2", size: 3 });
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "v1\n" });
+
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    saveBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "v1\n", { baseSHA256: "sha-1" }));
+
+    // Further typing during the flight: the write already submitted "v1\n", but the buffer moves on
+    // to "v2\n" before the write's response comes back.
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "v2\n" });
+
+    // The signature poll picks up the save's own CAS write (disk == "v1\n", exactly what was
+    // submitted) before the write's own network response returns.
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+
+    // No conflict, no merge indicator: this is recognized as the pane's own write completing, not a
+    // real external change to reconcile against.
+    // Banner element stays in the DOM classed "banner conflict" from the constructor default (only
+    // its content/buttons and display are ever swapped) — no real conflict was entered, so it must
+    // stay hidden, and no merge banner (a different className) was raised at all.
+    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
+    expect(container.querySelector(".banner.merge")).toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "v1\n",
+        content: "v2\n",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+
+    // The save's own write for the OLD baseline (sha-1) now lands successfully, late. Its success arm
+    // is discarded by the existing fetchToken guard (the signature push above already bumped it), so
+    // this must leave the reconciled state exactly as this branch already recorded it.
+    resolveWrite({ ok: true, sha256: "write-sha-a" });
+    await writePromise;
+
+    // Banner element stays in the DOM classed "banner conflict" from the constructor default (only
+    // its content/buttons and display are ever swapped) — no real conflict was entered, so it must
+    // stay hidden, and no merge banner (a different className) was raised at all.
+    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
+    expect(container.querySelector(".banner.merge")).toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "v1\n",
+        content: "v2\n",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("a genuinely third-party disk read during the same held-save shape still routes to diff3 and shows the conflict view (regression)", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
+      // A genuinely third-party write: differs from both the submitted content ("world\n") and the
+      // buffer's current, further-typed content ("world2\n"), on the same line/region as both.
+      .mockResolvedValueOnce({ content: "planet\n", sha256: "sha-2", size: 7 });
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "world\n" });
+
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    saveBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "world\n", { baseSHA256: "sha-1" }));
+
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "world2\n" });
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    expect(conflictBanner.textContent).toContain("changed on disk");
+    expect(saveBtn.disabled).toBe(true);
+
+    // The save's own write for the OLD baseline now lands successfully, late — its success arm stands
+    // down on the pre-existing fetchToken guard, so the conflict this fix must still catch stays put.
+    resolveWrite({ ok: true, sha256: "write-sha-a" });
+    await writePromise;
+
+    expect(conflictBanner.style.display).toBe("flex");
+    expect(conflictBanner.textContent).toContain("changed on disk");
+    expect(saveBtn.disabled).toBe(true);
+  });
+});
+
 describe("EditorView — external-change handling: dirty buffer, real conflict + compare view", () => {
   let container: HTMLElement;
 
@@ -2071,6 +2198,79 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
     expect(view.collectStateForFlush()).toBeNull();
     expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
   });
+});
+
+describe("EditorView — Keep mine's late arms stand down when a newer reconciliation already ran (against-main round-5 Fix 2)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("a newer reconcile completing while Keep mine's write is in flight is not clobbered by the write's late success", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 }) // enters conflict
+      // A further external write lands while Keep mine's own write is in flight: distinct from both
+      // "mine" ("edited\n") and the original conflict snapshot ("goodbye\n").
+      .mockResolvedValueOnce({ content: "third\n", sha256: "sha-3", size: 6 });
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+
+    // A further external write lands while Keep mine's own write is in flight. `handleExternalChange`
+    // runs unchanged while already in conflict (see its doc comment): this reconcile re-enters
+    // conflict against the NEWEST disk snapshot before Keep mine's own write response ever returns.
+    fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(conflictBanner.textContent).toContain("changed on disk"));
+
+    // Keep mine's write for the OLD conflict snapshot (baseSHA256 "sha-2") now lands successfully,
+    // late. Without this fix, its success arm would overwrite the reconcile's decision with the
+    // OLDER submitted content, marking the editor clean — asserting the reconcile's outcome survives
+    // is exactly what this fix is about.
+    resolveWrite({ ok: true, sha256: "write-sha-a" });
+    await writePromise;
+
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-3",
+        baseContent: "third\n",
+        content: "edited\n",
+        dirty: true,
+        conflict: true,
+      }),
+    );
+    expect(container.querySelector(".banner.conflict")!.textContent).toContain("changed on disk");
+    // The Save button (first "primary" button in document order — the compare view's own "Keep mine"
+    // is a second "primary" button inside the banner) stays disabled: still in conflict.
+    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // Regression: plain Keep mine with no interleaved signature event during the write still commits
+  // the clean keep-mine state exactly as before this fix. Already covered by the existing "Keep mine
+  // force-writes the buffer over disk..." test above — its write never races a `handleExternalChange`
+  // reconcile, so `fetchToken === this.externalChangeFetchToken` holds throughout and the new guard is
+  // a pass-through. No separate test added here per the fix spec's guidance to add one only if the
+  // existing coverage is judged insufficient.
 });
 
 describe("EditorView — external-change handling: superseded fetch (round-16 latest-wins)", () => {

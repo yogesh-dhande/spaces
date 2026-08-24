@@ -144,6 +144,12 @@ export class EditorView {
    *  await yields control back to the DOM, and two overlapping CAS writes racing the same baseline
    *  would let the second silently win with a hash the first's in-flight write invalidates. */
   private saveInFlight = false;
+  /** The exact content an in-flight `save()` submitted, set just before the write await and cleared
+   *  in `save()`'s `finally`. Exists ONLY so `handleExternalChange` can recognize disk content that
+   *  is this pane's own in-flight write when `latestContent` has already moved past it — the
+   *  `disk.content === this.latestContent` branch above it covers the not-moved-on case (see that
+   *  branch's own comment for the full mechanism). */
+  private pendingSaveSubmitted: string | undefined;
   /** True exactly while `this.banner` is showing the `invalidArgument` "file can no longer be
    *  displayed" error from `handleExternalChange`'s catch branch — not the merge indicator, the
    *  discard-consent prompt, the conflict compare view, or any other banner use, all of which use
@@ -621,6 +627,35 @@ export class EditorView {
       return;
     }
 
+    if (this.pendingSaveSubmitted !== undefined && disk.content === this.pendingSaveSubmitted) {
+      // Disk holds exactly what this pane's own in-flight save submitted — the write landed and the
+      // signature poll beat the write response back, while the user kept typing during the flight
+      // (`latestContent` has already moved past `submitted`, so the branch above this one didn't
+      // fire). This mirrors the save success arm's own rules (see `save()`'s success arm): adopt the
+      // write's content/hash as the new CAS baseline, but the buffer stays dirty because
+      // `latestContent` moved past `submitted` during the flight — that extra content was never
+      // written, and its next save CAS-checks correctly against this newly-adopted baseline.
+      //
+      // Routing this into `diff3MergeLines` below instead would merge ours-vs-theirs where both
+      // diverged from the same old baseline on the same lines (the further typing landed on top of
+      // what was just submitted), latching a false conflict for our own write — with no way to
+      // correct it later, since the save's late arms stand down on their own fetch-token guard (see
+      // `save()`'s `fetchToken` comment) once this reconcile has already run.
+      //
+      // Save stays enabled: `dirty` is true by construction here (we're inside the dirty path and
+      // disk !== latestContent). A CAS-rejected save can also reach this branch with
+      // `pendingSaveSubmitted` still set — the conflict arm awaits `handleExternalChange` before
+      // `finally` runs — but it only fires if disk coincidentally equals the submitted content,
+      // which is still the correct outcome to adopt in that case too.
+      this.baseSHA256 = disk.sha256;
+      this.baseContent = disk.content;
+      this.pendingMergeUndo = undefined;
+      this.banner.style.display = "none";
+      this.saveBtn.disabled = false;
+      this.pushEditorStateNow();
+      return;
+    }
+
     const merge = diff3MergeLines(this.latestContent ?? "", this.baseContent ?? "", disk.content);
     if ("conflict" in merge) {
       this.enterConflictState({ content: disk.content, sha256: disk.sha256, missing: false });
@@ -772,6 +807,15 @@ export class EditorView {
     const path = this.currentPath;
     if (!path) return;
     const generation = this.openGeneration;
+    // Fix 2 (round-5): `generation` alone only guards against a NEWER open() — it says nothing about
+    // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
+    // flight. `handleExternalChange` runs unchanged while already in conflict (see its doc comment),
+    // so an external writer changing the file again before this write's response arrives can push a
+    // fresh signature event whose reconcile re-enters conflict against that newer disk state (or
+    // auto-merges) BEFORE this call's own arms below run — those late arms must not clobber whatever
+    // that reconcile already decided. Captured here, alongside `generation`, and re-checked after the
+    // write settles (see the arms below). Mirrors `save()`'s identical `fetchToken` guard.
+    const fetchToken = this.externalChangeFetchToken;
     const content = this.latestContent ?? "";
     const baseSHA256 = this.diskMissing ? undefined : this.baseSHA256;
     let result: WorkspaceFileWriteResult;
@@ -779,12 +823,22 @@ export class EditorView {
       result = await this.bridge.workspaceFileWrite(path, content, { baseSHA256 });
     } catch (err) {
       if (generation !== this.openGeneration) return; // a later open() already won
+      // Fix 2 (round-5): a `handleExternalChange` reconcile for this same file completed while this
+      // write was in flight and already decided this file's UI state — this failure is for a write
+      // now superseded by that decision, so it must not repaint the compare view over whatever the
+      // reconcile already decided. Mirrors `save()`'s equivalent guard.
+      if (fetchToken !== this.externalChangeFetchToken) return;
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to save file.";
       this.renderConflictCompareView(message);
       return;
     }
     if (generation !== this.openGeneration) return; // a later open() already won
     if ("conflict" in result) {
+      // Deliberately NOT guarded by `fetchToken` (mirrors `save()`'s equivalent arm): this only
+      // re-invokes `handleExternalChange()`, which is idempotent against whatever an already-in-flight
+      // reconcile did — it always does its own fresh read and re-derives state from scratch, so
+      // calling it again here (superseded or not) is harmless.
+      //
       // Disk moved again while this conflict was unresolved. Re-run the exact same fresh-read
       // decision this conflict itself came from (see `handleExternalChange`'s doc comment) rather
       // than building a bespoke retry path: it re-fetches disk and re-enters conflict against the
@@ -792,6 +846,13 @@ export class EditorView {
       await this.handleExternalChange();
       return;
     }
+    // Fix 2 (round-5): a `handleExternalChange` reconcile against newer disk already ran while this
+    // write was in flight — committing the older submitted content as clean here would leave the
+    // pane stale with no future signature event to correct it (the reconcile consumed the latest
+    // one; disk's hash won't change again on its own). The write itself was still a valid CAS write —
+    // disk history is correct; there is just newer UI state that owns the pane now. Mirrors `save()`'s
+    // equivalent guard.
+    if (fetchToken !== this.externalChangeFetchToken) return;
     this.baseSHA256 = result.sha256;
     this.baseContent = content;
     this.latestContent = content;
@@ -1038,6 +1099,9 @@ export class EditorView {
       // success arm below) what ends up on disk. `this.latestContent` can move on underneath this
       // call if the user keeps typing while the write is in flight — the two must not be conflated.
       const submitted = this.latestContent;
+      // Fix 1: identifies this in-flight write's exact content for `handleExternalChange` to
+      // recognize (see `pendingSaveSubmitted`'s doc comment). Cleared in this method's `finally`.
+      this.pendingSaveSubmitted = submitted;
       let result: WorkspaceFileWriteResult;
       try {
         result = await this.bridge.workspaceFileWrite(this.currentPath, submitted, {
@@ -1116,6 +1180,7 @@ export class EditorView {
       this.pushEditorStateNow();
     } finally {
       this.saveInFlight = false;
+      this.pendingSaveSubmitted = undefined;
     }
   }
 }
