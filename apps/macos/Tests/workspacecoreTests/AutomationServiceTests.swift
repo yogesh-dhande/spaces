@@ -512,8 +512,8 @@ import spacesterminalcore
 
     // MARK: - Agent kind execution
 
-    /// Happy path: spawn the agent, wait for foreground detection, deliver the seed prompt as two
-    /// independent writes (text then a bare CR) in order, persist `promptDeliveredAt`, and complete
+    /// Happy path: spawn the agent, wait until it is both detected and reading input, deliver the seed
+    /// prompt as one submit-send, persist `promptDeliveredAt` once that write is acknowledged, and complete
     /// `succeeded` on the agent row's `done` signal with the session left open (never killed).
     func testAgentRunSpawnsDetectsDeliversPromptAndSucceedsOnDone() throws {
         let harness = try Harness(self)
@@ -522,12 +522,12 @@ import spacesterminalcore
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID, "the run records its spawned agent session")
 
-        // Before detection nothing is delivered.
+        // Before readiness nothing is delivered.
         harness.service.tick()
-        XCTAssertTrue(harness.host.writtenInput.isEmpty, "no prompt is delivered until the agent is detected")
+        XCTAssertTrue(harness.host.writtenInput.isEmpty, "no prompt is delivered until the agent is ready for it")
         XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
 
-        // Detection → the next tick delivers the prompt as one submit-send and records delivery.
+        // Readiness → the next tick delivers the prompt as one submit-send and records delivery.
         harness.host.markSessionForegroundDetected(sessionID: sessionID)
         harness.service.tick()
         let writes = harness.host.writtenInput
@@ -549,6 +549,79 @@ import spacesterminalcore
         XCTAssertEqual(finished.status, .succeeded)
         XCTAssertNil(finished.exitCode)
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "a done agent's session stays open")
+    }
+
+    /// The readiness gate: foreground detection fires on process identity, a second or two before the
+    /// agent's TUI has taken the terminal over. A prompt sent in that window lands in a pre-raw-mode buffer
+    /// or sits unsubmitted in a composer that was still initializing, so a detected-but-not-yet-reading
+    /// agent must not be prompted — and the moment it reports bracketed paste, it is.
+    func testAgentRunWaitsForTheDetectedAgentToStartReadingInputBeforeDeliveringThePrompt() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, prompt: "investigate the failing test")
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID, bracketedPasteActive: false)
+        harness.service.tick()
+        XCTAssertTrue(harness.host.writtenInput.isEmpty, "a detected agent that is not reading input yet must not be prompted")
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID, bracketedPasteActive: true)
+        harness.service.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "the prompt goes out once the agent is reading input")
+        XCTAssertEqual(harness.host.writtenInput.first?.input, .text("investigate the failing test"))
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+    }
+
+    /// The write acknowledgement: a send whose bytes never reached the PTY is not a delivery. The run keeps
+    /// `promptDeliveredAt` NULL — so it stays in the delivering phase rather than waiting forever on an
+    /// agent that was never given work — and the next tick sends again.
+    func testAgentRunRetriesPromptDeliveryUntilTheWriteIsAcknowledged() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, prompt: "investigate the failing test")
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.host.failInputWrites()
+        harness.service.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "the prompt is attempted")
+        XCTAssertNil(
+            try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "an unacknowledged write must not be recorded as a delivered prompt")
+
+        harness.host.acknowledgeInputWrites()
+        harness.service.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 2, "the next tick re-sends the prompt")
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "delivery is recorded once the write is acknowledged")
+
+        harness.service.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 2, "a delivered prompt is not re-sent")
+    }
+
+    /// Delivery that never lands is a loud failure, not a silent wait: the run fails at the same 90s budget
+    /// that bounds readiness, and its session is left running for inspection.
+    func testAgentRunFailsWhenPromptDeliveryNeverReachesTheAgent() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.host.failInputWrites()
+        harness.service.tick()
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+
+        clock.advance(by: 91)
+        harness.service.tick()
+
+        let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
+        XCTAssertEqual(finished.status, .failed)
+        XCTAssertNil(finished.promptDeliveredAt)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the session is left running for inspection")
     }
 
     /// Detection deadline miss: the agent is never classified within the 90s budget, so the run fails but
@@ -2427,6 +2500,10 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
         return writtenInputStore
     }
     private var writtenInputStore: [(sessionID: String, input: TerminalProfileInput, appendNewline: Bool)] = []
+    /// When set, every input write is attempted and then reported as failed, standing in for a daemon send
+    /// whose bytes never reached the PTY (the session went away between enqueue and write). The write is
+    /// still recorded, so a test can tell "attempted but not acknowledged" from "never attempted".
+    private var inputWriteFailureMessage: String?
     /// Session ids the executor asked to terminate through the process-wide terminator seam, in order — the
     /// seam a timeout/cancel no-PID teardown uses to end a whole session.
     var terminated: [String] {
@@ -2451,9 +2528,12 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
             self?.lock.unlock()
         }
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input, appendNewline in
-            self?.lock.lock()
-            self?.writtenInputStore.append((sessionID: sessionID, input: input, appendNewline: appendNewline))
-            self?.lock.unlock()
+            guard let self else { return }
+            self.lock.lock()
+            self.writtenInputStore.append((sessionID: sessionID, input: input, appendNewline: appendNewline))
+            let failure = self.inputWriteFailureMessage
+            self.lock.unlock()
+            if let failure { throw WorkspaceError.invalidArgument(message: failure) }
         }
     }
 
@@ -2480,14 +2560,30 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
         writeRuntimeState(sessionID: sessionID, paths: paths, state: .failed, childPID: nil)
     }
 
-    /// Publishes the daemon's foreground-detection result for a live session (still `.running`), the signal
-    /// the agent-kind executor waits for before delivering the prompt.
-    func markSessionForegroundDetected(sessionID: String, kind: TerminalDetectedAgentKind = .codex) {
+    /// Makes the daemon's send path report every write as failed until `acknowledgeInputWrites()`.
+    func failInputWrites(message: String = "Terminal session stopped accepting input before the send reached it.") {
+        lock.lock()
+        inputWriteFailureMessage = message
+        lock.unlock()
+    }
+
+    func acknowledgeInputWrites() {
+        lock.lock()
+        inputWriteFailureMessage = nil
+        lock.unlock()
+    }
+
+    /// Publishes the daemon's live runtime state for a session (still `.running`): the foreground-detection
+    /// result and whether the program running in it has bracketed paste enabled. The agent-kind executor
+    /// waits for BOTH before delivering the prompt, so `bracketedPasteActive: false` models the window
+    /// between the agent process being identified and its TUI actually reading input.
+    func markSessionForegroundDetected(sessionID: String, kind: TerminalDetectedAgentKind = .codex, bracketedPasteActive: Bool = true) {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
-                updatedAt: ISO8601DateFormatter().string(from: Date()), foregroundDetectedAgentKind: kind), paths: paths)
+                updatedAt: ISO8601DateFormatter().string(from: Date()), foregroundDetectedAgentKind: kind,
+                bracketedPasteActive: bracketedPasteActive), paths: paths)
     }
 
     private func launch(_ configuration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {

@@ -3,10 +3,10 @@ import XCTest
 
 @testable import spacesterminalcore
 
-/// Contract coverage for the control-input sequencer: writes run strictly in enqueue order, plain
-/// writes carry no artificial pacing (the framed-submit path), an unframed submit's separated carriage
-/// return is spaced from the text before it and the write after it, and `drain()` waits for the whole
-/// outstanding chain.
+/// Contract coverage for the control-input sequencer: writes run strictly in enqueue order, a framed
+/// submit carries no artificial pacing, an unframed submit's carriage return is spaced from the text
+/// before it and the write after it, every enqueue's acknowledgement reports what the writes reached,
+/// and `drain()` waits for the whole outstanding chain.
 final class TerminalControlInputSequencerTests: XCTestCase {
     private final class WriteRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -35,13 +35,26 @@ final class TerminalControlInputSequencerTests: XCTestCase {
         let recorder = WriteRecorder()
         let drained = expectation(description: "all writes ran")
 
-        sequencer.enqueueWrite { recorder.record("text-1") }
-        sequencer.enqueueWrite { recorder.record("cr-1") }
-        sequencer.enqueueWrite { recorder.record("text-2") }
-        sequencer.enqueueWrite { recorder.record("cr-2") }
+        sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text-1")
+                return .written(framed: true)
+            }, writeCarriageReturn: {
+                recorder.record("cr-1")
+                return .delivered
+            })
+        sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text-2")
+                return .written(framed: true)
+            }, writeCarriageReturn: {
+                recorder.record("cr-2")
+                return .delivered
+            })
         sequencer.enqueueWrite {
             recorder.record("text-3")
             drained.fulfill()
+            return .delivered
         }
 
         await fulfillment(of: [drained], timeout: 10)
@@ -59,13 +72,23 @@ final class TerminalControlInputSequencerTests: XCTestCase {
         let drained = expectation(description: "both submits ran")
 
         let start = ContinuousClock.now
-        sequencer.enqueueWrite { recorder.record("text-1") }
-        sequencer.enqueueWrite { recorder.record("cr-1") }
-        sequencer.enqueueWrite { recorder.record("text-2") }
-        sequencer.enqueueWrite {
-            recorder.record("cr-2")
-            drained.fulfill()
-        }
+        sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text-1")
+                return .written(framed: true)
+            }, writeCarriageReturn: {
+                recorder.record("cr-1")
+                return .delivered
+            })
+        sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text-2")
+                return .written(framed: true)
+            }, writeCarriageReturn: {
+                recorder.record("cr-2")
+                drained.fulfill()
+                return .delivered
+            })
 
         await fulfillment(of: [drained], timeout: 10)
 
@@ -78,17 +101,26 @@ final class TerminalControlInputSequencerTests: XCTestCase {
     /// the text write before it AND hold back the write after it by the separation interval, keeping the
     /// CR a lone PTY read burst on both sides (issue #187). Ordering across the delay is part of the
     /// contract: a write enqueued while the CR is still sleeping must run after it, never jump ahead.
+    /// The framing comes from the text write itself, which is what keeps the pacing bound to the bytes
+    /// that actually went out.
     func testSeparatedSubmitCarriageReturnSpacesBothSides() async {
         let separation: Duration = .milliseconds(120)
         let sequencer = TerminalControlInputSequencer(separation: separation)
         let recorder = WriteRecorder()
         let drained = expectation(description: "all writes ran")
 
-        sequencer.enqueueWrite { recorder.record("text") }
-        sequencer.enqueueSubmitCarriageReturn { recorder.record("cr") }
+        sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text")
+                return .written(framed: false)
+            }, writeCarriageReturn: {
+                recorder.record("cr")
+                return .delivered
+            })
         sequencer.enqueueWrite {
             recorder.record("next")
             drained.fulfill()
+            return .delivered
         }
 
         await fulfillment(of: [drained], timeout: 10)
@@ -113,15 +145,73 @@ final class TerminalControlInputSequencerTests: XCTestCase {
         sequencer.enqueueWrite {
             try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
             recorder.record("text")
+            return .delivered
         }
         sequencer.enqueueWrite {
             try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
             recorder.record("cr")
+            return .delivered
         }
 
         await sequencer.drain()
 
         // No polling: both writes must already have run because drain awaited the whole chain.
         XCTAssertEqual(recorder.recorded.map(\.label), ["text", "cr"], "drain() returned before the queued submit writes ran")
+    }
+
+    /// The acknowledgement is the whole point of the send contract: it must not resolve until the writes
+    /// have actually run, so a caller that waits on it (the daemon's send path, a session's control
+    /// socket) reports a write rather than an enqueue.
+    func testSubmitAcknowledgementResolvesOnlyAfterBothWritesRan() async {
+        let sequencer = TerminalControlInputSequencer()
+        let recorder = WriteRecorder()
+
+        let acknowledgement = sequencer.enqueueSubmit(
+            writeText: {
+                try? await Task.sleep(for: .milliseconds(80), clock: .continuous)
+                recorder.record("text")
+                return .written(framed: true)
+            }, writeCarriageReturn: {
+                try? await Task.sleep(for: .milliseconds(80), clock: .continuous)
+                recorder.record("cr")
+                return .delivered
+            })
+
+        let outcome = await Task.detached { acknowledgement.wait(timeout: .seconds(10)) }.value
+
+        XCTAssertEqual(outcome, .delivered)
+        XCTAssertEqual(recorder.recorded.map(\.label), ["text", "cr"], "the acknowledgement resolved before the submit's writes ran")
+    }
+
+    /// A submit whose text never reached the PTY — the session was torn down between enqueue and write —
+    /// fails the whole send and writes no carriage return: there is nothing in the composer to submit.
+    func testSubmitWhoseTextIsNotDeliveredFailsAndSkipsItsCarriageReturn() async {
+        let sequencer = TerminalControlInputSequencer()
+        let recorder = WriteRecorder()
+
+        let acknowledgement = sequencer.enqueueSubmit(
+            writeText: {
+                recorder.record("text")
+                return .notDelivered
+            }, writeCarriageReturn: {
+                recorder.record("cr")
+                return .delivered
+            })
+
+        let outcome = await Task.detached { acknowledgement.wait(timeout: .seconds(10)) }.value
+
+        XCTAssertEqual(outcome, .notDelivered)
+        XCTAssertEqual(recorder.recorded.map(\.label), ["text"], "a submit whose text went nowhere must not send its carriage return")
+    }
+
+    /// A plain write reports its own outcome the same way, so a send to a session that has lost its
+    /// surface is a failure rather than a silent no-op.
+    func testPlainWriteAcknowledgementCarriesTheWriteOutcome() async {
+        let sequencer = TerminalControlInputSequencer()
+
+        let acknowledgement = sequencer.enqueueWrite { .notDelivered }
+        let outcome = await Task.detached { acknowledgement.wait(timeout: .seconds(10)) }.value
+
+        XCTAssertEqual(outcome, .notDelivered)
     }
 }

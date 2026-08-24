@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 17
+    public static let currentVersion = 18
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -554,6 +554,45 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 16, toVersion: 17, description: "Persist automation next-run overrides", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN next_fire_override REAL;")
         },
+        // Records whether a session's program has bracketed paste (DECSET 2004) enabled, which is what
+        // agent-prompt delivery waits for before sending (process identity alone precedes the TUI reading
+        // input). Existing rows default to 0: no session's mode was observed before this version, and a
+        // live session's own core republishes the real value on its next runtime-state sample.
+        //
+        // The frozen pre-v18 shape is created first for the same reason the v8→v9 step creates its own: a
+        // database old enough to predate the terminal tables carries none of them, and the ALTER needs a
+        // table to alter; on a database that already has the table the CREATE is a no-op.
+        DatabaseMigrationStep(
+            fromVersion: 17, toVersion: 18, description: "Add terminal_runtime_states.bracketed_paste_active", requiresBackup: true
+        ) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_runtime_states (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      service_pid INTEGER NOT NULL,
+                      child_pid INTEGER,
+                      title TEXT,
+                      working_directory TEXT,
+                      columns INTEGER,
+                      rows INTEGER,
+                      state TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      exited_at TEXT,
+                      foreground_pid INTEGER,
+                      foreground_executable_path TEXT,
+                      foreground_executable_name TEXT,
+                      foreground_argv_json TEXT,
+                      foreground_detected_agent_kind TEXT,
+                      foreground_display_label TEXT,
+                      foreground_display_command TEXT,
+                      bell_at TEXT
+                    );
+                    ALTER TABLE terminal_runtime_states ADD COLUMN bracketed_paste_active INTEGER NOT NULL DEFAULT 0;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -634,7 +673,8 @@ public enum DatabaseSchema {
               foreground_detected_agent_kind TEXT,
               foreground_display_label TEXT,
               foreground_display_command TEXT,
-              bell_at TEXT
+              bell_at TEXT,
+              bracketed_paste_active INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS terminal_clients (

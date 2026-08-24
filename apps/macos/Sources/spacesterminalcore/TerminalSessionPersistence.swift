@@ -102,13 +102,22 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     /// from it, and its value is the alert's dismissal identity, so it must advance only on a bell the
     /// user has not been told about yet.
     public let bellAt: String?
+    /// Whether the program running in this session currently has bracketed paste (DECSET 2004) enabled.
+    ///
+    /// This is the session's report that its foreground application has taken the terminal over, and it
+    /// is what makes a seed prompt safe to send: process identity (`foregroundDetectedAgentKind`) says a
+    /// coding agent was exec'd, which is true a second or two before its TUI is reading input, while
+    /// this says the application is in the input mode that TUI runs in. The automation executor and
+    /// `spaces agent spawn` both gate prompt delivery on it, and it is the same live mode the send
+    /// chokepoint frames a submit's text with.
+    public let bracketedPasteActive: Bool
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
         updatedAt: String, exitedAt: String? = nil, title: String? = nil, workingDirectory: String? = nil, columns: Int? = nil, rows: Int? = nil,
         foregroundPID: Int32? = nil, foregroundExecutablePath: String? = nil, foregroundExecutableName: String? = nil,
         foregroundArgv: [String]? = nil, foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundDisplayLabel: String? = nil,
-        foregroundDisplayCommand: String? = nil, bellAt: String? = nil
+        foregroundDisplayCommand: String? = nil, bellAt: String? = nil, bracketedPasteActive: Bool = false
     ) {
         self.sessionID = sessionID
         self.backend = backend
@@ -129,6 +138,7 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         self.updatedAt = updatedAt
         self.exitedAt = exitedAt
         self.bellAt = bellAt
+        self.bracketedPasteActive = bracketedPasteActive
     }
 
     enum CodingKeys: String, CodingKey {
@@ -151,6 +161,7 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         case updatedAt
         case exitedAt
         case bellAt
+        case bracketedPasteActive
     }
 
     public init(from decoder: any Decoder) throws {
@@ -174,6 +185,7 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
         exitedAt = try container.decodeIfPresent(String.self, forKey: .exitedAt)
         bellAt = try container.decodeIfPresent(String.self, forKey: .bellAt)
+        bracketedPasteActive = try container.decodeIfPresent(Bool.self, forKey: .bracketedPasteActive) ?? false
     }
 
     /// Identifies one run of a session: the child PID differs per launch and the exit timestamp per
@@ -328,10 +340,11 @@ public enum TerminalSessionPersistence {
                     INSERT INTO terminal_runtime_states(
                       session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
                       foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
-                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command, bell_at
+                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command, bell_at,
+                      bracketed_paste_active
                     )
                     VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
-                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
+                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)
                     ON CONFLICT(session_id) DO UPDATE SET
                       root_directory = excluded.root_directory,
                       backend = excluded.backend,
@@ -351,7 +364,8 @@ public enum TerminalSessionPersistence {
                       foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
                       foreground_display_label = excluded.foreground_display_label,
                       foreground_display_command = excluded.foreground_display_command,
-                      bell_at = excluded.bell_at
+                      bell_at = excluded.bell_at,
+                      bracketed_paste_active = excluded.bracketed_paste_active
                     """,
                 bindings: [
                     state.sessionID, root, state.backend.rawValue, state.servicePID, state.childPID.map { Int($0) } as Any? ?? NSNull(),
@@ -359,7 +373,7 @@ public enum TerminalSessionPersistence {
                     state.state.rawValue, state.updatedAt, state.exitedAt ?? "", state.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
                     state.foregroundExecutablePath ?? "", state.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
                     state.foregroundDetectedAgentKind?.rawValue ?? "", state.foregroundDisplayLabel ?? "", state.foregroundDisplayCommand ?? "",
-                    state.bellAt ?? "",
+                    state.bellAt ?? "", state.bracketedPasteActive ? 1 : 0,
                 ])
         }
     }
@@ -450,7 +464,7 @@ public enum TerminalSessionPersistence {
                            COALESCE(foreground_pid, ''), COALESCE(foreground_executable_path, ''),
                            COALESCE(foreground_executable_name, ''), COALESCE(foreground_argv_json, ''),
                            COALESCE(foreground_detected_agent_kind, ''), COALESCE(foreground_display_label, ''),
-                           COALESCE(foreground_display_command, ''), COALESCE(bell_at, '')
+                           COALESCE(foreground_display_command, ''), COALESCE(bell_at, ''), bracketed_paste_active
                     FROM terminal_runtime_states
                     WHERE root_directory = ?
                     """, bindings: [root])
@@ -718,10 +732,11 @@ public enum TerminalSessionPersistence {
                     INSERT INTO terminal_runtime_states(
                       session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
                       foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
-                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command, bell_at
+                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command, bell_at,
+                      bracketed_paste_active
                     )
                     VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
-                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
+                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)
                     ON CONFLICT(session_id) DO UPDATE SET
                       root_directory = excluded.root_directory,
                       backend = excluded.backend,
@@ -741,7 +756,8 @@ public enum TerminalSessionPersistence {
                       foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
                       foreground_display_label = excluded.foreground_display_label,
                       foreground_display_command = excluded.foreground_display_command,
-                      bell_at = excluded.bell_at
+                      bell_at = excluded.bell_at,
+                      bracketed_paste_active = excluded.bracketed_paste_active
                     """,
                 bindings: [
                     runtimeState.sessionID, root, runtimeState.backend.rawValue, runtimeState.servicePID,
@@ -750,7 +766,7 @@ public enum TerminalSessionPersistence {
                     runtimeState.updatedAt, runtimeState.exitedAt ?? "", runtimeState.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
                     runtimeState.foregroundExecutablePath ?? "", runtimeState.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
                     runtimeState.foregroundDetectedAgentKind?.rawValue ?? "", runtimeState.foregroundDisplayLabel ?? "",
-                    runtimeState.foregroundDisplayCommand ?? "", runtimeState.bellAt ?? "",
+                    runtimeState.foregroundDisplayCommand ?? "", runtimeState.bellAt ?? "", runtimeState.bracketedPasteActive ? 1 : 0,
                 ])
             try database.execute(
                 sql: """
@@ -1122,7 +1138,7 @@ public enum TerminalSessionPersistence {
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
                            COALESCE(r.foreground_executable_name, ''), COALESCE(r.foreground_argv_json, ''),
                            COALESCE(r.foreground_detected_agent_kind, ''), COALESCE(r.foreground_display_label, ''),
-                           COALESCE(r.foreground_display_command, ''), COALESCE(r.bell_at, '')
+                           COALESCE(r.foreground_display_command, ''), COALESCE(r.bell_at, ''), r.bracketed_paste_active
                     FROM terminal_sessions s
                     JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
                     WHERE r.state IN (\(interactiveStatePlaceholders))
@@ -1130,7 +1146,7 @@ public enum TerminalSessionPersistence {
                     """, bindings: interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 32 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            guard row.count >= 33 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
             let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
             guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
             return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
@@ -1168,7 +1184,7 @@ public enum TerminalSessionPersistence {
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
                            COALESCE(r.foreground_executable_name, ''), COALESCE(r.foreground_argv_json, ''),
                            COALESCE(r.foreground_detected_agent_kind, ''), COALESCE(r.foreground_display_label, ''),
-                           COALESCE(r.foreground_display_command, ''), COALESCE(r.bell_at, '')
+                           COALESCE(r.foreground_display_command, ''), COALESCE(r.bell_at, ''), r.bracketed_paste_active
                     FROM terminal_sessions s
                     JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
                     WHERE s.session_id IN (\(sessionIDPlaceholders)) AND r.state NOT IN (\(interactiveStatePlaceholders))
@@ -1176,7 +1192,7 @@ public enum TerminalSessionPersistence {
                     """, bindings: sessionIDList + interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 32 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            guard row.count >= 33 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
             let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
             guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
             return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
@@ -1333,7 +1349,8 @@ public enum TerminalSessionPersistence {
             foregroundExecutableName: row.count > 13 && !row[13].isEmpty ? row[13] : nil,
             foregroundArgv: row.count > 14 ? try decodeForegroundArgv(row[14]) : nil, foregroundDetectedAgentKind: foregroundDetectedAgentKind,
             foregroundDisplayLabel: row.count > 16 && !row[16].isEmpty ? row[16] : nil,
-            foregroundDisplayCommand: row.count > 17 && !row[17].isEmpty ? row[17] : nil, bellAt: row.count > 18 && !row[18].isEmpty ? row[18] : nil)
+            foregroundDisplayCommand: row.count > 17 && !row[17].isEmpty ? row[17] : nil, bellAt: row.count > 18 && !row[18].isEmpty ? row[18] : nil,
+            bracketedPasteActive: row.count > 19 && row[19] == "1")
     }
 
     private static func decodeClient(row: [String]) throws -> TerminalClient {

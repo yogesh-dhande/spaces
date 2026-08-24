@@ -834,9 +834,10 @@ public final class AutomationService: @unchecked Sendable {
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
     }
 
-    /// Detection deadline for an agent-kind run: how long to wait for the daemon's foreground classifier to
-    /// identify the coding agent before failing the run. Matches the interactive `agent spawn` default (90s).
-    private static let agentDetectionDeadline: TimeInterval = 90
+    /// Readiness deadline for an agent-kind run: how long to wait for the agent to be identified AND ready
+    /// for its prompt, and for that prompt's write to reach the PTY, before failing the run. Matches the
+    /// interactive `agent spawn` default (90s) and covers the whole detect-then-deliver wait.
+    private static let agentReadinessDeadline: TimeInterval = 90
 
     /// Drives an agent-kind run through its two phases, both derived from the run row so a restart resumes
     /// deterministically: `promptDeliveredAt == nil` is the detecting/sending phase, otherwise the run is
@@ -872,10 +873,18 @@ public final class AutomationService: @unchecked Sendable {
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
     }
 
-    /// Detecting/sending phase (`promptDeliveredAt == nil`): wait for foreground detection, then deliver the
-    /// seed prompt. A session that ends before delivery fails the run (the agent never received its work). A
-    /// detection deadline miss also fails the run but leaves the session running for inspection (mirrors
-    /// `spaces agent spawn`, which reports a detection timeout without killing the session).
+    /// Detecting/sending phase (`promptDeliveredAt == nil`): wait for the agent to be ready for input, then
+    /// deliver the seed prompt. A session that ends before delivery fails the run (the agent never received
+    /// its work). A deadline miss also fails the run but leaves the session running for inspection (mirrors
+    /// `spaces agent spawn`, which reports a readiness timeout without killing the session).
+    ///
+    /// Readiness is two facts, not one. `foregroundDetectedAgentKind` says the coding agent process is
+    /// there, which is true a second or two after exec — before its TUI has taken the terminal over, and
+    /// possibly while a trust/auth dialog is holding input. `bracketedPasteActive` says the application
+    /// itself enabled bracketed paste (DECSET 2004), which is the mode every supported agent TUI runs its
+    /// composer in and the mode that makes the send chokepoint frame the prompt so its Enter lands as a
+    /// distinct keystroke. Sending on process identity alone is what let a prompt vanish into a
+    /// pre-raw-mode buffer or sit typed-but-unsubmitted in the composer.
     private func pollAgentDetectionPhase(_ run: AutomationRun, automation: Automation, sessionID: String, sessionLive: Bool) throws {
         guard sessionLive else {
             // Launch-persistence grace: just after a spawn the runtime row can be absent/stale under write-behind
@@ -887,29 +896,49 @@ public final class AutomationService: @unchecked Sendable {
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }
-        if let startedAt = run.startedAt, now().timeIntervalSince(startedAt) >= Self.agentDetectionDeadline {
-            logError("automation_agent_detection_timeout run=\(run.id) session=\(sessionID)")
+        let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
+        // Readiness is exactly two facts: a detected coding agent, and that agent reading input. What is
+        // on screen is deliberately out of scope — a trust/onboarding or auth dialog raised AFTER the TUI
+        // enabled bracketed paste satisfies this gate, so a seed prompt can still land in a modal and be
+        // recorded as delivered. No terminal-state fact distinguishes an active composer from a dialog,
+        // and reading the transcript to guess would be a heuristic on screen text; the gate narrows the
+        // window that made #556 reproducible and stops there. An orchestrator-driven `spaces agent spawn`
+        // (docs/spec.md) remains the answer for sessions that hit first-run dialogs.
+        let agentIsReady = runtimeState?.foregroundDetectedAgentKind != nil && runtimeState?.bracketedPasteActive == true
+        if let startedAt = run.startedAt, now().timeIntervalSince(startedAt) >= Self.agentReadinessDeadline {
+            // Which half of the wait ran out is the difference between "the agent never came up" and "the
+            // agent came up but its prompt never reached it", so the failure names the one that happened.
+            if agentIsReady {
+                logError("automation_agent_prompt_delivery_timeout run=\(run.id) session=\(sessionID)")
+            } else {
+                logError("automation_agent_detection_timeout run=\(run.id) session=\(sessionID)")
+            }
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }
-        let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
-        guard runtimeState?.foregroundDetectedAgentKind != nil else { return }
-        try deliverAgentPrompt(run, automation: automation, sessionID: sessionID)
+        guard agentIsReady else { return }
+        deliverAgentPrompt(run, automation: automation, sessionID: sessionID)
     }
 
     /// Delivers the agent's seed prompt as one submit-send (`appendNewline: true`): the session host's send
-    /// chokepoint writes the text and a separate, spaced Enter keystroke, which every supported agent TUI
-    /// (Claude Code, Codex, OpenCode) reads as a real submit — a client-side follow-up CR write would land
-    /// inline within the paste burst and is exactly what OpenCode leaves unsubmitted (issue #187). The
-    /// prompt is sent verbatim (nothing stripped). `promptDeliveredAt` is persisted only after the write
-    /// succeeds, so a restart or a failed write retries the whole send rather than resuming into a
-    /// never-submitted prompt.
-    private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String) throws {
+    /// chokepoint writes the text and its submitting Enter, which every supported agent TUI (Claude Code,
+    /// Codex, OpenCode) reads as a real submit — a client-side follow-up CR write would land inline within
+    /// the paste burst and is exactly what OpenCode leaves unsubmitted (issue #187). The prompt is sent
+    /// verbatim (nothing stripped).
+    ///
+    /// `promptDeliveredAt` is persisted only once the send path reports the bytes reached the PTY, which is
+    /// what the write acknowledgement the send chokepoint carries back makes knowable. A failed write is
+    /// logged and left for the next tick to retry, with the run's own readiness deadline as the bound: the
+    /// run either delivers or fails loudly, and can never sit in the awaiting phase for a prompt no agent
+    /// received.
+    private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String) {
         guard let prompt = automation.agentPrompt else { return }
-        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt), appendNewline: true)
-        try store.updateAutomationRun(
-            id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
-            promptDeliveredAt: now())
+        do {
+            try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt), appendNewline: true)
+            try store.updateAutomationRun(
+                id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
+                promptDeliveredAt: now())
+        } catch { logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) error=\(error)") }
     }
 
     /// Awaiting phase (`promptDeliveredAt != nil`): the run completes on the first of — the agent row

@@ -723,11 +723,13 @@ enum SpacesDaemonErrorClassification {
             try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
         }
         // The automation executor delivers an agent-kind automation's seed prompt through this writer. It
-        // sends with `appendNewline: false` because the executor issues the submitting CR as its own
-        // separate byte write (the provider-neutral two-write submit), routing through the same off-main
-        // send path the `.terminalSend` profile command uses (`terminalSendOffMain`). The executor runs on
-        // the automation service's own serial queue, never main, so the engine hop inside that send path
-        // is deadlock-safe (the one-way rule).
+        // sends with `appendNewline: true` — the submit path, where the session host writes the text and its
+        // submitting carriage return itself — routing through the same off-main send path the
+        // `.terminalSend` profile command uses (`terminalSendOffMain`). The executor runs on the automation
+        // service's own serial queue, never main, so the engine hop inside that send path is deadlock-safe
+        // (the one-way rule), and so is the wait that send path does for the write to reach the PTY: the
+        // response the executor gets back reports a real write, which is what it stamps `promptDeliveredAt`
+        // from.
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input, appendNewline in
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
             let response = self.terminalSendOffMain(
@@ -2114,16 +2116,19 @@ enum SpacesDaemonErrorClassification {
     /// Off-main terminal-send: a narrow engine hop for the live in-process core, else the control-socket
     /// round-trip on the transport thread.
     private nonisolated func sendProfileTerminalControlOffMain(sessionID: String, request: TerminalControlRequest) throws -> TerminalControlResponse {
-        if let live = TerminalEngineActor.runSynchronously({ self.liveCoreControlResponse(sessionID: sessionID, request: request) }) { return live }
+        // The core is looked up on the engine but the request is handled from HERE, on the transport thread:
+        // the core hops the engine itself and then waits off it for the send's writes to reach the PTY, and
+        // that wait must not be held on the engine the writes run on.
+        if let liveCore = TerminalEngineActor.runSynchronously({ self.liveSessionCore(sessionID: sessionID) }) {
+            return liveCore.handleControlRequest(request)
+        }
         return try controlSocketResponse(sessionID: sessionID, request: request)
     }
 
-    /// The live in-process core's control response, or nil when there is no live core. Touches
-    /// `sessionCores`/Ghostty, so it is isolated to the terminal engine actor.
-    @TerminalEngineActor private func liveCoreControlResponse(sessionID: String, request: TerminalControlRequest) -> TerminalControlResponse? {
-        guard let liveCore = sessionCores[sessionID] else { return nil }
-        return liveCore.handleControlRequest(request)
-    }
+    /// The live in-process core for a session, or nil when there is none. Touches `sessionCores`, so it is
+    /// isolated to the terminal engine actor; the core itself is engine-isolated and therefore Sendable, so
+    /// the handle is safe to carry back out to the transport thread that handles the request with it.
+    @TerminalEngineActor private func liveSessionCore(sessionID: String) -> GhosttyEmbeddedSessionCore? { sessionCores[sessionID] }
 
     /// The control-socket round-trip (5s timeout) for a non-live session. No main-actor state, so it is
     /// `nonisolated` and runs on the transport thread for the off-main terminal-send/send paths.
@@ -2468,7 +2473,11 @@ enum SpacesDaemonErrorClassification {
     /// The off-main send backing `submitAgentNotificationLine`: builds the single `appendNewline: true`
     /// `terminal send` and drives the engine through the off-main control path. Must run off the main
     /// actor (it calls `TerminalEngineActor.runSynchronously`). Throws when the send fails, which the
-    /// direct (off-main) caller reads as the subscriber having vanished.
+    /// direct (off-main) caller reads as the subscriber having vanished — including a send whose bytes
+    /// never reached the PTY, which a submit reports rather than swallowing. That wait holds this
+    /// delivery queue for as long as the submit takes (immediate for an agent TUI, which has bracketed
+    /// paste on; the unframed spacing for a plain shell), which is the ordering the serial queue already
+    /// gives and is bounded by the send path's own acknowledgement timeout.
     private nonisolated func deliverAgentNotificationLineOffMain(sessionID: String, line: String) throws {
         let request = TerminalControlRequest(
             command: .send(TerminalControlSendPayload(text: line, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: true)))
@@ -2592,10 +2601,9 @@ enum SpacesDaemonErrorClassification {
         if command.requiresOwnerClientID, controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             return TerminalServiceResponse(ok: false, message: "Missing device client ID.", errorCode: .invalidArgument)
         }
-        if let liveResponse = TerminalEngineActor.runSynchronously({
-            self.liveControlResponse(sessionID: sessionID, controlRequest: controlRequest, includeSessionState: command.includesSessionStateOnSuccess)
-        }) {
-            return liveResponse
+        if let liveCore = TerminalEngineActor.runSynchronously({ self.liveSessionCore(sessionID: sessionID) }) {
+            return liveControlResponse(
+                liveCore: liveCore, controlRequest: controlRequest, includeSessionState: command.includesSessionStateOnSuccess)
         }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2615,22 +2623,20 @@ enum SpacesDaemonErrorClassification {
         } catch { return Self.failureResponse(error) }
     }
 
-    /// The live in-process core control response, or nil when there is no live core (the off-main handler
-    /// then falls back to the control socket). Touches `sessionCores`/Ghostty, so it is isolated to the
-    /// terminal engine actor. The session-state payload is built inline from the same `liveCore` handle
-    /// rather than by delegating to a shared main-actor helper: this function already runs on the engine
-    /// (reached via `TerminalEngineActor.runSynchronously` from the transport thread), and a live core's
-    /// current state is always `liveCore.currentRemoteStatePayload` — the same fact a main-actor helper
-    /// would have to hop back onto the engine to read. Building it here avoids that round trip, which
-    /// would otherwise nest an engine→main hop inside this already-engine-isolated call and deadlock
+    /// A live in-process core's control response, handled from the transport thread. The core hops the
+    /// engine to handle the request and then waits off it for a send's writes to reach the PTY, so this
+    /// must NOT run on the engine actor — the writes it waits for run there. The session-state payload is
+    /// read in its own narrow engine hop afterwards, from the same core handle, rather than by delegating
+    /// to a main-actor helper: a live core's current state is always `liveCore.currentRemoteStatePayload`,
+    /// and routing that through main would nest a main hop inside engine-isolated work and deadlock
     /// against the engine's own serial queue.
-    @TerminalEngineActor private func liveControlResponse(sessionID: String, controlRequest: TerminalControlRequest, includeSessionState: Bool)
-        -> TerminalServiceResponse?
-    {
-        guard let liveCore = sessionCores[sessionID] else { return nil }
+    private nonisolated func liveControlResponse(
+        liveCore: GhosttyEmbeddedSessionCore, controlRequest: TerminalControlRequest, includeSessionState: Bool
+    ) -> TerminalServiceResponse {
         let response = liveCore.handleControlRequest(controlRequest)
         let sessionState =
-            response.ok && includeSessionState ? liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange) : nil
+            response.ok && includeSessionState
+            ? TerminalEngineActor.runSynchronously({ liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange) }) : nil
         return TerminalServiceResponse(
             ok: response.ok, message: response.message, errorCode: response.errorCode, sessionState: sessionState, controlResponse: response)
     }
