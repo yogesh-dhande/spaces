@@ -788,12 +788,28 @@ export class EditorView {
     keepMineBtn.type = "button";
     keepMineBtn.className = "btn primary";
     keepMineBtn.textContent = "Keep mine";
-    keepMineBtn.addEventListener("click", () => void this.resolveConflictKeepMine());
     const takeDiskBtn = document.createElement("button");
     takeDiskBtn.type = "button";
     takeDiskBtn.className = "btn";
     takeDiskBtn.textContent = this.diskMissing ? "Close without saving" : "Take disk";
     takeDiskBtn.addEventListener("click", () => this.resolveConflictTakeDisk());
+    // Once this write is issued it cannot be recalled: disk WILL hold the buffer's content when it
+    // settles, so "Take disk" stops being a real option the moment this click starts. Leaving it
+    // clickable would let a slow write's success arm reverse a later Take-disk choice — disable both
+    // buttons synchronously rather than adding a generation/token guard, which would instead let the
+    // UI adopt the disk snapshot while the in-flight write replaces disk out from under it (the
+    // write's own signature event would then flip the pane back to "mine" ~2s later anyway).
+    // `resolveConflictKeepMine`'s `generation`/`fetchToken` guards are right not to catch this case:
+    // nothing about a Take-disk click changes either token, by design — it is a pure local adoption.
+    // Every settle path re-renders or hides this banner, so the disabled state never outlives the
+    // flight: the failure arm re-renders via `renderConflictCompareView` (fresh, enabled buttons),
+    // the CAS-conflict arm re-enters via `handleExternalChange` (fresh banner), and the success arm
+    // hides the banner.
+    keepMineBtn.addEventListener("click", () => {
+      keepMineBtn.disabled = true;
+      takeDiskBtn.disabled = true;
+      void this.resolveConflictKeepMine();
+    });
 
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, keepMineBtn, takeDiskBtn);

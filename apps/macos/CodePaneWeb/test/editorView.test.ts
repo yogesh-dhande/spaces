@@ -2273,6 +2273,118 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
   // existing coverage is judged insufficient.
 });
 
+describe("EditorView — Keep mine disables both banner buttons while its write is in flight (P2 fix: Take-disk-after-Keep-mine race)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("Take disk stays inert while Keep mine's write is in flight, and the write's late success still commits mine as clean", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    const keepMineBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Keep mine")!;
+    const takeDiskBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk")!;
+
+    keepMineBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+
+    expect(keepMineBtn.disabled).toBe(true);
+    expect(takeDiskBtn.disabled).toBe(true);
+
+    // Take disk is clicked anyway while disabled: like a real browser, jsdom does not fire a click
+    // handler on a disabled button, so this must be a no-op — the compare view keeps showing and the
+    // buffer/state are untouched (still "mine", still in conflict against the original snapshot).
+    takeDiskBtn.click();
+    expect(conflictBanner.style.display).toBe("flex");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "goodbye\n",
+        content: "edited\n",
+        dirty: true,
+        conflict: true,
+      }),
+    );
+
+    // Keep mine's write now lands successfully: the pane commits "mine" as clean, same success-arm
+    // behavior as the plain Keep mine test above ("Keep mine force-writes the buffer over disk...").
+    resolveWrite({ ok: true, sha256: "sha-3" });
+    await writePromise;
+
+    await vi.waitFor(() => expect(conflictBanner.style.display).toBe("none"));
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-3",
+        baseContent: "edited\n",
+        content: "edited\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("a rejected Keep mine write re-renders the compare view with fresh, enabled buttons", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
+    let rejectWrite!: (err: unknown) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((_resolve, reject) => (rejectWrite = reject));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    const keepMineBtn = conflictBanner.querySelector("button") as HTMLButtonElement; // "Keep mine" is the first button
+    keepMineBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+    expect(keepMineBtn.disabled).toBe(true);
+
+    rejectWrite(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    await writePromise.catch(() => {});
+
+    // The failure arm calls `renderConflictCompareView(message)`, which rebuilds the banner's
+    // buttons from scratch (fresh elements, `disabled` defaulting to false) rather than re-enabling
+    // the stale ones — so this also confirms the same DOM node (`this.banner`) got new children.
+    await vi.waitFor(() => expect(conflictBanner.textContent).toContain("daemon not reachable"));
+    const reKeepMineBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Keep mine")!;
+    const reTakeDiskBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk")!;
+    expect(reKeepMineBtn.disabled).toBe(false);
+    expect(reTakeDiskBtn.disabled).toBe(false);
+  });
+});
+
 describe("EditorView — external-change handling: superseded fetch (round-16 latest-wins)", () => {
   let container: HTMLElement;
 
