@@ -100,8 +100,11 @@ export class CommentsController {
    *  without this, a live diff refresh (an agent touching the working tree while the user is mid-
    *  comment) would silently kick the user out of the textarea they were typing in. Consumed
    *  (cleared) the first time the matching card is rendered again — see `renderCard`. Re-keyed by
-   *  `persistBody` alongside `idAliases` when the id it names gets swapped for a server id mid-flight. */
-  private pendingFocus: { id: string; selectionStart?: number; selectionEnd?: number } | undefined;
+   *  `persistBody` alongside `idAliases` when the id it names gets swapped for a server id mid-flight.
+   *  Textarea focus restores caret/selection; action-button focus (`action` set) restores the button
+   *  itself, so a keyboard user's pending Enter/Space activation lands on the live rebuilt node
+   *  instead of falling through to `document.body`. */
+  private pendingFocus: { id: string; selectionStart?: number; selectionEnd?: number; action?: "send" | "batch" | "delete" } | undefined;
   /** Ids of drafts that exist only in this controller's local mirror and have never round-tripped
    *  to the daemon — see the class doc comment. Checked by `persistBody`/`sendOne` (create vs.
    *  update) and by `deleteDraft` (skip the RPC entirely for an id nothing server-side knows
@@ -967,6 +970,11 @@ export class CommentsController {
       // follow the id to its new key too, or a rebuild racing this persist would fail to find the
       // card it meant to refocus.
       if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
+      // Same follow-the-id rule as `pendingFocus`/`collapsedIds`: a delete registered before this
+      // re-key must coalesce with (not miss) a second delete call for the same row arriving after the
+      // rebuild uses the server id — see `deleteDraft`'s doc comment.
+      const pendingDelete = this.pendingDeleteById.get(resolvedId);
+      if (pendingDelete) this.pendingDeleteById.set(persisted.id, pendingDelete);
       // Batch-tray membership (see `collapsedIds`'s doc comment) must follow the id the same way —
       // otherwise a card added to the batch while still provisional would silently fall out of
       // `collapsedIds` the moment its first persist re-keys it to the server id, reappearing inline.
@@ -1035,6 +1043,18 @@ export class CommentsController {
       if (this.pendingDeleteById.get(id) === run) this.pendingDeleteById.delete(id);
       if (preResolvedId !== id && this.pendingDeleteById.get(preResolvedId) === run) {
         this.pendingDeleteById.delete(preResolvedId);
+      }
+      // Re-resolve at finally time, not the stale `preResolvedId` captured at call time: a persist
+      // may have re-keyed this draft to a server id WHILE this delete's own RPC was in flight (see
+      // the `doPersistBody`/sendOne re-key blocks' `pendingDeleteById` transfer above), publishing
+      // this run under that server id too. Without cleaning that up here, the transferred entry would
+      // outlive this run — and if this delete FAILED (rejected, not resolved), a later retry for the
+      // same row would find the map still pointing at this dead, already-settled run and incorrectly
+      // coalesce onto it (returning its already-rejected promise) instead of starting a fresh delete,
+      // permanently breaking Delete for that row.
+      const lateResolved = this.resolveId(id);
+      if (lateResolved !== id && lateResolved !== preResolvedId && this.pendingDeleteById.get(lateResolved) === run) {
+        this.pendingDeleteById.delete(lateResolved);
       }
     }
   }
@@ -1181,6 +1201,10 @@ export class CommentsController {
         if (liveAtSwap !== body) this.liveBodies.set(persisted.id, liveAtSwap);
       }
       if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
+      // Same follow-the-id rule as `pendingFocus` above — see `deleteDraft`'s doc comment and
+      // `doPersistBody`'s mirror of this transfer.
+      const pendingDelete = this.pendingDeleteById.get(resolvedId);
+      if (pendingDelete) this.pendingDeleteById.set(persisted.id, pendingDelete);
       // Unlike `doPersistBody`, `collapsedIds` is deliberately NOT transferred here: this path is
       // reached only via a card's inline Send button, and a collapsed (batch-tray) card has no inline
       // Send button, so `collapsedIds` membership can never be relevant to a draft reaching this code.
@@ -1265,14 +1289,23 @@ export class CommentsController {
    *  for a brand-new card that has no DOM yet to be "focused" in). */
   private captureFocusedCard(): void {
     const active = document.activeElement;
-    if (!(active instanceof HTMLTextAreaElement)) return;
-    const id = active.dataset.commentId;
-    if (id === undefined) return;
-    this.pendingFocus = {
-      id,
-      selectionStart: active.selectionStart ?? undefined,
-      selectionEnd: active.selectionEnd ?? undefined,
-    };
+    if (active instanceof HTMLTextAreaElement) {
+      const id = active.dataset.commentId;
+      if (id === undefined) return;
+      this.pendingFocus = {
+        id,
+        selectionStart: active.selectionStart ?? undefined,
+        selectionEnd: active.selectionEnd ?? undefined,
+      };
+      return;
+    }
+    // A keyboard user Tabs from an edited textarea onto a card action button, then the blur-triggered
+    // persist's rebuild lands before they press Enter/Space. The tray's remove button is deliberately
+    // NOT covered here — it is not Tab-adjacent to a card's textarea, so the blur-persist race window
+    // has long closed by the time keyboard focus could reach it.
+    if (active instanceof HTMLButtonElement && active.dataset.cardAction !== undefined && active.dataset.commentId !== undefined) {
+      this.pendingFocus = { id: active.dataset.commentId, action: active.dataset.cardAction as "send" | "batch" | "delete" };
+    }
   }
 
   /** Re-anchors, re-renders the tray, and pushes the toolbar state — the full pipeline, run after
@@ -1385,6 +1418,10 @@ export class CommentsController {
     sendBtn.type = "button";
     sendBtn.className = "btn primary";
     sendBtn.textContent = agent ? `Send to ${agent.label}` : "Send";
+    // Same purpose the textarea's `dataset.commentId` serves above: maps a focused DOM node back to
+    // its draft id (and which action it is) across a wholesale rebuild — see `captureFocusedCard`.
+    sendBtn.dataset.commentId = comment.id;
+    sendBtn.dataset.cardAction = "send";
     const disabledReason =
       this.agents.length === 0
         ? "No agent is running in this workspace."
@@ -1402,6 +1439,8 @@ export class CommentsController {
     batchBtn.type = "button";
     batchBtn.className = "btn";
     batchBtn.textContent = "Add to batch";
+    batchBtn.dataset.commentId = comment.id;
+    batchBtn.dataset.cardAction = "batch";
     batchBtn.addEventListener("click", () => void this.addToBatch(comment.id, textarea.value));
     actions.appendChild(batchBtn);
 
@@ -1409,6 +1448,8 @@ export class CommentsController {
     deleteBtn.type = "button";
     deleteBtn.className = "btn";
     deleteBtn.textContent = "Delete";
+    deleteBtn.dataset.commentId = comment.id;
+    deleteBtn.dataset.cardAction = "delete";
     deleteBtn.addEventListener("click", () => void this.deleteDraft(comment.id, false));
     actions.appendChild(deleteBtn);
 
@@ -1421,6 +1462,13 @@ export class CommentsController {
       // same render pass that invoked renderAnnotation, so focusing synchronously here can race
       // that insertion.
       setTimeout(() => {
+        if (focus.action !== undefined) {
+          // A keyboard user's pending Enter/Space was aimed at a card action button, not the
+          // textarea's caret — restore focus to the matching button on the freshly rebuilt card.
+          const targetBtn = focus.action === "send" ? sendBtn : focus.action === "batch" ? batchBtn : deleteBtn;
+          targetBtn.focus();
+          return;
+        }
         textarea.focus();
         if (focus.selectionStart !== undefined && focus.selectionEnd !== undefined) {
           textarea.setSelectionRange(focus.selectionStart, focus.selectionEnd);

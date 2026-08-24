@@ -640,6 +640,17 @@ export class EditorView {
       this.saveBtn.disabled = true;
       this.pendingMergeUndo = undefined;
       this.banner.style.display = "none";
+      if (this.conflict) {
+        // Disk now holds exactly the frozen buffer `enterConflictState` adopted, so the disagreement
+        // the conflict latched no longer exists. Canonical trigger: `resolveConflictKeepMine`'s own
+        // CAS write lands, the 2s file-signature poll's push beats the write's own response, that push
+        // bumps `externalChangeFetchToken` so Keep-mine's own success arm stands down per its
+        // fetchToken guard — this branch is what records the outcome instead. The compare view (not
+        // the edit view) is on screen while conflicted, so restore the edit view explicitly.
+        this.conflict = false;
+        this.diskMissing = false;
+        this.loadIntoCodeView(path, this.latestContent ?? "");
+      }
       this.pushEditorStateNow();
       return;
     }
@@ -670,6 +681,20 @@ export class EditorView {
       this.banner.style.display = "none";
       this.saveBtn.disabled = false;
       this.pushEditorStateNow();
+      return;
+    }
+
+    if (this.conflict) {
+      // A standing conflict must stay latched until the user explicitly resolves it (Keep mine / Take
+      // disk). Routing a further disk-side write through the auto-merge below would diff3 against the
+      // base `enterConflictState` adopted — the conflicting disk snapshot itself — so any follow-up
+      // edit outside the disputed hunk would read as a clean merge whose disputed hunk is "ours",
+      // silently re-enabling Save and letting it overwrite the other writer's version with no
+      // Keep-mine. Re-entering instead refreshes the compare view against the newest disk state and
+      // keeps Keep-mine's CAS baseline current — the same treatment the first conflicting write got.
+      // The buffer==disk branch above is the one way a conflict dissolves without explicit resolution,
+      // because there the disagreement itself is gone (disk now equals the frozen buffer exactly).
+      this.enterConflictState({ content: disk.content, sha256: disk.sha256, missing: false });
       return;
     }
 

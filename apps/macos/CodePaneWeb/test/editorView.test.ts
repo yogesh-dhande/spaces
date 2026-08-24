@@ -2943,3 +2943,98 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
     );
   });
 });
+
+describe("EditorView — a standing conflict stays latched until explicit resolution (round-17 Fix 1)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("a further disk-side write outside the disputed hunk does not silently auto-merge and re-enable Save; Keep mine still CAS-checks against the newest disk snapshot", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-1", size: 18 }) // initial open
+      // disk1: rewrites line1 (the disputed hunk H) differently from "mine" -> genuine conflict.
+      .mockResolvedValueOnce({ content: "line1 theirs\nline2\nline3\n", sha256: "sha-2", size: 24 })
+      // disk2: keeps disk1's line1 exactly, but edits line3 -- outside H, non-overlapping with "mine"
+      // relative to the FROZEN conflict base ("line1 theirs\n..."), which is exactly the shape that
+      // would fool diff3 into a false clean merge without the round-17 fix.
+      .mockResolvedValueOnce({ content: "line1 theirs\nline2\nline3 edited\n", sha256: "sha-3", size: 30 });
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-4" });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 mine\nline2\nline3\n" });
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(true);
+
+    // Second external change: disk2 diverges from disk1 only outside H. Without the fix, this would
+    // diff3-merge cleanly against the frozen conflict base and silently re-enable Save.
+    fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+
+    expect(conflictBanner.style.display).toBe("flex");
+    expect(conflictBanner.textContent).toContain("changed on disk");
+    expect(saveBtn.disabled).toBe(true);
+    expect(container.querySelector(".banner.merge")).toBeNull();
+
+    // Keep mine's CAS baseline must have followed the refreshed (disk2) snapshot, not the stale disk1
+    // one -- proving the re-entry above actually refreshed against the newest disk state.
+    (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
+    await vi.waitFor(() =>
+      expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 mine\nline2\nline3\n", { baseSHA256: "sha-3" }),
+    );
+  });
+
+  it("a conflict dissolves when a later disk write exactly matches the frozen buffer, restoring the edit view", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 }) // enters conflict
+      // A later writer (e.g. Keep mine from another client) lands exactly the frozen buffer content.
+      .mockResolvedValueOnce({ content: "edited\n", sha256: "sha-4", size: 7 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-4", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+
+    expect(conflictBanner.style.display).toBe("none");
+    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true); // not dirty
+    // Pushed state confirms the conflict is fully cleared, not just the banner hidden, and that the
+    // edit view (not the diff/compare view) was restored -- collectStateForFlush's `conflict: false`
+    // is the seam this harness exposes for that, since the fake CodeView doesn't render real DOM.
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-4",
+        baseContent: "edited\n",
+        content: "edited\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+});

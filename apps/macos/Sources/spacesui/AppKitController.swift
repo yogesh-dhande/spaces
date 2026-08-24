@@ -7301,6 +7301,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict, presentation: presentation)
             return
         }
+        // Accepted, deliberate consequence: this `return` exits before `lastPresentedWorkspaceDetailID`
+        // is updated below, so a blocked selection never touches it. That is intentional — a
+        // compatibility block presents a banner, not `workspace`, so no monitor should retarget its
+        // code pane to a workspace nothing ever actually showed. Accepted residue: if the very first
+        // workspace selected this launch is blocked, `lastPresentedWorkspaceDetailID` stays `nil`
+        // through it, so the first compatible workspace picked afterward is treated as this launch's
+        // very first selection (the `nil` guard below) and skips its own monitor retarget too — one
+        // skipped retarget that self-heals on the next selection change. The ordinary mid-session case
+        // (a compatible workspace, then a blocked one, then another compatible workspace) is already
+        // handled correctly: the first compatible selection already recorded
+        // `lastPresentedWorkspaceDetailID`, so the blocked visit in between leaves it untouched and the
+        // later compatible selection still retargets against it.
         // Captured before any branch below presents `workspace.id`: every remaining branch (the
         // loading placeholder, the setup detail, or the full panel — including its own
         // same-workspace fast path further down) ends up presenting this workspace, so this one

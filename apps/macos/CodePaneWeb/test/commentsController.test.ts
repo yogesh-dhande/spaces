@@ -913,6 +913,71 @@ describe("CommentsController — Fix 2: live text and focus survive a wholesale 
   });
 });
 
+describe("CommentsController — round-17 Fix 2: keyboard activation of a card action button survives a persist-driven rebuild", () => {
+  // Uses an already-persisted draft (created via `reviewCommentUpsert` + `loadInitial`, like the
+  // round-11 blocks below) rather than a still-provisional one: a provisional draft's *first*
+  // persist re-keys its id (`doPersistBody`'s `idAliases` swap), and `captureFocusedCard` reads the
+  // focused button's `dataset.commentId` straight off the DOM — which still names the OLD id at
+  // capture time, since the rebuild that would carry the new id hasn't happened yet. That ordering
+  // question is orthogonal to this fix (button-focus restore itself) and is exercised by the
+  // existing provisional-to-server id-swap coverage elsewhere in this file; keeping the id stable
+  // here isolates the mechanism this test is actually proving.
+  it("Tab-to-Send then a blur-triggered persist's rebuild still lands keyboard focus on the new, connected Send button, and it is clickable", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    document.body.appendChild(card); // jsdom only tracks `document.activeElement` for a connected node
+    const textarea = card.querySelector("textarea")!;
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.dataset.cardAction === "send")!;
+
+    textarea.value = "edited via keyboard";
+    textarea.dispatchEvent(new Event("input"));
+    sendBtn.focus(); // Tab moved focus off the textarea onto the card's Send button
+    expect(document.activeElement).toBe(sendBtn);
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody, held mid-flight — captureFocusedCard runs after this resolves
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.drafts.get(created.id)?.body).toBe("edited via keyboard"));
+
+    // Simulate the wholesale rebuild the persist's `refresh()` call triggers in the real library.
+    const persisted = firstAnchoredComment(diffViewFake);
+    card.remove();
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    document.body.appendChild(rebuiltCard);
+    const rebuiltSendBtn = [...rebuiltCard.querySelectorAll("button")].find((b) => b.dataset.cardAction === "send")!;
+
+    await vi.waitFor(() => expect(document.activeElement).toBe(rebuiltSendBtn));
+    expect((document.activeElement as HTMLElement).isConnected).toBe(true);
+    expect((document.activeElement as HTMLButtonElement).dataset.cardAction).toBe("send");
+    expect((document.activeElement as HTMLButtonElement).dataset.commentId).toBe(created.id);
+    expect(sendBtn.isConnected).toBe(false); // the old, detached button a naive focus-restore would have missed
+
+    rebuiltSendBtn.click(); // the Enter/Space activation the race would otherwise have lost
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+    expect(bridge.sendCalls[0]!.text).toContain("edited via keyboard");
+  });
+
+  // The textarea caret-restore control case (focus stays in the textarea across a rebuild, not on a
+  // button) is already covered by "restores focus and caret position on the rebuilt card when the
+  // original was focused" in the describe block above — not duplicated here.
+});
+
 describe("CommentsController — round-11 Fix 2: sendBatch awaits a pending persist before reading bodies/revisions", () => {
   it("sends the just-edited body (and bumped revision), not the stale pre-edit one, when a blur's persist is still in flight", async () => {
     const bridge = makeBridge();
@@ -2212,6 +2277,111 @@ describe("CommentsController — round-16 Fix 3: a blur auto-discard and a click
     await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false));
 
     expect(deleteSpy).toHaveBeenCalledTimes(2); // each row's delete is independent — no cross-row coalescing
+  });
+});
+
+describe("CommentsController — round-17 Fix 3: a delete registered under a provisional id follows a persist's re-key to the server id", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container };
+  }
+
+  it("a delete registered while the draft is still provisional coalesces with a second delete for the re-keyed server id, firing only one reviewCommentDelete RPC", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+    const provisionalId = draft.id;
+
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "needs review";
+    textarea.dispatchEvent(new Event("input"));
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody(provisionalId, "needs review"), held mid-flight
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    bridge.holdNextDelete = true;
+    deleteBtn.click(); // run 1: deleteDraft(provisionalId, false) — parks awaiting the held persist, then its own held delete RPC
+
+    bridge.releaseHeldUpsert?.(); // the persist lands: re-keys idAliases and transfers pendingDeleteById to the server id
+    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined()); // run 1 resumed and is now parked on its own RPC
+
+    const persisted = firstAnchoredComment(diffViewFake);
+    expect(persisted.id).not.toBe(provisionalId); // the server-assigned id the persist adopted
+
+    // Simulate the wholesale rebuild the id swap triggers, then click Delete again using the server
+    // id — this must coalesce onto run 1, not start a second RPC.
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltDeleteBtn = [...rebuiltCard.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    rebuiltDeleteBtn.click();
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1); // still just run 1's RPC — no second call issued
+
+    bridge.releaseHeldDelete?.();
+    await vi.waitFor(() => expect(bridge.drafts.has(persisted.id)).toBe(false));
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1); // exactly one reviewCommentDelete RPC fired, even after both settle
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex"); // no spurious error banner from the coalesced second click
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === persisted.id)).toBe(false); // row is gone from the rendered output
+  });
+
+  it("cleans up the transferred pendingDelete entry in finally even when the coalesced run's RPC rejects, so a later delete for the same row starts a fresh RPC instead of reusing the dead run", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "needs review";
+    textarea.dispatchEvent(new Event("input"));
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    bridge.holdNextDelete = true;
+    deleteBtn.click(); // run 1: parks awaiting the held persist, then its own held delete RPC
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined());
+
+    const persisted = firstAnchoredComment(diffViewFake);
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltDeleteBtn = [...rebuiltCard.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    rebuiltDeleteBtn.click(); // coalesces onto run 1 — no second RPC yet
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+
+    // Force run 1's held RPC to reject with a typed `notFound` when it resumes, rather than
+    // resolving, to prove the `finally` cleanup fires on the failure path too.
+    bridge.drafts.delete(persisted.id);
+    bridge.releaseHeldDelete?.();
+
+    await vi.waitFor(() => {
+      const banner = container.querySelector(".banner") as HTMLElement;
+      expect(banner.style.display).toBe("flex"); // run 1's own (non-silent) catch surfaced the failure
+    });
+    expect(deleteSpy).toHaveBeenCalledTimes(1); // both coalesced calls still share the one failed RPC
+
+    // A third, independent delete for the same row must not reuse run 1's dead, already-settled entry.
+    const thirdCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const thirdDeleteBtn = [...thirdCard.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    thirdDeleteBtn.click();
+
+    await vi.waitFor(() => expect(deleteSpy).toHaveBeenCalledTimes(2)); // a fresh RPC was issued, not coalesced onto the dead run
   });
 });
 
