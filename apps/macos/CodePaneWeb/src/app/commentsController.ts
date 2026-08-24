@@ -526,10 +526,20 @@ export class CommentsController {
 
   /** Public entry point for the toolbar's "Send batch" button — see `sendInFlight`'s doc comment for
    *  why this only waits for/publishes into the shared marker rather than doing any send work itself.
-   *  `doSendBatch` (below) is the unchanged original body. */
+   *  `doSendBatch` (below) is the unchanged original body.
+   *
+   * Fix 3 (round-2 P1): the agent shown on the "Send batch" button is captured HERE, before the
+   * `sendInFlight` wait — see the identical capture (and its full rationale) at the top of `sendOne`
+   * below. A selection change (dropdown pick, or an agents-update auto-selecting a different agent)
+   * during the queued wait — which can span the full duration of another in-flight send — or during
+   * `doSendBatch`'s own drain must not reroute the batch to a different agent's terminal; if this
+   * agent's session has ended by send time, `reviewCommentsSend` fails loudly through the existing
+   * failure path, which is preferable to silently delivering into whatever agent is selected now. */
   async sendBatch(): Promise<void> {
+    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
+    if (!agent) return; // toolbar keeps this disabled in this state; defensive no-op if reached anyway
     while (this.sendInFlight) await this.sendInFlight;
-    const run = this.doSendBatch();
+    const run = this.doSendBatch(agent);
     const published = run.finally(() => {
       // Only clear our own marker — a queued sender that started after us must not have its marker
       // wiped by our finally.
@@ -602,16 +612,7 @@ export class CommentsController {
    * user blur (a real interaction happening in real time), so the loop is naturally bounded by how
    * fast a person can type and click — no cap is added.
    */
-  private async doSendBatch(): Promise<void> {
-    // Fix 3 (round-2 P1): capture the agent shown on the "Send batch" button at click time, before
-    // any await — see the identical capture at the top of `sendOne` for the full rationale. A
-    // selection change (dropdown pick, or an agents-update auto-selecting a different agent) during
-    // the drain below must not reroute the batch to a different agent's terminal; if this agent's
-    // session has ended by send time, `reviewCommentsSend` below fails loudly through the existing
-    // failure path, which is preferable to silently delivering into whatever agent is selected now.
-    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
-    if (!agent) return; // toolbar keeps this disabled in this state; defensive no-op if reached anyway
-
+  private async doSendBatch(agent: CodePaneAgentSummary): Promise<void> {
     // Fix 2 (round-2 P1): drain until quiescent — see the class doc comment above for the full race
     // this closes. Re-snapshot both maps fresh on every iteration so a persist/delete that registers
     // during the just-awaited `Promise.all` is caught on the next pass instead of being missed.
@@ -954,10 +955,18 @@ export class CommentsController {
 
   /** Public entry point for a card's "Send" button — see `sendInFlight`'s doc comment for why this
    *  only waits for/publishes into the shared marker rather than doing any send work itself.
-   *  `doSendOne` (below) is the unchanged original body. */
+   *  `doSendOne` (below) is the unchanged original body.
+   *
+   * Fix 3 (round-2 P1): the agent shown on this card's Send button is captured HERE, before the
+   * `sendInFlight` wait — see `doSendOne`'s doc comment below for the full rationale. A selection
+   * change (dropdown pick, or an agents-update auto-selecting a different agent) during the queued
+   * wait — which can span the full duration of another in-flight send — or during `doSendOne`'s own
+   * pending-persist await must not reroute this comment to a different agent's terminal. */
   private async sendOne(id: string, body: string): Promise<void> {
+    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
+    if (!agent) return;
     while (this.sendInFlight) await this.sendInFlight;
-    const run = this.doSendOne(id, body);
+    const run = this.doSendOne(id, body, agent);
     const published = run.finally(() => {
       // Only clear our own marker — a queued sender that started after us must not have its marker
       // wiped by our finally.
@@ -987,20 +996,21 @@ export class CommentsController {
    * never incorrectly fire. `sendOne` therefore always re-issues its own upsert with the live `body`
    * it was given, self-healing the failed save.
    *
-   * Fix 3 (round-2 P1): the agent is captured at the very top, before the pending-persist await —
-   * not re-resolved from `this.selectedAgentId` after it, the way it used to be. The click targeted
-   * the agent shown on the card's Send button at click time; `selectedAgentId` can change during the
-   * await (a dropdown pick, or an agents-update auto-selecting a different agent — see
-   * `onAgentsChanged`), and resolving it after the await would silently reroute the comment into
-   * whatever agent happens to be selected by the time the persist settles, not the one the user
-   * actually clicked "Send to". If the captured agent's session has ended by send time, the
+   * Fix 3 (round-2 P1): `agent` is captured by the caller (`sendOne`, above) at the very top of the
+   * PUBLIC entry point — before both the `sendInFlight` wait and the pending-persist await below —
+   * not re-resolved from `this.selectedAgentId` after either of them, the way it used to be. The
+   * click targeted the agent shown on the card's Send button at click time; `selectedAgentId` can
+   * change during either await (a dropdown pick, or an agents-update auto-selecting a different
+   * agent — see `onAgentsChanged`), and resolving it after either would silently reroute the comment
+   * into whatever agent happens to be selected by the time the send actually runs, not the one the
+   * user actually clicked "Send to". If the captured agent's session has ended by send time, the
    * `reviewCommentsSend` call below fails loudly through the existing failure path — preferable to
-   * silently delivering into a different agent's terminal.
+   * silently delivering into a different agent's terminal. Capturing at the public entry point widens
+   * the window this covers to the full queued-wait duration (a send parked behind another in-flight
+   * send can wait many seconds), which is still accepted behavior, not a new concern — it is the same
+   * "session ended by send time" gap, just possibly longer.
    */
-  private async doSendOne(id: string, body: string): Promise<void> {
-    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
-    if (!agent) return;
-
+  private async doSendOne(id: string, body: string, agent: CodePaneAgentSummary): Promise<void> {
     const pending = this.pendingPersistById.get(id);
     if (pending) await pending;
     const resolvedId = this.resolveId(id);
@@ -1039,6 +1049,27 @@ export class CommentsController {
         this.idAliases.set(resolvedId, persisted.id);
       }
       this.drafts = this.drafts.map((d) => (d.id === resolvedId ? persisted : d));
+      // Fix 2 (P2): mirrors `doPersistBody`'s re-key block above (see its comments there for the
+      // drop-if-live-equals-persisted-body rule and the `pendingFocus` migration rationale) — this
+      // upsert re-keys the draft the same way a `persistBody` call would, so the card's live text and
+      // any pending focus-restore must follow the id the same way, or they silently fall out of sync.
+      // Named `liveAtSwap` (not `live`) to avoid colliding with the separate `live` lookup a few lines
+      // below, in the send success arm, which runs after this and reads a different, later snapshot.
+      const liveAtSwap = this.liveBodies.get(resolvedId);
+      if (liveAtSwap !== undefined) {
+        this.liveBodies.delete(resolvedId);
+        if (liveAtSwap !== body) this.liveBodies.set(persisted.id, liveAtSwap);
+      }
+      if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
+      // Unlike `doPersistBody`, `collapsedIds` is deliberately NOT transferred here: this path is
+      // reached only via a card's inline Send button, and a collapsed (batch-tray) card has no inline
+      // Send button, so `collapsedIds` membership can never be relevant to a draft reaching this code.
+      // `this.refresh()` must run BEFORE the `reviewCommentsSend` await below (not after): any
+      // keystroke typed during that await lands in `liveBodies` under the id the DOM card is actually
+      // keyed by, which only matches `persisted.id` once this rebuild has run. This is what the
+      // success arm's 3-key lookup chain (`this.liveBodies.get(persisted.id) ?? ...`, a few lines
+      // below) and the failure path's later rebuild both expect to find.
+      this.refresh();
     }
     const anchored = reanchorComments([persisted], this.files);
     try {

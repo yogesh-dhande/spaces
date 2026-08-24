@@ -942,17 +942,36 @@ enum CodePaneMode: Equatable {
             // deleted-then-recreated file is caught at all), so subscribing to a currently-missing path
             // is the intended shape here, not a workaround.
             //
-            // notFound only, deliberately: any other failure (offline device, daemon hiccup, a transport
-            // error) is not an authoritative answer about the path — the web side already schedules its
-            // own bounded-backoff re-read for those (see `EditorView.handleExternalChange`'s catch
-            // branch), and that retry's own eventual success installs the stream through the normal path.
+            // notFound and invalidArgument only, deliberately: these are the two error codes that are
+            // both (a) an AUTHORITATIVE per-file answer — the daemon actually examined the path and
+            // determined either "missing" or "oversized/non-regular" (`CodePaneBridge.bridgeErrorCode`
+            // collapses the daemon's own `payloadTooLarge` — a file that grew past 10 MiB while the pane
+            // was hibernated — into this same bridge-side `.invalidArgument`, alongside the daemon's
+            // `invalidArgument` for a path replaced by a non-regular file, e.g. a directory or a
+            // symlink-to-nowhere) — and (b) DURABLE on the web side: the web side's typed-error-code retry
+            // contract in `root.ts` never automatically retries `.notFound`/`.invalidArgument`, only
+            // `.unavailable`/`.internalError`. Because of that combination, the file-signature stream is
+            // the ONLY channel that can ever announce the file became readable again for these two cases
+            // (shrinks back under 10 MiB, or gets replaced back with a regular file) — so both need a
+            // recovery subscription installed here. The signature provider is safe to subscribe to in
+            // this state: per `SpacesDeviceAPIServer`, it hashes file content regardless of size, and
+            // skips ticks for a non-regular-file path while resuming normal ticks once the path becomes a
+            // regular file again, so a change back to readable produces a real frame the web side refetches
+            // on, and existing dedupe (`lastActedFileSignatureValue`) prevents a refetch loop from it.
+            //
+            // Any other failure (offline device, daemon hiccup, a transport error like `.unavailable`) is
+            // not an authoritative answer about the path — the daemon may not have even examined it — so
+            // installing a recovery subscription for those would be premature/wrong. The web side already
+            // schedules its own bounded-backoff re-read for those (see `EditorView.handleExternalChange`'s
+            // catch branch), and that retry's own eventual success installs the stream through the normal
+            // path.
             //
             // Accepted micro-cost: a fresh pane's first-ever open of a typo'd path also lands here (no
             // `lastActedFilePath`, notFound) and installs a stream for a path that will never exist. The
             // web side filters signature events by `currentPath`, so nothing misfires, and the next
             // successful open replaces the subscription — one lstat poll every 2s until then isn't worth
             // a special case to avoid.
-            guard error.code == .notFound else { return }
+            guard error.code == .notFound || error.code == .invalidArgument else { return }
             resubscribeFileSignature(path: path, device: device)
             return
         }
@@ -1188,8 +1207,16 @@ enum CodePaneMode: Equatable {
         // formed outside a `@Sendable` context and then merely *passed into* one as an already-built
         // `@Sendable` closure value is fine; re-deriving it from `self` from inside a non-isolated
         // closure is what the concurrency checker rejects.
+        // `client.stop()` (called by the success-arm guard below, or by a later resubscribe) cannot
+        // retract a frame that is already queued as a `Task { @MainActor in ... }` closure — the guard
+        // here is what stops a stale A frame from being forwarded/recorded after B has taken over.
+        // Mirrors `resubscribeFileSignature`'s `onFrame` guard exactly (see its doc comment for the
+        // fuller stakes, which are worse on the file-signature side).
         let onFrame: @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void = { [weak self] frame in
-            Task { @MainActor in self?.handleDiffSignatureFrame(frame) }
+            Task { @MainActor in
+                guard let self, self.diffSignatureSubscriptionGeneration == subscriptionGeneration else { return }
+                self.handleDiffSignatureFrame(frame)
+            }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
             Task { @MainActor in self?.handleDiffSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
@@ -1338,8 +1365,22 @@ enum CodePaneMode: Equatable {
         let subscriptionGeneration = fileSignatureSubscriptionGeneration
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
+        // `client.stop()` (called by the success-arm guard below, or by a later resubscribe) cannot
+        // retract a frame that is already queued as a `Task { @MainActor in ... }` closure: without this
+        // guard, a stale frame from a superseded subscription (e.g. file A's stream, still delivering
+        // after the pane retargeted to file B) would reach `handleFileSignatureFrame` and get forwarded
+        // to the web app AND recorded into `lastActedFileSignatureValue`. That's deadly specifically for
+        // "missing" frames, since every path's missing-frame carries the identical `(sha256: nil, missing:
+        // true)` value — a stale missing-frame left over from A would poison the dedupe state such that
+        // B's later REAL deletion frame gets wrongly suppressed as a duplicate. A deletion has no
+        // follow-up frame to self-heal from, so the editor pane would show stale content indefinitely
+        // until some unrelated event forced a fresh open. Mirrors `resubscribeDiffSignature`'s `onFrame`
+        // guard exactly.
         let onFrame: @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void = { [weak self] frame in
-            Task { @MainActor in self?.handleFileSignatureFrame(frame) }
+            Task { @MainActor in
+                guard let self, self.fileSignatureSubscriptionGeneration == subscriptionGeneration else { return }
+                self.handleFileSignatureFrame(frame)
+            }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
             Task { @MainActor in self?.handleFileSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }

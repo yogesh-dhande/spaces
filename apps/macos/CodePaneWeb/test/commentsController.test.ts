@@ -2680,3 +2680,207 @@ describe("CommentsController — Fix (P2): overlapping sends serialize instead o
     expect(anchoredAfter).toHaveLength(0); // both cards gone
   });
 });
+
+describe("CommentsController — Fix 1 (round-9 P1): captures the send-target agent before the sendInFlight queued wait", () => {
+  const AGENT_2: CodePaneAgentSummary = { id: "a2", label: "codex · fix", sessionId: "s2" };
+
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT, AGENT_2], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("sendOne queued behind another held sendOne still targets the agent selected when it was clicked, not a switch made while queued behind sendInFlight", async () => {
+    const { bridge, controller } = setup();
+    controller.onAgentSelected(AGENT.id);
+
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const sendBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const sendBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+
+    bridge.holdNextSend = true; // one-shot: holds only A's send RPC
+    sendBtnA.click(); // A's sendOne captures AGENT, reaches the (held) send RPC, publishes into sendInFlight
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // B's sendOne captures AGENT synchronously too (before B's own `while (sendInFlight)` wait even
+    // starts), then queues behind A via `sendInFlight` — B's send RPC has not been reached yet.
+    sendBtnB.click();
+
+    // Switch the selection while B is queued behind A. Without the fix (capturing after the
+    // `sendInFlight` wait), B would resolve `agent` from `selectedAgentId` only once it resumes,
+    // targeting AGENT_2 instead of the agent shown when B was actually clicked.
+    controller.onAgentSelected(AGENT_2.id);
+
+    bridge.releaseHeldSend?.(); // release A's held send; B then runs (its own send call is not held)
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(2));
+
+    expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId);
+    expect(bridge.sendCalls[1]!.sessionId).toBe(AGENT.sessionId); // captured at B's click time, not AGENT_2
+  });
+
+  it("sendBatch queued behind a held sendOne still targets the agent selected when it was called, not a switch made while queued behind sendInFlight", async () => {
+    const { bridge, controller } = setup();
+    controller.onAgentSelected(AGENT.id);
+
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const sendBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+
+    bridge.holdNextSend = true; // one-shot: holds only A's send RPC
+    sendBtnA.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // sendBatch captures AGENT synchronously (before its own `sendInFlight` wait even starts), then
+    // queues behind A's still-held send.
+    const batchPromise = controller.sendBatch();
+
+    // Selection changes while the batch is queued — without the fix, the batch would target AGENT_2
+    // once it resumes and re-reads `selectedAgentId`.
+    controller.onAgentSelected(AGENT_2.id);
+
+    bridge.releaseHeldSend?.(); // release A's held send; the queued batch then runs and sends B
+    await batchPromise;
+
+    expect(bridge.sendCalls).toHaveLength(2);
+    expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId);
+    expect(bridge.sendCalls[1]!.comments.map((c) => c.id)).toEqual([b.id]);
+    expect(bridge.sendCalls[1]!.sessionId).toBe(AGENT.sessionId); // captured at call time, not AGENT_2
+  });
+});
+
+describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server id swap migrates liveBodies/pendingFocus and refreshes before the send await", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("a rejected send preserves text typed after the provisional-to-server swap, and persists it under the server id on blur", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first draft";
+    textarea.dispatchEvent(new Event("input"));
+
+    // Records every upsert call's input from here on — used below to prove the blur-time persist
+    // targets the server-assigned id, not the stale provisional one.
+    const upsertCalls: ReviewCommentUpsertInput[] = [];
+    const originalUpsert = bridge.reviewCommentUpsert;
+    bridge.reviewCommentUpsert = (input) => {
+      upsertCalls.push(input);
+      return originalUpsert(input);
+    };
+
+    // The upsert (the swap) resolves normally; the subsequent send is parked on a manually-controlled
+    // promise so it can be rejected deterministically once the swap's state is inspected — mirrors the
+    // Y-reject pattern in the round-11 Fix 2 drain-loop test above.
+    let rejectSend: ((err: unknown) => void) | undefined;
+    bridge.reviewCommentsSend = () =>
+      new Promise<void>((_resolve, reject) => {
+        rejectSend = reject;
+      });
+
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click(); // doSendOne: upsert creates the server row, swaps the id, refreshes, then parks on the send
+
+    await vi.waitFor(() => expect(rejectSend).toBeDefined());
+
+    // The swap's refresh (before the send await) rebuilt the card under the server-assigned id — this
+    // is what the fix adds: without it, the latest render would still show the stale provisional id.
+    const persisted = firstAnchoredComment(diffViewFake);
+    expect(persisted.id).not.toBe(provisionalDraft.id);
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltTextarea = rebuiltCard.querySelector("textarea")!;
+
+    // Additional typing during the held send lands in `liveBodies` under the server id (the rebuilt
+    // card's `dataset.commentId`) — this is the window Fix 2 protects.
+    rebuiltTextarea.value = "first draft, plus more typed while the send is in flight";
+    rebuiltTextarea.dispatchEvent(new Event("input"));
+
+    rejectSend!(new Error("send failed"));
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let handleSendFailure's catch settle
+
+    // Re-render once more to check what actually ends up on screen after the failure.
+    const afterFailureComment = firstAnchoredComment(diffViewFake);
+    expect(afterFailureComment.id).toBe(persisted.id); // the rejected send never removed/re-keyed the draft
+    const afterFailureCard = controller.hooks.renderCard({ comment: afterFailureComment, position: { lineNumber: 1, outdated: false } });
+    const afterFailureTextarea = afterFailureCard.querySelector("textarea")!;
+    expect(afterFailureTextarea.value).toBe("first draft, plus more typed while the send is in flight");
+
+    afterFailureTextarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(upsertCalls.length).toBeGreaterThan(1));
+
+    expect(upsertCalls.at(-1)!.id).toBe(persisted.id); // persisted under the SERVER id, not the stale provisional one
+    expect(upsertCalls.at(-1)!.body).toBe("first draft, plus more typed while the send is in flight");
+  });
+
+  it("shows the live typed text, not a reverted persisted body, immediately after a held send is issued (post-swap refresh)", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "typed before send";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextSend = true; // holds reviewCommentsSend open — the upsert (the swap) has already resolved by then
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click();
+
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // The swap's refresh must have run BEFORE this point (it runs before the `reviewCommentsSend`
+    // await, not after) — so the latest render already reflects the server-assigned id and the live
+    // text, not a reverted body.
+    const persisted = firstAnchoredComment(diffViewFake);
+    expect(persisted.id).not.toBe(provisionalDraft.id);
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltTextarea = rebuiltCard.querySelector("textarea")!;
+    expect(rebuiltTextarea.value).toBe("typed before send"); // not reverted, not blank
+
+    bridge.releaseHeldSend?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+  });
+});

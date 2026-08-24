@@ -1482,6 +1482,55 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(fileSignatureScripts(evaluator)[0].contains("\"missing\":true"))
     }
 
+    /// A frame delivered through a SUPERSEDED subscription's captured `onFrame` handler must not touch
+    /// `lastActedFileSignatureValue` at all: `client.stop()` (called when retargeting from A to B) can't
+    /// retract a frame already queued as a `Task { @MainActor in ... }` closure, so a stale "missing"
+    /// frame left in flight from A's now-dead stream would otherwise poison the dedupe state with
+    /// `(sha256: nil, missing: true)` — the SAME value every path's missing-frame carries — and suppress
+    /// B's later REAL deletion frame as a spurious duplicate. Without the `fileSignatureSubscriptionGeneration`
+    /// guard in `onFrame`, this test fails: B's deletion event never reaches the web app.
+    @Test func aStaleFrameFromASupersededFileSubscriptionDoesNotPoisonDedupeForTheCurrentFile() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        // Open A ("foo.ts"): captures handler 0 (subscribe-call arrival index 0).
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // Open B ("bar.ts"): retargets — A's stream is stopped (but its captured handler 0 remains
+        // callable directly, standing in for a frame already in flight when `stop()` was called) — and a
+        // new subscription captures handler 1 (arrival index 1).
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.completeFileReadCall(at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+
+        // A's stale "missing" frame arrives late through the superseded handler 0. With the generation
+        // guard in place this must be a complete no-op: no event dispatched, no dedupe state touched.
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: nil, missing: true)
+        await settle()
+        #expect(fileSignatureScripts(evaluator).isEmpty, "a stale frame from a superseded subscription must not be forwarded")
+
+        // B's REAL deletion frame arrives through the current handler 1. This must be forwarded — if
+        // A's stale frame above had wrongly recorded `(nil, true)` into `lastActedFileSignatureValue`,
+        // this identical-valued frame for B would be suppressed as a duplicate.
+        await gateway.triggerFileFrame(at: 1, path: "bar.ts", sha256: nil, missing: true)
+        await waitUntil { !self.fileSignatureScripts(evaluator).isEmpty }
+
+        #expect(fileSignatureScripts(evaluator).count == 1, "B's real deletion frame must not be suppressed as a duplicate of A's stale frame")
+        #expect(
+            fileSignatureScripts(evaluator)[0].contains(#""path":"bar.ts""#),
+            "the one forwarded event must be B's deletion, not a wrongly-forwarded stale event for A")
+        #expect(fileSignatureScripts(evaluator)[0].contains("\"missing\":true"))
+    }
+
     @Test func aFileReadCompletionAfterDeactivateNeverResubscribesTheFileSignatureStream() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
@@ -1692,6 +1741,75 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         let subscribeCount = await gateway.fileSubscribeCallCount()
         #expect(subscribeCount == 1, "a transport-shaped rehydration read failure must not install a subscription")
+    }
+
+    /// Mirrors `aNotFoundRehydrationReadAfterTeardownInstallsAFileSignatureSubscriptionForTheRequestedPath`
+    /// exactly, but for the bridge's `.invalidArgument` code: the daemon's own `invalidArgument` (a path
+    /// replaced by a non-regular file) and `payloadTooLarge` (a file that grew past 10 MiB during
+    /// hibernation) both collapse into this bridge code (see `CodePaneBridge.bridgeErrorCode`), and both
+    /// are — like `.notFound` — an authoritative per-file answer that the web side's typed-error retry
+    /// contract never auto-retries, so a subscription must be installed here too.
+    @Test func anInvalidArgumentRehydrationReadAfterTeardownInstallsAFileSignatureSubscriptionForTheRequestedPath() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // Hibernate: teardown clears `lastActedFilePath`/`subscribedFilePath` unconditionally, so the
+        // pane's very first read after rehydrating always finds nothing to restore.
+        content.deactivate()
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // The web side's `restoreState` reconcile read for the file, which grew past 10 MiB (or was
+        // replaced by a non-regular file) while hibernating — the daemon rejects the read outright.
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "foo.ts is too large", code: .payloadTooLarge))
+
+        await gateway.waitForFileSubscribeCallCount(2)
+        let subscribedPath = await gateway.subscribedFilePath(at: 1)
+        #expect(
+            subscribedPath == "foo.ts",
+            "an invalidArgument-bridged rehydration read must still install a file-signature subscription for the requested path")
+    }
+
+    /// Control for the `.invalidArgument` case above: a daemon-typed but transport-shaped code (the
+    /// device/session/service not presently reachable — `SpacesDeviceErrorCode.serviceNotRunning`, which
+    /// `CodePaneBridge.bridgeErrorCode` maps to the bridge's `.unavailable`) is not an authoritative
+    /// answer about the file itself — the daemon may not have even examined the path — so it must stay
+    /// excluded from the recovery guard, same as the untyped-error case
+    /// `aTransportShapedRehydrationReadFailureDoesNotInstallAFileSignatureSubscription` already covers.
+    @Test func anUnavailableRehydrationReadFailureDoesNotInstallAFileSignatureSubscription() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.deactivate()
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(
+            at: 1, error: SpacesDeviceClientError.requestRejected(message: "device unavailable", code: .serviceNotRunning))
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 1, "an unavailable-shaped rehydration read failure must not install a subscription")
     }
 
     /// A file already open and monitored in a visible (non-hibernating) pane whose disk copy is
