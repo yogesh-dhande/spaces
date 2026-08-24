@@ -68,6 +68,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let diffRetryFailures = 0;
   const DIFF_RETRY_FLOOR_MS = 1000;
   const DIFF_RETRY_CAP_MS = 30000;
+  // round-16 Fix 1: coalescing state for refreshDiff's public gate (see its doc comment below).
+  let diffPullInFlight = false;
+  let trailingDiffRefreshQueued = false;
+  let trailingPreserveScroll = true;
 
   const pane = document.createElement("div");
   pane.className = "pane";
@@ -207,7 +211,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    * `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable`'s doc comment (Swift host) for the
    * daemon-side split this depends on.
    */
-  async function refreshDiff(preserveScroll: boolean): Promise<void> {
+  async function doRefreshDiff(preserveScroll: boolean): Promise<void> {
     const token = ++diffRequestToken;
     clearTimeout(diffRetryTimer);
     let result: WorkspaceDiffResult;
@@ -275,6 +279,52 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     });
     diffView.setFiles(files, preserveScroll);
     comments.setFiles(files);
+  }
+
+  /**
+   * Public-facing gate every caller below keeps calling unchanged: at most one `doRefreshDiff`
+   * pull is ever in flight, with at most one more coalesced trailing pull queued behind it. The
+   * daemon serializes `workspaceFileRead`/`workspaceFileWrite`/`workspaceDiff` on one per-workspace
+   * queue (round-16 Fix 1), so issuing a fresh request for every signature event during an active
+   * agent's churn just piles up pulls nobody will see rendered — each one delays the next, and
+   * delays any editor save queued behind them too.
+   *
+   * When a call arrives while a pull is already in flight, it does NOT issue a second request.
+   * Instead it bumps `diffRequestToken` right away — the exact same supersede a direct
+   * `doRefreshDiff` call would perform — so the in-flight pull's own `token !== diffRequestToken`
+   * checks discard its result or failure when it eventually settles, and clears any pending retry
+   * timer for it. The request itself collapses into a single trailing pull, queued to run the
+   * instant the in-flight one finishes; `doRefreshDiff` re-reads `state.scope` at that later time,
+   * so the trailing pull always targets whatever scope is current then, never whatever scope was
+   * selected when it was queued. This does not cost any wall-clock time to a fresh diff: those
+   * extra requests already had to wait on the same daemon serial queue today, so the trailing pull
+   * still lands no later than the last of today's piled-up pulls would have — the daemon just stops
+   * spending time computing diffs nobody will ever see. Any UI state a caller needs to show
+   * immediately (e.g. `setScope`'s synchronous `files = []` / `diffView.setLoading()`) still runs
+   * before this gate is even called, so a deferred pull never leaves the user looking at stale UI.
+   */
+  async function refreshDiff(preserveScroll: boolean): Promise<void> {
+    if (diffPullInFlight) {
+      diffRequestToken += 1;
+      clearTimeout(diffRetryTimer);
+      trailingDiffRefreshQueued = true;
+      // A single non-preserving caller (a scope switch) must win over any number of
+      // scroll-preserving signature events coalesced into the same trailing pull.
+      trailingPreserveScroll = trailingPreserveScroll && preserveScroll;
+      return;
+    }
+    diffPullInFlight = true;
+    try {
+      await doRefreshDiff(preserveScroll);
+    } finally {
+      diffPullInFlight = false;
+      if (trailingDiffRefreshQueued) {
+        trailingDiffRefreshQueued = false;
+        const preserve = trailingPreserveScroll;
+        trailingPreserveScroll = true;
+        void refreshDiff(preserve);
+      }
+    }
   }
 
   /** Schedules the next attempt for a failed refreshDiff pull: floor 1s, doubling, capped at 30s,

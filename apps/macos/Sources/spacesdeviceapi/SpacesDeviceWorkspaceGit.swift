@@ -416,6 +416,31 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 // line. Without `mode` here, that change would be invisible to a subscribed client's poll.
                 let mode = attributes[.posixPermissions] as? Int ?? -1
                 input.append(Data("\(entry.path)|\(size)|\(modified.timeIntervalSince1970)|\(mode)\n".utf8))
+                // round-16 Fix 3, accepted risk: an already-dirty file rewritten with DIFFERENT content of
+                // the exact SAME byte size, whose mtime is then deliberately restored to its original value
+                // (e.g. `rsync --times`, `touch -r`, or any other timestamp-preserving copy), changes none of
+                // this signature's inputs — HEAD, the porcelain status letter, `size`, `modified`, and `mode`
+                // above all stay identical — so no signature-change event fires and a subscribed client's diff
+                // pane stays stale on the old content until some unrelated change elsewhere in the workspace
+                // happens to re-fire the poll. Accepted as v1 behavior rather than fixed, for three reasons:
+                // (1) it is narrow and deliberate, not something ordinary editing hits — a plain write always
+                // advances mtime, and APFS/ext4 both carry nanosecond-resolution timestamps, so an equal-mtime
+                // collision never occurs naturally; triggering this requires a tool that explicitly restores
+                // timestamps AND happens to produce byte-identical length on a file that was already dirty.
+                // (2) it self-heals: any other signature input moving anywhere in the workspace (a different
+                // file's mtime, a git status change, HEAD moving) re-fires the poll, and the resulting pull
+                // re-reads every file's actual content fresh, so the stale diff never persists indefinitely.
+                // (3) both alternatives considered were rejected as disproportionate: reading ctime instead of
+                // mtime would catch this (userspace tools cannot restore ctime), but `FileAttributeKey` does
+                // not expose ctime, so it would require dropping to a raw `stat()` syscall just for this one
+                // edge case; content-hashing every file would also catch it, but would reintroduce exactly the
+                // unbounded per-poll hashing cost the codebase's sibling per-file signature deliberately avoids
+                // for the same reason — see `SpacesDeviceAPIServer.computeWorkspaceFileScopeSignature`'s
+                // `workspaceFileSignatureOversizedSentinel`, which substitutes a stable sentinel instead of
+                // hashing a file's content on every 2s poll tick once it crosses a size cap, rather than
+                // reading `size`/`modified`/`mode` off `FileManager.attributesOfItem` above the way this loop
+                // does — both fixes are disproportionate for a narrow, deliberate-timestamp-
+                // restoration edge case.
             } else {
                 // Raced with a delete between the status scan and this stat; still folds into the
                 // signature (as a distinct value from a present file) so the poll still detects the change.

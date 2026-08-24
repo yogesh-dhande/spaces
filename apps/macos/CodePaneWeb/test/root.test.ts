@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DiffView } from "../src/app/diffView";
 import { mountRoot } from "../src/app/root";
 import {
   CodePaneEditorState,
@@ -61,7 +62,17 @@ const hoisted = vi.hoisted(() => {
   }> = [];
   const workspaceDiff = vi.fn(() => new Promise((resolve, reject) => pendingDiffCalls.push({ resolve, reject })));
   const notifyModeChanged = vi.fn();
-  return { pendingDiffCalls, workspaceDiff, notifyModeChanged };
+  // round-16 Fix 1: captures every `subscribeDiffSignature` callback root.ts registers, in order,
+  // so a test can simulate a diff-signature push event by invoking one directly — mirroring
+  // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
+  // `resubscribeDiffSignature` replaces the previous subscription on every scope change, so the
+  // LAST entry is always the one a real push would currently be delivered to.
+  const diffSignatureCallbacks: Array<() => void> = [];
+  const subscribeDiffSignature = vi.fn((_scope: unknown, callback: () => void) => {
+    diffSignatureCallbacks.push(callback);
+    return () => {};
+  });
+  return { pendingDiffCalls, workspaceDiff, notifyModeChanged, diffSignatureCallbacks, subscribeDiffSignature };
 });
 
 vi.mock("../src/bridge", () => ({
@@ -75,7 +86,7 @@ vi.mock("../src/bridge", () => ({
     workspaceFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new Error("not used")),
-    subscribeDiffSignature: vi.fn(() => () => {}),
+    subscribeDiffSignature: hoisted.subscribeDiffSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyEditorStateChanged: vi.fn(),
     notifyModeChanged: hoisted.notifyModeChanged,
@@ -107,6 +118,14 @@ function clickButton(container: HTMLElement, label: string): void {
   button.click();
 }
 
+/** Simulates a diff-signature push event on whichever scope is currently subscribed (see
+ *  `hoisted.diffSignatureCallbacks`'s doc comment). */
+function fireDiffSignature(): void {
+  const callbacks = hoisted.diffSignatureCallbacks;
+  if (callbacks.length === 0) throw new Error("no diff-signature subscription registered yet");
+  callbacks[callbacks.length - 1]!();
+}
+
 describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
   let container: HTMLElement;
 
@@ -124,17 +143,21 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     // returning — so it's deliberately left pending here rather than awaited.
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
-    clickButton(container, "vs main"); // dispatches setScope -> refreshDiff (scope B)
-    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    // round-16 Fix 1: with scope A's pull still in flight, a scope switch to B no longer fires a
+    // second concurrent request — it coalesces into a single trailing pull (see the round-16
+    // describe blocks below for direct coverage of that coalescing), so this stays at 1 call.
+    clickButton(container, "vs main"); // dispatches setScope -> refreshDiff (scope B), coalesced
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
 
-    // Resolve B first, then the stale A — out of order, as the spec requires.
+    // Resolve the stale scope-A reply: superseded by the coalesce's token bump, so it must not
+    // render — and its settling is what fires the trailing pull for scope B.
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted; // scope A's own refreshDiff call settles once resolved, letting mountRoot return
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2)); // trailing pull for B
+
     resolveDiff(1, [makeFile("b.ts")], "sig-b");
     await vi.waitFor(() => expect(container.textContent).toContain("b.ts"));
 
-    resolveDiff(0, [makeFile("a.ts")], "sig-a");
-    await mounted; // scope A's own refreshDiff call settles once resolved, letting mountRoot return
-
-    expect(container.textContent).toContain("b.ts");
     expect(container.textContent).not.toContain("a.ts");
   });
 
@@ -142,15 +165,19 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
+    // round-16 Fix 1: coalesces into the trailing slot instead of firing a second concurrent
+    // request (see the note in the sibling test above).
     clickButton(container, "vs main");
-    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
+
+    // The stale A reply is now an error; it must be swallowed (superseded by the coalesce), not
+    // thrown or rendered — and its settling is what fires the trailing pull for scope B.
+    rejectDiff(0, new Error("stale scope-A workspaceDiff failure"));
+    await mounted;
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2)); // trailing pull for B
 
     resolveDiff(1, [makeFile("b.ts")], "sig-b");
     await vi.waitFor(() => expect(container.textContent).toContain("b.ts"));
-
-    // The stale A reply is now an error; it must be swallowed, not thrown or rendered.
-    rejectDiff(0, new Error("stale scope-A workspaceDiff failure"));
-    await mounted;
 
     expect(container.textContent).toContain("b.ts");
   });
@@ -292,6 +319,109 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     await vi.advanceTimersByTimeAsync(1);
     totalCalls += 1;
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // retried at the floor
+  });
+});
+
+describe("mountRoot's refreshDiff — coalesced diff-signature storm (round-16 Fix 1)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    container = document.createElement("div");
+  });
+
+  it("a storm of diff-signature events while a pull is in flight coalesces into exactly one trailing pull, not one per event", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("initial.ts")], "sig-0");
+    await mounted;
+    await vi.waitFor(() => expect(container.textContent).toContain("initial.ts"));
+
+    // Event #1 issues pull #2 (call index 1), held open.
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+
+    // 3 more events while pull #2 is still held: without the gate, each would issue its own
+    // `workspaceDiff` call (5 held/pending calls total, not 2) — that's the bug this fix closes.
+    fireDiffSignature();
+    fireDiffSignature();
+    fireDiffSignature();
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2); // still 2, not 5
+
+    // Resolving pull #2 discards its own result (superseded by the 3 coalesced events' token
+    // bumps) and issues exactly ONE trailing pull in its place.
+    resolveDiff(1, [makeFile("superseded.ts")], "sig-1");
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3)); // one trailing pull, not 6
+    expect(container.textContent).not.toContain("superseded.ts");
+
+    resolveDiff(2, [makeFile("trailing.ts")], "sig-2");
+    await vi.waitFor(() => expect(container.textContent).toContain("trailing.ts"));
+    expect(container.textContent).not.toContain("superseded.ts");
+  });
+});
+
+describe("mountRoot's refreshDiff — scope switch mid-pull keeps the supersede + latest-scope guarantees (round-16 Fix 1)", () => {
+  let container: HTMLElement;
+  let setFilesSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    container = document.createElement("div");
+    // Not mocked at the module level (only @pierre/diffs's CodeView is faked): spying on the real
+    // DiffView's prototype lets these tests observe the exact (files, preserveScroll) pair the
+    // coalesced trailing pull renders with, without altering DiffView's own behavior.
+    setFilesSpy = vi.spyOn(DiffView.prototype, "setFiles");
+  });
+
+  afterEach(() => {
+    setFilesSpy.mockRestore();
+  });
+
+  it("a scope switch coalesced with signature events supersedes the in-flight pull, targets the new scope, and keeps the switch's non-preserving intent", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("initial.ts")], "sig-0");
+    await mounted;
+    await vi.waitFor(() => expect(container.textContent).toContain("initial.ts"));
+
+    // A signature event for scope A ("uncommitted") issues a held pull.
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+
+    // A scope switch mid-pull must not issue a second concurrent request: its own `refreshDiff(false)`
+    // call coalesces into the trailing slot exactly like a direct queue-path call would.
+    clickButton(container, "vs main");
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+
+    // One more signature event lands (now on the newly-subscribed scope B) while still held — this
+    // proves the `&&` in `trailingPreserveScroll`: a non-preserving scope switch's `false` wins over
+    // any number of `true` signature events coalesced alongside it.
+    fireDiffSignature();
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+
+    // Resolve scope A's original held pull with distinguishable files: it was superseded by the two
+    // coalesced token bumps above, so these files must never render.
+    resolveDiff(1, [makeFile("scope-a-only.ts")], "sig-a");
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3)); // the trailing pull fires
+    expect(container.textContent).not.toContain("scope-a-only.ts");
+
+    // The trailing pull re-reads `state.scope` at run time, so it targets scope B (the current
+    // scope), not scope A (whatever was selected when it was queued).
+    resolveDiff(2, [makeFile("scope-b-only.ts")], "sig-b");
+    await vi.waitFor(() => expect(container.textContent).toContain("scope-b-only.ts"));
+    expect(container.textContent).not.toContain("scope-a-only.ts");
+
+    // And the render that actually applied scope B's files used preserveScroll === false: the scope
+    // switch's non-preserving intent survived being coalesced with the preserving signature events.
+    const finalCall = setFilesSpy.mock.calls[setFilesSpy.mock.calls.length - 1]!;
+    expect(finalCall[0]).toEqual([makeFile("scope-b-only.ts")]);
+    expect(finalCall[1]).toBe(false);
   });
 });
 

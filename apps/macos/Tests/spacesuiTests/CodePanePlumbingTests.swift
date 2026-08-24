@@ -546,6 +546,77 @@ extension ProcessProfileEnvironmentSuites {
                 "the persisted layout on disk reflects the retarget, not just the in-memory copy")
         }
 
+        /// A detour through the Alerts detail between two workspace presentations does not reset which
+        /// workspace `showWorkspaceDetail` last presented: retargeting must key off the workspace the user
+        /// actually last selected (`lastPresentedWorkspaceDetailID`), not off whatever `detailPane` happens
+        /// to be showing right now (`visibleDetailWorkspaceID`, which Alerts nils out). Without the fix,
+        /// presenting workspace-1 again after the Alerts detour would see `previousWorkspaceID == nil` (since
+        /// visiting Alerts nil'd out `visibleDetailWorkspaceID`) and skip the retarget, leaving the monitor
+        /// incorrectly stranded on workspace-2. Reaches Alerts via `showAlertsDetail`, the same production
+        /// entry point the sidebar's Alerts row and its keyboard shortcut both call (round-16 Fix 2).
+        @Test func alertsDetourBetweenTwoWorkspacePresentationsStillRetargetsOnReturn() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+
+            // First-ever presentation this session (a no-op retarget, same as the sibling test above), then
+            // a real change to workspace-2.
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
+                "precondition: the monitor retargeted to workspace-2")
+
+            // A detour through Alerts: nils out `visibleDetailWorkspaceID`, but must not disturb which
+            // workspace was last presented.
+            controller.showAlertsDetail(presentation: .userNavigation)
+
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+
+            let retargetedContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "the monitor's pane id keeps a live controller after retargeting back")
+            #expect(retargetedContent.workspaceID == "workspace-1", "the monitor retargets back to workspace-1 despite the Alerts detour")
+            #expect(retargetedContent.initialMode == .diff, "the retargeted monitor lands in diff mode")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"),
+                "the layout's pane descriptor moves back to workspace-1")
+        }
+
+        /// A same-workspace reselection must never retarget the monitor, whether or not an Alerts detour
+        /// sits in between — control for the test above, proving the fix only restores the A → Alerts → B
+        /// retarget without making an unrelated case (A → Alerts → A) start retargeting instead.
+        @Test func sameWorkspaceReselectionAcrossAnAlertsDetourDoesNotRetarget() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            let contentAfterFirstPresentation = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+
+            controller.showAlertsDetail(presentation: .userNavigation)
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?)
+                    === (contentAfterFirstPresentation as AnyObject?),
+                "a same-workspace reselection never retargets the monitor, even across an Alerts detour")
+        }
+
         /// An overview tick re-presenting the workspace already shown (`showWorkspaceDetail` firing
         /// repeatedly for an unchanged selection, as it does on every background refresh) must not churn
         /// a monitor: no retarget, no new controller instance.

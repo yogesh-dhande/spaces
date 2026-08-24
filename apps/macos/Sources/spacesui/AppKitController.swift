@@ -269,6 +269,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Read-only facets of `detailPane` that the app reads throughout. `showingSettings` is a separate
     /// stored flag because the Settings dialog floats over, and coexists with, whatever pane is shown.
     var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
+    /// The workspace `showWorkspaceDetail` most recently presented, tracked independently of
+    /// `detailPane` because the monitor-follow contract (docs/spec.md: a global-window code pane
+    /// "follows the sidebar's workspace selection") must survive detours through non-workspace
+    /// details: Alerts/Automations nil out `visibleDetailWorkspaceID`, but they do not change which
+    /// workspace the user last selected — so comparing against the visible detail would silently skip
+    /// the A → Alerts → B retarget. `nil` only until the first workspace presentation this launch,
+    /// preserving the restore-then-follow rule (a reopened monitor stays on its persisted workspace
+    /// until a real selection change).
+    private var lastPresentedWorkspaceDetailID: String?
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
     var showingAutomations: Bool { detailPane.isAutomations }
@@ -7296,10 +7305,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // loading placeholder, the setup detail, or the full panel — including its own
         // same-workspace fast path further down) ends up presenting this workspace, so this one
         // comparison, made once here, covers all of them instead of needing to be repeated per
-        // branch. `nil` means nothing has been presented yet this launch (`detailPane` starts
-        // `.none`), which must never retarget a monitor — it stays on its persisted workspace
-        // until a real selection change, not merely the first workspace this session shows.
-        let previousWorkspaceID = visibleDetailWorkspaceID
+        // branch. Read from `lastPresentedWorkspaceDetailID` rather than `visibleDetailWorkspaceID`:
+        // the latter is derived from `detailPane`, which goes `nil` the moment the user detours
+        // through Alerts or Automations, even though that detour does not change which workspace
+        // they last selected — comparing against it would silently skip the retarget on an
+        // A → Alerts → B sequence. `nil` means nothing has been presented yet this launch
+        // (`lastPresentedWorkspaceDetailID` starts `nil`, just as `detailPane` starts `.none`),
+        // which must never retarget a monitor — it stays on its persisted workspace until a real
+        // selection change, not merely the first workspace this session shows.
+        let previousWorkspaceID = lastPresentedWorkspaceDetailID
+        lastPresentedWorkspaceDetailID = workspace.id
         if let previousWorkspaceID, previousWorkspaceID != workspace.id {
             // Every global panel window's code pane is a workspace-following review monitor: the
             // sidebar selecting a different workspace retargets its diff to match, in `.diff`
