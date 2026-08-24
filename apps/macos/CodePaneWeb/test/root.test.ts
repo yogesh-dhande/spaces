@@ -76,6 +76,7 @@ vi.mock("../src/bridge", () => ({
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new Error("not used")),
     subscribeDiffSignature: vi.fn(() => () => {}),
+    subscribeFileSignature: vi.fn(() => () => {}),
     notifyEditorStateChanged: vi.fn(),
     notifyModeChanged: hoisted.notifyModeChanged,
     reviewCommentList: vi.fn().mockResolvedValue([]),
@@ -629,8 +630,10 @@ describe("mountRoot's init ordering — the hibernated editor snapshot is restor
     const dirtyEditorState: CodePaneEditorState = {
       path: "/repo/src/foo.ts",
       baseSHA256: "deadbeef",
+      baseContent: "let x = 0;\n",
       content: "let x = 1;\n",
       dirty: true,
+      conflict: false,
     };
     INIT_PAYLOAD = { ...defaultInitPayload, editorState: dirtyEditorState };
 

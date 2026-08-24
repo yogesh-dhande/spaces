@@ -500,3 +500,86 @@ public final class SpacesDeviceWorkspaceDiffSignatureStreamClient: @unchecked Se
         activeConnection?.cancel()
     }
 }
+
+/// Reads the per-(workspace, path)-scope file-signature subscription stream: opens a pinned-TLS Device
+/// API connection, sends a `subscribeWorkspaceFileSignature` request scoped to one workspace-relative
+/// file, and delivers each newline-framed `SpacesDeviceWorkspaceFileSignatureFrame`. Mirrors
+/// `SpacesDeviceWorkspaceDiffSignatureStreamClient` exactly, substituting the whole-frame `Equatable`
+/// comparison (`sha256`+`missing` together) for that client's single-field `scopeSignature` comparison,
+/// since a file-signature frame has no equivalent single composite field to compare instead.
+public final class SpacesDeviceWorkspaceFileSignatureStreamClient: @unchecked Sendable {
+    private let request: SpacesDeviceAPIRequest
+    private let resolver: SpacesDeviceEndpointResolver
+    private let onFrame: @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void
+    private let onDisconnect: @Sendable ((any Error)?) -> Void
+    private let connectionLock = NSLock()
+    private var connection: (any SpacesPinnedTLSLineConnection)?
+    /// Last frame delivered to `onFrame`, compared only from the receive loop's own callback (one
+    /// connection, one serial stream of `onLine` calls), so it needs no lock.
+    private var lastDeliveredFrame: SpacesDeviceWorkspaceFileSignatureFrame?
+
+    public init(
+        workspaceID: String, path: String, authToken: String?, clientApp: SpacesDeviceClientApp?, resolver: SpacesDeviceEndpointResolver,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws {
+        guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
+        self.request = SpacesDeviceAPIRequest(
+            command: .subscribeWorkspaceFileSignature(SpacesDeviceWorkspaceFileSignatureRequest(workspaceID: workspaceID, path: path)),
+            authToken: authToken, clientApp: clientApp)
+        self.resolver = resolver
+        self.onFrame = onFrame
+        self.onDisconnect = onDisconnect
+    }
+
+    /// The receive loop holds this client weakly, so dropping the last reference to a live stream
+    /// leaves its pinned-TLS connection running until something cancels it. Cancelling here makes the
+    /// reference-drop path safe by construction, matching `SpacesDeviceAPIRequestSessionClient`.
+    deinit { stop() }
+
+    public func start(timeoutSeconds: TimeInterval = 10) throws {
+        let host = try SpacesDeviceAPIStreamEndpoint.host(resolver: resolver)
+        let createdConnection: any SpacesPinnedTLSLineConnection
+        do { createdConnection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        connectionLock.lock()
+        connection = createdConnection
+        connectionLock.unlock()
+        let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
+        do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        let onFrame = onFrame
+        createdConnection.startReceiveLoop(
+            onLine: { [weak self] line in
+                do {
+                    let frame = try SpacesDeviceWorkspaceFileSignatureStreamCodec.decodeLine(line)
+                    guard let self else { return }
+                    guard frame != self.lastDeliveredFrame else { return }
+                    self.lastDeliveredFrame = frame
+                    onFrame(frame)
+                } catch {
+                    // A non-payload line is usually a server error response; surface its message. Reported
+                    // as a rejection rather than a connection failure because that is what it is: the
+                    // daemon answered on a healthy connection, so this must not read as the address being
+                    // unreachable — the message the user sees is the same either way.
+                    if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
+                        onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode))
+                    } else {
+                        onDisconnect(error)
+                    }
+                    self?.stop()
+                }
+            }, onClosed: { error in onDisconnect(error) })
+    }
+
+    public func stop() {
+        connectionLock.lock()
+        let activeConnection = connection
+        connection = nil
+        connectionLock.unlock()
+        activeConnection?.cancel()
+    }
+}

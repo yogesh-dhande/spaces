@@ -46,6 +46,20 @@ public enum TerminalServicePaths {
         return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
     }
 
+    /// Profile-scoped unix socket the daemon streams one workspace-relative file's content-signature
+    /// changes on (see `subscribeWorkspaceFileSignature`). One socket per subscribed (workspace, path)
+    /// scope, hashed by workspace id and path rather than the profile root, mirroring
+    /// `workspaceDiffSignatureSocketPath`'s own reasoning: a path is arbitrary client-supplied text (could
+    /// exceed the unix socket path limit or need escaping), and hashing keeps every socket name a uniform
+    /// fixed length.
+    public static func workspaceFileSignatureSocketPath(workspaceID: String, path: String, fileManager: FileManager = .default) throws -> String {
+        let root = try terminalRootDirectory(fileManager: fileManager)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let name =
+            "workspace-file-\(socketPathComponent(for: root.path))-\(socketPathComponent(for: workspaceID))-\(socketPathComponent(for: path))"
+        return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
+    }
+
     public static func instanceLockPath(fileManager: FileManager = .default) throws -> String {
         let root = try terminalRootDirectory(fileManager: fileManager)
         let socketRoot = try SpacesSocketPaths.secureSocketRoot()

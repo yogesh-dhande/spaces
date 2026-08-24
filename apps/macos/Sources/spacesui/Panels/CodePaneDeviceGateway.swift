@@ -11,20 +11,38 @@ protocol CodePaneDiffSignatureStreamHandle: AnyObject, Sendable {
 
 extension SpacesDeviceWorkspaceDiffSignatureStreamClient: CodePaneDiffSignatureStreamHandle {}
 
+/// A live file-signature subscription handle. Mirrors `CodePaneDiffSignatureStreamHandle` exactly.
+protocol CodePaneFileSignatureStreamHandle: AnyObject, Sendable {
+    func stop()
+}
+
+extension SpacesDeviceWorkspaceFileSignatureStreamClient: CodePaneFileSignatureStreamHandle {}
+
 /// Seam over the `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
-/// staleness guards (page generation, diff-request token, diff-signature subscription generation)
-/// protect against races with hibernation and scope changes, plus the review-comment CRUD/send
-/// calls (kept here too, rather than called directly like `workspaceFileRead`/`workspaceFileWrite`
-/// are, so `CodePaneContentControllerTests` can assert exactly which comment/args a dispatched RPC
-/// resolves to without a live device).
+/// staleness guards (page generation, diff-request/file-read token, diff/file-signature subscription
+/// generation) protect against races with hibernation and scope/path changes, plus the review-comment
+/// CRUD/send calls (kept here too, rather than called directly like `workspaceFileWrite` is, so
+/// `CodePaneContentControllerTests` can assert exactly which comment/args a dispatched RPC resolves to
+/// without a live device). `workspaceFileWrite` itself stays a direct `SpacesDeviceClient` call: nothing
+/// downstream of its completion re-keys a subscription off it the way `resubscribeFileSignature` does
+/// off `workspaceFileRead`, so it has no analogous need for this seam yet.
 protocol CodePaneDeviceGateway: Sendable {
     func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult
+
+    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceFileReadResult
 
     func subscribeWorkspaceDiffSignature(
         workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord,
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
         onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneDiffSignatureStreamHandle
+
+    func subscribeWorkspaceFileSignature(
+        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> any CodePaneFileSignatureStreamHandle
 
     func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment]
 
@@ -50,6 +68,14 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
+    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceFileReadResult
+    {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceFileRead(workspaceID: workspaceID, relativePath: relativePath, device: device)
+        }.value
+    }
+
     func subscribeWorkspaceDiffSignature(
         workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord,
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
@@ -58,6 +84,17 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceDiffSignature(
                 workspaceID: workspaceID, refName: refName, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+        }.value
+    }
+
+    func subscribeWorkspaceFileSignature(
+        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> any CodePaneFileSignatureStreamHandle {
+        try await Task.detached(priority: .utility) {
+            try SpacesDeviceClient.subscribeWorkspaceFileSignature(
+                workspaceID: workspaceID, relativePath: relativePath, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
         }.value
     }
 

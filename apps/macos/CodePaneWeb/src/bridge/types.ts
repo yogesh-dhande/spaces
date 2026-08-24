@@ -57,8 +57,15 @@ export interface WorkspaceFileReadResult {
 }
 
 export interface WorkspaceFileWriteOptions {
-  /** The sha256 the caller last read. The write is rejected as a conflict if the file's current sha256 no longer matches (compare-and-swap). */
-  baseSHA256: string;
+  /**
+   * The sha256 the caller last read. The write is rejected as a conflict if the file's current
+   * sha256 no longer matches (compare-and-swap). `undefined` invokes the daemon's "create"
+   * convention instead: the write succeeds only if nothing currently exists at `path`, and is
+   * rejected as a conflict (with `currentSHA256`) if something does. This is what lets the
+   * editor's conflict compare view's "Keep mine" action recreate a file that was deleted on disk
+   * — there is no prior hash to compare against, only "did anyone else recreate it first".
+   */
+  baseSHA256: string | undefined;
 }
 
 export interface WorkspaceFileWriteOk {
@@ -93,7 +100,22 @@ export interface DiffSignatureEvent {
 
 export type DiffSignatureListener = (event: DiffSignatureEvent) => void;
 
-/** Unsubscribe function returned by `subscribeDiffSignature`. */
+/**
+ * One file's on-disk signature, pushed whenever the host detects it changed while the editor
+ * has it open. `sha256` is `undefined` iff `missing` is `true` (the file was deleted on disk);
+ * otherwise it is the disk content's current hash. This never carries the disk content itself —
+ * the editor always does its own fresh `workspaceFileRead` to fetch it, so this event is just a
+ * "go look" signal, not a data payload.
+ */
+export interface FileSignatureEvent {
+  path: string;
+  sha256: string | undefined;
+  missing: boolean;
+}
+
+export type FileSignatureListener = (event: FileSignatureEvent) => void;
+
+/** Unsubscribe function returned by `subscribeDiffSignature`/`subscribeFileSignature`. */
 export type Unsubscribe = () => void;
 
 /** One line's side within a diff: `"old"` is the deletion side, `"new"` is the addition side.
@@ -206,6 +228,14 @@ export interface SpacesBridge {
    */
   subscribeDiffSignature(scope: DiffScope, listener: DiffSignatureListener): Unsubscribe;
   /**
+   * Subscribe to file-signature-changed push events for the editor's currently open file. The
+   * returned function unsubscribes. Only one path is observed at a time (mirroring
+   * `subscribeDiffSignature`'s one-scope-at-a-time model) — the host decides which path the
+   * underlying stream points at, driven by `workspaceFileRead` completions, so there is no
+   * explicit subscribe/unsubscribe RPC here; see README.md for the event-delivery mechanism.
+   */
+  subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;
+  /**
    * Fire-and-forget push (like the startup `ready` notification — no reply): tells the host the
    * editor's current open-file snapshot, so it survives this pane's next hibernation cycle (see
    * README.md "Editor state survives hibernation"). `undefined` the moment the editor has no open
@@ -250,13 +280,30 @@ export type CodePaneMode = "diff" | "editor";
 
 /** One editor's open-file snapshot: mirrors `CodePaneBridge.EditorState` on the Swift side. Pushed
  *  fire-and-forget via `notifyEditorStateChanged` and rehydrated through `spaces:init`'s
- *  `editorState` field after a hibernation cycle. Kept small and focused since Phase 5's merge
- *  model builds on this same snapshot. */
+ *  `editorState` field after a hibernation cycle.
+ *
+ *  `baseContent` is the content at the current CAS baseline (`baseSHA256`) — needed so a
+ *  rehydrated pane can still diff3-merge a disk change that arrives right after rehydration,
+ *  without a redundant read. While in conflict, this doubles as the compare view's disk side, so a
+ *  rehydrated conflict can render its compare view without a redundant read either. `conflict` must
+ *  survive hibernation (a conflict the user hasn't resolved yet should still show as a conflict
+ *  after a reload), so it is part of this snapshot. The auto-merge's undo snapshot
+ *  (`pendingMergeUndo` on the editor side) is deliberately NOT part of this state: it is cheap to
+ *  lose (simply not offering Undo after a hibernation cycle), and keeping it out avoids doubling
+ *  this payload's size on every debounced push.
+ *
+ *  This snapshot also can't distinguish "changed on disk" from "deleted on disk" for a rehydrated
+ *  conflict (there is no `diskMissing` field here — see the editor-side field's own doc comment for
+ *  why). A rehydrated conflict always renders with the "changed" wording as an approximation; it
+ *  self-corrects the moment a fresh `spaces:fileSignature` event or a compare-view action
+ *  re-derives the real state. */
 export interface CodePaneEditorState {
   path: string;
   baseSHA256: string;
+  baseContent: string;
   content: string;
   dirty: boolean;
+  conflict: boolean;
 }
 
 /**

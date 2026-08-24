@@ -373,6 +373,13 @@
   color: var(--orange);
 }
 
+/* A clean auto-merge is good news, not a problem needing attention — distinct from
+   .banner.conflict/.banner.error's orange (an unresolved problem the user must act on). */
+.banner.merge {
+  border-color: var(--green);
+  color: var(--green);
+}
+
 /* Diff-mode comment surface: an inline card rendered under its annotated line
    (`@pierre/diffs`' renderAnnotation) plus the collapsible batch tray docked at the bottom of
    `.diff-area`. See commentsController.ts. */

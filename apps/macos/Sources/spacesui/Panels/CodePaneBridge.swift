@@ -56,13 +56,40 @@ enum CodePaneBridge {
     }
 
     /// One editor's open-file snapshot: the wire shape of `editorStateChanged`'s `params` and of
-    /// `InitPayload`'s `editorState` field. Kept small and focused (path/hash/content/dirty only)
-    /// since Phase 5's merge model builds on this same snapshot.
+    /// `InitPayload`'s `editorState` field. Mirrors `CodePaneWeb/src/bridge/types.ts`'s
+    /// `CodePaneEditorState`: `baseContent` is the file's content as of `baseSHA256` (the merge
+    /// base for Phase 5's external-change reconciliation), and `conflict` is whether the web app's
+    /// own merge attempt left unresolved markers in `content`.
     struct EditorState: Codable, Equatable {
         let path: String
         let baseSHA256: String
+        let baseContent: String
         let content: String
         let dirty: Bool
+        let conflict: Bool
+
+        init(path: String, baseSHA256: String, baseContent: String, content: String, dirty: Bool, conflict: Bool = false) {
+            self.path = path
+            self.baseSHA256 = baseSHA256
+            self.baseContent = baseContent
+            self.content = content
+            self.dirty = dirty
+            self.conflict = conflict
+        }
+
+        /// Custom decode so an older/partial snapshot missing `conflict` (a field added after
+        /// `baseContent`) still decodes rather than failing outright: `conflict` defaults to
+        /// `false` when absent, while every other field stays required — a snapshot with no path,
+        /// hash, base content, live content, or dirty flag isn't a usable `EditorState` at all.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            path = try container.decode(String.self, forKey: .path)
+            baseSHA256 = try container.decode(String.self, forKey: .baseSHA256)
+            baseContent = try container.decode(String.self, forKey: .baseContent)
+            content = try container.decode(String.self, forKey: .content)
+            dirty = try container.decode(Bool.self, forKey: .dirty)
+            conflict = try container.decodeIfPresent(Bool.self, forKey: .conflict) ?? false
+        }
     }
 
     /// Evaluated by `CodePaneContentController.flushPendingEditorState()` at teardown to pull the web
@@ -176,9 +203,10 @@ enum CodePaneBridge {
         }
         guard let params = dict["params"] as? [String: Any], !params.isEmpty else { return .noFile }
         guard let path = params["path"] as? String, let baseSHA256 = params["baseSHA256"] as? String,
-            let content = params["content"] as? String, let dirty = params["dirty"] as? Bool
+            let baseContent = params["baseContent"] as? String, let content = params["content"] as? String, let dirty = params["dirty"] as? Bool
         else { return .noFile }
-        return .file(EditorState(path: path, baseSHA256: baseSHA256, content: content, dirty: dirty))
+        let conflict = params["conflict"] as? Bool ?? false
+        return .file(EditorState(path: path, baseSHA256: baseSHA256, baseContent: baseContent, content: content, dirty: dirty, conflict: conflict))
     }
 
     /// Decodes a `{method:"modeChanged", params:{mode}}` notification body: the web app's push
@@ -248,7 +276,12 @@ enum CodePaneBridge {
     enum Plan: Equatable {
         case workspaceDiff(scope: DiffScope)
         case workspaceFileRead(path: String)
-        case workspaceFileWrite(path: String, content: String, baseSHA256: String)
+        /// `baseSHA256` is `nil` for the "create" convention (see `WorkspaceFileWriteOptions.baseSHA256`
+        /// in `CodePaneWeb/src/bridge/types.ts`): the write must fail as a conflict unless the target
+        /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
+        /// missing (see `FileWritePayload`'s `fileMissing` case) instead of being unable to ever write
+        /// past that state.
+        case workspaceFileWrite(path: String, content: String, baseSHA256: String?)
         /// Decodes successfully (the params are well-formed) but has no daemon endpoint yet; the
         /// controller always replies `unavailable` for this rather than attempting a client call.
         case workspaceFileList
@@ -275,12 +308,15 @@ enum CodePaneBridge {
             }
             return .success(.workspaceFileRead(path: path))
         case "workspaceFileWrite":
+            // `options.baseSHA256` is optional: absent or JSON `null` (the wire's "create" convention
+            // — see realBridge.ts's `workspaceFileWrite`) both fall out of `as? String` as `nil` here,
+            // which is exactly the `Plan` case's own "create" meaning — no separate null-check needed.
             guard let path = request.params["path"] as? String, let content = request.params["content"] as? String,
-                let options = request.params["options"] as? [String: Any], let baseSHA256 = options["baseSHA256"] as? String
+                let options = request.params["options"] as? [String: Any]
             else {
-                return .failure(
-                    BridgeError(code: .invalidArgument, message: "workspaceFileWrite requires a path, content, and options.baseSHA256."))
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite requires a path, content, and options."))
             }
+            let baseSHA256 = options["baseSHA256"] as? String
             return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256))
         case "workspaceFileList":
             return .success(.workspaceFileList)
@@ -515,6 +551,17 @@ enum CodePaneBridge {
 
     /// `spaces:diffSignature`'s detail, dispatched whenever the subscribed scope's git state changes.
     struct DiffSignaturePayload: Encodable, Equatable { let scopeSignature: String }
+
+    /// `spaces:fileSignature`'s detail, dispatched whenever the currently-open file's on-disk content
+    /// changes or the file disappears. Mirrors `CodePaneWeb/src/bridge/types.ts`'s `FileSignatureEvent`:
+    /// `path` self-identifies the file this event is about (unlike `DiffSignaturePayload`, which needs
+    /// no such field since only one diff scope is ever live at a time), and `sha256` is nil-omitted
+    /// when `missing` is `true` — there is no content to hash.
+    struct FileSignaturePayload: Encodable, Equatable {
+        let path: String
+        let sha256: String?
+        let missing: Bool
+    }
 
     /// `spaces:agents`'s detail, dispatched whenever this workspace's running-agent set changes after
     /// startup (`spaces:init`'s `agents` field carries the set at page-load time).

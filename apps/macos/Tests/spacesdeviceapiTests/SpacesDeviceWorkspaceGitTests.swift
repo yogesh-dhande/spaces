@@ -78,6 +78,67 @@ import spacesruntimecore
             _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: "escape-link/secret.txt", workspaceDir: workspace.path)
         }
     }
+
+    /// A dangling symlink (the link exists; its target does not) must NOT be treated as a plain missing
+    /// component: `fileManager.fileExists` follows links and reports `false` for both, so an unguarded walk
+    /// would reappend the remaining components literally under the workspace root and let a create/write
+    /// land outside it. This is the round-3 codex finding: the link itself must be `lstat`'d and, when it
+    /// resolves outside the workspace, rejected exactly like a live escaping symlink.
+    @Test func rejectsADanglingSymlinkThatResolvesOutsideTheWorkspace() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-path-resolve-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        // The link's target ("new.txt" under `outside`) does not exist -- dangling -- but still names a
+        // location outside the workspace.
+        try FileManager.default.createSymbolicLink(
+            at: workspace.appendingPathComponent("dangling-outside-link"), withDestinationURL: outside.appendingPathComponent("new.txt"))
+
+        #expect(throws: SpacesDeviceWorkspacePathResolver.PathError.escapesWorkspace) {
+            _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: "dangling-outside-link", workspaceDir: workspace.path)
+        }
+        #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("new.txt").path))
+    }
+
+    /// A dangling symlink whose (relative) target resolves back INSIDE the workspace must keep resolving
+    /// there -- this is the "Keep mine" recreate / deleted-file read flow: an agent deletes a tracked file
+    /// that other in-workspace paths symlink to, and the editor still needs to read/recreate through the
+    /// link. Rejecting every dangling symlink outright (rather than resolving-and-recontaining) would break
+    /// this product flow.
+    @Test func resolvesADanglingSymlinkThatResolvesInsideTheWorkspace() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        // "real.txt" does not exist -- the link is dangling -- but its relative target names a location
+        // inside the workspace.
+        try FileManager.default.createSymbolicLink(
+            atPath: workspace.appendingPathComponent("dangling-inside-link").path, withDestinationPath: "real.txt")
+
+        let resolved = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(
+            relativePath: "dangling-inside-link", workspaceDir: workspace.path)
+        #expect(resolved == workspace.appendingPathComponent("real.txt").resolvingSymlinksInPath().path)
+    }
+
+    /// A chain of dangling symlinks longer than the resolver's cap must be rejected rather than looped
+    /// indefinitely or followed without bound.
+    @Test func rejectsASymlinkChainExceedingTheCap() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        // Each link in the chain points to the next, none of which exist until the final one -- which
+        // itself points outside the workspace, so this also confirms the cap fires before that final hop
+        // would otherwise be reached.
+        let linkCount = 10
+        for index in 0..<linkCount {
+            let linkName = "link-\(index)"
+            let targetName = index == linkCount - 1 ? "/does/not/exist" : "link-\(index + 1)"
+            try FileManager.default.createSymbolicLink(
+                atPath: workspace.appendingPathComponent(linkName).path, withDestinationPath: targetName)
+        }
+
+        #expect(throws: SpacesDeviceWorkspacePathResolver.PathError.escapesWorkspace) {
+            _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: "link-0", workspaceDir: workspace.path)
+        }
+    }
 }
 
 @Suite struct SpacesDeviceWorkspaceGitHashingTests {

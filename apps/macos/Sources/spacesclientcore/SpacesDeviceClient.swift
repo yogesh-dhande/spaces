@@ -743,6 +743,25 @@ public enum SpacesDeviceClient {
         return client
     }
 
+    /// Opens a live per-(workspace, path)-scope file-signature subscription: the paired daemon pushes a
+    /// frame whenever the file's `sha256`/`missing` state changes (notify-then-pull, mirroring
+    /// `subscribeWorkspaceDiffSignature` exactly), and the caller re-fetches `workspaceFileRead` (with the
+    /// same `relativePath`) on delivery rather than trust any content carried on the frame. The returned
+    /// client must be retained and `stop()`ped.
+    public static func subscribeWorkspaceFileSignature(
+        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws -> SpacesDeviceWorkspaceFileSignatureStreamClient {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+            workspaceID: workspaceID, path: relativePath, authToken: authToken, clientApp: clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            onDisconnect: onDisconnect)
+        try client.start()
+        return client
+    }
+
     public static func openWorkspaceTerminal(
         workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
@@ -1176,7 +1195,8 @@ public enum SpacesDeviceClient {
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .openServiceTunnel,
+            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+            .openServiceTunnel,
             .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns, .workspaceReviewCommentList,
             .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
             defaultRequestTimeoutSeconds

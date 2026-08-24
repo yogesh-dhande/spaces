@@ -114,6 +114,21 @@ public final class RemoteWorkspaceGitClient: Sendable {
         (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"], timeout: metadataCommandTimeout)) != nil
     }
 
+    /// Distinguishes "git ran and confirmed this isn't a repository" (exits nonzero — typically 128 — a
+    /// durable, semantic negative) from "git could not run to completion" (spawn failure, timeout, a wedged
+    /// process — transient daemon-side trouble that must not be misreported as the durable negative). Uses
+    /// `runGit` (which reports its `Int32` termination status for any completed exit and throws only when
+    /// the process could not run to completion) rather than `runGitAndCapture`, precisely because that is
+    /// the one primitive in this class that already keeps those two outcomes apart without an `allowedExitCodes`
+    /// widening — the same distinction `branchExists`/`hasRemote` already rely on, just without their own
+    /// `try?`/`?? 1` collapse of it. `assertIsGitRepository` (SpacesDeviceWorkspaceGit.swift) calls this
+    /// instead of `isRepo` so an execution failure surfaces as the existing retryable `gitCommandFailed` →
+    /// `internalError` wire shape instead of misreporting a durable "not a repo" rejection (`invalidArgument`)
+    /// for what might just be a daemon hiccup. `isRepo` itself is left untouched for its other callers.
+    public func isRepoStrict(path: String) throws -> Bool {
+        try runGit(["-C", path, "rev-parse", "--is-inside-work-tree"], timeout: metadataCommandTimeout) == 0
+    }
+
     public func branchExists(path: String, branch: String) -> Bool {
         let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"], timeout: metadataCommandTimeout)) ?? 1
         return status == 0

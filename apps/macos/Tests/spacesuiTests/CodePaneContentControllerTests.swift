@@ -98,6 +98,13 @@ private final class FakeDiffSignatureStreamHandle: CodePaneDiffSignatureStreamHa
     func stop() { stopCount += 1 }
 }
 
+/// `CodePaneFileSignatureStreamHandle` fake: only tracks how many times `stop()` was called. Mirrors
+/// `FakeDiffSignatureStreamHandle` exactly.
+private final class FakeFileSignatureStreamHandle: CodePaneFileSignatureStreamHandle, @unchecked Sendable {
+    private(set) var stopCount = 0
+    func stop() { stopCount += 1 }
+}
+
 /// Gates `workspaceDiff` on demand and records every `subscribeWorkspaceDiffSignature` call, so tests
 /// can reproduce the races the round-1 fixes guard against: an in-flight diff completing after the
 /// pane hibernates, two overlapping diffs completing out of order, and a stream disconnect racing a
@@ -288,6 +295,110 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         for waiter in waiters { waiter.resume() }
     }
 
+    // MARK: - File read / file-signature subscription (mirrors the workspaceDiff/diff-signature seam above)
+
+    private var pendingFileReadCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceFileReadResult, any Error>)] = []
+    private var fileReadCallArrivalCount = 0
+    private var fileReadArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var subscribedFilePaths: [String] = []
+    private var subscribedFileDisconnectHandlers: [@Sendable (Error?) -> Void] = []
+    private var subscribedFileFrameHandlers: [@Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void] = []
+    private var subscribeFileArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var subscribeFileFailuresRemaining = 0
+
+    private struct InjectedFileSubscribeFailure: Error {}
+
+    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceFileReadResult
+    {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceWorkspaceFileReadResult, any Error>) in
+            let arrivalIndex = fileReadCallArrivalCount
+            fileReadCallArrivalCount += 1
+            pendingFileReadCalls.append((arrivalIndex, continuation))
+            drainFileReadArrivalWaiters()
+        }
+    }
+
+    func subscribeWorkspaceFileSignature(
+        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> any CodePaneFileSignatureStreamHandle {
+        if subscribeFileFailuresRemaining > 0 {
+            subscribeFileFailuresRemaining -= 1
+            throw InjectedFileSubscribeFailure()
+        }
+        subscribedFilePaths.append(relativePath)
+        subscribedFileDisconnectHandlers.append(onDisconnect)
+        subscribedFileFrameHandlers.append(onFrame)
+        drainSubscribeFileArrivalWaiters()
+        return FakeFileSignatureStreamHandle()
+    }
+
+    /// Makes the next `count` `subscribeWorkspaceFileSignature` calls throw, so a test can exercise
+    /// `scheduleFileSignatureReconnect`'s failure arm without a real failure. Mirrors
+    /// `failNextSubscribeAttempts`.
+    func failNextFileSubscribeAttempts(_ count: Int) { subscribeFileFailuresRemaining = count }
+
+    /// Completes the `workspaceFileRead` call at `index` (0-based, arrival order — stable even once an
+    /// earlier or later call has already completed and been removed) with a success result, leaving
+    /// other pending calls untouched — mirrors `completeDiffCall`.
+    func completeFileReadCall(at index: Int, result: SpacesDeviceWorkspaceFileReadResult) {
+        guard let position = pendingFileReadCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no pending workspaceFileRead call at arrival index \(index)")
+        }
+        pendingFileReadCalls.remove(at: position).continuation.resume(returning: result)
+    }
+
+    /// Fails the `workspaceFileRead` call at `index` instead of completing it with a result.
+    func failFileReadCall(at index: Int, error: any Error) {
+        guard let position = pendingFileReadCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no pending workspaceFileRead call at arrival index \(index)")
+        }
+        pendingFileReadCalls.remove(at: position).continuation.resume(throwing: error)
+    }
+
+    /// Suspends until at least `count` `workspaceFileRead` calls have arrived in total (cumulative — a
+    /// completed call still counts), regardless of how many are still outstanding.
+    func waitForFileReadCallCount(_ count: Int) async {
+        while fileReadCallArrivalCount < count {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileReadArrivalWaiters.append(continuation) }
+        }
+    }
+
+    /// Suspends until at least `count` `subscribeWorkspaceFileSignature` calls have succeeded.
+    func waitForFileSubscribeCallCount(_ count: Int) async {
+        while subscribedFilePaths.count < count {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeFileArrivalWaiters.append(continuation) }
+        }
+    }
+
+    func subscribedFilePath(at index: Int) -> String { subscribedFilePaths[index] }
+
+    func fileSubscribeCallCount() -> Int { subscribedFilePaths.count }
+
+    func triggerFileDisconnect(at index: Int) { subscribedFileDisconnectHandlers[index](nil) }
+
+    /// Delivers a `spaces:fileSignature`-worthy frame on the subscription opened at `index` (0-based,
+    /// subscribe-call arrival order), standing in for the daemon's `DeviceOverviewStreamServer` pushing
+    /// a signature over the live stream. Mirrors `triggerFrame`.
+    func triggerFileFrame(at index: Int, path: String, sha256: String?, missing: Bool) {
+        subscribedFileFrameHandlers[index](
+            SpacesDeviceWorkspaceFileSignatureFrame(workspaceID: "workspace-1", path: path, sha256: sha256, missing: missing))
+    }
+
+    private func drainFileReadArrivalWaiters() {
+        let waiters = fileReadArrivalWaiters
+        fileReadArrivalWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func drainSubscribeFileArrivalWaiters() {
+        let waiters = subscribeFileArrivalWaiters
+        subscribeFileArrivalWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     // MARK: - Review comments
     //
     // Simple record-and-answer stubs (no arrival ordering/waiters needed): unlike `workspaceDiff` and
@@ -427,6 +538,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         var scope: [String: Any] = ["kind": scopeKind]
         if let refName { scope["refName"] = refName }
         return CodePaneBridge.Request(id: id, method: "workspaceDiff", params: ["scope": scope])
+    }
+
+    private func fileReadRequest(id: String, path: String) -> CodePaneBridge.Request {
+        CodePaneBridge.Request(id: id, method: "workspaceFileRead", params: ["path": path])
     }
 
     /// Waits out a window without asserting anything, so a "this must NOT happen" test can give the
@@ -1118,12 +1233,305 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(subscribeCount == 1, "no recovery subscribe may land for a pane that already hibernated")
     }
 
+    // MARK: - performFileRead → resubscribeFileSignature wiring (Phase 5 Part A)
+    //
+    // Mirrors the `performWorkspaceDiff` → `resubscribeDiffSignature` coverage above: a successful
+    // `workspaceFileRead` (re)points the file-signature stream at the path just read, a stale (superseded)
+    // completion must not retarget it, a disconnect schedules a bounded-backoff reconnect, and a forwarded
+    // frame dedupes against the last value the web app is known to have (whether from a read or a frame).
+
+    /// Isolates the `spaces:fileSignature` dispatch scripts out of `evaluator`'s full recording, the same
+    /// way `diffSignatureScripts` isolates `spaces:diffSignature` ones.
+    private func fileSignatureScripts(_ evaluator: RecordingCodePaneScriptEvaluator) -> [String] {
+        evaluator.evaluatedScripts.filter { $0.contains("spaces:fileSignature") }
+    }
+
+    @Test func aSuccessfulFileReadResubscribesTheFileSignatureStreamAtThatPath() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+
+        await gateway.waitForFileSubscribeCallCount(1)
+        let path = await gateway.subscribedFilePath(at: 0)
+        #expect(path == "foo.ts")
+    }
+
+    @Test func lateFileReadResponseDoesNotRetargetTheStreamToASupersededPath() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        // Complete the SECOND (later) path first, then the FIRST (now-superseded) path last.
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 1, "only the second (still-current) path's completion should have triggered a resubscribe")
+        let path = await gateway.subscribedFilePath(at: 0)
+        #expect(path == "bar.ts", "the subscription must target the later path, not the superseded first one")
+    }
+
+    @Test func disconnectOnTheFileSignatureStreamSchedulesABackoffRetryThatResubscribesTheSamePath() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.fileSignatureReconnectFloor = .milliseconds(20)
+        content.fileSignatureReconnectCap = .milliseconds(20)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        await gateway.triggerFileDisconnect(at: 0)
+        await gateway.waitForFileSubscribeCallCount(2)
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 2, "a disconnect must schedule a backoff retry that resubscribes the same path")
+        let path = await gateway.subscribedFilePath(at: 1)
+        #expect(path == "foo.ts")
+    }
+
+    @Test func aConnectFrameRepeatingTheJustReadFilesSignatureIsSuppressed() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // The stream's connect-time frame repeats exactly the (sha256, missing) pair `performFileRead`
+        // just recorded as read — the web app already has this content, so it must not be forwarded.
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: "sha-1", missing: false)
+        await settle()
+
+        #expect(fileSignatureScripts(evaluator).isEmpty, "a frame repeating the just-read file's own signature must not be forwarded")
+    }
+
+    @Test func aFrameWithADifferentFileSignatureIsForwardedAndRecordedAsActedOn() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: "sha-2", missing: false)
+        await waitUntil { !self.fileSignatureScripts(evaluator).isEmpty }
+
+        #expect(fileSignatureScripts(evaluator).count == 1)
+        #expect(fileSignatureScripts(evaluator)[0].contains("sha-2"))
+
+        // Repeating the now-acted-on signature must in turn go quiet.
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: "sha-2", missing: false)
+        await settle()
+        #expect(fileSignatureScripts(evaluator).count == 1, "a repeat of the signature just forwarded must not forward again")
+    }
+
+    @Test func aMissingFileFrameIsForwardedWithNoSha256() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // The file is deleted out from under the open editor: the daemon reports `missing: true` with no
+        // `sha256` (see `SpacesDeviceWorkspaceFileSignatureFrame`'s doc comment).
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: nil, missing: true)
+        await waitUntil { !self.fileSignatureScripts(evaluator).isEmpty }
+
+        #expect(fileSignatureScripts(evaluator).count == 1)
+        #expect(fileSignatureScripts(evaluator)[0].contains("\"missing\":true"))
+    }
+
+    @Test func aFileReadCompletionAfterDeactivateNeverResubscribesTheFileSignatureStream() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+
+        // Hibernate before the read completes.
+        content.deactivate()
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 0, "a workspaceFileRead completion after deactivate must never resubscribe the stream")
+    }
+
+    // MARK: - Restoring the previous file's monitoring after a failed open (Phase 5 review round-1 Fix 1)
+    //
+    // `performFileRead`'s dispatch-time generation bump only fires when the dispatched path differs from
+    // what's currently subscribed — the same shape as `performWorkspaceDiff`'s scope-change bump. Unlike
+    // diff (which accepts a disconnect-during-the-fetch-window edge, since the web app's own bounded-backoff
+    // `refreshDiff` retry self-heals it — see the comment in `performWorkspaceDiff`), a failed open here must
+    // proactively restore the previous path's monitoring: the editor has no equivalent retry loop, so
+    // nothing else would ever re-arm it.
+
+    /// Opening a second file while the first is still live and successfully monitored, then having that
+    /// second open fail, must not strand the first file's monitoring — and the restored subscription must
+    /// be reachable by the normal reconnect path afterward, not some inert leftover.
+    @Test func aFailedFileOpenRestoresThePreviousPathsFileSignatureMonitoring() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.fileSignatureReconnectFloor = .milliseconds(20)
+        content.fileSignatureReconnectCap = .milliseconds(20)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        struct InjectedFileReadFailure: Error {}
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: InjectedFileReadFailure())
+
+        await gateway.waitForFileSubscribeCallCount(2)
+        let restoredPath = await gateway.subscribedFilePath(at: 1)
+        #expect(restoredPath == "foo.ts", "the failed open must restore monitoring for the still-displayed previous file")
+
+        // The restored subscription must be current-generation, not a stale leftover: a real disconnect on
+        // it must still schedule the normal backoff reconnect, proving `handleFileSignatureDisconnect`
+        // recognizes it rather than silently dropping it as belonging to an old, superseded generation.
+        await gateway.triggerFileDisconnect(at: 1)
+        await gateway.waitForFileSubscribeCallCount(3)
+
+        let reconnectedPath = await gateway.subscribedFilePath(at: 2)
+        #expect(reconnectedPath == "foo.ts", "the restored subscription must still be reachable by the normal reconnect path")
+    }
+
+    /// The stranding this guards is worse when the first file's stream had already disconnected and was
+    /// sitting in a pending backoff retry: a failed second open must still bring it back with a fresh,
+    /// deliberate resubscribe rather than leaving it to the stale (and now-superseded) pending retry, which
+    /// this test proves never fires on top of the restore.
+    @Test func aFailedFileOpenRestoresMonitoringForAPathThatWasMidBackoff() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.fileSignatureReconnectFloor = .milliseconds(150)
+        content.fileSignatureReconnectCap = .milliseconds(150)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // Drop the first path's stream and let it enter its pending-retry backoff window, without waiting
+        // for that retry to fire.
+        await gateway.triggerFileDisconnect(at: 0)
+        await settle(.milliseconds(50)) // let the disconnect handler run and schedule the retry's sleep
+
+        struct InjectedFileReadFailure: Error {}
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: InjectedFileReadFailure())
+
+        // A fresh, deliberate resubscribe for the first path must happen here rather than relying on the
+        // still-pending (and now-superseded) backoff retry to eventually fire on its own.
+        await gateway.waitForFileSubscribeCallCount(2)
+        let restoredPath = await gateway.subscribedFilePath(at: 1)
+        #expect(restoredPath == "foo.ts")
+
+        // Wait well past the original 150ms backoff floor: the stale retry (still captured against the
+        // now-superseded generation) must not also fire and produce a second, redundant subscribe.
+        await settle(.milliseconds(300))
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 2, "the superseded backoff retry must not also resubscribe on top of the deliberate restore")
+    }
+
+    /// The restore must not reach backward past whoever currently owns the subscription state: if a THIRD
+    /// path is opened (and succeeds) before the second path's failing open resolves, the failure belongs to
+    /// an already-superseded generation and must not undo the third path's subscription.
+    @Test func aStaleFailedOpenDoesNotRestoreOverANewerPathThatAlreadyTookOver() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // Open a second path and leave its read pending (it will fail later, after the third path below
+        // has already taken over).
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        // A third path is opened and succeeds while the second path's read is still pending.
+        struct InjectedFileReadFailure: Error {}
+        content.dispatch(fileReadRequest(id: "req-3", path: "baz.ts"))
+        await gateway.waitForFileReadCallCount(3)
+        await gateway.completeFileReadCall(at: 2, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-3", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+
+        // Now the second path's read fails. Its `restoreFileSignatureMonitoringAfterFailedOpen` call
+        // captured the generation as of ITS OWN dispatch, which the third path's successful open has since
+        // moved past — this failure must find itself stale and do nothing.
+        await gateway.failFileReadCall(at: 1, error: InjectedFileReadFailure())
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 2, "a stale failed open must not resubscribe the first path over a newer path that already took over")
+        let currentPath = await gateway.subscribedFilePath(at: 1)
+        #expect(currentPath == "baz.ts", "the third (current) path must remain the one subscribed")
+    }
+
     // MARK: - Editor-state / mode hibernation snapshot (round-5)
 
     // No "/" in the path: JSONEncoder escapes forward slashes as "\/" in the emitted JS, which would
     // make a plain substring match brittle for no benefit these tests need.
-    private func fakeEditorState(path: String = "foo.ts", dirty: Bool = true) -> CodePaneBridge.EditorState {
-        CodePaneBridge.EditorState(path: path, baseSHA256: "sha-abc", content: "let x = 1;", dirty: dirty)
+    private func fakeEditorState(path: String = "foo.ts", dirty: Bool = true, conflict: Bool = false) -> CodePaneBridge.EditorState {
+        CodePaneBridge.EditorState(path: path, baseSHA256: "sha-abc", baseContent: "let x = 1;", content: "let x = 1;", dirty: dirty, conflict: conflict)
     }
 
     /// The live `WKWebView` `activate()` just installed — the "correct" `senderWebView` a push from
@@ -1158,7 +1566,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // async round trip, which nothing in this test pumps to completion.
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
-        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: teardownWebView() also flushes review-comment state now — this test isn't
         // about that surface, so answer its collect call with "nothing pending" to let both flushes
         // settle.
@@ -1206,7 +1614,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // reason (no init sent at all, rather than an init correctly omitting the cleared state).
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
-        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
         teardownEvaluator.enqueueCollectResult("__none__")
 
@@ -1326,7 +1734,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         let body: [String: Any] = [
             "method": "editorStateChanged",
-            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "content": "let x = 1;", "dirty": true],
+            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "baseContent": "let x = 1;", "content": "let x = 1;", "dirty": true],
         ]
         content.handleScriptMessage(name: "spacesBridge", body: body, senderWebView: WKWebView())
         content.handleReady()
@@ -1370,7 +1778,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // exercises, just routed through `handleScriptMessage` instead of `handleEditorStateChanged` directly).
         let editorBody: [String: Any] = [
             "method": "editorStateChanged",
-            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "content": "let x = 1;", "dirty": true],
+            "params": ["path": "foo.ts", "baseSHA256": "sha-abc", "baseContent": "let x = 1;", "content": "let x = 1;", "dirty": true],
         ]
         content.handleScriptMessage(name: "spacesBridge", body: editorBody, senderWebView: webView)
 
@@ -1394,7 +1802,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         content.deactivate() // issues the flush's collect script against `evaluator`, left pending
 
-        evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
         evaluator.completeOldestPending(with: "__none__")
 
@@ -1425,7 +1833,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.handleEditorStateChanged(fakeEditorState(path: "bar.ts"), senderWebView: liveWebView(content))
 
         // The stale flush from generation 1 answers late, with different content than the live push.
-        firstEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        firstEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
         firstEvaluator.completeOldestPending(with: "__none__")
 
@@ -1549,7 +1957,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.close() // teardownWebView()'s flush captures its generation and is left pending, then close() discards editorState
 
         // The flush from before close() answers late, with the very state close() just discarded.
-        evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
         evaluator.completeOldestPending(with: "__none__")
 
@@ -1587,7 +1995,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
             "handleReady must not send spaces:init while a flush from the torn-down page is still outstanding")
 
-        staleEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        staleEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
         staleEvaluator.completeOldestPending(with: "__none__")
 
@@ -1623,7 +2031,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // Generation 1's flush finally answers: one of two outstanding flushes settles, but generation
         // 2's flush is still outstanding, so nothing may fire yet.
-        evaluator1.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","content":"let x = 1;","dirty":true}"#)
+        evaluator1.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
         // round-16 Fix 1a: each deactivate() now also starts a comment-state flush against the same
         // evaluator; resolve generation 1's before checking anything, so this assertion is really about
         // generation 2's flushes (not a leftover generation-1 comment flush) still being outstanding.
@@ -1633,7 +2041,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // Generation 2's flush now answers too: the last outstanding flush settles, but the page the
         // deferred ready was waiting for (generation 2) is no longer current (generation 3 is) — this
         // must resolve to nothing, not a stale init for a page that's gone.
-        evaluator2.completeOldestPending(with: #"{"path":"bar.ts","baseSHA256":"sha-abc","content":"let y = 2;","dirty":true}"#)
+        evaluator2.completeOldestPending(with: #"{"path":"bar.ts","baseSHA256":"sha-abc","baseContent":"let y = 2;","content":"let y = 2;","dirty":true}"#)
         // round-16 Fix 1a: resolve generation 2's comment flush too — only once BOTH of generation 2's
         // flushes are settled does `outstandingTeardownFlushCount` reach zero and the deferred ready
         // actually re-check `generation == pageGeneration` (which fails, since generation 3 is current).

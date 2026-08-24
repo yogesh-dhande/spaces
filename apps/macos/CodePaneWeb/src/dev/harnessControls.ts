@@ -42,7 +42,37 @@ export function installHarnessControls(container: HTMLElement): void {
     getMockBridgeForHarness()?.simulateAgentsChange();
   });
 
+  const fileChangeButton = document.createElement("button");
+  fileChangeButton.type = "button";
+  fileChangeButton.textContent = "Change file on disk";
+  fileChangeButton.style.padding = "6px 10px";
+  fileChangeButton.style.marginLeft = "8px";
+  fileChangeButton.style.borderRadius = "6px";
+  fileChangeButton.style.border = "1px solid #888";
+  fileChangeButton.style.background = "#222";
+  fileChangeButton.style.color = "#fff";
+  fileChangeButton.style.cursor = "pointer";
+  fileChangeButton.addEventListener("click", () => {
+    getMockBridgeForHarness()?.simulateFileChange(`// changed on disk at ${new Date().toISOString()}\n`);
+  });
+
+  const fileDeleteButton = document.createElement("button");
+  fileDeleteButton.type = "button";
+  fileDeleteButton.textContent = "Delete file on disk";
+  fileDeleteButton.style.padding = "6px 10px";
+  fileDeleteButton.style.marginLeft = "8px";
+  fileDeleteButton.style.borderRadius = "6px";
+  fileDeleteButton.style.border = "1px solid #888";
+  fileDeleteButton.style.background = "#222";
+  fileDeleteButton.style.color = "#fff";
+  fileDeleteButton.style.cursor = "pointer";
+  fileDeleteButton.addEventListener("click", () => {
+    getMockBridgeForHarness()?.simulateFileDeleted();
+  });
+
   bar.appendChild(button);
   bar.appendChild(agentsButton);
+  bar.appendChild(fileChangeButton);
+  bar.appendChild(fileDeleteButton);
   container.appendChild(bar);
 }

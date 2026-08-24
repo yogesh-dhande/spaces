@@ -4,6 +4,8 @@ import {
   DiffScope,
   DiffSignatureEvent,
   DiffSignatureListener,
+  FileSignatureEvent,
+  FileSignatureListener,
   ReviewCommentSendEntry,
   ReviewCommentUpsertInput,
   SpacesBridge,
@@ -41,9 +43,14 @@ import {
  *     attached first.
  *
  *   Swift -> JS (push events): `window.dispatchEvent(new CustomEvent(name,
- *     { detail }))` for two event names — `spaces:init` (once, at startup,
- *     detail: CodePaneInitPayload) and `spaces:diffSignature` (any time the
- *     active scope's git state changes, detail: DiffSignatureEvent).
+ *     { detail }))` for three event names — `spaces:init` (once, at startup,
+ *     detail: CodePaneInitPayload), `spaces:diffSignature` (any time the
+ *     active scope's git state changes, detail: DiffSignatureEvent), and
+ *     `spaces:fileSignature` (any time the editor's currently open file
+ *     changes or is deleted on disk, detail: FileSignatureEvent). The host
+ *     decides which path `spaces:fileSignature` tracks based on
+ *     `workspaceFileRead` completions — there is no explicit subscribe
+ *     message for it.
  *
  *   JS -> Swift (state pushes, fire-and-forget): the same message handler,
  *     no `id`. `{ method: "editorStateChanged", params: state ?? null }`
@@ -59,6 +66,7 @@ type PendingCall = {
 };
 
 const DIFF_SIGNATURE_EVENT = "spaces:diffSignature";
+const FILE_SIGNATURE_EVENT = "spaces:fileSignature";
 
 interface SpacesBridgeCallbacks {
   resolve(id: string, result: unknown): void;
@@ -163,7 +171,15 @@ class RealSpacesBridge implements SpacesBridge {
     content: string,
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
-    return (await this.post("workspaceFileWrite", { path, content, options })) as WorkspaceFileWriteResult;
+    // `baseSHA256: undefined` (the "create" convention) is normalized to `null` here for the same
+    // reason `notifyEditorStateChanged` normalizes its whole payload: postMessage's structured-clone
+    // step drops `undefined`-valued properties entirely, which would make "create" indistinguishable
+    // from "the params object never had this key" on the Swift side.
+    return (await this.post("workspaceFileWrite", {
+      path,
+      content,
+      options: { baseSHA256: options.baseSHA256 ?? null },
+    })) as WorkspaceFileWriteResult;
   }
 
   async workspaceFileList(query: string): Promise<WorkspaceFileListResult> {
@@ -199,6 +215,21 @@ class RealSpacesBridge implements SpacesBridge {
     };
     window.addEventListener(DIFF_SIGNATURE_EVENT, handler);
     return () => window.removeEventListener(DIFF_SIGNATURE_EVENT, handler);
+  }
+
+  subscribeFileSignature(_path: string, listener: FileSignatureListener): Unsubscribe {
+    // Mirrors subscribeDiffSignature exactly: the host, not this call, decides which path the
+    // one live `spaces:fileSignature` stream tracks (driven by workspaceFileRead completions —
+    // see types.ts doc comment), so this never messages Swift, it only listens for the one
+    // global event.
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<FileSignatureEvent>).detail;
+      if (detail && typeof detail.path === "string" && typeof detail.missing === "boolean") {
+        listener(detail);
+      }
+    };
+    window.addEventListener(FILE_SIGNATURE_EVENT, handler);
+    return () => window.removeEventListener(FILE_SIGNATURE_EVENT, handler);
   }
 }
 

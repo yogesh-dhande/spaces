@@ -1098,6 +1098,35 @@ public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equata
     }
 }
 
+/// Identifies one `subscribeWorkspaceFileSignature` request's target: a single workspace-relative path
+/// within one workspace.
+public struct SpacesDeviceWorkspaceFileSignatureRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let path: String
+
+    public init(workspaceID: String, path: String) {
+        self.workspaceID = workspaceID
+        self.path = path
+    }
+}
+
+/// `sha256` is nil iff `missing` is true — the file does not currently exist at `path`. This is the
+/// same hash `workspaceFileRead`/`workspaceFileWrite` traffic in, so the web side can compare it
+/// directly against its own CAS baseline without any translation.
+public struct SpacesDeviceWorkspaceFileSignatureFrame: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let path: String
+    public let sha256: String?
+    public let missing: Bool
+
+    public init(workspaceID: String, path: String, sha256: String?, missing: Bool) {
+        self.workspaceID = workspaceID
+        self.path = path
+        self.sha256 = sha256
+        self.missing = missing
+    }
+}
+
 /// Which side of a diff a review comment is anchored to, mirroring `workspacecore`'s
 /// `WorkspaceReviewCommentSide` without a cross-module dependency (the Device API wire types stand alone
 /// from the daemon's storage types, same as every other command's payload in this file).
@@ -1939,6 +1968,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// (`refName == nil` scopes to uncommitted changes; a non-nil `refName` scopes to that ref's
     /// merge-base) since the two commands are subscribing to and fetching the same scope's diff.
     case subscribeWorkspaceDiffSignature(SpacesDeviceWorkspaceDiffRequest)
+    /// Long-lived subscription that streams a single workspace-relative file's content hash whenever it
+    /// changes (notify-then-pull; see `SpacesDeviceWorkspaceFileSignatureFrame`). Mirrors
+    /// `subscribeWorkspaceDiffSignature`'s architecture but scopes to one file's `sha256`/`missing` state
+    /// rather than a diff scope's `scopeSignature`; the Swift host (not the web app) decides when to
+    /// (re)point this subscription, driven by `workspaceFileRead` completions.
+    case subscribeWorkspaceFileSignature(SpacesDeviceWorkspaceFileSignatureRequest)
     /// Draft review comments for the code pane's diff view (see `SpacesDeviceReviewComment`). Comments
     /// are DB-backed per the locked v1 architecture decision (survive-restart and iOS/remote-Linux
     /// parity fall out of daemon-side storage), not held client-side.
@@ -2011,6 +2046,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceFileWrite: "workspaceFileWrite"
         case .workspaceDiff: "workspaceDiff"
         case .subscribeWorkspaceDiffSignature: "subscribeWorkspaceDiffSignature"
+        case .subscribeWorkspaceFileSignature: "subscribeWorkspaceFileSignature"
         case .workspaceReviewCommentList: "workspaceReviewCommentList"
         case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
         case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
@@ -2052,7 +2088,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     public var isSubscriptionCommand: Bool {
         switch self {
-        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature: true
+        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature: true
         default: false
         }
     }
@@ -2077,6 +2113,22 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// nil` is the uncommitted-changes scope, matching `workspaceDiff`'s own convention.
     public var workspaceDiffSignatureScope: (workspaceID: String, refName: String?)? {
         if case .subscribeWorkspaceDiffSignature(let payload) = self { return (payload.workspaceID, payload.refName) }
+        return nil
+    }
+
+    /// True for the per-file signature subscription, which streams a single file's content-hash state
+    /// rather than terminal state and is not tied to a terminal session.
+    public var isWorkspaceFileSignatureSubscription: Bool {
+        if case .subscribeWorkspaceFileSignature = self { return true }
+        return false
+    }
+
+    /// The (workspace, path) scope a `subscribeWorkspaceFileSignature` subscription is for, so the
+    /// transport layer can key its per-scope producer socket without re-decoding the command payload.
+    /// Unlike `workspaceDiffSignatureScope`'s `refName`, `path` is not optional — a file-signature
+    /// subscription always names exactly one path.
+    public var workspaceFileSignatureScope: (workspaceID: String, path: String)? {
+        if case .subscribeWorkspaceFileSignature(let payload) = self { return (payload.workspaceID, payload.path) }
         return nil
     }
 
@@ -2171,6 +2223,7 @@ extension SpacesDeviceAPICommand: Codable {
         case workspaceFileWrite
         case workspaceDiff
         case subscribeWorkspaceDiffSignature
+        case subscribeWorkspaceFileSignature
         case workspaceReviewCommentList
         case workspaceReviewCommentUpsert
         case workspaceReviewCommentDelete
@@ -2265,6 +2318,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
         case .subscribeWorkspaceDiffSignature:
             self = .subscribeWorkspaceDiffSignature(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
+        case .subscribeWorkspaceFileSignature:
+            self = .subscribeWorkspaceFileSignature(try container.decode(SpacesDeviceWorkspaceFileSignatureRequest.self, forKey: key))
         case .workspaceReviewCommentList:
             self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListRequest.self, forKey: key))
         case .workspaceReviewCommentUpsert:
@@ -2341,6 +2396,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .subscribeWorkspaceDiffSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceDiffSignature)
+        case .subscribeWorkspaceFileSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceFileSignature)
         case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         case .workspaceReviewCommentDelete(let payload): try container.encode(payload, forKey: .workspaceReviewCommentDelete)

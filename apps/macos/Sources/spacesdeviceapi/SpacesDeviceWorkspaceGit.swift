@@ -24,9 +24,19 @@ enum SpacesDeviceWorkspacePathResolver {
     /// Rejects an absolute path and any `.`/`..` path component outright, then follows symlinks on the
     /// nearest existing ancestor of the target (the leaf itself may not exist yet — a file-write create —
     /// so containment cannot simply `resolvingSymlinksInPath()` the full candidate path) and asserts that
-    /// resolved ancestor is inside the workspace's own resolved root. Any remaining path components past
-    /// that ancestor cannot themselves be symlinks (they do not exist on disk), so they are reappended
-    /// literally.
+    /// resolved ancestor is inside the workspace's own resolved root.
+    ///
+    /// A DANGLING symlink (the link itself exists; its target does not) is not skipped as if it were a
+    /// plain missing component: `fileManager.fileExists` follows links, so it reports `false` for a
+    /// dangling link exactly like it does for a component that is not there at all, and treating the two
+    /// the same would let a dangling link steer a create/write outside the workspace unchecked. Instead,
+    /// each component that `fileExists` calls missing is `lstat`'d — via `attributesOfItem`, which reports
+    /// the link itself rather than its (absent) target — and, if it is a symlink, its target is substituted
+    /// in and the walk continues from there, exactly as a live symlink's target already is. A dangling link
+    /// pointing back inside the workspace must keep resolving there (an agent deleting a tracked file and
+    /// the editor's "Keep mine" recreating it through the same relative link, or a plain missing-file read,
+    /// must not break); only a dangling link that resolves outside the workspace is rejected. A link chain
+    /// is capped at `maxSymlinkSubstitutions` to bound the walk.
     ///
     /// This containment check guards an honest client against path mistakes — traversal, typos, a stale
     /// relative path — not against an adversarial process already running inside the workspace. Everything
@@ -46,9 +56,29 @@ enum SpacesDeviceWorkspacePathResolver {
         let workspaceRoot = URL(fileURLWithPath: workspaceDir, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         let candidate = URL(fileURLWithPath: relativePath, relativeTo: workspaceRoot).standardizedFileURL
 
+        // Bounds the number of dangling-symlink substitutions the walk below will follow, matching typical
+        // kernel SYMLOOP_MAX behavior for a live-symlink chain.
+        let maxSymlinkSubstitutions = 8
+        var symlinkSubstitutions = 0
+
         var existingAncestor = candidate
         var remainder: [String] = []
         while !fileManager.fileExists(atPath: existingAncestor.path) {
+            if let attributes = try? fileManager.attributesOfItem(atPath: existingAncestor.path),
+                (attributes[.type] as? FileAttributeType) == .typeSymbolicLink
+            {
+                symlinkSubstitutions += 1
+                guard symlinkSubstitutions <= maxSymlinkSubstitutions else { throw PathError.escapesWorkspace }
+
+                let target = try fileManager.destinationOfSymbolicLink(atPath: existingAncestor.path)
+                let targetURL =
+                    target.hasPrefix("/")
+                    ? URL(fileURLWithPath: target).standardizedFileURL
+                    : URL(fileURLWithPath: target, relativeTo: existingAncestor.deletingLastPathComponent()).standardizedFileURL
+                existingAncestor = remainder.reduce(targetURL) { $0.appendingPathComponent($1) }.standardizedFileURL
+                remainder = []
+                continue
+            }
             remainder.insert(existingAncestor.lastPathComponent, at: 0)
             let parent = existingAncestor.deletingLastPathComponent()
             guard parent.path != existingAncestor.path else { throw PathError.escapesWorkspace }
@@ -88,6 +118,55 @@ enum SpacesDeviceWorkspaceGitHashing {
                     _ = OpenSSL.SHA256(baseAddress, data.count, &digest)
                 }
             }
+            return digest.map { String(format: "%02x", $0) }.joined()
+        #else
+            preconditionFailure("SpacesDeviceWorkspaceGitHashing requires SHA-256 support.")
+        #endif
+    }
+
+    /// Streams `atPath` through an incremental SHA-256 hasher in fixed chunks rather than materializing
+    /// the whole file as one `Data` (unlike `sha256Hex`, used by `workspaceFileRead`/`workspaceFileWrite`,
+    /// which cap at 10 MiB because they return content over the wire). The file-signature poll only needs
+    /// the hash, never the content, so per the phase 5 spec it is not subject to that cap — this hashes a
+    /// file of any size a chunk at a time. Returns nil on any read error (the poll's provider-failure /
+    /// skip-tick signal), never throws.
+    static func streamingSHA256Hex(atPath path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let chunkSize = 1_048_576
+        #if canImport(CryptoKit)
+            var hasher = SHA256()
+            while true {
+                // `read(upToCount:)` returns nil to signal ordinary EOF, not just to report a thrown read
+                // error — collapsing both cases into "no chunk, stop" via a bare `try?` would make the loop
+                // exit at EOF before ever finalizing a hash for any file. A genuine I/O error is instead
+                // caught explicitly and reported as this function's own nil ("provider failure") result.
+                let chunk: Data?
+                do { chunk = try handle.read(upToCount: chunkSize) } catch { return nil }
+                guard let chunk, !chunk.isEmpty else { break }
+                hasher.update(data: chunk)
+            }
+            let digest = hasher.finalize()
+            return digest.map { String(format: "%02x", $0) }.joined()
+        #elseif canImport(OpenSSL)
+            var context = SHA256_CTX()
+            guard OpenSSL.SHA256_Init(&context) == 1 else { return nil }
+            while true {
+                // See the CryptoKit branch above: nil here means ordinary EOF, not a read failure.
+                let chunk: Data?
+                do { chunk = try handle.read(upToCount: chunkSize) } catch { return nil }
+                guard let chunk, !chunk.isEmpty else { break }
+                let updated = chunk.withUnsafeBytes { rawBuffer -> Int32 in
+                    guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                    return OpenSSL.SHA256_Update(&context, baseAddress, chunk.count)
+                }
+                guard updated == 1 else { return nil }
+            }
+            // A zero-byte file never enters the loop above, so `SHA256_Update` is never called for it —
+            // matching `sha256Hex`'s own empty-input special case, `SHA256_Final` alone still produces the
+            // correct empty-input digest without needing a dummy `Update` call.
+            var digest = [UInt8](repeating: 0, count: Int(SHA256_DIGEST_LENGTH))
+            guard OpenSSL.SHA256_Final(&digest, &context) == 1 else { return nil }
             return digest.map { String(format: "%02x", $0) }.joined()
         #else
             preconditionFailure("SpacesDeviceWorkspaceGitHashing requires SHA-256 support.")
@@ -181,13 +260,24 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// regardless of whether it is one — so without this check, the first git invocation inside
     /// `scopeSignature`/`buildDiff` (`rev-parse HEAD`, say) would fail and surface as a generic
     /// `gitCommandFailed`, giving the client no renderable reason to distinguish "not a repo" from any other
-    /// git failure. `RemoteWorkspaceGitClient.isRepo` already runs the canonical `rev-parse
-    /// --is-inside-work-tree` probe on its own `metadataCommandTimeout`, so this only translates a `false`
-    /// into the typed error both call sites throw. Whether to still show the Diff entry point at all for a
-    /// non-git workspace is left to the client — a UI-phase decision this error exists to make possible, not
-    /// one this daemon-side check makes on the client's behalf.
+    /// git failure. `RemoteWorkspaceGitClient.isRepoStrict` runs the canonical `rev-parse
+    /// --is-inside-work-tree` probe on its own `metadataCommandTimeout`, so this only translates a
+    /// confirmed-not-a-repo `false` into the typed error both call sites throw.
+    ///
+    /// Uses `isRepoStrict`, not `isRepo`: `isRepo`'s `try?` collapses "git could not run to completion"
+    /// (spawn failure, timeout, a wedged process) into the same `false` as git's own honest "not a
+    /// repository" answer, which would misreport a transient daemon hiccup as this function's durable 400
+    /// (`invalidArgument`) — a rejection the client's retry classification (`root.ts`'s `refreshDiff`) never
+    /// retries, since a real non-repo will fail identically forever. `isRepoStrict` keeps those two outcomes
+    /// apart: a confirmed non-repo still throws this same 400 below, while an execution failure propagates
+    /// out of this function uncaught, surfacing as the existing retryable `gitCommandFailed` →
+    /// `.internalError` shape instead.
+    ///
+    /// Whether to still show the Diff entry point at all for a non-git workspace is left to the client — a
+    /// UI-phase decision this error exists to make possible, not one this daemon-side check makes on the
+    /// client's behalf.
     static func assertIsGitRepository(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws {
-        guard gitClient.isRepo(path: workspaceDir) else {
+        guard try gitClient.isRepoStrict(path: workspaceDir) else {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 400,
                 userInfo: [NSLocalizedDescriptionKey: "Workspace directory is not a git repository."])
@@ -249,10 +339,19 @@ enum SpacesDeviceWorkspaceDiffEngine {
     static func scopeSignature(workspaceDir: String, refName: String? = nil, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil)
         throws -> String
     {
-        let headSHA = (try? gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "HEAD"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // `--verify --quiet` + `allowedExitCodes: [0, 1]` (no `try?`), not a bare `rev-parse HEAD`: an
+        // unborn HEAD (a freshly `git init`ed repo, still a valid git project — see `buildDiff`'s identical
+        // probe, which this is now textually the same command as) exits 1 with empty stdout, which is the
+        // durable, legitimate reason for `headSHA` to be `""` here. A `try?`/`?? ""` collapse would instead
+        // fold "git could not run to completion" (spawn failure, timeout) into that same `""`, silently
+        // misreporting a transient daemon hiccup as an unborn-HEAD repo and leaving `scopeSignature` stuck on
+        // a signature that never changes again until something else perturbs it. Letting the throw propagate
+        // instead surfaces as the normal retryable `gitCommandFailed` failure this whole function already
+        // exits with for `statusOutput`'s or `prefix`'s own git invocation just below.
+        let headSHA = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"],
+            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout, allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
         // `--untracked-files=all` (rather than git's default `normal`) is required here: the default
         // collapses every file inside a wholly-untracked directory into one `?? dir/` record, so editing a
         // file inside an already-untracked directory would not change this signature (the directory's own
@@ -269,10 +368,17 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // status` has no `--relative` of its own (confirmed against real git: `error: unknown option
         // 'relative'`), unlike the `diff` invocations below. `--show-prefix` answers correctly even in an
         // unborn repo (no commits yet), since it is purely CWD-based.
-        let prefix = (try? gitClient.runGitAndCapture(
+        // No `try?`/`?? ""` here (see `buildDiff`'s identical probe for the same fix and its full
+        // rationale): `assertIsGitRepository`/`buildDiff` have already confirmed this is a real repository
+        // by the time `scopeSignature` runs, so this probe should never legitimately fail — a genuine
+        // failure here must propagate as a normal thrown error rather than being folded into an empty
+        // prefix, which git also produces on a plain SUCCESS (a workspace rooted exactly at its repo root).
+        // Those are two different outcomes; collapsing them together previously let a transient failure
+        // here silently blend into the "no scoping needed" case rather than surfacing as a retryable error.
+        let prefix = try gitClient.runGitAndCapture(
             ["-C", workspaceDir, "rev-parse", "--show-prefix"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
 
         var input = Data((headSHA + "\n").utf8)
         // The common case — a workspace rooted AT the repository root, `prefix.isEmpty` — must hash
@@ -380,13 +486,26 @@ enum SpacesDeviceWorkspaceDiffEngine {
         } else {
             // Detect an unborn `HEAD` (a freshly `git init`ed repo with no commits yet — still a valid git
             // project, and `assertIsGitRepository` above already accepted it) with one cheap probe. The
-            // timeout is resolved *before* the probe itself, as its own statement outside the `try?`, so a
-            // request-deadline expiry here propagates as a hard failure instead of being swallowed and
-            // misread as "HEAD doesn't exist" — those are different conditions and must not collapse into
-            // the same fallback.
+            // timeout is resolved *before* the probe itself, as its own statement outside the probe call, so
+            // a request-deadline expiry here (`remainingTimeout` itself throwing) propagates as a hard
+            // failure instead of being misread as "HEAD doesn't exist" — those are different conditions and
+            // must not collapse into the same fallback.
+            //
+            // Beyond that already-guarded deadline-expiry case, the probe's own git invocation can still
+            // separately fail to run to completion (a timeout mid-flight, a wedged process) — a DIFFERENT
+            // condition from "HEAD legitimately does not exist yet", and the two must not collapse together
+            // either. The former `try? ... != nil` shape did exactly that: it read any failure, execution or
+            // semantic, as `headExists == false`, silently reporting a transient daemon hiccup as an unborn
+            // repo and diffing against the empty tree instead of surfacing a retryable error. `--verify
+            // --quiet` + `allowedExitCodes: [0, 1]` (no `try?`) keeps the two apart the same way
+            // `assertRefIsResolvable` already does: exit 0 with the resolved SHA means HEAD exists, exit 1
+            // with empty stdout is git's own honest "no such ref" for an unborn HEAD, and anything else —
+            // any other exit code, or a could-not-run/timeout condition — throws normally, propagating as the
+            // existing retryable `gitCommandFailed` → `.internalError` wire shape.
             let headProbeTimeout = try remainingTimeout(start: start)
-            let headExists =
-                (try? gitClient.runGitAndCapture(["-C", workspaceDir, "rev-parse", "--verify", "HEAD"], timeout: headProbeTimeout)) != nil
+            let headProbeResult = try gitClient.runGitAndCapture(
+                ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"], timeout: headProbeTimeout, allowedExitCodes: [0, 1])
+            let headExists = !headProbeResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if headExists {
                 compareRef = "HEAD"
             } else {
@@ -468,9 +587,17 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // subtree-rooted workspace needs its porcelain paths scoped and stripped by hand via the repo
         // prefix. A no-op when the workspace IS the repo root (`prefix.isEmpty`), matching the enumeration
         // above.
-        let prefix = (try? gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start)))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        //
+        // This must not be a `try?`-collapsed probe: `--show-prefix` always exits 0 for any valid workspace
+        // inside a repo, so there is no legitimate semantic negative to swallow here, only execution failure
+        // (timeout, could-not-run). The former `try? ... ?? ""` shape read that failure as "the workspace IS
+        // the repo root" — silently producing an UNSCOPED enumeration for subtree workspaces (every path in
+        // the whole repo, not just the workspace's subtree, resolved against the wrong root) instead of a
+        // visible, retryable error. Let it throw and propagate as the existing `gitCommandFailed` →
+        // `.internalError` shape instead.
+        let prefix = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let scopedStatusEntries =
             prefix.isEmpty ? changedEntries(fromPorcelainZ: statusOutput) : subtreeScoped(changedEntries(fromPorcelainZ: statusOutput), prefix: prefix)
         // `--untracked-files=all` should mean every `??` record is already a file, never a directory, but

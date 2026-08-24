@@ -32,6 +32,7 @@ enum CodePaneMode: Equatable {
     private static let initEventName = "spaces:init"
     private static let themeEventName = "spaces:theme"
     private static let diffSignatureEventName = "spaces:diffSignature"
+    private static let fileSignatureEventName = "spaces:fileSignature"
     private static let agentsEventName = "spaces:agents"
 
     let descriptor: PaneContentDescriptor
@@ -122,6 +123,41 @@ enum CodePaneMode: Equatable {
     /// rather than being redialed every second for as long as the pane stays open. Internal for the
     /// same reason as the floor above.
     var diffSignatureReconnectCap: Duration = .seconds(30)
+
+    /// Bumped on every `workspaceFileRead` call; mirrors `latestDiffRequestToken` exactly, but for the
+    /// file-signature stream: only the completion of the latest read is allowed to (re)point
+    /// `resubscribeFileSignature` at its path.
+    private var latestFileReadRequestToken = 0
+
+    /// The workspace-relative path the live file-signature stream is pointed at, or `nil` when nothing
+    /// is subscribed. Unlike `DiffSignatureScope`, a plain `String?` is enough here: a path (unlike a
+    /// `refName`) is never itself a legitimate "no scope" value, so `nil` unambiguously means "not
+    /// subscribed" rather than needing a wrapper case. Every `workspaceFileRead` call is the signal to
+    /// (re)point this — mirrors `subscribedScope`'s doc comment exactly, substituting
+    /// `subscribeFileSignature`'s architecture (the web app's bridge method never messages Swift; see
+    /// `CodePaneWeb/src/bridge/realBridge.ts`'s doc comment) for `subscribeDiffSignature`'s.
+    private var subscribedFilePath: String?
+
+    /// Mirrors `SpacesDeviceAPIServer.WorkspaceFileSignatureValue`: Swift tuples aren't `Equatable`, and
+    /// this needs to be compared as a whole (`sha256` alone can't distinguish "still missing" from "a
+    /// brand-new empty file", so both fields matter) to decide whether to forward a frame.
+    private struct FileSignatureValue: Equatable {
+        let sha256: String?
+        let missing: Bool
+    }
+    /// The `(sha256, missing)` pair of the last file read the web app is known to have fetched for the
+    /// current path — mirrors `lastActedScopeSignature`/`lastActedScope` exactly.
+    private var lastActedFileSignatureValue: FileSignatureValue?
+    private var lastActedFilePath: String?
+    private var fileSignatureStream: (any CodePaneFileSignatureStreamHandle)?
+    /// Mirrors `diffSignatureSubscriptionGeneration` exactly.
+    private var fileSignatureSubscriptionGeneration = 0
+    /// Mirrors `diffSignatureReconnectFailures` exactly.
+    private var fileSignatureReconnectFailures = 0
+    /// Mirrors `diffSignatureReconnectFloor`/`diffSignatureReconnectCap` exactly — internal so a test
+    /// can pin these to a short delay too.
+    var fileSignatureReconnectFloor: Duration = .seconds(1)
+    var fileSignatureReconnectCap: Duration = .seconds(30)
 
     /// The web app's last-known open-editor snapshot, pushed via the `editorStateChanged`
     /// notification (see `CodePaneBridge.EditorState`). Lives on the controller — which survives
@@ -368,6 +404,15 @@ enum CodePaneMode: Equatable {
         // pass) and would reopen a daemon subscription for a pane the user is no longer looking at —
         // and a fast reactivate could then inherit that stale stream ahead of its own fresh fetch.
         latestDiffRequestToken += 1
+        // Mirrors the diff-signature reset block immediately above, for the file-signature stream.
+        fileSignatureStream?.stop()
+        fileSignatureStream = nil
+        subscribedFilePath = nil
+        lastActedFileSignatureValue = nil
+        lastActedFilePath = nil
+        fileSignatureSubscriptionGeneration += 1
+        fileSignatureReconnectFailures = 0
+        latestFileReadRequestToken += 1
     }
 
     /// Pulls the web app's live editor snapshot before the page underneath it disappears, closing the
@@ -692,6 +737,11 @@ enum CodePaneMode: Equatable {
             // then rides the web app's own bounded-backoff `refreshDiff` retry (see root.ts) until a
             // later successful fetch calls `resubscribeDiffSignature` for the new scope. Narrow and
             // self-healing, so left as-is rather than adding a second invalidation path for it.
+            //
+            // `performFileRead`'s identical-shaped bump does NOT accept this same edge case — a failed
+            // file open restores the previous file's monitoring instead, since the editor has no
+            // equivalent fetch-retry loop of its own. See
+            // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment for the full asymmetry.
             if subscribedScope != .scope(refName) {
                 diffSignatureSubscriptionGeneration += 1
                 diffSignatureReconnectFailures = 0
@@ -725,26 +775,98 @@ enum CodePaneMode: Equatable {
                 error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
             return
         }
+        // Every workspaceFileRead call claims "latest read"; a completion that isn't the latest one
+        // anymore must not retarget the live file-signature stream below (mirrors
+        // `latestDiffRequestToken`'s doc comment).
+        latestFileReadRequestToken += 1
+        let requestToken = latestFileReadRequestToken
+        // Whether THIS dispatch is changing the monitored path, captured before the conditional bump
+        // below runs — a failed open below only needs to restore anything when it was the one that
+        // just tore down the previous path's monitoring in the first place (see
+        // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment).
+        let pathChanged = subscribedFilePath != path
+        // Mirrors `performWorkspaceDiff`'s `diffSignatureSubscriptionGeneration` bump: invalidate a
+        // pending old-path backoff retry HERE, at dispatch time, only on an actual path change — see
+        // that call site's doc comment for why this must be conditional, not unconditional.
+        if pathChanged {
+            fileSignatureSubscriptionGeneration += 1
+            fileSignatureReconnectFailures = 0
+        }
+        // The generation as of this dispatch's bump (a no-op read of the current value when
+        // `pathChanged` is false). A failed open below only restores if this is still the current
+        // generation when it runs — see `restoreFileSignatureMonitoringAfterFailedOpen`.
+        let dispatchGeneration = fileSignatureSubscriptionGeneration
         let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
         Task { [weak self] in
-            let outcome = await Task.detached(priority: .userInitiated) { () -> Result<SpacesDeviceWorkspaceFileReadResult, Error> in
-                do { return .success(try SpacesDeviceClient.workspaceFileRead(workspaceID: workspaceID, relativePath: path, device: device)) }
-                catch { return .failure(error) }
-            }.value
-            guard let self else { return }
-            switch outcome {
-            case .success(let result):
+            do {
+                let result = try await deviceGateway.workspaceFileRead(workspaceID: workspaceID, relativePath: path, device: device)
+                guard let self else { return }
                 switch CodePaneBridge.fileReadPayload(result) {
-                case .success(let payload): self.reply(id: id, generation: generation, result: payload)
-                case .failure(let error): self.reply(id: id, generation: generation, error: error)
+                case .success(let payload):
+                    self.reply(id: id, generation: generation, result: payload)
+                    guard self.latestFileReadRequestToken == requestToken else { return }
+                    // Recorded before resubscribing, mirroring `performWorkspaceDiff`'s
+                    // `lastActedScopeSignature`/`lastActedScope` bookkeeping.
+                    self.lastActedFileSignatureValue = FileSignatureValue(sha256: result.sha256, missing: false)
+                    self.lastActedFilePath = path
+                    self.resubscribeFileSignature(path: path, device: device)
+                case .failure(let error):
+                    self.reply(id: id, generation: generation, error: error)
+                    self.restoreFileSignatureMonitoringAfterFailedOpen(
+                        pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
                 }
-            case .failure(let error):
+            } catch {
+                guard let self else { return }
                 self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self.restoreFileSignatureMonitoringAfterFailedOpen(
+                    pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
             }
         }
     }
 
-    private func performFileWrite(path: String, content: String, baseSHA256: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+    /// Restores file-signature monitoring for the PREVIOUSLY-open file after `performFileRead` fails to
+    /// open a new one (either `fileReadPayload`'s `.failure` arm, or the outer `catch`) — called from
+    /// both failure arms with the `pathChanged`/`dispatchGeneration` values `performFileRead` captured at
+    /// dispatch time.
+    ///
+    /// The stranding this undoes: opening file B while A is open trips `performFileRead`'s dispatch-time
+    /// generation bump (conditional on the path actually changing), which staled A's live stream's
+    /// `onDisconnect` closure and cancelled any pending backoff retry for A. If B's read then fails,
+    /// nothing else would ever restore A — no resubscribe runs, so external-change monitoring for A
+    /// silently dies for good even though the web pane still shows A (a failed open keeps the prior file
+    /// displayed). Restoring here re-arms it, and the fresh `resubscribeFileSignature` call below installs
+    /// a current-generation `onDisconnect`/backoff closure, closing the stale-handler window too.
+    ///
+    /// Deliberately asymmetric with `performWorkspaceDiff`'s twin scope-change bump, which leaves a
+    /// disconnect-during-the-fetch-window stream stale as an accepted edge (see the comment there): the
+    /// web app's diff view recovers on its own via its bounded-backoff `refreshDiff` retry loop, so a
+    /// silently-dead diff-signature stream self-heals the next time a refetch runs. The editor has no
+    /// equivalent fetch-retry loop — nothing else will ever re-arm external-change monitoring for a file
+    /// still open in the pane — so a failed open must proactively restore it here instead of relying on
+    /// the web side. See that comment for the reverse cross-reference.
+    private func restoreFileSignatureMonitoringAfterFailedOpen(pathChanged: Bool, dispatchGeneration: Int, device: SpacesPairedDeviceRecord) {
+        // Not this dispatch's path change (nothing was torn down for it to restore), or a newer
+        // path-changing dispatch has since bumped the generation again and its own success/failure arm
+        // now owns this state — either way, this stale completion must not interfere.
+        guard pathChanged, fileSignatureSubscriptionGeneration == dispatchGeneration else { return }
+        // `lastActedFilePath` is still the previous file's path in both stranding sub-cases: the
+        // live-stream case (nothing on this failed path ever clears it), and the disconnected-with-
+        // pending-retry case (cleared only by a different-path resubscribe, which never ran since this
+        // dispatch's read failed). `nil` means no file was ever successfully read yet this pane's life —
+        // there is nothing to restore.
+        guard let restorePath = lastActedFilePath else { return }
+        // Stop and drop whatever is (or isn't) currently installed, then resubscribe fresh. Clearing
+        // `subscribedFilePath` first is what lets `resubscribeFileSignature`'s own `!= path` guard pass.
+        // Restoring over a still-healthy A stream (failure arrived before any disconnect ever happened)
+        // just stops and reopens it — brief, harmless churn, not special-cased away.
+        fileSignatureStream?.stop()
+        fileSignatureStream = nil
+        subscribedFilePath = nil
+        resubscribeFileSignature(path: restorePath, device: device)
+    }
+
+    private func performFileWrite(path: String, content: String, baseSHA256: String?, id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
                 id: id, generation: generation,
@@ -1096,6 +1218,111 @@ enum CodePaneMode: Equatable {
         // (below) the web app never saw this signature, so a later identical frame must still forward
         // once it is.
         lastActedScopeSignature = frame.scopeSignature
+        scriptEvaluator.evaluateCodePaneScript(script)
+    }
+
+    /// (Re)points the live file-signature stream at `path` if it isn't already there. A repeat
+    /// `workspaceFileRead` call for the same path (e.g. a save's own read-back, or a redundant refetch)
+    /// is a no-op here — only actually opening a different file tears down and reopens the stream.
+    /// Mirrors `resubscribeDiffSignature` exactly.
+    private func resubscribeFileSignature(path: String, device: SpacesPairedDeviceRecord) {
+        guard subscribedFilePath != path else { return }
+        if lastActedFilePath != path {
+            lastActedFileSignatureValue = nil
+            lastActedFilePath = nil
+        }
+        fileSignatureStream?.stop()
+        fileSignatureStream = nil
+        subscribedFilePath = path
+        fileSignatureSubscriptionGeneration += 1
+        let subscriptionGeneration = fileSignatureSubscriptionGeneration
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        let onFrame: @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void = { [weak self] frame in
+            Task { @MainActor in self?.handleFileSignatureFrame(frame) }
+        }
+        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.handleFileSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
+        }
+        Task { [weak self] in
+            do {
+                let client = try await deviceGateway.subscribeWorkspaceFileSignature(
+                    workspaceID: workspaceID, relativePath: path, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                // Same staleness concern `resubscribeDiffSignature`'s success arm guards against: a
+                // rapid A → B → A path-change sequence can land a stale A attempt's completion after a
+                // newer A attempt has already taken over, so `subscriptionGeneration` (identity of this
+                // one ATTEMPT), not just the target path, is what tells them apart.
+                guard let self, self.subscribedFilePath == path, self.fileSignatureSubscriptionGeneration == subscriptionGeneration,
+                    self.webView != nil
+                else {
+                    client.stop()
+                    return
+                }
+                self.fileSignatureStream = client
+                self.fileSignatureReconnectFailures = 0
+            } catch {
+                // Subscribing is a best-effort live-refresh add-on; a failure here doesn't affect the
+                // read result already delivered, so nothing more is surfaced to the web app beyond
+                // scheduling a retry (below) — mirrors `resubscribeDiffSignature`'s failure arm exactly.
+                guard let self, self.subscribedFilePath == path, self.fileSignatureSubscriptionGeneration == subscriptionGeneration else {
+                    return
+                }
+                self.subscribedFilePath = nil
+                self.scheduleFileSignatureReconnect(path: path, generation: subscriptionGeneration)
+            }
+        }
+    }
+
+    /// Clears `subscribedFilePath`/`fileSignatureStream` after a real disconnect and starts a
+    /// bounded-backoff retry loop. Mirrors `handleDiffSignatureDisconnect` exactly.
+    private func handleFileSignatureDisconnect(subscriptionGeneration: Int) {
+        guard subscriptionGeneration == fileSignatureSubscriptionGeneration else { return }
+        fileSignatureStream = nil
+        // Capture before clearing: the scheduled retry below needs the dropped subscription's path to
+        // retarget the same file once the backoff elapses.
+        let path = subscribedFilePath
+        subscribedFilePath = nil
+        guard let path else { return }
+        scheduleFileSignatureReconnect(path: path, generation: subscriptionGeneration)
+    }
+
+    /// Schedules the next reconnect attempt for the file-signature stream on the same bounded-
+    /// exponential curve `scheduleDiffSignatureReconnect` uses (see its doc comment), against this
+    /// stream's own floor/cap/failure-count fields.
+    private func scheduleFileSignatureReconnect(path: String, generation: Int) {
+        fileSignatureReconnectFailures += 1
+        let delay = RemoteConnectionBackoff.delay(
+            consecutiveFailures: fileSignatureReconnectFailures, floor: fileSignatureReconnectFloor, cap: fileSignatureReconnectCap,
+            jitterFraction: 0)
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, self.fileSignatureSubscriptionGeneration == generation else { return }
+            // Mirrors `scheduleDiffSignatureReconnect`'s device-unavailable reschedule: the device is
+            // nil by contract for exactly the window a daemon restart's disconnect fires retries into.
+            guard let hosting = self.hosting, let device = hosting.codePaneDevice(workspaceID: self.workspaceID) else {
+                self.scheduleFileSignatureReconnect(path: path, generation: generation)
+                return
+            }
+            self.resubscribeFileSignature(path: path, device: device)
+        }
+    }
+
+    /// Invariant: a frame is forwarded iff its `(sha256, missing)` pair differs from the last file read
+    /// the web app is known to have fetched for the current path (`lastActedFileSignatureValue`).
+    /// Mirrors `handleDiffSignatureFrame` exactly.
+    private func handleFileSignatureFrame(_ frame: SpacesDeviceWorkspaceFileSignatureFrame) {
+        let value = FileSignatureValue(sha256: frame.sha256, missing: frame.missing)
+        guard value != lastActedFileSignatureValue else { return }
+        guard isReady, let scriptEvaluator else { return }
+        guard
+            let script = CodePaneBridge.dispatchEventScript(
+                name: Self.fileSignatureEventName,
+                detail: CodePaneBridge.FileSignaturePayload(path: frame.path, sha256: frame.sha256, missing: frame.missing))
+        else { return }
+        // Only recorded once the frame is actually about to be forwarded: if the page isn't ready
+        // (above) the web app never saw this value, so a later identical frame must still forward once
+        // it is.
+        lastActedFileSignatureValue = value
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 

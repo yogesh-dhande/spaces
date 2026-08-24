@@ -12,6 +12,7 @@ import {
   CodePaneMode,
   DiffScope,
   DiffSignatureListener,
+  FileSignatureListener,
   ReviewCommentSendEntry,
   ReviewCommentUpsertInput,
   SpacesBridge,
@@ -52,6 +53,12 @@ function scopeKey(scope: DiffScope): string {
 export class MockSpacesBridge implements SpacesBridge {
   private version = 0;
   private readonly listeners = new Set<DiffSignatureListener>();
+  private readonly fileSignatureListeners = new Set<FileSignatureListener>();
+  /** The path most recently passed to `workspaceFileRead`: this is what the harness's "currently
+   *  open in the editor" file is, for `simulateFileChange`/`simulateFileDeleted` to act against —
+   *  mirroring how the real host tracks which path its one live `spaces:fileSignature` stream
+   *  points at (driven by `workspaceFileRead` completions, per types.ts's doc comment). */
+  private currentReadPath: string | undefined;
   private readonly files = new Map<string, { content: string; sha256: string }>(
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
   );
@@ -94,6 +101,10 @@ export class MockSpacesBridge implements SpacesBridge {
   }
 
   async workspaceFileRead(path: string): Promise<WorkspaceFileReadResult> {
+    // Track this as the harness's "currently open" path regardless of outcome below, mirroring
+    // the real host: a read attempt (even one that turns out notFound) is what points the one
+    // live file-signature stream at this path.
+    this.currentReadPath = path;
     const entry = this.files.get(path);
     if (!entry) {
       throw new SpacesBridgeError("notFound", `No such file in the mock workspace: ${path}`);
@@ -107,10 +118,16 @@ export class MockSpacesBridge implements SpacesBridge {
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
     const entry = this.files.get(path);
-    if (!entry) {
-      throw new SpacesBridgeError("notFound", `No such file in the mock workspace: ${path}`);
-    }
-    if (entry.sha256 !== options.baseSHA256) {
+    if (options.baseSHA256 === undefined) {
+      // "Create" convention: succeeds only if nothing currently exists at this path. Used by the
+      // conflict compare view's "Keep mine" action to recreate a file deleted on disk.
+      if (entry) {
+        return delay({ conflict: true, currentSHA256: entry.sha256 });
+      }
+    } else if (!entry) {
+      // The file was deleted on disk after it was last read — nothing to compare hashes against.
+      return delay({ conflict: true, fileMissing: true });
+    } else if (entry.sha256 !== options.baseSHA256) {
       return delay({ conflict: true, currentSHA256: entry.sha256 });
     }
     const sha256 = fixtureHash(content);
@@ -127,6 +144,38 @@ export class MockSpacesBridge implements SpacesBridge {
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  subscribeFileSignature(_path: string, listener: FileSignatureListener): Unsubscribe {
+    this.fileSignatureListeners.add(listener);
+    return () => this.fileSignatureListeners.delete(listener);
+  }
+
+  /** Dev-harness-only control, not part of `SpacesBridge`: mutates the mock's file-content map for
+   *  whatever path is currently open (see `currentReadPath`) to `newContent`, and fires every
+   *  `subscribeFileSignature` listener with the new hash — simulating a disk edit made outside the
+   *  pane (e.g. another editor, or an agent). A no-op if nothing has been read yet. */
+  simulateFileChange(newContent: string): void {
+    const path = this.currentReadPath;
+    if (path === undefined) return;
+    const sha256 = fixtureHash(newContent);
+    this.files.set(path, { content: newContent, sha256 });
+    for (const listener of this.fileSignatureListeners) {
+      listener({ path, sha256, missing: false });
+    }
+  }
+
+  /** Dev-harness-only control, not part of `SpacesBridge`: removes whatever path is currently open
+   *  (see `currentReadPath`) from the mock's file-content map, and fires every
+   *  `subscribeFileSignature` listener with `missing: true` — simulating the file being deleted on
+   *  disk outside the pane. A no-op if nothing has been read yet. */
+  simulateFileDeleted(): void {
+    const path = this.currentReadPath;
+    if (path === undefined) return;
+    this.files.delete(path);
+    for (const listener of this.fileSignatureListeners) {
+      listener({ path, sha256: undefined, missing: true });
+    }
   }
 
   async reviewCommentList(): Promise<SpacesReviewComment[]> {

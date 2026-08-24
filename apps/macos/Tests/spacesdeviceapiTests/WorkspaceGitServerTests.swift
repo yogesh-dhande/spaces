@@ -302,6 +302,65 @@
             }
         }
 
+        /// Round-3 codex finding: a dangling symlink (the link exists; its target does not) whose target
+        /// names a location OUTSIDE the workspace must not let a create-CAS write land there. Before the
+        /// fix, `fileExists` (which follows links) reported the dangling link as a plain missing component,
+        /// so the walk reappended the remaining path literally under the workspace root and containment
+        /// passed against the wrong (workspace-relative) candidate while the actual write followed the link
+        /// straight outside.
+        func testWorkspaceFileWriteThroughADanglingSymlinkToOutsideTheWorkspaceRejectsItAndCreatesNothing() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-outside-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: outside) }
+                let outsideTarget = outside.appendingPathComponent("new.txt")
+                try FileManager.default.createSymbolicLink(at: repo.appendingPathComponent("dangling-outside-link"), withDestinationURL: outsideTarget)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "dangling-outside-link",
+                                base64Data: Data("should not land".utf8).base64EncodedString(), expectedSHA256: nil)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: outsideTarget.path), "the write must not have created anything outside the workspace")
+            }
+        }
+
+        /// Companion to the outside case above: a dangling symlink whose target names a location INSIDE the
+        /// workspace must keep resolving there so the editor's "Keep mine" recreate (and a plain read of a
+        /// deleted-but-still-symlinked file) keeps working.
+        func testWorkspaceFileReadThenWriteThroughADanglingSymlinkToInsideTheWorkspaceRecreatesTheTarget() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("dangling-inside-link").path, withDestinationPath: "recreated.md")
+
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "dangling-inside-link")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(readResponse.ok)
+                XCTAssertEqual(readResponse.errorCode, .notFound, "the link's target does not exist yet")
+
+                let content = Data("keep mine".utf8)
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "dangling-inside-link", base64Data: content.base64EncodedString(),
+                                expectedSHA256: nil)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(writeResponse.ok, writeResponse.message)
+                XCTAssertTrue(try XCTUnwrap(writeResponse.workspaceFileWrite).didWrite)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("recreated.md")), content, "the write must have landed inside the workspace, at the link's relative target")
+            }
+        }
+
         func testWorkspaceFileWriteOnAnUnknownWorkspaceReturnsNotFound() throws {
             try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
@@ -558,6 +617,157 @@
             XCTAssertNil(file.patch, "a truncated entry must carry no patch")
         }
 
+        /// round-17 Fix B1: `assertIsGitRepository` now calls `isRepoStrict` (which throws on a could-not-run
+        /// probe) instead of `isRepo` (which folded that into a plain `false`), so an execution failure must
+        /// surface as the existing retryable `gitCommandFailed` → `.internalError` shape rather than the
+        /// permanent "not a git repository" 400 a real non-repo gets. `RemoteWorkspaceGitClient` has no fake
+        /// git executable errors to inject directly, but its `gitExecutable` initializer parameter is already
+        /// an established test seam (see `RemoteWorkspaceGitClientTests.swift`'s `/bin/sleep` and
+        /// stub-script substitutions) for exactly this: this stub ignores its arguments entirely and just
+        /// hangs, so whatever `isRepoStrict` invokes always times out and gets killed rather than exiting
+        /// with any real status — a clean simulation of "git could not run to completion" that is agnostic to
+        /// the exact arguments `isRepoStrict` happens to pass. `metadataCommandTimeout` is shortened so the
+        /// kill (and this test) happens promptly rather than waiting out the client's default 2s.
+        ///
+        /// The real non-repo regression (a confirmed non-repo directory must still report `.invalidArgument`)
+        /// is already covered end-to-end by `testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument` above,
+        /// which exercises this same `assertIsGitRepository` call through the real server path against a real
+        /// plain (non-git) directory — that test would have failed to distinguish this bug (both outcomes
+        /// look identical, a 400), which is exactly why this new test exists alongside it.
+        func testAssertIsGitRepositoryPropagatesAnExecutionFailureInsteadOfMisclassifyingItAsANotARepo() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-assert-is-git-repository-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let scriptURL = root.appendingPathComponent("stub-hangs-forever.sh")
+            try "#!/bin/sh\nsleep 30\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path, metadataCommandTimeout: 0.3)
+            XCTAssertThrowsError(try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: root.path, gitClient: client)) { error in
+                let nsError = error as NSError
+                XCTAssertFalse(
+                    nsError.domain == "SpacesDeviceAPIServer" && nsError.code == 400,
+                    "an execution failure must not be misreported as the not-a-repo 400, got \(error)")
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not invalidArgument")
+            }
+        }
+
+        /// round-17 Fix B2: `buildDiff`'s HEAD-existence probe (and `scopeSignature`'s parallel `headSHA`
+        /// probe, now the textually identical `rev-parse --verify --quiet HEAD` invocation) must throw on an
+        /// execution failure rather than collapsing it into "HEAD does not exist" (an unborn repo). `buildDiff`
+        /// calls `scopeSignature` first, so in this fixture the throw actually originates from
+        /// `scopeSignature`'s copy of the probe — that is expected and, since both call sites now share the
+        /// exact same command shape, this is valid regression coverage for both: a fix to only one of them
+        /// (or a future regression reintroducing `try?` in either) would be caught here.
+        ///
+        /// This stub script hangs ONLY when it recognizes this specific `rev-parse --verify --quiet HEAD`
+        /// invocation and otherwise `exec`s the real `git`, so the repo fixture itself (a real, born commit)
+        /// is not needed for this probe to be reachable — a real repo is used anyway for realism and so this
+        /// test would also catch a regression that made some OTHER probe in the same call path start
+        /// misbehaving instead. `deadlineStart` is set to leave roughly 1s of the shared request-wide budget,
+        /// so the hang is killed quickly rather than waiting out the full `diffBuildDeadline`.
+        ///
+        /// The real unborn-HEAD regression (a genuinely HEAD-less repo must still diff against the empty
+        /// tree) is already covered by `SpacesDeviceWorkspaceGitTests.swift`'s
+        /// `buildDiffOnAnUnbornRepoReportsAStagedAdditionAndAnUntrackedFile`.
+        func testBuildDiffHeadExistenceProbeExecutionFailurePropagatesAsInternalErrorInsteadOfMisclassifyingAsUnbornHead() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-head-probe-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let scriptURL = repo.appendingPathComponent("stub-hangs-on-head-verify.sh")
+            let script = """
+                #!/bin/sh
+                if [ "$3" = "rev-parse" ] && [ "$4" = "--verify" ] && [ "$5" = "--quiet" ] && [ "$6" = "HEAD" ]; then
+                    sleep 30
+                    exit 0
+                fi
+                exec git "$@"
+                """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+            let deadlineStart = Date().addingTimeInterval(-44)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the HEAD-probe execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not a misclassified unborn-HEAD outcome")
+            }
+        }
+
+        /// round-17 Fix B3: `buildDiff`'s workspace-prefix (`--show-prefix`) probe (and `scopeSignature`'s
+        /// parallel `prefix` probe, now the textually identical invocation) must throw on an execution
+        /// failure rather than collapsing it into `""` — which used to silently produce an UNSCOPED
+        /// enumeration for subtree workspaces (every path in the whole repo resolved against the wrong root,
+        /// not just the workspace's subtree). As with the B2 test above, `buildDiff` calls `scopeSignature`
+        /// first, so the throw actually originates from `scopeSignature`'s copy of the probe here too; that is
+        /// valid shared coverage for the same reason.
+        ///
+        /// This stub script lets `rev-parse --verify --quiet HEAD` and `status --porcelain -z
+        /// --untracked-files=all` run against the real repo normally, and hangs only on the `--show-prefix`
+        /// invocation, isolating the fix under test from the probes ahead of it in `scopeSignature`.
+        ///
+        /// The real subtree-scoping regression (a subtree workspace's enumeration and patches stay
+        /// workspace-relative) is already covered by `SpacesDeviceWorkspaceGitTests.swift`'s
+        /// `trackedModificationInsideTheSubtreeReportsOneWorkspaceRelativeEntryWithAWorkspaceRelativePatch` and
+        /// its sibling subtree tests.
+        func testBuildDiffShowPrefixProbeExecutionFailurePropagatesAsInternalErrorInsteadOfSilentlyUnscoping() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-prefix-probe-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let scriptURL = repo.appendingPathComponent("stub-hangs-on-show-prefix.sh")
+            let script = """
+                #!/bin/sh
+                if [ "$3" = "rev-parse" ] && [ "$4" = "--show-prefix" ]; then
+                    sleep 30
+                    exit 0
+                fi
+                exec git "$@"
+                """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+            let deadlineStart = Date().addingTimeInterval(-44)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the show-prefix execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not a silently-unscoped empty prefix")
+            }
+        }
+
         /// A `subscribeWorkspaceDiffSignature` subscription's `pollTimer` (`WorkspaceDiffSignatureSubscription`
         /// in `SpacesDeviceAPIServer`) is created suspended and only resumed once the scope's own tiny
         /// Unix-socket producer (`DeviceOverviewStreamServer`) starts successfully; releasing a still-suspended
@@ -744,6 +954,250 @@
                 "the first tick must feed exactly one provider call to both the change-compare and the broadcast frame")
         }
 
+        // MARK: - workspaceFileSignature subscription (Phase 5 Part A)
+
+        /// The connect-time frame (`WorkspaceFileSignatureSubscription`'s `lineProvider` computing fresh since
+        /// `latestValueBox` is still nil pre-first-tick) must reflect the file's actual on-disk content at
+        /// subscribe time — the first frame any subscriber ever receives.
+        func testSubscribeWorkspaceFileSignatureDeliversAnInitialFrameMatchingTheFilesCurrentContent() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("hello workspace".utf8))
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let firstFrameArrived = expectation(description: "the initial connect-time frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "README.md", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        firstFrameArrived.fulfill()
+                    },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [firstFrameArrived], timeout: 5)
+
+                let frame = try XCTUnwrap(frames.values.first)
+                XCTAssertEqual(frame.sha256, expectedSHA)
+                XCTAssertFalse(frame.missing)
+            }
+        }
+
+        /// A poll tick after the file's content changes on disk must deliver a second frame carrying the
+        /// updated hash — the ordinary "changed content" case `subscribeWorkspaceFileSignature` exists for.
+        func testSubscribeWorkspaceFileSignatureDeliversAChangedFrameAfterTheFileIsEdited() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let secondFrameArrived = expectation(description: "the second, changed-content frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "README.md", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        if frames.count == 2 { secondFrameArrived.fulfill() }
+                    },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+
+                // Give the initial connect-time frame a moment to land before mutating the file, so the edit
+                // lands after that frame instead of racing it.
+                Thread.sleep(forTimeInterval: 0.5)
+                try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                wait(for: [secondFrameArrived], timeout: 5)
+
+                // Guard the index rather than assume `wait(for:timeout:)` actually saw both frames: a timeout
+                // there does not stop this code from running, and indexing an out-of-range element would
+                // crash the whole test process (taking every later test down with it) instead of failing just
+                // this one.
+                guard frames.values.count > 1 else {
+                    XCTFail("expected at least 2 frames, got \(frames.values.count)")
+                    return
+                }
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("edited content".utf8))
+                XCTAssertEqual(frames.values[1].sha256, expectedSHA)
+                XCTAssertFalse(frames.values[1].missing)
+            }
+        }
+
+        /// Round-tripped through the same "construct the subscription directly + a raw socket reader" pattern
+        /// `testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheTickComparedAndRecorded` above uses:
+        /// an injected `signatureProvider` returning an unchanged value across multiple poll ticks must not
+        /// rebroadcast beyond the first poll tick (divergence #1's `tick`-always-increments rule means the
+        /// provider IS still called every tick; only the broadcast itself is suppressed for an unchanged
+        /// value). `lastBroadcastValue` starts nil, so the connect-time frame's own fresh computation never
+        /// updates it — the first poll tick's compare is always against nil and so always "changes" and
+        /// broadcasts once (see `WorkspaceFileSignatureSubscription`'s own doc comment), even though the
+        /// value it carries is identical to the connect-time frame's. Only the SECOND tick onward, once
+        /// `lastBroadcastValue` actually holds a real value to compare against, is where a truly unchanged
+        /// value stops rebroadcasting — which is what this test's 4.5s window (covering exactly two ticks)
+        /// is verifying: 2 total frames (connect-time + first-tick), never a 3rd from the second tick.
+        func testWorkspaceFileSignatureSubscriptionDoesNotRebroadcastAnUnchangedValueAcrossMultiplePolls() throws {
+            let scope = SpacesDeviceAPIServer.WorkspaceFileScope(workspaceID: "workspace-\(UUID().uuidString)", path: "unchanged.txt")
+            let socketPath = try TerminalServicePaths.workspaceFileSignatureSocketPath(workspaceID: scope.workspaceID, path: scope.path)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceFileSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-file-signature.\(scope.workspaceID).\(scope.path)"),
+                signatureProvider: { _ in
+                    providerCallCounter.increment()
+                    return SpacesDeviceAPIServer.WorkspaceFileSignatureValue(sha256: "same-sha", missing: false)
+                })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            let receivedFrames = FileSignatureFrameCollector()
+            let client = try RawWorkspaceFileSignatureSocketClient(socketPath: socketPath) { frame in receivedFrames.append(frame) }
+            defer { client.stop() }
+
+            // Two poll ticks (t=2s, t=4s) fire in this window. The first tick always broadcasts once (its
+            // compare is against a still-nil `lastBroadcastValue`, even though the value itself is
+            // unchanged from the connect-time frame); the second tick's compare is against a real recorded
+            // value and so must not rebroadcast. Expected total: connect-time frame + first-tick frame = 2.
+            Thread.sleep(forTimeInterval: 4.5)
+
+            XCTAssertEqual(
+                receivedFrames.count, 2,
+                "expected exactly the connect-time frame plus the first poll tick's mandatory broadcast; a 3rd frame would mean the second tick "
+                    + "rebroadcast an unchanged value")
+            XCTAssertGreaterThanOrEqual(
+                providerCallCounter.value, 2, "the poll timer must still be calling the provider each tick even though it isn't rebroadcasting")
+        }
+
+        /// Guards `computeWorkspaceFileScopeSignature`'s stat-before-hash type guard (Phase 5 review round-1
+        /// Fix 2), through the real production path rather than an injected provider: a subscribed regular
+        /// file replaced on disk by a FIFO must have its poll tick skipped silently (no frame, no crash) —
+        /// the type guard refuses the FIFO before the hashing open that would otherwise block this scope's
+        /// `streamQueue` forever — and, crucially, a LATER tick once the path is a regular file again must
+        /// still land and broadcast normally. That final broadcast is the actual liveness proof: if the FIFO
+        /// tick had wedged the queue instead of merely skipping, this restore would never produce a frame and
+        /// the test would hang instead of failing cleanly.
+        func testSubscribeWorkspaceFileSignatureSkipsATickWhenTheFileIsReplacedByAFIFOAndRecoversAfterwards() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                let path = repo.appendingPathComponent("swap.txt")
+                try "hello workspace".write(to: path, atomically: true, encoding: .utf8)
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "swap.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in frames.append(frame) },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+
+                // Let the connect-time frame land before swapping the file out from under it.
+                Thread.sleep(forTimeInterval: 0.5)
+                let framesBeforeSwap = frames.count
+
+                try FileManager.default.removeItem(at: path)
+                XCTAssertEqual(mkfifo(path.path, 0o644), 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+                // Two poll ticks (t≈2s, t≈4s from subscribe) land inside this window. Neither may produce a
+                // frame: the type guard refuses the FIFO before any hashing open, so the tick is skipped
+                // exactly like a read failure. Were the guard missing, the first of these ticks would block
+                // this scope's `streamQueue` on the FIFO's open forever, and every assertion below —
+                // including the recovery one — would hang rather than fail.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(
+                    frames.count, framesBeforeSwap,
+                    "a poll tick landing on a FIFO must be skipped entirely — no frame for content that was never hashed")
+
+                // Restore a regular file with new content at the same path. A fresh, correct frame arriving
+                // here is the liveness proof: it can only happen if the poll timer kept firing and the
+                // `streamQueue` kept servicing ticks straight through the FIFO ticks above.
+                try FileManager.default.removeItem(at: path)
+                try "restored content".write(to: path, atomically: true, encoding: .utf8)
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("restored content".utf8))
+
+                let deadline = Date().addingTimeInterval(5)
+                while frames.count == framesBeforeSwap, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+
+                guard let latest = frames.values.last else {
+                    XCTFail("expected a frame reporting the restored regular file's content")
+                    return
+                }
+                XCTAssertEqual(latest.sha256, expectedSHA)
+                XCTAssertFalse(latest.missing)
+            }
+        }
+
+        /// A subscribed path that does not exist is a legitimate reportable state (`missing: true`, `sha256:
+        /// nil`), not a subscribe-time refusal — mirrors `testWorkspaceFileReadOnAMissingFileReturnsNotFound`'s
+        /// scenario, but for the signature stream, whose contract is to report absence rather than error on it.
+        func testSubscribeWorkspaceFileSignatureOnAMissingFileDeliversAFrameWithNoSha256() throws {
+            try withWorkspaceFixture { workspaceID, _, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frameArrived = expectation(description: "the missing-file frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "does-not-exist.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        frameArrived.fulfill()
+                    },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [frameArrived], timeout: 5)
+
+                let frame = try XCTUnwrap(frames.values.first)
+                XCTAssertNil(frame.sha256)
+                XCTAssertTrue(frame.missing)
+            }
+        }
+
+        /// Mirrors `testWorkspaceFileReadRejectsAPathThatEscapesTheWorkspace`, but through the full subscribe
+        /// relay path: `assertWorkspaceFileScopeIsValid` runs before subscriber registration (divergence #2),
+        /// so an escaping path is rejected synchronously with a typed error rather than ever reaching the poll
+        /// loop.
+        func testSubscribeWorkspaceFileSignatureRejectsAPathThatEscapesTheWorkspace() throws {
+            try withWorkspaceFixture { workspaceID, _, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let rejected = expectation(description: "an escaping path is rejected instead of subscribed")
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "../escape.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { _ in XCTFail("a rejected subscription must never deliver a frame") },
+                    onDisconnect: { error in
+                        guard let error else { return }
+                        guard let clientError = error as? SpacesDeviceAPIRequestClientError, case .requestRejected(_, let code) = clientError else {
+                            XCTFail("expected a rejected response, got \(error)")
+                            return
+                        }
+                        XCTAssertEqual(code, .invalidArgument)
+                        rejected.fulfill()
+                    })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [rejected], timeout: 5)
+            }
+        }
+
         // MARK: - Test helpers
 
         /// Thread-safe invocation counter for `signatureProvider` closures under test, which
@@ -781,6 +1235,33 @@
             }
 
             var values: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage.count
+            }
+        }
+
+        /// Thread-safe ordered collector for `SpacesDeviceWorkspaceFileSignatureFrame` values delivered to a
+        /// `SpacesDeviceWorkspaceFileSignatureStreamClient`'s `onFrame` callback — mirrors
+        /// `FrameSignatureCollector` above, just holding whole frames instead of a bare signature string
+        /// (a file-signature frame's `sha256`/`missing` pair needs both fields asserted, not one).
+        private final class FileSignatureFrameCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [SpacesDeviceWorkspaceFileSignatureFrame] = []
+
+            func append(_ value: SpacesDeviceWorkspaceFileSignatureFrame) {
+                lock.lock()
+                defer { lock.unlock() }
+                storage.append(value)
+            }
+
+            var values: [SpacesDeviceWorkspaceFileSignatureFrame] {
                 lock.lock()
                 defer { lock.unlock() }
                 return storage
@@ -845,6 +1326,64 @@
                     let line = pendingBytes[..<newlineIndex]
                     pendingBytes.removeSubrange(...newlineIndex)
                     if let frame = try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.decodeLine(Data(line)) {
+                        onFrame(frame)
+                    }
+                }
+            }
+
+            func stop() { source?.cancel() }
+        }
+
+        /// Mirrors `RawWorkspaceDiffSignatureSocketClient` exactly, decoding
+        /// `SpacesDeviceWorkspaceFileSignatureFrame` lines instead — used only by
+        /// `testWorkspaceFileSignatureSubscriptionDoesNotRebroadcastAnUnchangedValueAcrossMultiplePolls`, which
+        /// constructs a `WorkspaceFileSignatureSubscription` directly and needs to observe its raw producer
+        /// broadcasts without a TLS/relay harness.
+        private final class RawWorkspaceFileSignatureSocketClient: @unchecked Sendable {
+            private let fileDescriptor: Int32
+            private let queue = DispatchQueue(label: "test.raw-workspace-file-signature-client")
+            private var source: DispatchSourceRead?
+            /// Confined to `queue`: only the read source's event handler, always dispatched there, touches it.
+            private var pendingBytes = Data()
+            private let onFrame: (SpacesDeviceWorkspaceFileSignatureFrame) -> Void
+
+            init(socketPath: String, onFrame: @escaping (SpacesDeviceWorkspaceFileSignatureFrame) -> Void) throws {
+                self.onFrame = onFrame
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                var address = sockaddr_un()
+                address.sun_family = sa_family_t(AF_UNIX)
+                let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+                let utf8Path = socketPath.utf8CString
+                guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
+                withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                    utf8Path.withUnsafeBufferPointer { if let baseAddress = $0.baseAddress { memcpy(pointer, baseAddress, $0.count) } }
+                }
+                let connectResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                }
+                guard connectResult == 0 else {
+                    let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                    close(fd)
+                    throw POSIXError(code)
+                }
+                fileDescriptor = fd
+                let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+                readSource.setEventHandler { [weak self] in self?.drain() }
+                readSource.setCancelHandler { close(fd) }
+                source = readSource
+                readSource.resume()
+            }
+
+            private func drain() {
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(fileDescriptor, &readBuffer, readBuffer.count)
+                guard count > 0 else { return }
+                pendingBytes.append(contentsOf: readBuffer[0..<count])
+                while let newlineIndex = pendingBytes.firstIndex(of: 0x0A) {
+                    let line = pendingBytes[..<newlineIndex]
+                    pendingBytes.removeSubrange(...newlineIndex)
+                    if let frame = try? SpacesDeviceWorkspaceFileSignatureStreamCodec.decodeLine(Data(line)) {
                         onFrame(frame)
                     }
                 }

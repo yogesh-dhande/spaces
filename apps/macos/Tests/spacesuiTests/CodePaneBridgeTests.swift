@@ -155,7 +155,7 @@ import spacesterminalcore
     }
 
     @Test func initPayloadEncodesEditorStateWhenPresent() throws {
-        let state = CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", content: "let x = 1", dirty: true)
+        let state = CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 1", content: "let x = 1", dirty: true)
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
             initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: state,
@@ -166,17 +166,55 @@ import spacesterminalcore
         let editorState = try #require(json["editorState"] as? [String: Any])
         #expect(editorState["path"] as? String == "a.swift")
         #expect(editorState["baseSHA256"] as? String == "sha-1")
+        #expect(editorState["baseContent"] as? String == "let x = 1")
         #expect(editorState["content"] as? String == "let x = 1")
         #expect(editorState["dirty"] as? Bool == true)
+        #expect(editorState["conflict"] as? Bool == false)
     }
 
     // MARK: - editorStateChanged decode (round-5 hibernation fix)
 
     @Test func decodeEditorStateChangedParsesAFileSnapshot() {
         let message = CodePaneBridge.decodeEditorStateChanged(
-            body: ["method": "editorStateChanged", "params": ["path": "a.swift", "baseSHA256": "sha-1", "content": "let x = 1", "dirty": true]])
+            body: [
+                "method": "editorStateChanged",
+                "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
+            ])
 
-        #expect(message == .file(CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", content: "let x = 1", dirty: true)))
+        #expect(
+            message
+                == .file(
+                    CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 0", content: "let x = 1", dirty: true)))
+    }
+
+    @Test func decodeEditorStateChangedParsesAConflictFlag() {
+        let message = CodePaneBridge.decodeEditorStateChanged(
+            body: [
+                "method": "editorStateChanged",
+                "params": [
+                    "path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true, "conflict": true,
+                ],
+            ])
+
+        #expect(
+            message
+                == .file(
+                    CodePaneBridge.EditorState(
+                        path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 0", content: "let x = 1", dirty: true, conflict: true)))
+    }
+
+    @Test func decodeEditorStateChangedDefaultsConflictToFalseWhenAbsent() {
+        let message = CodePaneBridge.decodeEditorStateChanged(
+            body: [
+                "method": "editorStateChanged",
+                "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
+            ])
+
+        guard case .file(let state) = message else {
+            Issue.record("expected a decoded file snapshot")
+            return
+        }
+        #expect(state.conflict == false)
     }
 
     @Test func decodeEditorStateChangedTreatsNullParamsAsNoFile() {
@@ -198,6 +236,14 @@ import spacesterminalcore
 
     @Test func decodeEditorStateChangedTreatsIncompleteParamsAsNoFile() {
         #expect(CodePaneBridge.decodeEditorStateChanged(body: ["method": "editorStateChanged", "params": ["path": "a.swift"]]) == .noFile)
+    }
+
+    @Test func decodeEditorStateChangedTreatsMissingBaseContentAsNoFile() {
+        #expect(
+            CodePaneBridge.decodeEditorStateChanged(
+                body: [
+                    "method": "editorStateChanged", "params": ["path": "a.swift", "baseSHA256": "sha-1", "content": "let x = 1", "dirty": true],
+                ]) == .noFile, "baseContent is required, mirroring the other snapshot fields")
     }
 
     // MARK: - modeChanged decode (round-5 hibernation fix)
@@ -266,9 +312,18 @@ import spacesterminalcore
         #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
     }
 
-    @Test func planForWorkspaceFileWriteRequiresBaseSHA256() {
+    /// `baseSHA256` is optional, not required: an absent (or JSON `null`) `options.baseSHA256` is the
+    /// wire's "create" convention (see `Plan.workspaceFileWrite`'s doc comment) — "Keep mine" uses this
+    /// to recreate a file the daemon reports as missing, so this must succeed with `nil`, not reject.
+    @Test func planForWorkspaceFileWriteTreatsAMissingBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": [:]])
-        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil)))
+    }
+
+    @Test func planForWorkspaceFileWriteTreatsAJSONNullBaseSHA256AsCreate() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["baseSHA256": NSNull()]])
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil)))
     }
 
     @Test func planForWorkspaceFileList() {
@@ -505,14 +560,58 @@ import spacesterminalcore
         #expect(decoded.scopeSignature == "a\"b`c\nd")
     }
 
+    // MARK: - FileSignaturePayload encoding (Phase 5 Part A)
+
+    @Test func fileSignaturePayloadOmitsSha256WhenMissingIsTrue() throws {
+        let payload = CodePaneBridge.FileSignaturePayload(path: "foo.ts", sha256: nil, missing: true)
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["path"] as? String == "foo.ts")
+        #expect(json["missing"] as? Bool == true)
+        #expect(json["sha256"] == nil, "sha256 must be omitted (not sent as JSON null) when the file is missing")
+    }
+
+    @Test func fileSignaturePayloadIncludesSha256WhenPresent() throws {
+        let payload = CodePaneBridge.FileSignaturePayload(path: "foo.ts", sha256: "sha-1", missing: false)
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["path"] as? String == "foo.ts")
+        #expect(json["sha256"] as? String == "sha-1")
+        #expect(json["missing"] as? Bool == false)
+    }
+
+    @Test func dispatchEventScriptSafelyEscapesQuotesInAFileSignaturePayloadsPath() throws {
+        let script = try #require(
+            CodePaneBridge.dispatchEventScript(
+                name: "spaces:fileSignature", detail: CodePaneBridge.FileSignaturePayload(path: "a\"b`c\nd", sha256: "sha-1", missing: false)))
+
+        let detailJSON = try #require(
+            stripped(script, prefix: #"window.dispatchEvent(new CustomEvent("spaces:fileSignature", {detail: "#, suffix: "}));"))
+        struct DecodedFileSignaturePayload: Decodable { let path: String }
+        let decoded = try JSONDecoder().decode(DecodedFileSignaturePayload.self, from: Data(detailJSON.utf8))
+        #expect(decoded.path == "a\"b`c\nd")
+    }
+
     // MARK: - Collected editor-state flush decode (round-6 Fix 1)
 
     @Test func decodeCollectedEditorStateParsesAJSONSnapshot() {
-        let json = #"{"path":"foo.ts","baseSHA256":"sha","content":"let x = 1;","dirty":true}"#
+        let json = #"{"path":"foo.ts","baseSHA256":"sha","baseContent":"let x = 0;","content":"let x = 1;","dirty":true}"#
 
         #expect(
             CodePaneBridge.decodeCollectedEditorState(json)
-                == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", content: "let x = 1;", dirty: true)))
+                == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true)))
+    }
+
+    @Test func decodeCollectedEditorStateParsesAConflictFlag() {
+        let json = #"{"path":"foo.ts","baseSHA256":"sha","baseContent":"let x = 0;","content":"let x = 1;","dirty":true,"conflict":true}"#
+
+        #expect(
+            CodePaneBridge.decodeCollectedEditorState(json)
+                == .file(
+                    CodePaneBridge.EditorState(
+                        path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true, conflict: true)))
     }
 
     @Test func decodeCollectedEditorStateTreatsTheNoFileSentinelAsNoFile() {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommentsController, CommentsToolbarState } from "../src/app/commentsController";
 import type { DiffView } from "../src/app/diffView";
 import {
@@ -26,6 +26,11 @@ function makeBridge(): SpacesBridge & {
    *  `reviewCommentDelete` — used by the Fix 2 tests to force a typed rejection distinct from the
    *  RPC's own `notFound`-for-unknown-id behavior. */
   failNextDelete: SpacesBridgeError | undefined;
+  /** Round-3 codex Fix 3: same one-shot check-then-clear-then-throw pattern, for `reviewCommentList`
+   *  — used by the `loadInitial` retry tests to simulate a transient failure distinct from a
+   *  parked/held call. Unlike `failNextUpsert`/`failNextDelete` this is settable to reject more than
+   *  once in a row (tests reassign it between attempts) to exercise the retry backoff itself. */
+  failNextList: SpacesBridgeError | undefined;
   upsertCallCount: number;
   /** When true, the next `reviewCommentUpsert` call parks on an internally-created promise instead
    *  of resolving immediately, and stashes that promise's `resolve` on `releaseHeldUpsert` — set by
@@ -53,6 +58,7 @@ function makeBridge(): SpacesBridge & {
     failNextSend: undefined as SpacesBridgeError | undefined,
     failNextUpsert: undefined as SpacesBridgeError | undefined,
     failNextDelete: undefined as SpacesBridgeError | undefined,
+    failNextList: undefined as SpacesBridgeError | undefined,
     upsertCallCount: 0,
     holdNextUpsert: false,
     releaseHeldUpsert: undefined as (() => void) | undefined,
@@ -65,10 +71,16 @@ function makeBridge(): SpacesBridge & {
     workspaceFileWrite: notUsed,
     workspaceFileList: notUsed,
     subscribeDiffSignature: () => () => {},
+    subscribeFileSignature: () => () => {},
     notifyEditorStateChanged: () => {},
     notifyModeChanged: () => {},
     notifyReady: () => {},
     async reviewCommentList() {
+      if (bridge.failNextList) {
+        const err = bridge.failNextList;
+        bridge.failNextList = undefined;
+        throw err;
+      }
       if (bridge.holdNextList) {
         bridge.holdNextList = false;
         await new Promise<void>((resolve) => {
@@ -1598,5 +1610,88 @@ describe("CommentsController — Fix 3 (round-13): rejection relist merges, keep
     });
     const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
     expect(rendered.some((c) => c.id === b.id)).toBe(true);
+  });
+});
+
+// Round-3 codex Fix 3: `loadInitial`'s third requirement — "a provisional draft created before the
+// retry lands survives the merge" — is already covered by the "Fix 4" describe block above, not
+// re-tested here. A retry re-invokes the exact same `loadInitial` body, including the
+// `stillLocalOnly` merge below the RPC call, as the very first attempt; it adds no merge logic of
+// its own. Fix 4's "keeps a provisional draft created while reviewCommentList is still in flight"
+// test already proves a provisional draft survives a `reviewCommentList` call resolving after it
+// was created, which is the same code path a retry's eventual successful call exercises.
+describe("CommentsController — Fix 3 (round-3 codex): loadInitial retries a transient reviewCommentList failure", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("retries with backoff after repeated transient failures, surfaces the banner exactly once, and lists the drafts once it succeeds", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+
+    await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "server-side comment",
+    });
+
+    const listSpy = vi.spyOn(bridge, "reviewCommentList");
+    const banner = container.querySelector(".banner") as HTMLElement;
+
+    // Fake timers are switched on before the first failing call so the retry timer it schedules is
+    // one `vi.advanceTimersByTimeAsync` can control end to end — switching on partway through (after
+    // a real `setTimeout` is already pending) would leave that first retry running on the real clock.
+    vi.useFakeTimers();
+
+    bridge.failNextList = new SpacesBridgeError("unavailable", "device offline");
+    await controller.loadInitial(); // first attempt: rejects, banner shown, retry #1 scheduled at the 1000ms floor
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(banner.style.display).toBe("flex");
+    // `surfaceError` prefers a `SpacesBridgeError`'s own message over the fallback string (see
+    // `surfaceError`), so the banner shows the injected error's message here.
+    expect(banner.textContent).toBe("device offline");
+
+    // A second consecutive failure: the counter keeps backing off, and — the point of this test —
+    // the banner must NOT be re-shown for it (only the first failure in a retry run does).
+    bridge.failNextList = new SpacesBridgeError("unavailable", "device offline");
+    banner.textContent = "sentinel"; // would be overwritten by a second surfaceError call
+    await vi.advanceTimersByTimeAsync(1000); // retry #1 fires and fails, retry #2 scheduled at 2000ms (doubled)
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(banner.textContent).toBe("sentinel"); // untouched by the second failure
+
+    // `failNextList` is left unset now, so retry #2 succeeds.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(listSpy).toHaveBeenCalledTimes(3);
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.body === "server-side comment")).toBe(true);
+  });
+
+  it("a teardown (collectStateForFlush) while a retry is pending stops it from ever calling the bridge again", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const listSpy = vi.spyOn(bridge, "reviewCommentList");
+    vi.useFakeTimers();
+
+    bridge.failNextList = new SpacesBridgeError("unavailable", "device offline");
+    await controller.loadInitial(); // fails, retry scheduled
+    expect(listSpy).toHaveBeenCalledTimes(1);
+
+    controller.collectStateForFlush(); // teardown seam: must clear the pending retry timer
+
+    // Well past the retry floor (and the 30s cap) — the timer must never fire again post-teardown.
+    await vi.advanceTimersByTimeAsync(35000);
+    expect(listSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -40,6 +40,13 @@ export interface CommentsControllerCallbacks {
 
 const BANNER_TIMEOUT_MS = 4000;
 
+/** Bounded-backoff floor/cap for `loadInitial`'s retry-on-transient-failure mechanism — same
+ *  floor/doubling/cap shape as root.ts's `scheduleDiffRetry` and `editorView.ts`'s
+ *  `scheduleExternalChangeRetry` (mirrored here, not imported/shared, matching those two's own
+ *  precedent of a private per-file copy). */
+const LOAD_INITIAL_RETRY_FLOOR_MS = 1000;
+const LOAD_INITIAL_RETRY_CAP_MS = 30000;
+
 /**
  * Owns the diff-mode comment surface end to end: the in-memory draft mirror (rehydrated once from
  * `reviewCommentList`, then kept in sync by local mutations only — see `loadInitial`'s doc
@@ -157,6 +164,18 @@ export class CommentsController {
    *  cleared wholesale (see `loadInitial`). It exists solely so a second teardown landing inside
    *  that window (`collectStateForFlush`) still has something to recover the typed text from. */
   private readonly restoredPendingById = new Map<string, PendingReviewCommentEntry>();
+  /** Consecutive-failure counter and pending-timer handle for `loadInitial`'s retry-on-transient-
+   *  failure mechanism — same shape as `EditorView`'s `externalChangeRetryFailures`/
+   *  `externalChangeRetryTimer` (see that class for the fuller rationale). `root.ts` calls
+   *  `loadInitial` exactly once; without a retry, a transient `reviewCommentList` failure (the pane
+   *  opened while the device is briefly unavailable — a daemon restart/update, a remote offline at
+   *  open) would surface a banner and give up for the rest of the page's lifetime, leaving
+   *  persisted drafts invisible even though the restart/hibernation persistence contract promises
+   *  them back. Reset to 0 whenever a call reaches a decoded outcome (a successful response), so a
+   *  later transient failure starts its own backoff at the floor rather than inheriting whatever
+   *  count a prior run left behind. */
+  private loadInitialRetryFailures = 0;
+  private loadInitialRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   private readonly banner: HTMLElement;
   private bannerTimer: ReturnType<typeof setTimeout> | undefined;
@@ -253,15 +272,30 @@ export class CommentsController {
    * it can afford to keep every one of them; `reconcileMirrorAfterRejection`'s caller just received
    * proof from the daemon that this client's mirror was wrong about something, so it must not
    * blindly keep everything absent from the response.
+   *
+   * A `reviewCommentList` rejection is retried with bounded backoff (`loadInitialRetryFailures`/
+   * `scheduleLoadInitialRetry`) rather than given up on after one attempt — see
+   * `loadInitialRetryFailures`'s doc comment. A retry landing after the user already started
+   * drafting is safe: `stillLocalOnly` above already keeps any id absent from the response (a
+   * provisional draft never round-trips, so it can never appear there), the same as it does for the
+   * very first call.
    */
   async loadInitial(): Promise<void> {
+    // Cancels any pending retry: this call — whether the original one-time invocation or the retry
+    // timer's own re-invocation — is itself a fresh attempt that supersedes it.
+    clearTimeout(this.loadInitialRetryTimer);
     let response: SpacesReviewComment[];
     try {
       response = await this.bridge.reviewCommentList();
     } catch (err) {
-      this.surfaceError(err, "Failed to load draft comments.");
+      // Only the FIRST failure in a retry run shows the banner — re-showing it on every retry
+      // attempt would be a distracting flicker for what is, from the user's point of view, a single
+      // ongoing "still trying to load" condition.
+      if (this.loadInitialRetryFailures === 0) this.surfaceError(err, "Failed to load draft comments.");
+      this.scheduleLoadInitialRetry();
       return;
     }
+    this.loadInitialRetryFailures = 0;
     const responseIds = new Set(response.map((d) => d.id));
     const stillLocalOnly = this.drafts.filter((d) => !responseIds.has(this.resolveId(d.id)));
     this.drafts = [...response, ...stillLocalOnly];
@@ -273,6 +307,21 @@ export class CommentsController {
     // makes. Either way nothing is left for the map to hold past this point.
     this.restoredPendingById.clear();
     this.refresh();
+  }
+
+  /** Schedules the next `loadInitial` retry attempt after a `reviewCommentList` rejection — same
+   *  floor/doubling/cap backoff shape as root.ts's `scheduleDiffRetry` and `editorView.ts`'s
+   *  `scheduleExternalChangeRetry`. No generation/token guard is needed here (unlike those two):
+   *  `root.ts` calls `loadInitial` exactly once as its own entry point, so this timer is the only
+   *  thing that will ever re-invoke it, and `loadInitial`'s own `clearTimeout` at the top of every
+   *  call means a fresh attempt (this timer firing) never overlaps a still-pending one. */
+  private scheduleLoadInitialRetry(): void {
+    const delay = Math.min(LOAD_INITIAL_RETRY_FLOOR_MS * 2 ** this.loadInitialRetryFailures, LOAD_INITIAL_RETRY_CAP_MS);
+    this.loadInitialRetryFailures += 1;
+    clearTimeout(this.loadInitialRetryTimer);
+    this.loadInitialRetryTimer = setTimeout(() => {
+      void this.loadInitial();
+    }, delay);
   }
 
   /**
@@ -297,8 +346,15 @@ export class CommentsController {
    * object into `this.drafts` yet (see that map's doc comment): without it, a second teardown
    * landing inside that restore→list-merge window would find nothing in `this.drafts` for that id
    * and silently lose the text a first teardown had already recovered.
+   *
+   * This is also this controller's one teardown seam (the Swift host's synchronous call is the
+   * only signal this controller ever gets that the page is going away), so it doubles as the place
+   * `loadInitial`'s pending retry timer (see `loadInitialRetryFailures`'s doc comment) is cleared —
+   * a retry firing after teardown would call `reviewCommentList` again for a page nobody is looking
+   * at any more.
    */
   collectStateForFlush(): string | null {
+    clearTimeout(this.loadInitialRetryTimer);
     const entries: PendingReviewCommentEntry[] = [];
     for (const draft of this.drafts) {
       const live = this.liveBodies.get(draft.id);

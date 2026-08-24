@@ -159,9 +159,9 @@ extension SpacesDeviceAPICommand {
     /// the corroboration `.ping`) if left on the serial state queue. Both transports divert them to a
     /// serial queue scoped to the request's own workspace (`workspaceGitQueue(for:)`), so a slow diff on one
     /// workspace stalls only that workspace's other requests, not another workspace's or the state queue's.
-    /// `.subscribeWorkspaceDiffSignature` is not included here: it hijacks the connection
-    /// (`hijacksConnection`) before either transport's dispatch chain reaches this check, so it never needs
-    /// a worker-queue divert of its own.
+    /// `.subscribeWorkspaceDiffSignature` and `.subscribeWorkspaceFileSignature` are not included here: both
+    /// hijack the connection (`hijacksConnection`) before either transport's dispatch chain reaches this
+    /// check, so neither ever needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
         case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: true
@@ -314,6 +314,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `closeStreamRelay` uses it to
             /// release that scope's poll-subscriber slot when this relay's connection closes.
             var diffSignatureScope: WorkspaceDiffScope? = nil
+            /// Set only for a `subscribeWorkspaceFileSignature` relay; `closeStreamRelay` uses it to
+            /// release that scope's poll-subscriber slot when this relay's connection closes. A separate
+            /// field from `diffSignatureScope` since the scope types differ (workspace+ref vs. workspace+path).
+            var fileSignatureScope: WorkspaceFileScope? = nil
         }
 
         private final class StreamSendSequencer: @unchecked Sendable {
@@ -506,6 +510,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `relayLinuxSubscription` uses it to
             /// release that scope's poll-subscriber slot once the relay loop returns.
             var diffSignatureScope: WorkspaceDiffScope? = nil
+            /// Set only for a `subscribeWorkspaceFileSignature` relay; `relayLinuxSubscription` uses it to
+            /// release that scope's poll-subscriber slot once the relay loop returns.
+            var fileSignatureScope: WorkspaceFileScope? = nil
         }
 
         private enum LinuxSubscribeAction: Sendable {
@@ -1050,6 +1057,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// and removed when its last relay closes (see
     /// `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`).
     private var workspaceDiffSignatureSubscriptions: [WorkspaceDiffScope: WorkspaceDiffSignatureSubscription] = [:]
+    /// Producer + 2s poll timer per subscribed (workspace, path) scope for `subscribeWorkspaceFileSignature`,
+    /// keyed by `WorkspaceFileScope`. Entries are `queue`-confined: created on a scope's first subscriber
+    /// and removed when its last relay closes (see
+    /// `addWorkspaceFileSignatureSubscriber`/`removeWorkspaceFileSignatureSubscriber`).
+    private var workspaceFileSignatureSubscriptions: [WorkspaceFileScope: WorkspaceFileSignatureSubscription] = [:]
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1601,6 +1613,218 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
     }
 
+    /// Identifies one `subscribeWorkspaceFileSignature` subscription's target: a single workspace-relative
+    /// path within one workspace. Unlike `WorkspaceDiffScope`, there is no ref-name normalization concern —
+    /// the path is used exactly as the client supplied it (two different strings that happen to name the
+    /// same file, e.g. via a redundant `./` segment, are treated as different scopes; not expected to matter
+    /// in practice since the web app always subscribes with the exact path it just read).
+    struct WorkspaceFileScope: Hashable, Sendable {
+        let workspaceID: String
+        let path: String
+    }
+
+    /// One poll tick's computed file-signature value. A plain struct rather than a bare
+    /// `(sha256: String?, missing: Bool)` tuple since Swift tuples aren't `Equatable`, and this is compared
+    /// tick-to-tick to decide whether to broadcast.
+    struct WorkspaceFileSignatureValue: Equatable {
+        let sha256: String?
+        let missing: Bool
+    }
+
+    /// Producer + 2s poll timer for one (workspace, path) scope's `subscribeWorkspaceFileSignature` stream.
+    /// Mirrors `WorkspaceDiffSignatureSubscription`'s architecture (producer + poll timer on a dedicated
+    /// `streamQueue`, connect-time frame from the latest computed value, keepalive cadence via
+    /// `workspaceDiffSignatureKeepaliveShouldBroadcast`, reused unchanged — see that function's doc comment)
+    /// with one deliberate divergence: a provider failure here SKIPS the tick's broadcast/`lastBroadcastValue`
+    /// update entirely, rather than substituting a sentinel the way diff's `workspaceDiffSignatureUnavailableSentinel`
+    /// does. `{sha256, missing}` has no natural third state to stand in for "unavailable" the way a single
+    /// opaque signature string does, so inventing one would be an arbitrary wire value with no real meaning
+    /// to a client. `tick` still increments unconditionally on every fire (including a skipped one) so the
+    /// ~20s keepalive cadence measured in tick count keeps counting through an intermittent failure.
+    /// Accepted gap: a Linux relay's keepalive-based disconnect detection pauses for the duration of a
+    /// persistent read failure (e.g. a permissions error mid-poll) and resumes the moment the file becomes
+    /// readable again — narrower than diff's guarantee, but this keeps the contract simple and singular
+    /// rather than adding a sentinel value with no natural meaning here.
+    final class WorkspaceFileSignatureSubscription: @unchecked Sendable {
+        /// Mirrors `WorkspaceDiffSignatureSubscription.LatestSignatureBox`'s role and retain-cycle rationale
+        /// exactly, just holding a `WorkspaceFileSignatureValue` instead of a signature string.
+        private final class LatestValueBox: @unchecked Sendable {
+            var value: WorkspaceFileSignatureValue?
+        }
+
+        let socketPath: String
+        let server: DeviceOverviewStreamServer
+        private let pollTimer: DispatchSourceTimer
+        private let latestValueBox = LatestValueBox()
+        /// Last value broadcast by the poll timer; starts nil so the first tick always "changes" and
+        /// broadcasts once. Compared only from the timer's own handler (always on `streamQueue`).
+        private var lastBroadcastValue: WorkspaceFileSignatureValue?
+        /// Ticks since this producer started, incremented on every poll timer fire regardless of whether it
+        /// broadcasts OR is skipped for a provider failure; feeds `workspaceDiffSignatureKeepaliveShouldBroadcast`.
+        private var tick = 0
+        /// `queue`-confined; see the type doc above.
+        var subscriberCount = 0
+
+        init(
+            scope: WorkspaceFileScope, socketPath: String, streamQueue: DispatchQueue,
+            signatureProvider: @escaping @Sendable (WorkspaceFileScope) -> WorkspaceFileSignatureValue?
+        ) {
+            self.socketPath = socketPath
+            let latestValueBox = latestValueBox
+            server = DeviceOverviewStreamServer(
+                socketPath: socketPath, queue: streamQueue,
+                lineProvider: {
+                    // Ordinarily just reads the value the timer handler already computed and recorded this
+                    // tick. The one exception is a client connecting before the first tick fires (+2s after
+                    // start): the box is still nil then, so this computes fresh for that one initial frame
+                    // only, and does NOT write the result into the box or `lastBroadcastValue`. If even that
+                    // fresh computation fails (provider returns nil), there is nothing to report for the
+                    // connect-time frame — matching the tick handler's own skip-on-failure behavior.
+                    guard let value = latestValueBox.value ?? signatureProvider(scope) else { return nil }
+                    return try? SpacesDeviceWorkspaceFileSignatureStreamCodec.encodeLine(
+                        SpacesDeviceWorkspaceFileSignatureFrame(
+                            workspaceID: scope.workspaceID, path: scope.path, sha256: value.sha256, missing: value.missing))
+                })
+            let timer = DispatchSource.makeTimerSource(queue: streamQueue)
+            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
+            pollTimer = timer
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.tick += 1
+                // Divergence from diff's sentinel-substitution: skip this tick's broadcast/lastBroadcastValue
+                // update entirely on a provider failure, rather than substituting a stand-in value. See the
+                // type doc above for why. `tick` above was already incremented unconditionally, so the
+                // keepalive cadence keeps counting through the failure.
+                guard let value = signatureProvider(scope) else { return }
+                latestValueBox.value = value
+                let changed = value != self.lastBroadcastValue
+                guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: self.tick, changed: changed) else { return }
+                self.lastBroadcastValue = value
+                self.server.broadcast()
+            }
+        }
+
+        func start() throws {
+            do {
+                try server.start()
+            } catch {
+                // See `WorkspaceDiffSignatureSubscription.start()`'s identical comment: a dispatch source
+                // must never be released while suspended, so arm then immediately cancel on setup failure.
+                pollTimer.resume()
+                pollTimer.cancel()
+                throw error
+            }
+            pollTimer.resume()
+        }
+
+        func stop() {
+            pollTimer.cancel()
+            server.stop()
+        }
+    }
+
+    /// Registers one subscriber for `scope`'s file-signature stream, creating its producer + 2s poll timer
+    /// on the first subscriber and returning its socket path either way. Must run on `queue`.
+    private func addWorkspaceFileSignatureSubscriber(scope: WorkspaceFileScope) throws -> String {
+        if let existing = workspaceFileSignatureSubscriptions[scope] {
+            existing.subscriberCount += 1
+            return existing.socketPath
+        }
+        let socketPath = try TerminalServicePaths.workspaceFileSignatureSocketPath(workspaceID: scope.workspaceID, path: scope.path)
+        // Dedicated per-scope queue, never shared with any other scope's subscription — mirrors
+        // `addWorkspaceDiffSignatureSubscriber`'s own per-scope queue rationale.
+        let streamQueue = DispatchQueue(label: "spaces.workspace-file-signature.\(scope.workspaceID).\(scope.path)")
+        let subscription = WorkspaceFileSignatureSubscription(
+            scope: scope, socketPath: socketPath, streamQueue: streamQueue,
+            signatureProvider: { [weak self] scope in self?.computeWorkspaceFileScopeSignature(scope: scope) })
+        try subscription.start()
+        subscription.subscriberCount = 1
+        workspaceFileSignatureSubscriptions[scope] = subscription
+        return socketPath
+    }
+
+    /// Releases one subscriber for `scope`, tearing its producer + poll timer down once the count reaches
+    /// zero. There is no explicit unsubscribe command by design; a relay's connection closing is the only
+    /// unsubscribe. Must run on `queue`.
+    private func removeWorkspaceFileSignatureSubscriber(scope: WorkspaceFileScope) {
+        guard let subscription = workspaceFileSignatureSubscriptions[scope] else { return }
+        subscription.subscriberCount -= 1
+        guard subscription.subscriberCount <= 0 else { return }
+        subscription.stop()
+        workspaceFileSignatureSubscriptions.removeValue(forKey: scope)
+    }
+
+    /// Resolves `scope`'s workspace + path and computes its content-signature. Used by the file-signature
+    /// poll timer's `signatureProvider`, which calls this on that scope's own dedicated `streamQueue` (see
+    /// `addWorkspaceFileSignatureSubscriber`) — a queue with no `RequestContext` of its own — so this opens
+    /// its own `SQLiteStore` rather than sharing one, matching `computeWorkspaceDiffScopeSignature`'s
+    /// confinement rule. Returns nil on any resolution/read failure (the provider-failure/skip-tick signal),
+    /// mirroring `computeWorkspaceDiffScopeSignature`'s own `try?`-swallowed-by-caller shape.
+    private func computeWorkspaceFileScopeSignature(scope: WorkspaceFileScope) -> WorkspaceFileSignatureValue? {
+        guard let store = try? SQLiteStore(path: DatabaseLocator.defaultPath()), let workspace = try? store.workspace(id: scope.workspaceID) else {
+            return nil
+        }
+        guard let resolvedPath = try? SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspace.dir)
+        else { return nil }
+        // A stat, not a plain `fileExists` check: `attributesOfItem` never blocks, even against a FIFO
+        // or socket, but the hashing open below does — see `handleWorkspaceFileReadRequest`'s identical
+        // guard for the full FIFO-wedge rationale ("this guard is the fix, not a timeout around the
+        // read"). A watched regular file that gets replaced on disk by a FIFO (or a symlink resolving to
+        // one) still passes a bare `fileExists`, and the subsequent hashing open then blocks
+        // indefinitely — wedging this scope's dedicated `streamQueue` forever, killing both further
+        // signature frames and the keepalive cadence.
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath) else {
+            return WorkspaceFileSignatureValue(sha256: nil, missing: true)
+        }
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            // The scope was validated at subscribe time (`assertWorkspaceFileScopeIsValid`) against a
+            // then-regular file; a non-regular replacement afterward (the FIFO-swap case above) is a
+            // transient/abnormal on-disk state, not a missing file — treated the same as an existing but
+            // unreadable file: skip this tick's broadcast entirely rather than reporting a signature for
+            // content that was never actually hashed. `tick` still increments in the caller regardless
+            // (see `WorkspaceFileSignatureSubscription`'s doc comment), so the keepalive cadence keeps
+            // counting through this skip and the connection doesn't look dead.
+            //
+            // This is a stat-then-open TOCTOU pair, same as `handleWorkspaceFileReadRequest`'s own
+            // accepted, documented risk: the file could still be swapped for something non-regular in the
+            // gap between this stat and the hashing open below. Not worth a second stat (it wouldn't close
+            // the gap) or a timeout on the open (this guard is what makes the common, long-lived
+            // replacement case safe; the race is orthogonal and already accepted elsewhere in this file).
+            return nil
+        }
+        guard let hash = SpacesDeviceWorkspaceGitHashing.streamingSHA256Hex(atPath: resolvedPath) else { return nil }
+        return WorkspaceFileSignatureValue(sha256: hash, missing: false)
+    }
+
+    /// Validates a file-signature scope's workspace + path the same way `handleWorkspaceFileReadRequest`
+    /// validates a `workspaceFileRead` request (workspace-root confinement, symlink rules), so a bad path
+    /// is rejected synchronously at subscribe time with a typed error instead of the poll loop silently
+    /// producing nothing forever. Opens its own `SQLiteStore` since this runs at relay/subscribe time, off
+    /// any `RequestContext` — same reason `computeWorkspaceDiffScopeSignature` opens its own store.
+    ///
+    /// Unlike diff's `assertWorkspaceDiffScopeIsGitRepository` (which validates a git-repository
+    /// requirement that has no equivalent here — a plain file read/signature is git-independent, exactly
+    /// like `workspaceFileRead`/`workspaceFileWrite`), this validates only that the scope resolves to a
+    /// real, contained path; it does not require the path to currently exist (a missing file is a valid,
+    /// reportable state — see `WorkspaceFileSignatureFrame.missing` — not a subscribe-time refusal).
+    private func assertWorkspaceFileScopeIsValid(scope: WorkspaceFileScope) throws {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: scope.workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
+        }
+        do {
+            _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspace.dir)
+        } catch {
+            // Rethrown as the same typed, `errorCode(for:)`-mapped shape `handleWorkspaceFileReadRequest`
+            // uses for this identical failure, rather than letting the raw `PathError.escapesWorkspace`
+            // propagate — that generic error has no domain/code mapping and would fall through to
+            // `.internalError`, misreporting a client mistake (an escaping path) as a server fault.
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Path escapes the workspace directory."])
+        }
+    }
+
     public func stop() { queue.async { self.stopOnQueue() } }
 
     func listPairedDevices() throws -> [SpacesDevicePairedClient] { try syncOnQueue { try self.pairingStore.listDevices() } }
@@ -1769,7 +1993,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
@@ -4153,6 +4377,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
                         clientID: nil, diffSignatureScope: scope))
             }
+            if let scopePayload = request.command.workspaceFileSignatureScope {
+                // Same shape as the diff-signature relay above, substituting the file-scope validation
+                // (`assertWorkspaceFileScopeIsValid`, no git-repository requirement) and scope/subscriber
+                // registration.
+                let scope = WorkspaceFileScope(workspaceID: scopePayload.workspaceID, path: scopePayload.path)
+                let socketPath: String
+                do {
+                    try assertWorkspaceFileScopeIsValid(scope: scope)
+                    socketPath = try addWorkspaceFileSignatureSubscriber(scope: scope)
+                } catch {
+                    return .response(SpacesDeviceAPIServer.failureResponse(for: error))
+                }
+                return .relay(
+                    LinuxSubscription(
+                        sessionID: "workspace-file-signature:\(scope.workspaceID):\(scope.path)",
+                        installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
+                        clientID: nil, fileSignatureScope: scope))
+            }
             guard let sessionID = request.sessionID else {
                 return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument))
             }
@@ -4187,6 +4429,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             defer {
                 if let scope = subscription.diffSignatureScope {
                     performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) }
+                }
+                if let scope = subscription.fileSignatureScope {
+                    performOnQueue { self.removeWorkspaceFileSignatureSubscriber(scope: scope) }
                 }
             }
             let relaySocketFD = try connectUnixSocket(path: subscription.subscriptionSocketPath)
@@ -4312,6 +4557,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             if let scopePayload = request.command.workspaceDiffSignatureScope {
                 try relayWorkspaceDiffSignatureSubscription(
                     connection: connection, scope: WorkspaceDiffScope(workspaceID: scopePayload.workspaceID, refName: scopePayload.refName),
+                    installationID: request.clientApp?.installationID ?? "")
+                return
+            }
+            if let scopePayload = request.command.workspaceFileSignatureScope {
+                try relayWorkspaceFileSignatureSubscription(
+                    connection: connection, scope: WorkspaceFileScope(workspaceID: scopePayload.workspaceID, path: scopePayload.path),
                     installationID: request.clientApp?.installationID ?? "")
                 return
             }
@@ -4442,6 +4693,36 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // The relay never made it into `streamRelays`, so `closeStreamRelay` will never see this
                 // subscriber's scope and release its slot; release it here instead.
                 removeWorkspaceDiffSignatureSubscriber(scope: scope)
+                throw error
+            }
+        }
+
+        /// Relays one (workspace, path) scope's file-signature producer socket to a subscribing connection.
+        /// Mirrors `relayWorkspaceDiffSignatureSubscription` exactly, substituting the file-scope validation
+        /// (`assertWorkspaceFileScopeIsValid`, which has no git-repository requirement — see its doc comment)
+        /// and subscriber/scope types.
+        private func relayWorkspaceFileSignatureSubscription(connection: NWConnection, scope: WorkspaceFileScope, installationID: String) throws {
+            try assertWorkspaceFileScopeIsValid(scope: scope)
+            let socketPath = try addWorkspaceFileSignatureSubscriber(scope: scope)
+            do {
+                let relaySocketFD = try connectUnixSocket(path: socketPath)
+                try setNonBlocking(relaySocketFD)
+                let relayQueue = DispatchQueue(label: "spaces.device.api.workspace-file.\(ObjectIdentifier(connection))")
+                let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
+                relaySource.setEventHandler { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.relayStateData(from: relaySocketFD, to: connection)
+                }
+                relaySource.setCancelHandler { close(relaySocketFD) }
+                streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+                    sessionID: "workspace-file-signature:\(scope.workspaceID):\(scope.path)", installationID: installationID,
+                    relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: nil, connection: connection,
+                    sendSequencer: StreamSendSequencer(queueKey: queueKey), fileSignatureScope: scope)
+                relaySource.resume()
+            } catch {
+                // The relay never made it into `streamRelays`, so `closeStreamRelay` will never see this
+                // subscriber's scope and release its slot; release it here instead.
+                removeWorkspaceFileSignatureSubscriber(scope: scope)
                 throw error
             }
         }
@@ -4588,6 +4869,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 shutdown(relay.relaySocketFD, SHUT_RDWR)
             }
             if let scope = relay.diffSignatureScope { removeWorkspaceDiffSignatureSubscriber(scope: scope) }
+            if let scope = relay.fileSignatureScope { removeWorkspaceFileSignatureSubscriber(scope: scope) }
             if cancelNetworkConnection { connection.cancel() }
         }
 
