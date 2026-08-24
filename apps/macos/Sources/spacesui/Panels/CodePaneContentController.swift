@@ -877,21 +877,30 @@ enum CodePaneMode: Equatable {
             // scope's subscription lifecycle at the backoff floor rather than wherever the old
             // scope's retry loop had climbed to.
             //
-            // Accepted edge: a scope change dispatched over a healthy OLD-scope stream leaves that
-            // stream's `onDisconnect` closure stale for this fetch's window (its generation was just
-            // bumped out from under it here). If the old stream also happens to die inside that same
-            // window, its disconnect is silently dropped and nothing reconnects on its own — recovery
-            // then rides the web app's own bounded-backoff `refreshDiff` retry (see root.ts) until a
-            // later successful fetch calls `resubscribeDiffSignature` for the new scope. Narrow and
-            // self-healing, so left as-is rather than adding a second invalidation path for it.
+            // The generation bump and the old subscription's teardown happen atomically, right here at
+            // dispatch time: there is no window where a half-alive stale stream can silently die and
+            // leave nothing to reconnect it. `subscribedScope` and `diffSignatureStream` immediately and
+            // accurately reflect "nothing subscribed" the instant a scope change is dispatched,
+            // regardless of whether the new scope's fetch ever succeeds. This is also what fixes
+            // returning to the OLD scope after a failed fetch for the new one: since `subscribedScope`
+            // was actually cleared (not left pointing at the old scope), both this bump's own condition
+            // above and `resubscribeDiffSignature`'s guard correctly see a fresh state and resubscribe
+            // from scratch, instead of the old scope's now-generation-stale stream being mistaken for
+            // still current.
             //
-            // `performFileRead`'s identical-shaped bump does NOT accept this same edge case — a failed
-            // file open restores the previous file's monitoring instead, since the editor has no
-            // equivalent fetch-retry loop of its own. See
-            // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment for the full asymmetry.
+            // `performFileRead`'s identical-shaped bump stays bump-only, without a matching teardown,
+            // because a failed file open actively RESTORES the previous path's monitoring instead — see
+            // `restoreFileSignatureMonitoringAfterFailedOpen`, which reinstalls a live stream for
+            // whatever file the pane is still showing. The diff side has no equivalent restore target:
+            // there's no "previous scope's stream" worth reinstalling here, so instead of restoring it
+            // tears down at dispatch and simply relies on the next `workspaceDiff` call — same scope or
+            // different — to resubscribe from a clean `.none` state.
             if subscribedScope != .scope(refName) {
                 diffSignatureSubscriptionGeneration += 1
                 diffSignatureReconnectFailures = 0
+                diffSignatureStream?.stop()
+                diffSignatureStream = nil
+                subscribedScope = .none
             }
             let workspaceID = workspaceID
             let deviceGateway = deviceGateway
@@ -1016,13 +1025,13 @@ enum CodePaneMode: Equatable {
     /// displayed). Restoring here re-arms it, and the fresh `resubscribeFileSignature` call below installs
     /// a current-generation `onDisconnect`/backoff closure, closing the stale-handler window too.
     ///
-    /// Deliberately asymmetric with `performWorkspaceDiff`'s twin scope-change bump, which leaves a
-    /// disconnect-during-the-fetch-window stream stale as an accepted edge (see the comment there): the
-    /// web app's diff view recovers on its own via its bounded-backoff `refreshDiff` retry loop, so a
-    /// silently-dead diff-signature stream self-heals the next time a refetch runs. The editor has no
-    /// equivalent fetch-retry loop — nothing else will ever re-arm external-change monitoring for a file
-    /// still open in the pane — so a failed open must proactively restore it here instead of relying on
-    /// the web side. See that comment for the reverse cross-reference.
+    /// Deliberately asymmetric with `performWorkspaceDiff`'s twin scope-change bump, which tears down
+    /// the old subscription at dispatch time instead of restoring it (see the comment there): the diff
+    /// side has no "previous scope's stream" worth reinstalling, so it simply relies on the next
+    /// `workspaceDiff` call to resubscribe from a clean `.none` state. The editor has no equivalent
+    /// fetch-retry loop — nothing else will ever re-arm external-change monitoring for a file still open
+    /// in the pane — so a failed open must proactively restore it here instead. See that comment for the
+    /// reverse cross-reference.
     ///
     /// `pathChanged` (captured at dispatch time, before this read even started) is what already keeps
     /// this from ever touching a live, still-subscribed stream: a re-read of the file the pane is ALREADY

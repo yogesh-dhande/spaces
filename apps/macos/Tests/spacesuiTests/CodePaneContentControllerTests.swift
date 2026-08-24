@@ -118,7 +118,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     // before a later one arrives (Fix 4's disconnect tests do exactly this) would otherwise see
     // `pendingDiffCalls` shrink back toward zero instead of growing, and `at:` positions would drift
     // out from under still-pending calls once an earlier one is removed.
-    private var pendingDiffCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceDiffResult, Never>)] = []
+    private var pendingDiffCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceDiffResult, any Error>)] = []
     private var diffCallArrivalCount = 0
     private var diffArrivalWaiters: [CheckedContinuation<Void, Never>] = []
     private var subscribedRefNames: [String?] = []
@@ -147,7 +147,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private struct InjectedSubscribeFailure: Error {}
 
     func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult {
-        await withCheckedContinuation { (continuation: CheckedContinuation<SpacesDeviceWorkspaceDiffResult, Never>) in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceWorkspaceDiffResult, any Error>) in
             let arrivalIndex = diffCallArrivalCount
             diffCallArrivalCount += 1
             pendingDiffCalls.append((arrivalIndex, continuation))
@@ -259,6 +259,15 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             preconditionFailure("no pending workspaceDiff call at arrival index \(index)")
         }
         pendingDiffCalls.remove(at: position).continuation.resume(returning: result)
+    }
+
+    /// Fails the `workspaceDiff` call at `index` instead of completing it with a result. Mirrors
+    /// `failFileReadCall`.
+    func failDiffCall(at index: Int, error: any Error) {
+        guard let position = pendingDiffCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no pending workspaceDiff call at arrival index \(index)")
+        }
+        pendingDiffCalls.remove(at: position).continuation.resume(throwing: error)
     }
 
     func subscribedRefName(at index: Int) -> String? { subscribedRefNames[index] }
@@ -1322,6 +1331,126 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             "hibernating must stop the generation check before it ever reaches the device lookup again")
         let subscribeCount = await gateway.subscribeCallCount()
         #expect(subscribeCount == 1, "no recovery subscribe may land for a pane that already hibernated")
+    }
+
+    // MARK: - Failed scope change must not strand the old scope's live stream (P1 fix)
+    //
+    // `performWorkspaceDiff`'s dispatch-time generation bump used to leave `subscribedScope` and the
+    // old stream installed but generation-stale when the NEW scope's fetch failed: a later return to
+    // the old scope would find `subscribedScope` already equal to it, so both the bump's own condition
+    // and `resubscribeDiffSignature`'s guard would skip, leaving the pane's live updates dead until
+    // hibernation. The fix tears the old subscription down (`stop()`, nil the stream, clear
+    // `subscribedScope` to `.none`) in the same breath as the generation bump, so a scope change is
+    // atomic: there is never a window where a stale-but-still-installed stream can be found later.
+
+    /// Pins the regression directly: navigate away from a live scope A to a scope B whose fetch fails,
+    /// then return to A — a fresh subscription must open, not be skipped by a guard that (pre-fix)
+    /// still thought A's superseded stream was current.
+    @Test func aFailedScopeChangeDoesNotStrandTheOldScopesLiveStreamOnReturn() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady() // simulate the web app's ready handshake so frames are eligible to forward
+
+        // Scope A live.
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a1", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        // Navigate to scope B with a typo'd ref; its fetch fails with a durable error the web app's
+        // own `refreshDiff` retry contract never automatically retries (`.invalidArgument`).
+        content.dispatch(diffRequest(id: "req-2", scopeKind: "ref", refName: "typo-branch"))
+        await gateway.waitForDiffCallCount(2)
+        await gateway.failDiffCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "no such ref", code: .invalidArgument))
+
+        // Return to scope A.
+        content.dispatch(diffRequest(id: "req-3", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(3)
+        await gateway.completeDiffCall(at: 2, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a2", files: []))
+        await gateway.waitForSubscribeCallCount(2)
+
+        let subscribeCount = await gateway.subscribeCallCount()
+        #expect(subscribeCount == 2, "returning to A after B's failed fetch must open a FRESH subscription, not skip through a stale guard")
+
+        // Prove the fresh subscription is actually live and forwarding, not just that a subscribe call
+        // was made — mirrors `aFrameWithADifferentSignatureIsForwardedAndRecordedAsActedOn`'s check.
+        await gateway.triggerFrame(at: 1, scopeSignature: "sig-a3")
+        await waitUntil { !self.diffSignatureScripts(evaluator).isEmpty }
+        #expect(diffSignatureScripts(evaluator).count == 1)
+        #expect(diffSignatureScripts(evaluator)[0].contains("sig-a3"))
+    }
+
+    /// Proves the teardown is atomic with the generation bump, not merely inferred from a later
+    /// resubscribe: A's stream handle is captured directly (via `holdNextSubscribeAttempts`, the same
+    /// technique the stale-attempt tests above use) and its `stopCount` is checked immediately after
+    /// dispatching B — BEFORE B's fetch even resolves — so this pins that the old stream is stopped at
+    /// dispatch time, not merely as an eventual side effect of B's fetch failing.
+    @Test func aScopeChangeStopsTheOldScopesStreamAtDispatchTimeRegardlessOfWhetherTheNewFetchSucceeds() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // Hold A's subscribe attempt so this test can capture its handle directly.
+        await gateway.holdNextSubscribeAttempts(1)
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-a1", files: []))
+        await gateway.waitForSubscribeAttemptCount(1)
+        let handleA = await gateway.completeHeldSubscribeCall(at: 0)
+        await gateway.waitForSubscribeCallCount(1)
+
+        #expect(handleA.stopCount == 0, "the live A stream must not be stopped before anything invalidates it")
+
+        // Navigate to scope B — do NOT resolve its fetch yet.
+        content.dispatch(diffRequest(id: "req-2", scopeKind: "ref", refName: "typo-branch"))
+        await gateway.waitForDiffCallCount(2)
+
+        #expect(
+            handleA.stopCount == 1,
+            "the old A stream must be stopped at DISPATCH time (the generation bump site), before B's fetch has resolved at all")
+
+        // Fail B's fetch for realism (matches the scenario the P1 report describes); the assertion
+        // above already proved the teardown does not wait on this outcome.
+        await gateway.failDiffCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "no such ref", code: .invalidArgument))
+        await settle()
+
+        #expect(handleA.stopCount == 1, "failing B's fetch must not stop A's already-stopped stream a second time")
+    }
+
+    /// Control: an ordinary same-scope refetch (the kind a `spaces:diffSignature` frame's `refreshDiff`
+    /// triggers) must NOT trip the teardown this fix adds — the teardown rides the same
+    /// `subscribedScope != .scope(refName)` condition the generation bump already used, which only
+    /// trips for a genuine scope change. `aSameScopeRefetchDoesNotStaleTheLiveStreamsDisconnectHandler`
+    /// above already pins that no second subscription opens on a same-scope refetch; this isolates the
+    /// other half that test doesn't cover — that the live stream's handle isn't stopped either.
+    @Test func aSameScopeRefetchDoesNotStopTheLiveStreamsHandle() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        await gateway.holdNextSubscribeAttempts(1)
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-1", files: []))
+        await gateway.waitForSubscribeAttemptCount(1)
+        let handle = await gateway.completeHeldSubscribeCall(at: 0)
+        await gateway.waitForSubscribeCallCount(1)
+
+        content.dispatch(diffRequest(id: "req-2", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(2)
+        await gateway.completeDiffCall(at: 1, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig-1", files: []))
+        await settle()
+
+        #expect(handle.stopCount == 0, "a same-scope refetch must not stop the live stream's handle")
+        #expect(await gateway.subscribeCallCount() == 1, "a same-scope refetch must not open a second subscription")
     }
 
     // MARK: - performFileRead → resubscribeFileSignature wiring (Phase 5 Part A)
