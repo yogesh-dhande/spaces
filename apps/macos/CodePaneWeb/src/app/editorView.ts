@@ -593,6 +593,34 @@ export class EditorView {
       return;
     }
 
+    if (disk.content === this.latestContent) {
+      // Buffer-level analog of the `disk.sha256 === this.baseSHA256` spurious guard above: that one
+      // catches disk matching the BASELINE, this one catches disk matching the BUFFER. Disk already
+      // holds exactly what's showing in the editor, so there is nothing to merge and nothing unsaved
+      // — routing this into `diff3MergeLines` below would merge ours == theirs, which is a no-op on
+      // content but still flips on the "Merged external changes." banner and (per the dirty branch's
+      // own rule) leaves `dirty` true with Save enabled for a merge that never actually happened.
+      //
+      // Canonical trigger: this pane's OWN save. The CAS write lands on disk, the 2s file-signature
+      // poll picks it up and pushes an external-change event, and this read completes before the
+      // save's own network response returns. That push already bumped `externalChangeFetchToken`, so
+      // the save's late success arm correctly stands down per its existing fetch-token guard (:1067)
+      // — this branch is what records the clean outcome instead, since that guard only defers to
+      // whatever `handleExternalChange` decides. An external writer that coincidentally writes exactly
+      // the buffer's content reconciles identically through this same branch.
+      //
+      // Banner-hide and `pendingMergeUndo` clear mirror the save-success arm (:1085-1086): buffer ==
+      // disk == baseline leaves nothing to undo and nothing to report.
+      this.baseSHA256 = disk.sha256;
+      this.baseContent = disk.content;
+      this.dirty = false;
+      this.saveBtn.disabled = true;
+      this.pendingMergeUndo = undefined;
+      this.banner.style.display = "none";
+      this.pushEditorStateNow();
+      return;
+    }
+
     const merge = diff3MergeLines(this.latestContent ?? "", this.baseContent ?? "", disk.content);
     if ("conflict" in merge) {
       this.enterConflictState({ content: disk.content, sha256: disk.sha256, missing: false });

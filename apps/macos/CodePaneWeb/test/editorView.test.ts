@@ -1845,6 +1845,105 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
   });
 });
 
+describe("EditorView — external-change handling: dirty buffer reconciles clean when disk already matches the buffer (against-main round-4 fix)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("the pane's own save landing on disk before its write response returns reconciles clean, and the late response is a no-op", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
+      // handleExternalChange's own read: the signature poll picked up this save's own CAS write —
+      // disk now holds exactly what's submitted, under a new hash the poll assigned it.
+      .mockResolvedValueOnce({ content: "edited\n", sha256: "sha-2", size: 7 });
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
+    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
+
+    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
+    saveBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1" }));
+
+    // The write's own CAS commit lands on disk and the 2s signature poll pushes it before the
+    // save's own network response comes back.
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+
+    // No merge indicator: disk already matched the buffer, so there was nothing to merge.
+    expect(container.querySelector(".banner.merge")).toBeNull();
+    expect(saveBtn.disabled).toBe(true);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "edited\n",
+        content: "edited\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+
+    // The save's own write for the OLD baseline (sha-1) now lands successfully, late. Its success arm
+    // is discarded by the existing fetchToken guard (the signature push above already bumped it), so
+    // this must leave the reconciled clean state exactly as this branch already recorded it.
+    resolveWrite({ ok: true, sha256: "write-sha-a" });
+    await writePromise;
+
+    expect(container.querySelector(".banner.merge")).toBeNull();
+    expect(saveBtn.disabled).toBe(true);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "edited\n",
+        content: "edited\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("an external writer that coincidentally writes exactly the buffer's content reconciles clean, with no save in flight", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 }) // initial open
+      // The external writer's content happens to equal the buffer's current (unsaved) content.
+      .mockResolvedValueOnce({ content: "line1 edited\nline2\n", sha256: "sha-2", size: 19 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+
+    expect(container.querySelector(".banner.merge")).toBeNull();
+    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "line1 edited\nline2\n",
+        content: "line1 edited\nline2\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+});
+
 describe("EditorView — external-change handling: dirty buffer, real conflict + compare view", () => {
   let container: HTMLElement;
 
