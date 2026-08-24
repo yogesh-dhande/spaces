@@ -1417,17 +1417,21 @@ private final class BlockingAuthorizePairingStore: SpacesDevicePairingStoreProto
         lock.unlock()
     }
 
+    /// Holds `lock` across the blocked window, which is what makes this double faithful to
+    /// `SpacesDevicePairingStore`: that store does its whole read-modify-write of the pairings file inside
+    /// one lock of its own, so a revoke or reset cannot save on top of an authorization already in flight.
+    /// The serialization belongs to the store rather than to the Device API queue — `.ping` is authorized
+    /// on its connection's own queue precisely so it never waits on the shared one.
     func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         guard let clientApp else { throw SpacesDevicePairingError.missingClientApp }
         try validate(clientApp: clientApp)
         guard authToken == self.authToken else { throw SpacesDevicePairingError.invalidAuthToken }
 
+        lock.lock()
+        defer { lock.unlock() }
         authorizeStarted.signal()
         guard authorizeCanFinish.wait(timeout: .now() + 5) == .success else { throw POSIXError(.ETIMEDOUT) }
-
-        lock.lock()
         isPaired = true
-        lock.unlock()
     }
 
     func validate(clientApp: SpacesDeviceClientApp) throws {

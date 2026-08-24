@@ -705,6 +705,14 @@ apps/macos/Tests/e2e.sh terminal --scenario workspace-process-terminal
 
 That profiler waits for the built-in session summon metric instead of sleeping a fixed second after refocus, so the reported close or reopen timings track the actual app-side window path more closely.
 
+For Device API control-lane profiling — what a keystroke's control round trip costs while several sessions stream — use:
+
+```bash
+SAMPLES=120 PRODUCERS=5 apps/macos/Tests/profile_device_api_control_lanes.sh
+```
+
+It runs its own throwaway profile and daemon (never the installed one), streams `PRODUCERS` bursty agent-shaped sessions at roughly 100 KB/s each, resyncs every one of them with `.state` from its own connection while a sidebar-shaped `.overview` poll runs, then reports p50/p95/max for the typed control round trip, for `.overview`, and for the DEBUG-gated `device_api_control_lane_wait` read out of the profile's `perf.log`. The corroboration `.ping` is not measured: every sample would have to dial through the CLI, timing a process launch that dwarfs the round trip, and a unit test already pins that a ping is answered clear of the shared queue. The daemon runs with `DEBUG=1`, which costs it real work, so absolute numbers are only comparable against another run of this script. Nothing is published unless the run is comparable: the perf log must have armed, every producer must have streamed and stayed alive across the measured window, and the `.overview` poll must have run to the end unrejected — otherwise the script prints what went wrong and exits nonzero with no summary. A daemon that armed its log but emits no `device_api_control_lane_wait` row anywhere is recognized as a pre-lane build, which is what makes the before half of a before/after comparison runnable: it publishes the externally measured distributions with the lane-wait fields omitted and `lane_wait_metric: "absent"` in their place, while a daemon that does emit the metric is still refused if the window carries none. Lane waits and revisions are read from the window that starts at the first counted sample, so warm-up and startup traffic stay out of the distributions.
+
 ## Pre-commit Hook
 
 Git commits can use the repo hook in `.githooks/pre-commit`, which runs the canonical local verification path.
