@@ -47,6 +47,11 @@ function makeBridge(): SpacesBridge & {
    *  Fix 2 tests to hold a blur-time auto-discard's delete RPC open while `sendBatch` is invoked. */
   holdNextDelete: boolean;
   releaseHeldDelete: (() => void) | undefined;
+  /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentsSend` — used by Fix 1 (P2)'s
+   *  tests to hold a send open while simulating text typed into the card after the click (`sendOne`)
+   *  or into a still-focused card mid-batch (`sendBatch`). */
+  holdNextSend: boolean;
+  releaseHeldSend: (() => void) | undefined;
 } {
   let nextId = 0;
   const drafts = new Map<string, SpacesReviewComment>();
@@ -66,6 +71,8 @@ function makeBridge(): SpacesBridge & {
     releaseHeldList: undefined as (() => void) | undefined,
     holdNextDelete: false,
     releaseHeldDelete: undefined as (() => void) | undefined,
+    holdNextSend: false,
+    releaseHeldSend: undefined as (() => void) | undefined,
     workspaceDiff: notUsed,
     workspaceFileRead: notUsed,
     workspaceFileWrite: notUsed,
@@ -139,6 +146,12 @@ function makeBridge(): SpacesBridge & {
         const err = bridge.failNextSend;
         bridge.failNextSend = undefined;
         throw err;
+      }
+      if (bridge.holdNextSend) {
+        bridge.holdNextSend = false;
+        await new Promise<void>((resolve) => {
+          bridge.releaseHeldSend = resolve;
+        });
       }
       sendCalls.push({ sessionId, text, comments });
       for (const entry of comments) drafts.delete(entry.id);
@@ -397,6 +410,148 @@ describe("CommentsController — send one and send batch", () => {
     // re-read from the bridge rather than trusting the pre-send local copy.
     const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[])[0]!.comment;
     expect(rendered.body).toBe("edited elsewhere");
+  });
+});
+
+describe("CommentsController — Fix 1 (P2): text typed into a card while its send is in flight survives as a new provisional draft", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("sendOne: text typed after the click, while the send is held open, survives as a new provisional card at the same anchor", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+
+    // Persist the draft first (unheld) so `sendOne` below takes its `draft.body === body` fast path
+    // — no upsert in flight, isolating this test to the send itself being held.
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first text";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
+    const persisted = [...bridge.drafts.values()][0]!;
+
+    const persistedCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const persistedTextarea = persistedCard.querySelector("textarea")!;
+    expect(persistedTextarea.value).toBe("first text");
+
+    bridge.holdNextSend = true;
+    const sendBtn = [...persistedCard.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click(); // sendOne reads "first text" live at click time, then issues the (held) send
+
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // Simulate refocusing the card and typing more while the send is still in flight.
+    persistedTextarea.value = "first text plus more";
+    persistedTextarea.dispatchEvent(new Event("input"));
+
+    bridge.releaseHeldSend?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+
+    expect(bridge.drafts.size).toBe(0); // the sent row is archived server-side
+
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(1); // the sent card is gone AND a new provisional card exists
+    const newDraft = anchoredAfter[0]!.comment;
+    expect(newDraft.id).not.toBe(persisted.id);
+    expect(newDraft.filePath).toBe(persisted.filePath);
+    expect(newDraft.lineNumber).toBe(persisted.lineNumber);
+    expect(newDraft.body).toBe(""); // provisional shape: body empty, live text seeded into liveBodies
+
+    const newCard = controller.hooks.renderCard({ comment: newDraft, position: { lineNumber: 1, outdated: false } });
+    const newTextarea = newCard.querySelector("textarea")!;
+    expect(newTextarea.value).toBe("first text plus more"); // renders via `liveBodies`, same as a restored draft
+
+    // Blurring it persists through the normal upsert path.
+    newTextarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
+    expect([...bridge.drafts.values()][0]!.body).toBe("first text plus more");
+  });
+
+  it("sendOne no-op: nothing typed during the flight leaves no new card, matching the existing removal behavior", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first text";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
+    const persisted = [...bridge.drafts.values()][0]!;
+
+    const persistedCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    bridge.holdNextSend = true;
+    const sendBtn = [...persistedCard.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click();
+
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    bridge.releaseHeldSend?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+
+    expect(bridge.drafts.size).toBe(0);
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(0); // no leftover live text — no new card appears
+  });
+
+  it("sendBatch: delivers the PERSISTED bodies, and a still-focused card's unsent live text survives as a new provisional card", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "persisted B",
+    });
+    await controller.loadInitial();
+
+    // Card B is mid-edit and still focused: live text is ahead of its persisted body, and no blur
+    // has fired to save it — the still-focused-card acceptance `sendBatch`'s doc comment describes.
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea")!;
+    textareaB.value = "persisted B plus more";
+    textareaB.dispatchEvent(new Event("input"));
+
+    bridge.holdNextSend = true;
+    const sendPromise = controller.sendBatch();
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    bridge.releaseHeldSend?.();
+    await sendPromise;
+
+    expect(bridge.sendCalls).toHaveLength(1);
+    // The PERSISTED bodies were delivered, not B's in-progress live text — the existing acceptance,
+    // unchanged by this fix.
+    expect(bridge.sendCalls[0]!.text).toContain("persisted A");
+    expect(bridge.sendCalls[0]!.text).toContain("persisted B");
+    expect(bridge.sendCalls[0]!.text).not.toContain("plus more");
+    expect(bridge.sendCalls[0]!.comments.map((c) => c.id).sort()).toEqual([a.id, b.id].sort());
+
+    expect(bridge.drafts.size).toBe(0); // both server rows archived
+
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(1); // A's clean card is simply gone; B's edit survives as a new card
+    const newDraft = anchoredAfter[0]!.comment;
+    expect(newDraft.id).not.toBe(a.id);
+    expect(newDraft.id).not.toBe(b.id);
+    expect(newDraft.body).toBe("");
+
+    const newCard = controller.hooks.renderCard({ comment: newDraft, position: { lineNumber: 1, outdated: false } });
+    expect(newCard.querySelector("textarea")!.value).toBe("persisted B plus more");
   });
 });
 

@@ -173,7 +173,7 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
 
         let client = RemoteWorkspaceGitClient(
             gitExecutable: scriptURL.path, environmentOverrides: ["SPACES_TEST_DRAIN_PIDFILE": pidFileURL.path])
-        defer { killLingeringChild(pidFileURL: pidFileURL) }
+        defer { Self.killLingeringChild(pidFileURL: pidFileURL) }
 
         let start = Date()
         XCTAssertThrowsError(try client.runGitAndCapture([], timeout: 3)) { error in
@@ -192,7 +192,7 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
     /// Kills the `sleep` this test's stub script detaches, using its pid file (written once the script has
     /// actually backgrounded the child). Best-effort: if the pid file was never written (the stub failed to
     /// run at all), there is nothing to clean up.
-    private func killLingeringChild(pidFileURL: URL) {
+    private static func killLingeringChild(pidFileURL: URL) {
         guard let pidString = try? String(contentsOf: pidFileURL, encoding: .utf8),
             let pid = Int32(pidString.trimmingCharacters(in: .whitespacesAndNewlines))
         else { return }
@@ -203,6 +203,80 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         kill.standardError = Pipe()
         try? kill.run()
         kill.waitUntilExit()
+    }
+
+    /// Regression coverage for Fix 2: the `.exited` branch's stderr drain used to reuse `drainTimeout`,
+    /// the value computed once *before* the stdout wait, instead of recomputing it from what remained of
+    /// the deadline. When a stdout straggler ties up a meaningful chunk of the deadline before finally
+    /// releasing, that bug let a stderr straggler add a second, nearly-full-length wait on top — up to
+    /// ~2x the caller's remaining budget after the caller had already given up.
+    ///
+    /// The stub script here backgrounds two detached stragglers, one holding each pipe's write end (via
+    /// `exec`-redirecting the *other* fd to `/dev/null` inside each subshell, then a second `exec` into
+    /// `sleep` so the subshell process is replaced in place rather than forking a child that would hold
+    /// the real fds out of reach of the pid captured via `$!` — so each straggler only keeps one pipe
+    /// open, under the pid the test can actually kill) and exits immediately itself — the `.exited` branch,
+    /// same as the sibling test above. Unlike that test, the stdout straggler here is killed by the test
+    /// partway through the drain window (~2s into a 4s deadline) rather than only in cleanup, so the
+    /// stdout wait consumes about half the deadline before returning — the scenario that distinguishes
+    /// the fix (stderr gets only what remains, ~2s) from the bug (stderr would get a fresh ~4s on top,
+    /// pushing total elapsed to ~6s). The stderr straggler is held for the whole run and only killed in
+    /// `defer`, so the stderr wait genuinely times out rather than returning early on its own.
+    ///
+    /// Because the stdout drain does get EOF (the released straggler lets it complete) within its
+    /// timeout, `runGitAndCapture` does not throw here — the stub's own exit code is 0 and stdout capture
+    /// succeeds with empty output — so this asserts on the call's wall-clock duration rather than on an
+    /// error, which is what actually distinguishes the fix from the bug (both paths return successfully;
+    /// only the fixed path returns in bounded time).
+    func testRunGitAndCaptureRecomputesTheStderrDrainTimeoutFromTheRemainingDeadlineAfterAStdoutStragglerReleasesPartway() throws {
+        let root = try makeTempDirectory()
+        let scriptURL = root.appendingPathComponent("stub-two-detaching-children.sh")
+        let outPidFileURL = root.appendingPathComponent("stdout-holder.pid")
+        let errPidFileURL = root.appendingPathComponent("stderr-holder.pid")
+        let script = """
+            #!/bin/sh
+            ( exec 2>/dev/null; exec sleep 30 ) &
+            echo $! > "$SPACES_TEST_STDOUT_PIDFILE"
+            ( exec 1>/dev/null; exec sleep 30 ) &
+            echo $! > "$SPACES_TEST_STDERR_PIDFILE"
+            exit 0
+            """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        let client = RemoteWorkspaceGitClient(
+            gitExecutable: scriptURL.path,
+            environmentOverrides: [
+                "SPACES_TEST_STDOUT_PIDFILE": outPidFileURL.path,
+                "SPACES_TEST_STDERR_PIDFILE": errPidFileURL.path,
+            ])
+        defer {
+            Self.killLingeringChild(pidFileURL: outPidFileURL)
+            Self.killLingeringChild(pidFileURL: errPidFileURL)
+        }
+
+        // Releases the stdout straggler ~2s into a 4s deadline, well before its own budget would
+        // otherwise expire, so the stdout wait consumes a meaningful but partial chunk of the deadline
+        // before returning. The stderr straggler is left running (killed only in the `defer` above), so
+        // whichever timeout the stderr wait actually gets is the one that determines how long this call
+        // takes to return.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            Self.killLingeringChild(pidFileURL: outPidFileURL)
+        }
+
+        let start = Date()
+        let output = try client.runGitAndCapture([], timeout: 4)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(output, "", "the stub produces no stdout, and the stdout drain must have reached EOF once its straggler was killed")
+        XCTAssertGreaterThan(elapsed, 3.5, "the call should not return before the stderr straggler's wait has had a chance to run its course")
+        XCTAssertLessThan(
+            elapsed, 5.5,
+            """
+            the stderr drain must recompute its timeout from what remains of the deadline (~4s total, one drainGrace of slack) \
+            rather than reusing the value computed before the stdout wait (which would add a second near-full timeout on top, ~6s total)
+            """
+        )
     }
 
     func testRunGitAndCaptureBoundedModeReturnsOutputNormallyWhenUnderTheCap() throws {

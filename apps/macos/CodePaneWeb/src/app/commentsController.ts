@@ -617,7 +617,11 @@ export class CommentsController {
       // (below) stays the persisted one, unchanged from before this fix — by the time this filter
       // runs, every surviving sendable card's in-flight persist has already resolved (the drain loop
       // above only exits once both maps are empty), so persisted and live text agree for anything
-      // this filter lets through.
+      // this filter lets through, EXCEPT a still-focused card mid-edit with no blur yet: it passes on
+      // its live text while its persisted body (what actually gets sent, per the still-focused-card
+      // acceptance in the class doc comment above) lags behind. Fix 1 (P2): that gap's unsent live
+      // text is not lost — see the success arm below, which preserves it via `preserveUnsentLiveText`
+      // once the send that carried the stale persisted body succeeds.
       const liveText = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
       return liveText.trim().length > 0;
     });
@@ -634,13 +638,23 @@ export class CommentsController {
     }
     const sentIds = new Set(ids);
     this.drafts = this.drafts.filter((draft) => !sentIds.has(draft.id));
-    for (const id of ids) {
+    for (const ac of sendableAnchored) {
+      const id = ac.comment.id;
+      // Fix 1 (P2): captured BEFORE `forgetDraftState` below deletes it — see the sendable-filter
+      // comment above and `preserveUnsentLiveText`'s doc comment for why a live entry surviving here
+      // is the still-focused-card gap's unsent typing, not stale bookkeeping.
+      const live = this.liveBodies.get(id);
       this.collapsedIds.delete(id);
       this.forgetDraftState(id);
       // Fix 4 (round-2) / round-2b: see `doDeleteDraft`'s identical guard — a `loadInitial` or
       // `reconcileMirrorAfterRejection` response already dispatched before this batch send completed
       // still carries these rows.
       if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(id);
+      // `ac.comment.body` is the exact (persisted) text this send delivered for this card — a live
+      // entry equal to it means nothing was typed beyond what was already saved.
+      if (live !== undefined && live !== ac.comment.body && live.trim().length > 0) {
+        this.preserveUnsentLiveText(ac.comment, live);
+      }
     }
     this.refresh();
   }
@@ -680,6 +694,42 @@ export class CommentsController {
       this.pendingPersistById.delete(id);
       this.restoredPendingById.delete(id);
     }
+  }
+
+  /** Fix 1 (P2): called from `sendOne`'s and `sendBatch`'s success arms only, after they have
+   *  already removed `sent` from `this.drafts` and called `forgetDraftState` for it. A `liveBodies`
+   *  entry surviving at that point (passed in as `live`) is text typed since the last successful
+   *  `doPersistBody` — see its re-key block above — that the just-completed send did not carry (the
+   *  send always delivers a previously-persisted body, per `sendBatch`'s still-focused-card
+   *  acceptance and `sendOne`'s live-body-at-click-time capture, either of which can predate a later
+   *  keystroke). The sent row is archived server-side the moment the send succeeds, so without this,
+   *  `forgetDraftState`'s `liveBodies.delete` would silently destroy that unsent typing — the only
+   *  event that is allowed to lose an unsaved edit is quitting the app.
+   *
+   * Recreates the leftover text as a brand-new local draft at the same anchor, mirroring
+   * `restorePendingState`'s provisional branch exactly (same shape: empty `body`, the text seeded
+   * into `liveBodies` instead) so nothing downstream sees a novel state — `renderCard` already knows
+   * how to render a provisional card whose live text hasn't been persisted yet, and the next blur
+   * persists it through the normal `persistBody` path. Deliberately does not set `pendingFocus`:
+   * unlike `createDraft` (a direct user action opening a new card), this runs from a send's success
+   * arm with no user gesture on this new card, so stealing focus onto it would be a surprising side
+   * effect of a completed send. */
+  private preserveUnsentLiveText(sent: SpacesReviewComment, live: string): void {
+    const id = `provisional-${++this.provisionalSequence}`;
+    const now = new Date().toISOString();
+    const draft: SpacesReviewComment = {
+      id,
+      filePath: sent.filePath,
+      side: sent.side,
+      lineNumber: sent.lineNumber,
+      lineText: sent.lineText,
+      body: "",
+      createdAt: now,
+      revision: 0,
+    };
+    this.provisionalIds.add(id);
+    this.drafts = [...this.drafts, draft];
+    this.liveBodies.set(id, live);
   }
 
   /** Serializes against any persist already in flight for this id (a prior blur that hasn't
@@ -961,6 +1011,10 @@ export class CommentsController {
       await this.handleSendFailure(err, "Failed to send the comment.");
       return;
     }
+    // Fix 1 (P2): captured BEFORE the removal/forget below, under every key this draft's live text
+    // could still be sitting under — see `preserveUnsentLiveText`'s doc comment for why a surviving
+    // entry here is unsent typing, not stale bookkeeping.
+    const live = this.liveBodies.get(persisted.id) ?? this.liveBodies.get(resolvedId) ?? this.liveBodies.get(id);
     this.drafts = this.drafts.filter((d) => d.id !== persisted.id);
     this.collapsedIds.delete(persisted.id);
     this.forgetDraftState(id, resolvedId, persisted.id);
@@ -968,6 +1022,9 @@ export class CommentsController {
     // `reconcileMirrorAfterRejection` response already dispatched before this send completed still
     // carries this row.
     if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(persisted.id);
+    // `body` is the exact text this send delivered — a live entry equal to it means the user retyped
+    // the same thing (or typed nothing new since the click), so there is nothing to preserve.
+    if (live !== undefined && live !== body && live.trim().length > 0) this.preserveUnsentLiveText(persisted, live);
     this.refresh();
   }
 

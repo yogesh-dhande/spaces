@@ -310,7 +310,14 @@ public final class RemoteWorkspaceGitClient: Sendable {
                     message:
                         "Git command timed out after \(timeout ?? 0)s: \(commandDescription) (a spawned descendant kept a pipe open after exit)")
             }
-            let errData = errDrain.waitForData(timeout: drainTimeout) ?? Data()
+            // The stdout wait above may itself have consumed most of the remaining deadline (a straggler
+            // holding stdout open, released late); reusing `drainTimeout` here would let a straggler
+            // holding stderr stretch the total post-exit drain to ~2x the caller's budget, retaining the
+            // per-workspace git queue for work the caller has already abandoned. Recomputed from the same
+            // deadline with the same `drainGrace` floor so a command that exits at the deadline's edge
+            // still gets the minimal stderr chance.
+            let errDrainTimeout = deadline.map { max(Self.drainGrace, $0.timeIntervalSinceNow) } ?? Self.drainGrace
+            let errData = errDrain.waitForData(timeout: errDrainTimeout) ?? Data()
             // `awaitProcessExitOrCapOverflow`'s poll loop can observe `!process.isRunning` a beat before the
             // drain thread finishes appending its final chunk and sets `didExceedCap` — the process exiting
             // and the drain thread noticing the cap is crossed are two independent, unsynchronized events,
