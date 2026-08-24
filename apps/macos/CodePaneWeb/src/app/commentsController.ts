@@ -235,6 +235,17 @@ export class CommentsController {
   private readonly trayCaret: HTMLElement;
   private trayExpanded = true;
 
+  /** Fix 2 (P2): the `anchored` array `renderTray` was last called with — `refresh()` is the only
+   *  call site (see `renderTray`'s doc comment), so this is set there right before that call.
+   *  `refreshTray()` replays `renderTray` with this cached list so the `input` listener can keep the
+   *  tray's membership/excerpts live on every keystroke without paying for a full re-anchor (typing
+   *  never changes an anchor: `reanchorComments` reads file/line/lineText, not bodies). Starts as an
+   *  empty array rather than `undefined`: `refreshTray` can then be called unconditionally without a
+   *  guard, and the empty case (typing into a card before the first `refresh()` has ever run — not
+   *  reachable in practice, since a card only exists after `createDraft`/`loadInitial` already called
+   *  `refresh()`) just renders an empty tray instead of needing special-cased no-op handling. */
+  private lastAnchored: readonly AnchoredComment[] = [];
+
   /**
    * round-15 Fix: press-scoped rebuild gate. `refresh()`/`refreshCardsOnly()` route through
    * `@pierre/diffs`' `setComments`, which does a WHOLESALE DOM rebuild on every call, creating fresh
@@ -657,13 +668,14 @@ export class CommentsController {
   }
 
   /**
-   * Sends every current sendable draft in one call. Unlike `sendOne`, this reads bodies from
-   * `this.drafts` (the last-persisted value), not live from any card's textarea: a card mid-edit
-   * that has not yet blurred still sends its last-saved body, not the in-progress keystrokes.
-   * Accepted as-is — the toolbar's "Send batch" button lives outside any card, so there is no
-   * single textarea whose blur this action could naturally trigger first, and forcing a blur on
-   * every open card as a side effect of a toolbar click would be a surprising, hard-to-predict
-   * side effect of its own.
+   * Sends every current sendable draft in one call. Unlike `sendOne`, this does not read live text
+   * from a card's textarea directly at click time — it reads bodies from `this.drafts` (the
+   * last-persisted value) once every live-divergent sendable draft has been committed into that
+   * value (Fix 1 (P1) below, and the commit loop further down). The toolbar's "Send batch" button
+   * lives outside any card, so there is no single textarea whose blur this action could naturally
+   * trigger first, and forcing a real DOM blur on every open card as a side effect of a toolbar
+   * click would be a surprising, hard-to-predict side effect of its own; Fix 1 (P1) gets the same
+   * effect a blur would (a `persistBody` call) without simulating one.
    *
    * Drains `pendingPersistById`/`pendingDeleteById` in a loop — not a one-shot snapshot-then-await
    * — before reading anything from `this.drafts`, so the bodies/revisions read below are always
@@ -675,12 +687,44 @@ export class CommentsController {
    * beat the delayed upsert to the daemon, the daemon would archive the stale body and reject the
    * upsert as already-sent — silently discarding the user's edit. Looping — re-snapshotting both
    * maps fresh after every `Promise.all` and only stopping once both come back empty — closes that
-   * window: any persist that registers mid-drain is caught by the next iteration. Once the loop
-   * exits, the membership computation below (`reanchorComments`, the sendable filter, `ids`/
-   * `comments`) runs synchronously with no intervening await — JS is single-threaded, so nothing can
-   * register between the last empty-maps check and the `reviewCommentsSend` call below. This closes
-   * both possible race orderings between this call and a just-blurred card's fire-and-forget
-   * `persistBody`:
+   * window: any persist that registers mid-drain is caught by the next iteration. This is not the
+   * same as `sendOne`/`deleteDraft`'s `resolveId` re-keying — a persist that isn't a
+   * provisional-to-server swap doesn't change an id's identity, only its body/revision — so nothing
+   * here needs `resolveId`.
+   *
+   * Fix 1 (P1): once both maps come back empty, this method does not immediately treat `this.drafts`
+   * as final — it also commits any *live-divergent* draft (`liveBodies` disagrees with `d.body` and
+   * is non-blank) via `persistBody`, then loops again. The pending/deletes drain above only catches a
+   * card whose blur has already fired (a real focused card: a browser fires `blur` before delivering
+   * the toolbar button's `click`, so that persist is already registered in `pendingPersistById` by
+   * the time this method starts). It does NOT catch a draft that has live text in `liveBodies` but
+   * has never blurred this session and therefore has no entry in `pendingPersistById` at all — most
+   * notably a hibernation-restored draft: `restorePendingState` recreates a still-provisional card as
+   * `{id: provisional-N, body: "", revision: 0}` with its typed text seeded only into `liveBodies`,
+   * and a restored *persisted* draft can likewise have newer text in `liveBodies` than in its
+   * `body`/`revision`. Without this commit loop, a restored provisional's `provisional-N` id would go
+   * straight into the send payload — an id the daemon has never seen, so it rejects the whole batch
+   * — and a restored persisted draft would silently deliver stale text. docs/spec.md:156 ("A draft's
+   * text is durable as of its last commit point (its card losing focus, or a send)") is what commits
+   * us to fixing this: a send is itself a commit point for every sendable draft, not only the ones
+   * that happened to blur first. `persistBody` is the right seam to commit through: it serializes per
+   * id, and `doPersistBody` handles the provisional re-key (fresh server id + `idAliases`), the
+   * revision bump, and the live-carry (deleting the `liveBodies` entry once live matches the newly
+   * persisted body, or re-seeding it under a re-keyed id if the user kept typing mid-persist) — which
+   * is exactly why looping again after committing is required: a re-key or a keystroke that landed
+   * during the persist RPC can leave new work for `pendingPersistById`/`liveBodies` that the next
+   * iteration's drain-then-commit pass picks up. Commits run sequentially (`for...of` with `await`,
+   * not `Promise.all`): the daemon serializes per-workspace writes anyway, and sequential persists
+   * keep the abort semantics on a failure obvious (see below). A card emptied on screen (live `""`)
+   * is excluded from `divergent` by the same non-blank check the sendable filter below uses — it is
+   * neither committed nor sent, and the blur-time auto-discard (`deleteDraft`) still owns clearing
+   * it, unchanged by this fix.
+   *
+   * Once this commit loop finds nothing left to commit and the maps are empty, the membership
+   * computation below (`reanchorComments`, the sendable filter, `ids`/`comments`) runs synchronously
+   * with no intervening await — JS is single-threaded, so nothing can register between that last
+   * check and the `reviewCommentsSend` call below. This closes both possible race orderings between
+   * this call and a just-blurred (or just-committed) card's persist:
    *   - Upsert-wins-first: if this were reached without waiting, the daemon's own `revision` check
    *     would reject this send as a `conflict` (see `handleSendFailure`), which re-fetches and
    *     re-renders — self-correcting, not a duplicate or an orphan.
@@ -689,35 +733,35 @@ export class CommentsController {
    *     currently has (the stale, pre-edit one) and then rejecting the delayed upsert as
    *     already-sent/gone — silently discarding the user's edit, with no error surfaced, because
    *     the client raced itself rather than something the daemon's revision check can catch.
-   * This is not the same as `sendOne`/`deleteDraft`'s `resolveId` re-keying — a persist that isn't a
-   * provisional-to-server swap doesn't change an id's identity, only its body/revision — so nothing
-   * here needs `resolveId`.
    *
-   * The residual window this cannot close: a blur that happens AFTER the drain loop has already
-   * exited and `reviewCommentsSend` has already been issued. That is the same still-focused-card
-   * acceptance noted above (a card mid-edit with no blur yet sends its last-saved body by design),
-   * and the daemon's revision CAS turns a same-card race of that shape into a `conflict`
-   * (self-correcting, see `handleSendFailure`) rather than a silent loss, because that upsert is now
-   * the one racing an already-issued send rather than the reverse. This is the unavoidable minimum
-   * without daemon-side coordination of persist-vs-send ordering.
+   * The residual window this cannot close: an edit-then-blur (or an edit alone, now that Fix 1
+   * commits live-divergent drafts) that happens strictly AFTER the drain-and-commit loop has already
+   * exited and `reviewCommentsSend` has already been issued — e.g. new keystrokes land during the
+   * `reviewCommentsSend` RPC's own await. That gap's unsent live text is not lost: the success arm
+   * below (`preserveUnsentLiveText`) resurrects it as a new provisional draft, exactly as `sendOne`
+   * already does for the same window. The daemon's revision CAS turns any same-card persist that
+   * still manages to race an already-issued send into a `conflict` (self-correcting, see
+   * `handleSendFailure`) rather than a silent loss. This is the unavoidable minimum without
+   * daemon-side coordination of persist-vs-send ordering.
    *
-   * A *failed* persist (drained at any iteration) is a distinct case from the successful-racing-
-   * persist ordering above, and cannot be handled the same way: `doPersistBody`'s catch block
-   * surfaces the error but never updates `this.drafts`' body or revision, so after the drain,
-   * `this.drafts` still holds the pre-edit body at the pre-edit revision — indistinguishable, from
-   * this method's point of view, from a card that was never edited at all. The daemon's revision CAS
-   * has nothing to catch here (the revision never bumped), so sending would silently
-   * archive/deliver the wrong (stale) text. `pendingPersistById`'s promises therefore resolve to a
-   * boolean, and this method checks every one of them at every iteration and aborts before computing
-   * anything if any failed, leaving every draft untouched so the user can retry. A `deleteDraft` call
-   * awaiting a pending persist internally (see `pendingDeleteById`'s doc comment) is already covered
-   * correctly by the combined wait — by the time a `pendingDeleteById` promise resolves, any persist
-   * it was itself waiting on has already resolved too, so there is no extra sequencing to add for
-   * that case.
+   * A *failed* persist (drained at any iteration, including a failed commit from the new loop above)
+   * is a distinct case from the successful-racing-persist ordering above, and cannot be handled the
+   * same way: `doPersistBody`'s catch block surfaces the error but never updates `this.drafts`' body
+   * or revision, so after the drain, `this.drafts` still holds the pre-edit body at the pre-edit
+   * revision — indistinguishable, from this method's point of view, from a card that was never
+   * edited at all. The daemon's revision CAS has nothing to catch here (the revision never bumped),
+   * so sending would silently archive/deliver the wrong (stale) text. `pendingPersistById`'s
+   * promises (and the new commit loop's own `persistBody` calls) therefore resolve to a boolean, and
+   * this method aborts before computing anything if any of them failed, leaving every draft untouched
+   * so the user can retry. A `deleteDraft` call awaiting a pending persist internally (see
+   * `pendingDeleteById`'s doc comment) is already covered correctly by the combined wait — by the
+   * time a `pendingDeleteById` promise resolves, any persist it was itself waiting on has already
+   * resolved too, so there is no extra sequencing to add for that case.
    *
-   * Starvation is not a concern worth guarding against: each extra loop iteration requires another
-   * user blur (a real interaction happening in real time), so the loop is naturally bounded by how
-   * fast a person can type and click — no cap is added.
+   * Starvation is not a concern worth guarding against: each extra loop iteration requires either
+   * another user blur or another already-diverged draft to commit, both bounded by how fast a person
+   * can type/click and by `persistBody`'s live-carry converging once the user stops typing — no cap
+   * is added.
    */
   private async doSendBatch(agent: CodePaneAgentSummary): Promise<void> {
     // Fix 2 (round-2 P1): drain until quiescent — see the class doc comment above for the full race
@@ -726,7 +770,31 @@ export class CommentsController {
     for (;;) {
       const persists = [...this.pendingPersistById.values()];
       const deletes = [...this.pendingDeleteById.values()];
-      if (persists.length === 0 && deletes.length === 0) break;
+      if (persists.length === 0 && deletes.length === 0) {
+        // Fix 1 (P1): both maps are quiescent, but that alone doesn't mean `this.drafts` is final —
+        // a draft can hold live text in `liveBodies` that has never gone through `persistBody` at
+        // all this session (no blur ever fired for it), most notably a hibernation-restored card.
+        // See the class doc comment above for the full rationale; commit every such draft, then loop
+        // again since `persistBody` may register new pending work (a provisional re-key, or a
+        // keystroke that landed during the persist RPC re-seeding `liveBodies` under the new id).
+        const divergent = this.drafts.filter((d) => {
+          const live = this.liveBodies.get(d.id);
+          return live !== undefined && live !== d.body && live.trim().length > 0;
+        });
+        if (divergent.length === 0) break;
+        for (const d of divergent) {
+          const ok = await this.persistBody(d.id, this.liveBodies.get(d.id)!);
+          if (!ok) {
+            // Same abort shape as the pending-persist-drain failure below: doPersistBody's catch
+            // already surfaced the underlying error via surfaceError, this is the sendBatch-specific
+            // "nothing was sent" toast, and every draft is left untouched (persistBody/doPersistBody
+            // never mutate this.drafts on failure) so the user can retry.
+            this.surfaceError(undefined, "A recent edit failed to save — nothing was sent. Try again.");
+            return;
+          }
+        }
+        continue;
+      }
       const [persistResults] = await Promise.all([Promise.all(persists), Promise.all(deletes)]);
       if (persistResults.some((ok) => !ok)) {
         // A blur-time persist that was in flight during the drain failed — this.drafts still holds
@@ -748,13 +816,12 @@ export class CommentsController {
       // `this.drafts` with its old non-empty body even though the user emptied it on screen.
       // Consulting live text here excludes it from the batch either way. The BODY actually sent
       // (below) stays the persisted one, unchanged from before this fix — by the time this filter
-      // runs, every surviving sendable card's in-flight persist has already resolved (the drain loop
-      // above only exits once both maps are empty), so persisted and live text agree for anything
-      // this filter lets through, EXCEPT a still-focused card mid-edit with no blur yet: it passes on
-      // its live text while its persisted body (what actually gets sent, per the still-focused-card
-      // acceptance in the class doc comment above) lags behind. Fix 1 (P2): that gap's unsent live
-      // text is not lost — see the success arm below, which preserves it via `preserveUnsentLiveText`
-      // once the send that carried the stale persisted body succeeds.
+      // runs, every surviving sendable card's live and persisted text agree: the loop above only
+      // exits once both maps are empty AND (Fix 1 (P1)) every live-divergent draft has been
+      // committed through `persistBody`. The one gap that survives is text typed during the
+      // `reviewCommentsSend` RPC's own await below (after this filter already ran) — that unsent
+      // live text is not lost; see the success arm below, which preserves it via
+      // `preserveUnsentLiveText`.
       const liveText = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
       return liveText.trim().length > 0;
     });
@@ -775,7 +842,9 @@ export class CommentsController {
       const id = ac.comment.id;
       // Fix 1 (P2): captured BEFORE `forgetDraftState` below deletes it — see the sendable-filter
       // comment above and `preserveUnsentLiveText`'s doc comment for why a live entry surviving here
-      // is the still-focused-card gap's unsent typing, not stale bookkeeping.
+      // is unsent typing from during the `reviewCommentsSend` RPC await itself (Fix 1 (P1) above
+      // already committed everything live-divergent before that await started), not stale
+      // bookkeeping.
       const live = this.liveBodies.get(id);
       this.collapsedIds.delete(id);
       this.forgetDraftState(id);
@@ -838,9 +907,11 @@ export class CommentsController {
    *
    * In the send case, a `liveBodies` entry surviving at that point (passed in as `live`) is text
    * typed since the last successful `doPersistBody` — see its re-key block above — that the
-   * just-completed send did not carry (the send always delivers a previously-persisted body, per
-   * `sendBatch`'s still-focused-card acceptance and `sendOne`'s live-body-at-click-time capture,
-   * either of which can predate a later keystroke). The sent row is archived server-side the moment
+   * just-completed send did not carry (the send always delivers a previously-persisted body: for
+   * `sendBatch` that's guaranteed by Fix 1 (P1)'s commit loop, which persists every live-divergent
+   * draft before the send payload is built; for `sendOne` it's the live-body-at-click-time capture;
+   * either way a later keystroke, made during the send RPC's own await, can still postdate it). The
+   * sent row is archived server-side the moment
    * the send succeeds, so without this, `forgetDraftState`'s `liveBodies.delete` would silently
    * destroy that unsent typing. In the `loadInitial` case, the held entry's text was typed AFTER the
    * last persist (the only way `collectStateForFlush` emits a non-provisional entry at all — see its
@@ -1337,8 +1408,21 @@ export class CommentsController {
     const anchored = this.anchoredAll();
     const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
     this.diffView?.setComments(visible);
+    this.lastAnchored = anchored; // Fix 2 (P2): cached for refreshTray() — see its field doc comment
     this.renderTray(anchored);
     this.pushToolbarState();
+  }
+
+  /** Fix 2 (P2): re-renders just the tray from `lastAnchored`, without touching the diff-view cards
+   *  or re-anchoring — called from the textarea `input` listener so the tray's membership and
+   *  excerpts stay live per keystroke (see `renderTray`'s doc comment for why membership/excerpts
+   *  must track `liveBodies`). No press-gating is needed here the way `refresh()`/`refreshCardsOnly()`
+   *  need it: the round-15 gate exists because a wholesale `setComments` rebuild can replace a
+   *  just-pressed button's DOM node before its `click` fires (see `pointerPressActive`'s doc
+   *  comment), but an `input` event is keyboard-driven and cannot land mid-mouse-press on a tray
+   *  button, and `renderTray` only rebuilds the tray's own rows, not any card. */
+  private refreshTray(): void {
+    this.renderTray(this.lastAnchored);
   }
 
   /** Cheaper path for a change that only affects card rendering (agent selection/list), not the
@@ -1410,6 +1494,10 @@ export class CommentsController {
       // text and `doSendBatch`'s sendable filter already treats this card as sendable right now.
       // Cheap: a filter over a handful of drafts, run once per keystroke.
       this.pushToolbarState();
+      // Fix 2 (P2): keeps the open tray's membership/excerpts live too — see `renderTray`'s doc
+      // comment for why it must agree with `pushToolbarState`'s count. No press-gating needed; see
+      // `refreshTray`'s doc comment.
+      this.refreshTray();
     });
     // Blur-only persistence, deliberately with no debounce timer at all (stricter than
     // editorView.ts's ~500ms debounce for editor buffer edits): a comment body is short and the
@@ -1526,8 +1614,16 @@ export class CommentsController {
     return card;
   }
 
+  /** Fix 2 (P2): membership and excerpts are judged on LIVE text (falling back to the persisted body
+   *  when there is no live entry), the same expression `doSendBatch`'s sendable filter and
+   *  `pushToolbarState`'s `draftCount` already use — see their doc comments. Before this fix the tray
+   *  read `ac.comment.body` alone, so three different places disagreed about what counts as
+   *  "sendable": the toolbar's live count, the batch's actual send membership, and the open tray's
+   *  own rows/excerpts. That let the toolbar show "Send batch · 1" for a live-only provisional
+   *  (typed-but-never-blurred, or hibernation-restored — see Fix 1 (P1) above) while the open tray
+   *  showed nothing for it, or showed a stale excerpt for a card whose live text had moved on. */
   private renderTray(anchored: readonly AnchoredComment[]): void {
-    const sendable = anchored.filter((ac) => ac.comment.body.trim().length > 0);
+    const sendable = anchored.filter((ac) => (this.liveBodies.get(ac.comment.id) ?? ac.comment.body).trim().length > 0);
     this.tray.style.display = sendable.length === 0 ? "none" : "flex";
     this.trayCount.textContent = String(sendable.length);
 
@@ -1555,7 +1651,7 @@ export class CommentsController {
 
       const excerpt = document.createElement("span");
       excerpt.className = "comment-tray-excerpt";
-      excerpt.textContent = ac.comment.body;
+      excerpt.textContent = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
       row.appendChild(excerpt);
 
       const removeBtn = document.createElement("button");

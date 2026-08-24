@@ -502,7 +502,19 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     expect(anchoredAfter).toHaveLength(0); // no leftover live text — no new card appears
   });
 
-  it("sendBatch: delivers the PERSISTED bodies, and a still-focused card's unsent live text survives as a new provisional card", async () => {
+  // round-19 Fix 1 (P1): this test used to assert the OLD pre-commit-loop behavior — a still-focused
+  // card's un-blurred live text was excluded from the batch payload and survived send as a new
+  // provisional card. docs/spec.md:156 makes a send itself a commit point ("A draft's text is
+  // durable as of its last commit point (its card losing focus, or a send)"), and `doSendBatch`'s
+  // drain loop now commits any live-divergent draft via `persistBody` before building the batch
+  // payload — see its doc comment's Fix 1 (P1) paragraph. This scenario (an `input` event with no
+  // `blur`, then a direct `sendBatch()` call) is exactly what that commit loop is meant to catch: from
+  // the controller's point of view it is indistinguishable from a hibernation-restored draft that will
+  // never blur (the code has no DOM-focus awareness), so the fix necessarily also covers a genuinely
+  // still-focused card in this harness. Updated to assert the new, correct behavior: B's live edit is
+  // committed (an upsert fires) before the send, its full text is delivered, and no leftover
+  // provisional card is created since nothing was left uncommitted.
+  it("sendBatch: commits a still-focused card's live-divergent text before building the payload, then delivers it", async () => {
     const { bridge, controller, diffViewFake } = setup();
     const a = await bridge.reviewCommentUpsert({
       filePath: "src/foo.ts",
@@ -520,8 +532,7 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     });
     await controller.loadInitial();
 
-    // Card B is mid-edit and still focused: live text is ahead of its persisted body, and no blur
-    // has fired to save it — the still-focused-card acceptance `sendBatch`'s doc comment describes.
+    // Card B is mid-edit: live text is ahead of its persisted body, and no blur has fired to save it.
     const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
     const textareaB = cardB.querySelector("textarea")!;
     textareaB.value = "persisted B plus more";
@@ -529,29 +540,24 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
 
     bridge.holdNextSend = true;
     const sendPromise = controller.sendBatch();
+    // The commit loop persists B's live text and the held send is issued with it BEFORE this resolves
+    // — releaseHeldSend only appears once reviewCommentsSend has actually been called.
     await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    expect(bridge.upsertCallCount).toBe(3); // A's initial create, B's initial create, B's commit
+    expect(bridge.drafts.get(b.id)?.body).toBe("persisted B plus more"); // committed before the send
+
     bridge.releaseHeldSend?.();
     await sendPromise;
 
     expect(bridge.sendCalls).toHaveLength(1);
-    // The PERSISTED bodies were delivered, not B's in-progress live text — the existing acceptance,
-    // unchanged by this fix.
     expect(bridge.sendCalls[0]!.text).toContain("persisted A");
-    expect(bridge.sendCalls[0]!.text).toContain("persisted B");
-    expect(bridge.sendCalls[0]!.text).not.toContain("plus more");
+    expect(bridge.sendCalls[0]!.text).toContain("persisted B plus more");
     expect(bridge.sendCalls[0]!.comments.map((c) => c.id).sort()).toEqual([a.id, b.id].sort());
 
     expect(bridge.drafts.size).toBe(0); // both server rows archived
 
     const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
-    expect(anchoredAfter).toHaveLength(1); // A's clean card is simply gone; B's edit survives as a new card
-    const newDraft = anchoredAfter[0]!.comment;
-    expect(newDraft.id).not.toBe(a.id);
-    expect(newDraft.id).not.toBe(b.id);
-    expect(newDraft.body).toBe("");
-
-    const newCard = controller.hooks.renderCard({ comment: newDraft, position: { lineNumber: 1, outdated: false } });
-    expect(newCard.querySelector("textarea")!.value).toBe("persisted B plus more");
+    expect(anchoredAfter).toHaveLength(0); // nothing left uncommitted — no leftover provisional card
   });
 });
 
@@ -1870,6 +1876,126 @@ describe("CommentsController — round-11 Fix: a repeat teardown inside the rest
     expect(entriesAfter[0]!.id).not.toBe("c-gone");
     expect(entriesAfter[0]!.id.startsWith("provisional-")).toBe(true);
     expect(entriesAfter[0]).toMatchObject({ provisional: true, body: "typed since last save" });
+  });
+});
+
+describe("CommentsController — round-19 Fix 1 (P1): sendBatch commits live-divergent draft text before building the batch payload", () => {
+  it("commits a restored provisional draft's live text before sending, instead of sending a client-local id the daemon rejects the whole batch for", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    // Simulates a hibernation-restored provisional card: recreated locally with an empty stored body
+    // and its typed text seeded only into liveBodies — no blur has ever fired for it this session, so
+    // (pre-fix) doSendBatch's drain never touches it and the send payload would carry "provisional-N".
+    controller.restorePendingState([
+      {
+        id: "provisional-9", // the pre-teardown id — irrelevant here, restorePendingState mints a fresh one
+        provisional: true,
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 1,
+        lineText: "const x = compute();",
+        body: "restored text",
+      },
+    ]);
+
+    await controller.sendBatch();
+
+    // The commit loop persisted the restored text (creating a real server row) before the send ran.
+    expect(bridge.upsertCallCount).toBe(1);
+    expect(bridge.sendCalls).toHaveLength(1);
+    const sentIds = bridge.sendCalls[0]!.comments.map((c) => c.id);
+    expect(sentIds).toHaveLength(1);
+    expect(sentIds[0]).not.toMatch(/^provisional-/); // a real server id, not the client-local placeholder
+    expect(bridge.sendCalls[0]!.text).toContain("restored text");
+
+    expect(bridge.drafts.size).toBe(0); // the committed-then-sent row is archived server-side
+  });
+
+  it("commits a restored persisted draft's newer live text before sending, instead of silently delivering the stale listed body", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "old",
+    });
+
+    // Same restore shape as the round-16 Fix 1 test above: restorePendingState seeds liveBodies ahead
+    // of loadInitial's merge, which lands the listed (stale) body into this.drafts.
+    controller.restorePendingState([
+      {
+        id: persisted.id,
+        provisional: false,
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 1,
+        lineText: "const x = compute();",
+        body: "new",
+      },
+    ]);
+    await controller.loadInitial();
+
+    await controller.sendBatch();
+
+    // The commit loop upserted "new" (bumping the revision) before the send read anything.
+    expect(bridge.upsertCallCount).toBe(2); // the initial create, then the restore commit
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.sendCalls[0]!.text).toContain("new");
+    expect(bridge.sendCalls[0]!.text).not.toContain("old");
+    const sentComment = bridge.sendCalls[0]!.comments.find((c) => c.id === persisted.id)!;
+    expect(sentComment.revision).toBe(1); // bumped by the commit, not the stale listed revision (0)
+  });
+
+  it("a failed commit-persist during the drain aborts the batch, surfacing the error and leaving the draft's live text retryable", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "old",
+    });
+
+    controller.restorePendingState([
+      {
+        id: persisted.id,
+        provisional: false,
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 1,
+        lineText: "const x = compute();",
+        body: "new",
+      },
+    ]);
+    await controller.loadInitial();
+
+    bridge.failNextUpsert = new SpacesBridgeError("internalError", "daemon unreachable");
+    await controller.sendBatch();
+
+    expect(bridge.sendCalls).toHaveLength(0); // aborted before anything was sent
+    expect(bridge.drafts.get(persisted.id)?.body).toBe("old"); // the server-side row was never touched
+
+    // The draft's live text survives untouched (doPersistBody's catch never mutates liveBodies), so
+    // it renders and is retryable on the next blur.
+    const comment = firstAnchoredComment(diffViewFake);
+    expect(comment.body).toBe("old"); // this.drafts still holds the pre-commit body
+    const card = controller.hooks.renderCard({ comment, position: { lineNumber: 1, outdated: false } });
+    expect(card.querySelector("textarea")!.value).toBe("new");
   });
 });
 
@@ -3682,5 +3808,84 @@ describe("CommentsController — round-18 Fix 3 (P2): toolbar batch count reflec
     textarea.value = "";
     textarea.dispatchEvent(new Event("input"));
     expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
+  });
+});
+
+describe("CommentsController — round-19 Fix 2 (P2): batch tray membership and excerpts track live text", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container); // mounts the (persistent) tray element the tests query below
+    return { bridge, controller, diffViewFake, container, onToolbarStateChange };
+  }
+
+  it("a live-only provisional (typed, never blurred) appears in the open tray, agreeing with the toolbar's live draftCount", () => {
+    const { controller, diffViewFake, container, onToolbarStateChange } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+
+    // Before typing, an empty provisional draft has no sendable body — the tray is empty, matching
+    // the toolbar's own count.
+    expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(0);
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
+
+    textarea.value = "restored text";
+    textarea.dispatchEvent(new Event("input")); // no blur — this draft has never round-tripped
+
+    expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(1);
+    const rows = container.querySelectorAll(".comment-tray-row");
+    expect(rows).toHaveLength(1); // agrees with the toolbar count above
+    expect(container.querySelector(".comment-tray-excerpt")!.textContent).toBe("restored text");
+  });
+
+  it("excerpt tracks live edits: a persisted draft's tray excerpt reflects unsaved typing, not the stale saved body", async () => {
+    const { bridge, controller, container } = setup();
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "old",
+    });
+    await controller.loadInitial();
+
+    expect(container.querySelector(".comment-tray-excerpt")!.textContent).toBe("old"); // the listed body, pre-edit
+
+    const card = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "new";
+    textarea.dispatchEvent(new Event("input")); // no blur — the excerpt must not wait for a commit
+
+    expect(container.querySelector(".comment-tray-excerpt")!.textContent).toBe("new");
+  });
+
+  it("the open tray re-renders on every keystroke, with no blur dispatched at any point", () => {
+    const { controller, diffViewFake, container } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+
+    expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(0);
+
+    textarea.value = "f";
+    textarea.dispatchEvent(new Event("input"));
+    expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(1);
+    expect(container.querySelector(".comment-tray-excerpt")!.textContent).toBe("f");
+
+    textarea.value = "fi";
+    textarea.dispatchEvent(new Event("input"));
+    expect(container.querySelector(".comment-tray-excerpt")!.textContent).toBe("fi");
+
+    textarea.value = "";
+    textarea.dispatchEvent(new Event("input"));
+    expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(0); // emptied back out, still no blur
   });
 });
