@@ -5,8 +5,9 @@ inside the macOS app's WKWebView and talks to the Swift host only through the ty
 `window.spaces` bridge. Built with Vite + TypeScript, rendering with `@pierre/diffs`
 (Shiki-based).
 
-Nothing in this bundle makes a network request at runtime; it is loaded from `file://` and
-every asset path in the built output is relative.
+Nothing in this bundle makes a network request at runtime; it is served to the WKWebView over the
+app's `spaces-codepane` custom URL scheme by a `WKURLSchemeHandler` reading the checked-in
+`Resources/CodePane` bundle, and every asset path in the built output is relative.
 
 ## Build and dev harness
 

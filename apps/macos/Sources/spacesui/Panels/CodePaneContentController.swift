@@ -60,7 +60,7 @@ enum CodePaneMode: Equatable {
     /// Set once the web app's `ready` message arrives; the host must wait for it before dispatching
     /// `spaces:init` (see README) and must not push `spaces:theme`/`spaces:diffSignature` before
     /// the page has a listener attached for them either.
-    private var isReady = false
+    private(set) var isReady = false
     private var currentTheme: ThemeAppearance?
     /// The running-agent set last pushed via `spaces:agents` (or folded into the pending
     /// `spaces:init` payload before the page was ready) — `nil` until the first push/init, so the
@@ -449,6 +449,16 @@ enum CodePaneMode: Equatable {
     private func installWebView() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: Self.messageHandlerName)
+        // The built bundle's `index.html` loads its entry as `<script type="module" crossorigin>` plus
+        // a `crossorigin` stylesheet, both of which are CORS-fetched. A `file://` load gives the page an
+        // opaque origin, which WebKit blocks both requests against, so the module script and stylesheet
+        // never run and the page renders blank. Registering `CodePaneSchemeHandler` on a custom scheme
+        // instead gives the page a stable, non-opaque origin the module script, stylesheet, and any
+        // Shiki dynamic-import chunks can all load same-origin from.
+        let baseDirectory = Self.codePaneIndexURL()?.deletingLastPathComponent()
+        if let baseDirectory {
+            configuration.setURLSchemeHandler(CodePaneSchemeHandler(baseDirectory: baseDirectory), forURLScheme: CodePaneSchemeHandler.scheme)
+        }
         let webView = WKWebView(frame: rootView.bounds, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(webView)
@@ -463,10 +473,10 @@ enum CodePaneMode: Equatable {
         isReady = false
         pageGeneration += 1
         // The built web bundle is checked into the package as a `.copy` resource; it must always be
-        // present in a built app, so there is nothing to fall back to if it's missing — the page just
-        // stays blank.
-        if let indexURL = Self.codePaneIndexURL() {
-            webView.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
+        // present in a built app, so there is nothing to fall back to if it's missing, and the page
+        // just stays blank.
+        if baseDirectory != nil {
+            webView.load(URLRequest(url: CodePaneSchemeHandler.entryURL))
         }
     }
 
