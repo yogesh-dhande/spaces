@@ -2,6 +2,7 @@
     import XCTest
     import Network
     import spacesdevicecore
+    import spacesterminalcore
     @testable import SpacesMobile
 
     /// `SpacesDeviceEndpointResolver` opens real `NWConnection`s. Most of what's covered here doesn't
@@ -217,9 +218,10 @@
 
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
+            let sentinelBox = WeakStreamSentinelBox()
             let disconnected = expectation(description: "stream disconnected with an error")
             _ = try await backend.openSessionStream(
-                request: request, onEvent: { _ in },
+                request: request, onEvent: makeSentinelEventCallback(recordingInto: sentinelBox),
                 onDisconnect: { error in
                     XCTAssertNotNil(error)
                     disconnected.fulfill()
@@ -228,6 +230,9 @@
             await fulfillment(of: [disconnected], timeout: 15)
             let cachedHostAfterFailure = await backend.resolver.currentCachedHost()
             XCTAssertNil(cachedHostAfterFailure)
+            // A stream that ends badly must also leave nothing behind: an outage retries for as long as it
+            // lasts, so a connection and its queue orphaned per attempt accumulate for the whole outage.
+            try await waitForSubscriptionRelease(sentinelBox)
         }
 
         /// The other half of symptom 1's contract: a `nil` disconnect error is a clean, caller-initiated
@@ -262,6 +267,59 @@
             await fulfillment(of: [disconnected], timeout: 5)
             let cachedHostAfterCleanClose = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostAfterCleanClose, "127.0.0.1")
+        }
+
+        /// Nothing a stream leaves behind may outlive it. An `NWConnection` holds its handler blocks —
+        /// and those blocks hold `StreamSubscription`, its decode buffer, and the per-stream
+        /// `DispatchQueue` — until the connection is cancelled, so cancelling is the only thing that
+        /// releases the graph. Every way a stream ends therefore cancels, and this pins the mechanism the
+        /// callers depend on: both clients drop their stream handle on disconnect with no cleanup of their
+        /// own, which is only correct because the connection cancels itself here.
+        ///
+        /// The sentinel is owned by the event callback and by nothing else, so its deallocation is a direct
+        /// read of whether the subscription behind it was released.
+        func testCancellingAStreamReleasesItsSubscription() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let backend = SpacesDeviceNetworkBackend(settings: settings)
+
+            let sentinelBox = WeakStreamSentinelBox()
+            let request = SpacesDeviceAPIRequest(
+                command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
+            let disconnected = expectation(description: "stream disconnected cleanly")
+            let handle = try await backend.openSessionStream(
+                request: request, onEvent: makeSentinelEventCallback(recordingInto: sentinelBox), onDisconnect: { _ in disconnected.fulfill() })
+            handle.cancel()
+
+            await fulfillment(of: [disconnected], timeout: 5)
+            try await waitForSubscriptionRelease(sentinelBox)
+        }
+
+        /// Builds an event callback owning a freshly created sentinel, recorded weakly in `box`. Written as
+        /// a function so the only strong reference lives inside the returned callback — a strong local in
+        /// the test's own frame would keep the sentinel alive no matter what the subscription does.
+        private func makeSentinelEventCallback(recordingInto box: WeakStreamSentinelBox) -> @MainActor (GhosttyRemoteSessionStatePayload) -> Void {
+            let sentinel = StreamLifetimeSentinel()
+            box.object = sentinel
+            XCTAssertNotNil(box.object, "the sentinel must be recorded before the callback escapes")
+            return { _ in sentinel.noteEvent() }
+        }
+
+        /// Waits for the subscription behind `box` to be released. The release happens on the stream's own
+        /// queue as the cancelled connection drops its handler blocks, so it is observed rather than
+        /// assumed — with a bound short enough that a subscription still alive means nothing cancelled it.
+        private func waitForSubscriptionRelease(_ box: WeakStreamSentinelBox, file: StaticString = #filePath, line: UInt = #line) async throws {
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline, box.object != nil { try await Task.sleep(for: .milliseconds(50)) }
+            XCTAssertNil(
+                box.object, "a stream that ended must have cancelled its connection, or its handler blocks keep the whole subscription alive",
+                file: file, line: line)
         }
 
         // MARK: - Single warm-start mechanism (item 3)
@@ -385,6 +443,19 @@
     /// level" so a test can exercise the pin-mismatch path without a real pinned-TLS daemon. Accepts and
     /// immediately parks every incoming connection (never sends a TLS handshake), which is what makes a
     /// pinned-TLS `NWConnection` against it time out rather than succeed or fail outright.
+    /// Stands in for everything a live `StreamSubscription` keeps alive. Held only by the event callback
+    /// the subscription owns, so its deallocation is a direct read of whether that subscription was
+    /// released. `noteEvent` exists so the capture is an unambiguous use rather than a discardable one.
+    private final class StreamLifetimeSentinel: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events = 0
+
+        func noteEvent() { lock.withLock { events += 1 } }
+    }
+
+    /// Weak handle to a `StreamLifetimeSentinel`, so a test can observe its deallocation without holding it.
+    private final class WeakStreamSentinelBox: @unchecked Sendable { weak var object: StreamLifetimeSentinel? }
+
     private final class LoopbackConnectionSink: @unchecked Sendable {
         private let listener: NWListener
         private let queue = DispatchQueue(label: "spaces.device.api.resolver-test.sink")

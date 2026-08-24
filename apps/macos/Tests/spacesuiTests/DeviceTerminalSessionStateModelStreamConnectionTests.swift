@@ -128,6 +128,472 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.isStateStreamDisconnected)
     }
 
+    /// The cached runtime state is not evidence that a dropped stream needs no replacement. The stream
+    /// that just died is the only thing that keeps that cache current, so a cache reading `.exited` for a
+    /// session the device still has running used to end the reconnect path for good: no stream, no retry,
+    /// no notice, and nothing left that could correct any of it — the pane stayed frozen until it was
+    /// closed and reopened (issue #537). The drop asks the device instead of ruling on the cache, and the
+    /// device's answer re-arms both the notice and the retry.
+    @MainActor func testADropAgainstAStaleEndedCacheRecoversWhenTheDeviceReportsTheSessionRunning() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        // Far beyond this test's own runtime: what is asserted is that a retry is armed, not what it does
+        // when it runs, and a retry that fired here would dial the unreachable fixture device.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let script = LivenessFetchScript(repeating: .success(runningStatePayload(sessionID: sessionID)))
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        // The last thing the (now dead) stream said about this session was that its process had exited.
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+
+        // Nothing is claimed on the cache's word alone: a session that really ended needs no stream and
+        // gets no outage notice, so the drop is neither reported nor retried until the device has answered.
+        XCTAssertFalse(model.isStateStreamDisconnected)
+        XCTAssertFalse(model.hasArmedReconnectForTesting)
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "the drop must leave the liveness question open, not drop it")
+
+        // The device answers: the session is running after all, and the cache was stale.
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertTrue(model.isStateStreamDisconnected, "the device's answer must surface the outage the stale cache hid")
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect the stale cache turned away")
+    }
+
+    /// A `.state` request that never reaches the device is the likeliest outcome of the very outage that
+    /// dropped the stream, and it answers nothing — so it must not end the recheck. An unreachable device
+    /// is itself an outage the pane has to show, and the question stays open on the paced cadence until the
+    /// device settles it. Going quiescent here would reproduce issue #537 through this path: a live session
+    /// frozen behind a stale `.exited` cache, with no notice and nothing left to ask again.
+    @MainActor func testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .milliseconds(1)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // A second attempt is what proves the first failure was re-asked rather than swallowed; bounding the
+        // wait on it makes a recheck that goes quiescent fail here instead of hanging the suite.
+        let askedTwice = expectation(description: "the recheck asked again after an unreachable attempt")
+        askedTwice.expectedFulfillmentCount = 2
+        askedTwice.assertForOverFulfill = false
+        let script = LivenessFetchScript(
+            repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")), onAttempt: { _ in askedTwice.fulfill() })
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+
+        await fulfillment(of: [askedTwice], timeout: 5)
+        XCTAssertTrue(model.isStateStreamDisconnected, "a device that cannot answer is an outage the pane must report")
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a failed request must leave the question open")
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "nothing is worth reconnecting to until the device says the session is live")
+
+        // The device comes back and answers. Stretch the shared cadence first: the reconnect that answer
+        // arms is what this asserts on, and at the 1ms cadence above it would fire (and dial the
+        // unreachable fixture device) before the assertion could read it.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "an answered question must close")
+    }
+
+    /// The recheck is settled by the answer to its OWN request and by nothing else. Any other payload
+    /// reaching the model — a control response, a catch-up `.state` that was already in flight when the
+    /// stream dropped, a coalesced older read — describes some earlier moment, so accepting one as the
+    /// answer would settle the question on evidence that predates the drop.
+    @MainActor func testAnUnrelatedPayloadDoesNotSettleTheOpenLivenessQuestion() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // Holds the recheck's request open, so the payload below lands while the question is unanswered.
+        let heldRequest = HeldLivenessFetch()
+        model.livenessStateFetchOverrideForTesting = { await heldRequest.request() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+        await heldRequest.waitUntilAsked()
+
+        // A payload saying the session is running arrives from somewhere else entirely.
+        model.applyControlResponseState(runningStatePayload(sessionID: sessionID))
+
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "an applied payload must not stand in for the recheck's own answer")
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "the question is still open until this recheck's request answers")
+
+        // Only this recheck's own answer settles it.
+        await heldRequest.answer(.success(runningStatePayload(sessionID: sessionID)))
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting)
+    }
+
+    /// A device that confirms the session ended settles the question for good: the daemon streams live
+    /// sessions only, so there is nothing to reconnect to and nothing to report — the pane's notice for
+    /// this session is the ended one, not an outage. That includes clearing a notice an earlier
+    /// unreachable attempt put up, and leaving no poll running behind a pane that is done.
+    @MainActor func testAConfirmedEndedSessionQuiescesAndClearsTheNotice() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .milliseconds(1)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // One unreachable attempt first, so the notice this test watches get cleared was really raised.
+        let script = LivenessFetchScript(
+            queued: [.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))],
+            repeating: .success(endedStatePayload(sessionID: sessionID)))
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertFalse(model.isStateStreamDisconnected, "an ended session's refused stream is the expected answer, not an outage")
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "there is nothing to reconnect to")
+        XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "a settled question must leave no poll running")
+        let attempts = await script.attemptCount
+        XCTAssertEqual(attempts, 2, "the device's answer must end the asking, not start another round")
+    }
+
+    /// A recheck answer describes a request that was in flight, and the pane can have been rescued while it
+    /// flew — another listener registering is enough to install a stream and clear the notice. A failure
+    /// that lands afterwards says nothing about the stream that now exists, so acting on it would leave an
+    /// outage notice standing over a healthy pane with the loop exiting (a stream is installed) and nothing
+    /// left that would ever take the notice down.
+    @MainActor func testAFailureThatLandsAfterAStreamIsInstalledRaisesNoNotice() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let heldRequest = HeldLivenessFetch()
+        model.livenessStateFetchOverrideForTesting = { await heldRequest.request() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+        await heldRequest.waitUntilAsked()
+
+        // A second listener's connect lands while the recheck's request is still out: the session has a
+        // live stream again, and the notice is down.
+        model.installStreamClientForTesting(FakeStreamClient())
+
+        await heldRequest.answer(.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertFalse(model.isStateStreamDisconnected, "a failure from a request the pane has already outlived must not put a notice over it")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the stream that rescued the pane must be left alone")
+    }
+
+    /// Only the daemon refusing this session answers the liveness question. A pinned identity that did not
+    /// match, an `ok` response carrying no state, a request that never arrived — none of them is the device
+    /// saying the session is gone, so quiescing on one strands a live session behind a stale `.exited` cache
+    /// exactly the way issue #537 did.
+    @MainActor func testAnUnclassifiableFailureKeepsAskingInsteadOfSettling() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .milliseconds(1)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let askedAgain = expectation(description: "the recheck asked again after failures it cannot read as an answer")
+        askedAgain.expectedFulfillmentCount = 3
+        askedAgain.assertForOverFulfill = false
+        let script = LivenessFetchScript(
+            queued: [
+                .failure(TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb")),
+                .failure(DeviceTerminalSessionStateModel.StateFetchError.missingState),
+            ], repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")), onAttempt: { _ in askedAgain.fulfill() }
+        )
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+
+        await fulfillment(of: [askedAgain], timeout: 5)
+        XCTAssertTrue(model.isStateStreamDisconnected, "a pane that cannot reach its session must say so")
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "no unreadable failure may close the question")
+
+        // The device answers properly, and the question closes on that.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
+    }
+
+    /// The one failure that IS an answer: a reachable, authenticated daemon refusing the session. It says
+    /// the session is not there, so the pane stops asking and carries its ended notice rather than an
+    /// outage — including clearing an outage an earlier unreachable attempt put up.
+    @MainActor func testADaemonRefusingTheSessionSettlesTheRecheck() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .milliseconds(1)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let script = LivenessFetchScript(
+            queued: [.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))],
+            repeating: .failure(
+                DeviceTerminalSessionStateModel.StateFetchError.rejected(message: "Session is not running.", code: .sessionNotRunning)))
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertFalse(model.isStateStreamDisconnected, "a daemon that answered about this session is not an outage")
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "there is nothing to reconnect to")
+        let attempts = await script.attemptCount
+        XCTAssertEqual(attempts, 2, "the refusal must end the asking")
+    }
+
+    /// A refusal is not automatically an answer about the session. `SpacesDeviceAPIRequestSessionClient`
+    /// returns an unauthorized reply as an ordinary `ok == false` response, so a revoked or rotated token
+    /// arrives in the same shape as "this session is gone". Reading it as the session ending would clear the
+    /// notice, stop the asking, and leave a pane holding a stale non-interactive cache frozen there — never
+    /// reaching the credential and endpoint recovery each retry runs.
+    @MainActor func testAnUnauthorizedRefusalKeepsAskingInsteadOfSettling() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .milliseconds(1)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let askedAgain = expectation(description: "the recheck asked again after an unauthorized refusal")
+        askedAgain.expectedFulfillmentCount = 3
+        askedAgain.assertForOverFulfill = false
+        let script = LivenessFetchScript(
+            queued: [], repeating: .failure(DeviceTerminalSessionStateModel.StateFetchError.rejected(message: "Unauthorized.", code: .unauthorized)),
+            onAttempt: { _ in askedAgain.fulfill() })
+        model.livenessStateFetchOverrideForTesting = { await script.answer() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+
+        model.handleStreamDisconnect(nil, generation: generation)
+
+        await fulfillment(of: [askedAgain], timeout: 5)
+        XCTAssertTrue(model.isStateStreamDisconnected, "a pane whose credentials were refused still cannot reach its session")
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a refusal about credentials must not close the question")
+
+        // Re-authorized, the device answers about the session, and that settles it.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await waitForLivenessRecheckToSettle(model)
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
+    }
+
+    /// A recheck cancelled with its request still out (its pane's last listener left) can resume long after
+    /// a replacement recheck has been armed for the same session. It must not release the slot on its way
+    /// out: the replacement would be left running with nothing referring to it, so the next listener removal
+    /// could not cancel it and the next drop would arm a second recheck alongside it.
+    @MainActor func testAnAbandonedRecheckDoesNotReleaseItsReplacementsSlot() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        let heldRequest = HeldLivenessFetch()
+        model.livenessStateFetchOverrideForTesting = { await heldRequest.request() }
+        let subscriber = model.makeHostStateStreamSubscriber()
+
+        // A pane opens, its stream drops against a stale `.exited` cache, and the recheck's request goes out.
+        let firstGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        var firstHandle: (any TerminalRemoteStateStreamClient)? = try subscriber(sessionID, { _ in }, { _ in })
+        model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
+        model.handleStreamDisconnect(nil, generation: firstGeneration)
+        await heldRequest.waitUntilAsked(count: 1)
+
+        // The pane goes away with that request still out, which cancels the recheck.
+        firstHandle?.stop()
+        firstHandle = nil
+        await Task { @MainActor in }.value
+        XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "a pane with no listeners must not keep asking")
+
+        // A new pane opens on the same session and its own stream drops the same way.
+        let secondGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        let secondHandle = try subscriber(sessionID, { _ in }, { _ in })
+        model.handleStreamDisconnect(nil, generation: secondGeneration)
+        await heldRequest.waitUntilAsked(count: 2)
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "the new pane's drop must open its own question")
+
+        // Both requests answer at once: the abandoned one and the live one.
+        await heldRequest.answer(.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        await waitForLivenessRecheckToRaiseTheNotice(model)
+        await Task { @MainActor in }.value
+        await Task { @MainActor in }.value
+
+        XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "the abandoned recheck must not release the live recheck's slot")
+        secondHandle.stop()
+    }
+
+    /// The 500ms subscribe throttle paces attempts; it must never be the reason a session is left with
+    /// listeners and nothing arranging a stream for them. A pane replaced inside that window — its last
+    /// listener leaving cancels the liveness recheck, and its replacement registers immediately — used to
+    /// land exactly there: listeners present, no stream, no connect, no reconnect, nothing scheduled.
+    @MainActor func testASubscribeTheThrottleTurnsAwayStillArmsRecovery() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-THROTTLE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // Only the stream connect is stubbed; the catch-up `.state` this registration fires reaches the real
+        // server, so the session reads as running for the rest of the test.
+        model.stateStreamConnectOverrideForTesting = { true }
+        let subscriber = model.makeHostStateStreamSubscriber()
+
+        // A pane subscribes, which stamps the throttle.
+        var handle: (any TerminalRemoteStateStreamClient)? = try subscriber(sessionID, { _ in }, { _ in })
+        await model.drainPendingConnectForTesting()
+        XCTAssertTrue(model.hasActiveStreamClientForTesting)
+
+        // It goes away, and its stream drops: no listener, so nothing is armed for it.
+        handle?.stop()
+        handle = nil
+        await Task { @MainActor in }.value
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.handleStreamDisconnect(nil, generation: generation)
+        XCTAssertFalse(model.hasActiveStreamClientForTesting)
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "with no listener there is nothing to arm a retry for")
+
+        // Its replacement registers immediately — well inside the throttle window.
+        let replacementHandle = try subscriber(sessionID, { _ in }, { _ in })
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "a subscribe the throttle turned away must leave a retry armed behind it")
+        replacementHandle.stop()
+    }
+
+    /// Which client a disconnect came from is what decides whether the model reacts to it — not how many
+    /// stream generations have been issued since. A superseded client's late drop must still not tear down
+    /// the stream that replaced it, but a drop from the client the model is actually holding must never be
+    /// turned away: `ensureSubscriptionStarted` reads any installed client as a live subscription, so a
+    /// dead one left installed strands the pane on a stream that will never carry another payload, with no
+    /// notice and no retry (issue #537).
+    ///
+    /// Drives a real in-process `SpacesDeviceAPIServer` with the session registered as genuinely live
+    /// (`startLiveSession`), so the retry armed by the honored drop actually reconnects — proving the model
+    /// is left able to resubscribe, not merely that it cleared a field.
+    @MainActor func testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-GUARD-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        model.reconnectBackoff.retryDelay = .milliseconds(5)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(5)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+
+        // Installing a client before any listener registers keeps registration from dialing: the model
+        // treats an installed stream as a live subscription.
+        let supersededClient = StoppableFakeStreamClient()
+        let supersededGeneration = model.installStreamClientForTesting(supersededClient)
+        let installedClient = StoppableFakeStreamClient()
+        let installedGeneration = model.installStreamClientForTesting(installedClient)
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        model.applyControlResponseState(runningStatePayload(sessionID: sessionID))
+
+        // The superseded client's late drop says nothing about the stream that replaced it.
+        model.handleStreamDisconnect(nil, generation: supersededGeneration)
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "a superseded client's drop must not tear down the stream that replaced it")
+        XCTAssertFalse(model.isStateStreamDisconnected)
+
+        // The installed client's own drop is honored: cleared, stopped (a pinned-TLS connection is released
+        // only by an explicit cancel), reported, and retried.
+        model.handleStreamDisconnect(nil, generation: installedGeneration)
+        XCTAssertFalse(model.hasActiveStreamClientForTesting)
+        XCTAssertEqual(installedClient.stopCount, 1, "a dropped stream must be stopped, not merely dereferenced")
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertTrue(model.hasArmedReconnectForTesting)
+
+        // Nothing dead is left installed, so the armed retry reaches the device and resubscribes.
+        await model.drainPendingReconnectForTesting()
+
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
+        XCTAssertFalse(model.isStateStreamDisconnected, "a successful reconnect must clear the disconnected notice")
+    }
+
+    /// A subscriber's handle is the only thing that takes its listener back out of the shared fan-out, and
+    /// a handle can be released without anyone calling `stop()` — `RemoteGhosttySessionHost.deinit` returns
+    /// without stopping anything when it runs off the main thread. A listener stranded by a released handle
+    /// keeps every payload fanning out to a subscriber that is gone, and keeps `listeners` from ever
+    /// falling empty, which is itself a guard the reconnect path reads (issue #537).
+    @MainActor func testAListenerHandleReleasedWithoutStoppingLeavesTheFanOut() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        let deliveries = PayloadDeliveryCounter()
+        var handle: (any TerminalRemoteStateStreamClient)? = try model.makeHostStateStreamSubscriber()(
+            sessionID, { _ in deliveries.increment() }, { _ in })
+        XCTAssertNotNil(handle)
+
+        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:01Z"))
+        XCTAssertEqual(deliveries.count, 1, "the listener must be attached while its handle is held")
+
+        handle = nil
+        // The detach hops to the main actor, and a main-actor task enqueued after it runs after it.
+        await Task { @MainActor in }.value
+
+        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:02Z"))
+        XCTAssertEqual(deliveries.count, 1, "a released handle must take its listener out of the fan-out")
+    }
+
     /// Input rides a different connection than the state subscription, so a send that cannot reach the
     /// device is the earliest evidence the link is gone: a silently dead network path leaves the
     /// subscription's socket looking healthy until TCP keepalive gives up a minute or more later, while the
@@ -890,6 +1356,27 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             outputByteCount: nil, clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
     }
 
+    /// Waits for the open liveness question to raise the disconnected notice, bounded so a recheck that
+    /// never acts fails the test rather than hanging it.
+    @MainActor private func waitForLivenessRecheckToRaiseTheNotice(
+        _ model: DeviceTerminalSessionStateModel, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !model.isStateStreamDisconnected { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(model.isStateStreamDisconnected, "the recheck never reported the unreachable device", file: file, line: line)
+    }
+
+    /// Waits for the open liveness question to close, bounded so a recheck that never settles fails the
+    /// test rather than hanging it. `hasArmedLivenessRecheckForTesting` is cleared only after the answer
+    /// has been acted on, so everything the settle decided is readable once this returns.
+    @MainActor private func waitForLivenessRecheckToSettle(
+        _ model: DeviceTerminalSessionStateModel, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, model.hasArmedLivenessRecheckForTesting { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "the liveness recheck never settled", file: file, line: line)
+    }
+
     @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
             id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
@@ -962,6 +1449,97 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as
 /// an installed stream, which is all these tests need.
 private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+
+/// Scripts the answers the liveness recheck's own `.state` request comes back with, so a test can drive
+/// that state machine through unreachable attempts and device answers without a device. It also counts how
+/// many times it was asked, which is how a test observes that a failed attempt was re-asked rather than
+/// swallowed.
+private actor LivenessFetchScript {
+    private var queued: [Result<GhosttyRemoteSessionStatePayload, any Error>]
+    private var repeating: Result<GhosttyRemoteSessionStatePayload, any Error>
+    private var attempts = 0
+    private let onAttempt: @Sendable (Int) -> Void
+
+    init(
+        queued: [Result<GhosttyRemoteSessionStatePayload, any Error>] = [], repeating: Result<GhosttyRemoteSessionStatePayload, any Error>,
+        onAttempt: @escaping @Sendable (Int) -> Void = { _ in }
+    ) {
+        self.queued = queued
+        self.repeating = repeating
+        self.onAttempt = onAttempt
+    }
+
+    var attemptCount: Int { attempts }
+
+    func answer() -> Result<GhosttyRemoteSessionStatePayload, any Error> {
+        attempts += 1
+        onAttempt(attempts)
+        return queued.isEmpty ? repeating : queued.removeFirst()
+    }
+
+    /// What every attempt from now on answers with — the device coming back, or going away.
+    func setRepeating(_ result: Result<GhosttyRemoteSessionStatePayload, any Error>) { repeating = result }
+}
+
+/// Holds one liveness request open until the test answers it, so a test can act while the question is
+/// unanswered — which is the only window in which something else could wrongly settle it.
+private actor HeldLivenessFetch {
+    private var pendingRequests: [CheckedContinuation<Result<GhosttyRemoteSessionStatePayload, any Error>, Never>] = []
+    private var pendingAnswer: Result<GhosttyRemoteSessionStatePayload, any Error>?
+    private var askedCount = 0
+    private var askedWaiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func request() async -> Result<GhosttyRemoteSessionStatePayload, any Error> {
+        askedCount += 1
+        let reached = askedWaiters.filter { $0.threshold <= askedCount }
+        askedWaiters.removeAll { $0.threshold <= askedCount }
+        for waiter in reached { waiter.continuation.resume() }
+        if let pendingAnswer {
+            self.pendingAnswer = nil
+            return pendingAnswer
+        }
+        return await withCheckedContinuation { pendingRequests.append($0) }
+    }
+
+    func waitUntilAsked(count: Int = 1) async {
+        guard askedCount < count else { return }
+        await withCheckedContinuation { askedWaiters.append((count, $0)) }
+    }
+
+    /// Answers every request being held, so a test can release an abandoned recheck's request and its
+    /// replacement's together — which is the ordering that decides who owns the recheck slot.
+    func answer(_ result: Result<GhosttyRemoteSessionStatePayload, any Error>) {
+        guard !pendingRequests.isEmpty else {
+            pendingAnswer = result
+            return
+        }
+        let held = pendingRequests
+        pendingRequests.removeAll()
+        for continuation in held { continuation.resume(returning: result) }
+    }
+}
+
+/// A stream client that records being stopped, so a test can prove a dropped subscription was cancelled
+/// rather than merely dereferenced.
+private final class StoppableFakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stops = 0
+
+    var stopCount: Int { lock.withLock { stops } }
+
+    func stop() { lock.withLock { stops += 1 } }
+}
+
+/// Counts payloads delivered to a fan-out listener. The model's host-facing subscriber takes a `@Sendable`
+/// event callback, so the count lives behind a lock rather than in a captured local.
+private final class PayloadDeliveryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deliveries = 0
+
+    var count: Int { lock.withLock { deliveries } }
+
+    func increment() { lock.withLock { deliveries += 1 } }
+}
 
 /// A live subscription socket for one terminal session: binds and listens on that session's
 /// subscription socket path, accepts every connection the Device API server opens against it, and hands

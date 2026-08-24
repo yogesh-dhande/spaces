@@ -3136,13 +3136,48 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("host renders the last frame of the delta series") { host.snapshotText() == "fram1" }
     }
 
-    /// Captures the host's state-stream callback so a test can emit payloads the way the device state
-    /// model does: off the main actor, in a known order.
+    /// The handle the host holds for its state subscription is a listener on the state model's shared
+    /// fan-out, and the model keeps that listener attached until the handle says otherwise. Dropping the
+    /// handle on a disconnect without stopping it therefore left this host's callbacks in the fan-out for
+    /// the life of the session, with the next subscribe registering a second listener on top of them
+    /// (issue #537).
+    @MainActor func testStateStreamDisconnectStopsTheSubscriptionHandleItDrops() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-disconnect-detaches-listener"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        subscriber.disconnect(nil)
+
+        waitForCondition("the host stops the subscription handle it drops") { subscriber.stoppedClientCount >= 1 }
+        withExtendedLifetime(host) {}
+    }
+
+    /// Captures the host's state-stream callbacks so a test can emit payloads the way the device state
+    /// model does: off the main actor, in a known order. It also stands in for the model's listener
+    /// handle, counting the handles the host stops so a test can prove the host detaches from the
+    /// fan-out rather than silently dropping its subscription.
     private final class RecordingStateStreamSubscriber: @unchecked Sendable {
-        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable {
+            private let onStop: @Sendable () -> Void
+
+            init(onStop: @escaping @Sendable () -> Void) { self.onStop = onStop }
+
+            func stop() { onStop() }
+        }
 
         private let lock = NSLock()
         private var onEvent: (@Sendable (GhosttyRemoteSessionStatePayload) -> Void)?
+        private var onDisconnect: (@Sendable ((any Error)?) -> Void)?
+        private var stoppedClients = 0
 
         var isSubscribed: Bool {
             lock.lock()
@@ -3150,14 +3185,34 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             return onEvent != nil
         }
 
+        var stoppedClientCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return stoppedClients
+        }
+
         func subscribe(
             _: String, onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect _: @escaping @Sendable ((any Error)?) -> Void
+            onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> any TerminalRemoteStateStreamClient {
             lock.lock()
             self.onEvent = onEvent
+            self.onDisconnect = onDisconnect
             lock.unlock()
-            return Client()
+            return Client(onStop: { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                self.stoppedClients += 1
+                self.lock.unlock()
+            })
+        }
+
+        /// Reports the drop the model reports to a listener when the shared subscription goes away.
+        func disconnect(_ error: (any Error)?) {
+            lock.lock()
+            let onDisconnect = self.onDisconnect
+            lock.unlock()
+            onDisconnect?(error)
         }
 
         func emit(_ payload: GhosttyRemoteSessionStatePayload) {

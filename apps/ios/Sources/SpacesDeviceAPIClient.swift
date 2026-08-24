@@ -1211,7 +1211,17 @@ private final class StreamSubscription: @unchecked Sendable {
             case .ready:
                 connectionReady = true
                 sendInitialRequest()
-            case .failed(let error): lifecycle.finish(error: pinRejection.error ?? error)
+            case .failed(let error):
+                lifecycle.finish(error: pinRejection.error ?? error)
+                // Cancel, like every other way a stream ends here (the initial-event timeout, a send
+                // failure, a decode failure, a receive error, a clean close). A connection holds its
+                // handler blocks until it is cancelled, and those blocks hold this subscription, its
+                // buffer, and the per-stream `DispatchQueue` — so a termination that only reports the drop
+                // orphans all of it. Network.framework reaches `.failed` rarely (an unreachable endpoint,
+                // a refused port, and a rejected pin all sit in `.waiting` instead, and a connection that
+                // dies after `.ready` surfaces through the outstanding receive), which is exactly why this
+                // branch must not be the one that forgets: nothing downstream would notice.
+                connection.cancel()
             case .cancelled: lifecycle.finish(error: nil)
             default: break
             }

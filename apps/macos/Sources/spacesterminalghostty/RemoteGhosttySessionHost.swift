@@ -535,6 +535,12 @@
                     },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
+                            // Stop before dropping the reference. The handle this holds is a listener on the
+                            // state model's shared subscription, and the model keeps that listener attached
+                            // until the handle says otherwise, so releasing it silently would leave this
+                            // host's callbacks in the fan-out while the next subscribe below registers a
+                            // second listener on top (issue #537).
+                            self?.directStateStreamClient?.stop()
                             self?.directStateStreamClient = nil
                             self?.handleStreamDisconnect()
                         }
