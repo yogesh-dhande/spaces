@@ -1438,6 +1438,156 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
   });
 });
 
+describe("CommentsController — Fix 3 (P2): list-response merges keep the locally newer row by revision", () => {
+  it("loadInitial: a stale relist response landing after a newer local upsert does not revert the row, and a subsequent no-op blur doesn't resend the old body", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const original = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "old body",
+    });
+    await controller.loadInitial(); // seeds this.drafts at revision 0
+
+    // A second reviewCommentList call (e.g. an overlapping retry) is dispatched and parked.
+    bridge.holdNextList = true;
+    const relistPromise = controller.loadInitial();
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+
+    // While that list call is still in flight, a blur-driven upsert completes for the SAME row,
+    // acknowledged by the daemon at revision 1 with a new body — and the persist's drop-if-equal rule
+    // clears liveBodies for this id (see doPersistBody), so nothing else masks a reversion.
+    const card = controller.hooks.renderCard({ comment: original, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea") as HTMLTextAreaElement;
+    textarea.value = "new body";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.get(original.id)?.revision).toBe(1));
+    const newlyPersisted = bridge.drafts.get(original.id)!;
+    expect(newlyPersisted.body).toBe("new body");
+
+    // Stand in for the daemon's already-serialized stale response the held list call carries — same
+    // technique the Fix 4 (round-2) tests above use, here to make the release-time snapshot reflect
+    // the OLD revision/body instead of the just-persisted one.
+    bridge.drafts.set(original.id, original);
+    bridge.releaseHeldList?.();
+    await relistPromise;
+    bridge.drafts.set(original.id, newlyPersisted); // restore true server state for hygiene
+
+    // The stale response must not have reverted the local row: it still shows the new body at the new
+    // revision, not the old one the stale relist carried.
+    const comment = firstAnchoredComment(diffViewFake);
+    expect(comment.body).toBe("new body");
+    expect(comment.revision).toBe(1);
+
+    // A subsequent blur on a freshly rendered card (no further typing) must not resend the old body:
+    // renderCard's blur handler no-ops once the textarea's value matches the render's own
+    // `comment.body` (now "new body", not the reverted "old body"), so no upsert call is issued at all.
+    const upsertCallCountBefore = bridge.upsertCallCount;
+    const rerenderedCard = controller.hooks.renderCard({ comment, position: { lineNumber: 1, outdated: false } });
+    rerenderedCard.querySelector("textarea")!.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.upsertCallCount).toBe(upsertCallCountBefore);
+  });
+
+  it("loadInitial: a response row at a revision equal to or newer than local wins (existing behavior preserved)", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "v0",
+    });
+    await controller.loadInitial(); // seeds this.drafts at revision 0
+
+    // A daemon-acknowledged update this controller's mirror never locally applied (e.g. a plain relist
+    // picking up a change made through another surface) bumps the row to revision 1 with a new body,
+    // entirely through the fake bridge's own store — this controller's local revision stays at 0.
+    await bridge.reviewCommentUpsert({
+      id: created.id,
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "v1 from elsewhere",
+    });
+
+    await controller.loadInitial(); // response revision (1) >= local revision (0) → response wins
+
+    const comment = firstAnchoredComment(diffViewFake);
+    expect(comment.body).toBe("v1 from elsewhere");
+    expect(comment.revision).toBe(1);
+  });
+
+  it("reconcileMirrorAfterRejection: a stale relist response after a rejected mutation does not revert an unrelated row's newer local upsert", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    // A's delete is rejected with a conflict, triggering reconcileMirrorAfterRejection's own relist —
+    // held open the same way the round-2b tests above hold it.
+    bridge.failNextDelete = new SpacesBridgeError("conflict", "stale revision");
+    bridge.holdNextList = true;
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnA.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // reconcile's own relist is parked
+
+    // While that relist is in flight, an UNRELATED draft (B) gets a newer, daemon-acknowledged body via
+    // a blur-driven upsert.
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const textareaB = cardB.querySelector("textarea") as HTMLTextAreaElement;
+    textareaB.value = "comment B, updated";
+    textareaB.dispatchEvent(new Event("input"));
+    textareaB.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.drafts.get(b.id)?.revision).toBe(1));
+    const newlyPersistedB = bridge.drafts.get(b.id)!;
+
+    // Stand in for the daemon's already-serialized stale response the held relist carries, still at
+    // B's OLD revision/body.
+    bridge.drafts.set(b.id, b);
+    const rendersBeforeRelease = diffViewFake.setComments.mock.calls.length;
+    bridge.releaseHeldList?.();
+    await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(rendersBeforeRelease));
+    bridge.drafts.set(b.id, newlyPersistedB); // restore true server state for hygiene
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    const survivingB = rendered.find((c) => c.id === b.id);
+    expect(survivingB?.body).toBe("comment B, updated"); // the locally newer row survives the stale relist
+    expect(survivingB?.revision).toBe(1);
+  });
+});
+
 describe("CommentsController — round-16 Fix 1: comment drafts survive web-view teardown", () => {
   it("restorePendingState recreates a provisional entry as a fresh draft with its live body, and the next blur persists it normally", async () => {
     const bridge = makeBridge();
@@ -1618,7 +1768,7 @@ describe("CommentsController — round-11 Fix: a repeat teardown inside the rest
     expect(entriesAfter[0]).toMatchObject({ id: persisted.id, body: "typed since last save" });
   });
 
-  it("collectStateForFlush no longer recovers a restored persisted entry once loadInitial resolves without that id in the response (it was deleted or sent while this pane was torn down)", async () => {
+  it("collectStateForFlush still recovers a restored persisted entry, as a fresh provisional draft, once loadInitial resolves without that id in the response (it was deleted or sent while this pane was torn down) — Fix 1 (P2)", async () => {
     const bridge = makeBridge();
     const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
     const diffViewFake = makeFakeDiffView();
@@ -1641,7 +1791,165 @@ describe("CommentsController — round-11 Fix: a repeat teardown inside the rest
 
     await controller.loadInitial(); // response is empty — "c-gone" was deleted/sent while torn down
 
-    expect(controller.collectStateForFlush()).toBeNull(); // no longer recoverable — not this mechanism's promise
+    // The old id is gone, but the typed text was never part of that completed send, so it is not
+    // lost: loadInitial's leftover-restoredPendingById conversion (Fix 1, P2) recreates it as a fresh
+    // provisional draft at the same anchor — collectStateForFlush recovers it under a new id, not null.
+    const flushedAfter = controller.collectStateForFlush();
+    expect(flushedAfter).not.toBeNull();
+    const entriesAfter = JSON.parse(flushedAfter!) as PendingReviewCommentEntry[];
+    expect(entriesAfter).toHaveLength(1);
+    expect(entriesAfter[0]!.id).not.toBe("c-gone");
+    expect(entriesAfter[0]!.id.startsWith("provisional-")).toBe(true);
+    expect(entriesAfter[0]).toMatchObject({ provisional: true, body: "typed since last save" });
+  });
+});
+
+describe("CommentsController — Fix 1 (P2 hibernation): loadInitial converts a leftover restoredPendingById entry into a fresh provisional draft", () => {
+  it("recovers text typed during a send that archived the row before the next loadInitial resolved", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "saved body",
+    });
+    await controller.loadInitial();
+
+    const comment = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea") as HTMLTextAreaElement;
+    textarea.value = "typed but never blurred before teardown";
+    textarea.dispatchEvent(new Event("input"));
+
+    const flushed = controller.collectStateForFlush();
+    expect(flushed).not.toBeNull();
+    const entries = JSON.parse(flushed!) as PendingReviewCommentEntry[];
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: persisted.id,
+      provisional: false,
+      body: "typed but never blurred before teardown",
+    });
+
+    // A fresh controller/bridge stands in for the next page load. The send that archived this row
+    // happened entirely server-side — this fresh bridge starts with an empty draft store, so
+    // reviewCommentList's response for the fresh controller simply omits the id, matching "the row is
+    // gone" with no held-response machinery needed.
+    const freshBridge = makeBridge();
+    const freshController = new CommentsController(freshBridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const freshDiffViewFake = makeFakeDiffView();
+    freshController.attachDiffView(freshDiffViewFake.fake);
+    freshController.setFiles([FILE]);
+
+    freshController.restorePendingState(entries);
+    await freshController.loadInitial(); // response is empty — the row was sent/archived server-side
+
+    const rendered = (freshDiffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map(
+      (ac) => ac.comment,
+    );
+    expect(rendered).toHaveLength(1);
+    const recreated = rendered[0]!;
+    expect(recreated.id.startsWith("provisional-")).toBe(true); // fresh provisional id, not the old real one
+    expect(recreated.filePath).toBe(persisted.filePath);
+    expect(recreated.side).toBe(persisted.side);
+    expect(recreated.lineNumber).toBe(persisted.lineNumber);
+    expect(recreated.lineText).toBe(persisted.lineText);
+    expect(recreated.body).toBe(""); // provisional shape: live text lives in liveBodies until persisted
+
+    const recreatedCard = freshController.hooks.renderCard({ comment: recreated, position: { lineNumber: 1, outdated: false } });
+    const recreatedTextarea = recreatedCard.querySelector("textarea") as HTMLTextAreaElement;
+    expect(recreatedTextarea.value).toBe("typed but never blurred before teardown"); // renders via liveBodies
+
+    // Blurring it persists through the normal upsert path, under the entry's own anchor.
+    const upsertCalls: ReviewCommentUpsertInput[] = [];
+    const originalUpsert = freshBridge.reviewCommentUpsert;
+    freshBridge.reviewCommentUpsert = (input) => {
+      upsertCalls.push(input);
+      return originalUpsert(input);
+    };
+    recreatedTextarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(upsertCalls).toHaveLength(1));
+    expect(upsertCalls[0]).toMatchObject({
+      filePath: persisted.filePath,
+      side: persisted.side,
+      lineNumber: persisted.lineNumber,
+      lineText: persisted.lineText,
+      body: "typed but never blurred before teardown",
+    });
+  });
+
+  it("does not recreate a provisional draft when the held entry's id is still present in the response", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "last saved",
+    });
+
+    controller.restorePendingState([
+      {
+        id: persisted.id,
+        provisional: false,
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 1,
+        lineText: "const x = compute();",
+        body: "typed since last save",
+      },
+    ]);
+
+    await controller.loadInitial(); // response includes persisted.id — covered by the ordinary merge
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered).toHaveLength(1); // no extra provisional card
+    expect(rendered[0]!.id).toBe(persisted.id);
+
+    const card = controller.hooks.renderCard({ comment: rendered[0]!, position: { lineNumber: 1, outdated: false } });
+    expect(card.querySelector("textarea")!.value).toBe("typed since last save"); // liveBodies overlay still applies
+  });
+
+  it("drops a whitespace-only held entry without recreating a draft, when its id is absent from the response", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    controller.restorePendingState([
+      {
+        id: "c-gone", // never created in bridge.drafts, so reviewCommentList's response omits it
+        provisional: false,
+        filePath: "src/foo.ts",
+        side: "new",
+        lineNumber: 1,
+        lineText: "const x = compute();",
+        body: "   ", // whitespace-only: nothing worth preserving
+      },
+    ]);
+
+    await controller.loadInitial(); // response is empty
+
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(0); // no provisional draft minted
+
+    // The conversion loop deletes liveBodies's entry for the old id unconditionally, before checking
+    // whether the text is worth preserving (see loadInitial's implementation) — so nothing is left
+    // behind under "c-gone" for collectStateForFlush's main loop to ever stumble on, even though
+    // "c-gone" no longer names any draft in this.drafts.
+    expect(controller.collectStateForFlush()).toBeNull();
   });
 });
 

@@ -305,7 +305,19 @@ export class CommentsController {
    * The response is *merged* into `this.drafts`, not assigned wholesale: this RPC can take a
    * moment, and a gutter click (a provisional draft, which never round-trips) or a fast
    * `persistBody` can land locally while it is still in flight. Response rows win (they are the
-   * daemon's authoritative state as of just now); any currently-held local draft whose id — after
+   * daemon's authoritative state as of just now) — EXCEPT when a currently-held local row for that
+   * same id carries a strictly higher `revision` than the response's copy (see the
+   * `localByResolvedId`/`mergedResponse` substitution right before the final `this.drafts =`
+   * assignment below). A local row can only carry a higher revision than the response's copy if a
+   * `reviewCommentUpsert` the daemon already acknowledged landed locally after this list snapshot was
+   * taken — the local row IS the daemon's own newer state, so the snapshot must not revert it. Ties
+   * and lower revisions go to the response: same revision means same body, under the daemon's
+   * revision CAS; a provisional row sits at revision 0 and never appears in a response at all, so it
+   * is untouched by this substitution. `reconcileMirrorAfterRejection` applies the identical
+   * substitution to its own relist response — see its doc comment for why its stricter prior doesn't
+   * change this rule.
+   *
+   * Any currently-held local draft whose id — after
    * resolving through `idAliases`, in case it was re-keyed mid-flight — is *not* already present in
    * the response is kept too. That covers both a still-open provisional card (it never round-trips,
    * so it can never appear in the response) and a draft whose persist landed server-side after the
@@ -361,13 +373,32 @@ export class CommentsController {
     if (this.listCallsInFlight === 0) this.removedWhileListInFlight.clear();
     const responseIds = new Set(survivingResponse.map((d) => d.id));
     const stillLocalOnly = this.drafts.filter((d) => !responseIds.has(this.resolveId(d.id)));
-    this.drafts = [...survivingResponse, ...stillLocalOnly];
+    // Fix 3 (P2): substitute a response row with the currently-held local copy when the local one
+    // carries a strictly higher revision — see the doc comment above for the full rationale. ids are
+    // identical between `survivingResponse` and `mergedResponse`; only the CONTENT used for a given id
+    // changes, so `responseIds`/`stillLocalOnly` above (computed from `survivingResponse`) are
+    // unaffected by this substitution.
+    const localByResolvedId = new Map(this.drafts.map((d) => [this.resolveId(d.id), d]));
+    const mergedResponse = survivingResponse.map((row) => {
+      const local = localByResolvedId.get(row.id);
+      return local && local.revision > row.revision ? local : row;
+    });
+    this.drafts = [...mergedResponse, ...stillLocalOnly];
     // The restore→list-merge race `restoredPendingById` exists to bridge (see its doc comment) is
-    // over now that this response has landed: an id present in `response` is a real draft object
-    // going forward, covered normally by `this.drafts`/`liveBodies`; an id absent from it was
-    // deleted or sent remotely while this pane was torn down — delete/send are the only two actions
-    // that legitimately remove a draft, so resurrecting that text is not a promise this mechanism
-    // makes. Either way nothing is left for the map to hold past this point.
+    // over now that this response has landed: an id present in `response`/`this.drafts` going forward
+    // is a real draft object, covered normally by `this.drafts`/`liveBodies`. An id absent from it was
+    // sent or deleted remotely while this pane was torn down — but the held entry's text was typed
+    // AFTER the last persist (the only way `collectStateForFlush` emits a non-provisional entry at
+    // all — see its doc comment), so a completed send never carried it, and
+    // `preserveUnsentLiveText`'s no-lost-edits promise applies: recreate it as a fresh provisional
+    // draft at the entry's own anchor. Empty/whitespace leftovers are dropped with nothing recreated
+    // — there is nothing worth preserving.
+    for (const [id, entry] of this.restoredPendingById) {
+      if (this.drafts.some((d) => d.id === id)) continue; // real row arrived; covered normally
+      const live = this.liveBodies.get(id) ?? entry.body;
+      this.liveBodies.delete(id);
+      if (live.trim().length > 0) this.preserveUnsentLiveText(entry, live);
+    }
     this.restoredPendingById.clear();
     this.refresh();
   }
@@ -722,33 +753,49 @@ export class CommentsController {
     }
   }
 
-  /** Fix 1 (P2): called from `sendOne`'s and `sendBatch`'s success arms only, after they have
-   *  already removed `sent` from `this.drafts` and called `forgetDraftState` for it. A `liveBodies`
-   *  entry surviving at that point (passed in as `live`) is text typed since the last successful
-   *  `doPersistBody` — see its re-key block above — that the just-completed send did not carry (the
-   *  send always delivers a previously-persisted body, per `sendBatch`'s still-focused-card
-   *  acceptance and `sendOne`'s live-body-at-click-time capture, either of which can predate a later
-   *  keystroke). The sent row is archived server-side the moment the send succeeds, so without this,
-   *  `forgetDraftState`'s `liveBodies.delete` would silently destroy that unsent typing — the only
-   *  event that is allowed to lose an unsaved edit is quitting the app.
+  /** Fix 1 (P2): called from `sendOne`'s and `sendBatch`'s success arms, after they have already
+   *  removed the sent draft from `this.drafts` and called `forgetDraftState` for it, and from
+   *  `loadInitial`'s leftover-`restoredPendingById` conversion (see that method's doc comment) for an
+   *  entry still held there whose id the list response no longer contains — the draft was sent or
+   *  deleted remotely while this pane was torn down, but the held text was typed since the last
+   *  persist and was never part of that completed send.
+   *
+   * In the send case, a `liveBodies` entry surviving at that point (passed in as `live`) is text
+   * typed since the last successful `doPersistBody` — see its re-key block above — that the
+   * just-completed send did not carry (the send always delivers a previously-persisted body, per
+   * `sendBatch`'s still-focused-card acceptance and `sendOne`'s live-body-at-click-time capture,
+   * either of which can predate a later keystroke). The sent row is archived server-side the moment
+   * the send succeeds, so without this, `forgetDraftState`'s `liveBodies.delete` would silently
+   * destroy that unsent typing. In the `loadInitial` case, the held entry's text was typed AFTER the
+   * last persist (the only way `collectStateForFlush` emits a non-provisional entry at all — see its
+   * doc comment), so a completed send never carried it either. Either way, the only event allowed to
+   * lose an unsaved edit is quitting the app.
+   *
+   * `anchor` is narrowed to just the draft's fixed identity fields (not the full
+   * `SpacesReviewComment`) so a `PendingReviewCommentEntry` — which has no `id`/`body`/`createdAt`/
+   * `revision` compatible with that type — can be passed directly from `loadInitial` without
+   * constructing a throwaway comment object; a `SpacesReviewComment` (the send call sites' argument)
+   * still satisfies this narrower type structurally.
    *
    * Recreates the leftover text as a brand-new local draft at the same anchor, mirroring
    * `restorePendingState`'s provisional branch exactly (same shape: empty `body`, the text seeded
    * into `liveBodies` instead) so nothing downstream sees a novel state — `renderCard` already knows
    * how to render a provisional card whose live text hasn't been persisted yet, and the next blur
    * persists it through the normal `persistBody` path. Deliberately does not set `pendingFocus`:
-   * unlike `createDraft` (a direct user action opening a new card), this runs from a send's success
-   * arm with no user gesture on this new card, so stealing focus onto it would be a surprising side
-   * effect of a completed send. */
-  private preserveUnsentLiveText(sent: SpacesReviewComment, live: string): void {
+   * unlike `createDraft` (a direct user action opening a new card), this runs with no user gesture on
+   * this new card, so stealing focus onto it would be a surprising side effect. */
+  private preserveUnsentLiveText(
+    anchor: Pick<SpacesReviewComment, "filePath" | "side" | "lineNumber" | "lineText">,
+    live: string,
+  ): void {
     const id = `provisional-${++this.provisionalSequence}`;
     const now = new Date().toISOString();
     const draft: SpacesReviewComment = {
       id,
-      filePath: sent.filePath,
-      side: sent.side,
-      lineNumber: sent.lineNumber,
-      lineText: sent.lineText,
+      filePath: anchor.filePath,
+      side: anchor.side,
+      lineNumber: anchor.lineNumber,
+      lineText: anchor.lineText,
       body: "",
       createdAt: now,
       revision: 0,
@@ -1385,6 +1432,15 @@ export class CommentsController {
    * and `listCallsInFlight`'s for why this relist needs its own tombstone guard: this method's own
    * `reviewCommentList` call is just as much a stale snapshot, racing a concurrent unrelated
    * send/delete, as `loadInitial`'s is.
+   *
+   * Fix 3 (P2): the response is also substituted, row for row, the same locally-newer-wins-by-revision
+   * way `loadInitial` substitutes its own response — see that method's doc comment for the full
+   * explanation. This respects this method's own stricter prior above (it drops an absent local row
+   * that isn't provisional or in-flight, unlike `loadInitial`'s keep-everything default) without
+   * conflicting with it: the daemon proved the mirror wrong about *something* here (that's why this
+   * reconcile runs at all), but a strictly higher local revision on a row that IS present in the
+   * response is itself daemon-issued proof that THIS PARTICULAR row is newer than the snapshot, not
+   * part of the wrongness this reconcile is correcting for.
    */
   private async reconcileMirrorAfterRejection(err: unknown): Promise<void> {
     if (
@@ -1418,14 +1474,23 @@ export class CommentsController {
     const responseIds = new Set(survivingResponse.map((d) => d.id));
     const stillRelevantLocalOnly = this.drafts.filter((d) => {
       const resolvedId = this.resolveId(d.id);
-      if (responseIds.has(resolvedId)) return false; // response rows win, same as loadInitial
+      // response rows win, same as loadInitial (including its revision exception — see the
+      // localByResolvedId/mergedResponse substitution just below, and loadInitial's doc comment)
+      if (responseIds.has(resolvedId)) return false;
       return (
         this.provisionalIds.has(resolvedId) ||
         this.pendingPersistById.has(resolvedId) ||
         this.pendingPersistById.has(d.id)
       );
     });
-    this.drafts = [...survivingResponse, ...stillRelevantLocalOnly];
+    // Fix 3 (P2): same locally-newer-wins-by-revision substitution as loadInitial — see this method's
+    // doc comment (Fix 3 paragraph) for why this doesn't conflict with the stricter keep-rule above.
+    const localByResolvedId = new Map(this.drafts.map((d) => [this.resolveId(d.id), d]));
+    const mergedResponse = survivingResponse.map((row) => {
+      const local = localByResolvedId.get(row.id);
+      return local && local.revision > row.revision ? local : row;
+    });
+    this.drafts = [...mergedResponse, ...stillRelevantLocalOnly];
   }
 
   /** Common failure path for both `sendOne` and `sendBatch`: surfaces the error, then reconciles

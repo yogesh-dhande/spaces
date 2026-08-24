@@ -189,6 +189,14 @@ enum CodePaneMode: Equatable {
     /// `close()` just discarded.
     private var editorStateGeneration = 0
 
+    /// round-10: the most recently committed `workspaceFileWrite`'s outcome, used to fold that write
+    /// into a teardown-flushed `editorState` snapshot that still carries the pre-write baseline — see
+    /// `adoptCommittedWriteIntoEditorState`. Deliberately never cleared: the CAS-chain guard inside that
+    /// method makes a stale record inert on its own (its `expectedBase` will no longer match any live
+    /// snapshot's `baseSHA256` once something newer has applied), so there is no separate invalidation
+    /// to maintain.
+    private var lastCommittedFileWrite: (path: String, expectedBase: String?, sha256: String, content: String)?
+
     /// round-16 Fix 1a: the web app's last-known teardown snapshot of comment text typed but not yet
     /// persisted (see `CodePaneBridge.ReviewCommentEntryPayload`) — mirrors `editorState` above exactly,
     /// including its lifecycle (survives `deactivate()`, discarded by `close()`) and its rehydration
@@ -237,8 +245,18 @@ enum CodePaneMode: Equatable {
     /// `pendingReviewCommentState`, or the next `loadInitial()`) race the mutation's own effect on the
     /// daemon. See the tradeoff noted at each `perform*` call site below.
     private var outstandingReviewCommentMutationCount = 0
+    /// round-10: count of in-flight `workspaceFileWrite` RPCs. A write outstanding at `ready` time can
+    /// still change what `editorState` should read once it completes — its completion adopts the
+    /// committed baseline into the flushed snapshot (see `adoptCommittedWriteIntoEditorState`), and
+    /// answering `ready` first would rehydrate the page against the pre-save baseline, making it treat
+    /// its own save as an external change (a false diff3 merge or conflict banner — the fresh page has
+    /// no `pendingSaveSubmitted` to recognize its own just-landed save). Mirrors
+    /// `outstandingReviewCommentMutationCount` exactly: bumped right before the RPC's `Task` starts,
+    /// decremented — unconditionally, success or failure — in its completion.
+    private var outstandingFileWriteCount = 0
     /// The page generation `handleReady()` was called for when it deferred sending `spaces:init`
-    /// because `outstandingTeardownFlushCount`/`outstandingReviewCommentMutationCount` was nonzero —
+    /// because `outstandingTeardownFlushCount`/`outstandingReviewCommentMutationCount`/
+    /// `outstandingFileWriteCount` was nonzero —
     /// `nil` when nothing is deferred. Sending init immediately in that state would ship the stale
     /// pre-flush `editorState`/`pendingReviewCommentState`, and once the flush's completion did land,
     /// `storeFlushedEditorState`'s `generation >= editorStateGeneration` guard (and its
@@ -509,6 +527,49 @@ enum CodePaneMode: Equatable {
         case .file(let state): editorState = state
         }
         editorStateGeneration = generation
+        // round-10: a write can commit AFTER this flush already stored a snapshot at exactly the
+        // pre-write baseline — see `adoptCommittedWriteIntoEditorState`'s doc comment for why this call
+        // site, not just the write completion's own, is needed. A no-op when `editorState` is `nil`
+        // (the `.noFile` case above) or when nothing committed matches: the method's own guard handles
+        // both.
+        adoptCommittedWriteIntoEditorState()
+    }
+
+    /// round-10: folds a committed write into the flushed editor snapshot so a page rehydrated after
+    /// hibernation starts from the baseline its own save established, instead of treating that save as
+    /// an external change. CAS-chain guard: the snapshot is patched only when its `baseSHA256` equals
+    /// the base the write was issued against — a snapshot at that baseline provably predates the
+    /// write's landing, while any other baseline already reflects the write or something newer and must
+    /// be left alone. The record is deliberately never cleared: this guard makes a stale record inert
+    /// on its own. Called from both the write completion and `storeFlushedEditorState`, because the
+    /// flush and the write settle in either order — patching only at completion would be overwritten by
+    /// a later-arriving flush that stored the pre-write snapshot; patching only at flush time would miss
+    /// a write that completes and commits its baseline AFTER the flush already stored a snapshot at
+    /// that exact pre-write baseline.
+    ///
+    /// Known accepted gap: a write issued while the file was missing on disk sends a nil
+    /// `expectedSHA256` (see `editorView.ts`'s `diskMissing` handling) while the snapshot still carries
+    /// the old (non-nil) `baseSHA256` — the guard below then never matches, so a recreate-during-
+    /// hibernation is not adopted here; that compound case falls back to the ordinary
+    /// `handleExternalChange` reconcile on the rehydrated page.
+    private func adoptCommittedWriteIntoEditorState() {
+        guard let write = lastCommittedFileWrite, let state = editorState,
+            state.path == write.path, state.baseSHA256 == write.expectedBase
+        else { return }
+        var newDirty = state.dirty
+        var newConflict = state.conflict
+        if state.content == write.content {
+            // Nothing was typed after the save click: the buffer is exactly the committed content — a
+            // clean file at the new baseline (this also covers a Keep-mine write that was in flight at
+            // teardown: its snapshot's content IS the mine buffer it wrote).
+            newDirty = false
+            newConflict = false
+        }
+        // else: post-click typing stays dirty against the adopted baseline; `conflict` is left
+        // untouched (a conflicted snapshot's buffer is not editable, so content always equals the
+        // Keep-mine write's content and lands in the branch above).
+        editorState = CodePaneBridge.EditorState(
+            path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty, conflict: newConflict)
     }
 
     /// round-16 Fix 1a: mirrors `storeFlushedEditorState` exactly, against the independent
@@ -586,32 +647,34 @@ enum CodePaneMode: Equatable {
         // resets `isReady = false` before a replacement page can load, so this self-corrects across a
         // hibernation cycle.
         isReady = true
-        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0 else {
+        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0 else {
             // A flush kicked off by tearing down the page before this one (see
-            // `flushPendingEditorState`/`flushPendingReviewCommentState`), or a review-comment mutation
+            // `flushPendingEditorState`/`flushPendingReviewCommentState`), a review-comment mutation
             // RPC still in flight from before that (round-16 Fix 1b — see
-            // `outstandingReviewCommentMutationCount`'s doc comment), may still be outstanding and could
-            // still change what `editorState`/`pendingReviewCommentState` should read right now. See
-            // `deferredReadyGeneration`'s doc comment for why sending `spaces:init` before that lands
-            // would lose content for good rather than merely delay it. Capture the generation this
-            // `ready` belongs to and let the outstanding work's completion resume this once settled
-            // (`resumeDeferredReadyIfNeeded`).
+            // `outstandingReviewCommentMutationCount`'s doc comment), or a `workspaceFileWrite` RPC
+            // still in flight (round-10 — see `outstandingFileWriteCount`'s doc comment), may still be
+            // outstanding and could still change what `editorState`/`pendingReviewCommentState` should
+            // read right now. See `deferredReadyGeneration`'s doc comment for why sending `spaces:init`
+            // before that lands would lose content for good rather than merely delay it. Capture the
+            // generation this `ready` belongs to and let the outstanding work's completion resume this
+            // once settled (`resumeDeferredReadyIfNeeded`).
             deferredReadyGeneration = pageGeneration
             return
         }
         sendInitPayload(scriptEvaluator: scriptEvaluator, hosting: hosting)
     }
 
-    /// Fires the `handleReady()` continuation deferred while a teardown flush or review-comment
-    /// mutation RPC was outstanding (see `deferredReadyGeneration`), once every such flush/RPC has
-    /// settled (`outstandingTeardownFlushCount` and `outstandingReviewCommentMutationCount` both back
-    /// at zero — see their doc comments for why counts, not flags). Re-verifies the deferred generation
+    /// Fires the `handleReady()` continuation deferred while a teardown flush, review-comment mutation
+    /// RPC, or file-write RPC was outstanding (see `deferredReadyGeneration`), once every such
+    /// flush/RPC has settled (`outstandingTeardownFlushCount`, `outstandingReviewCommentMutationCount`,
+    /// and `outstandingFileWriteCount` all back at zero — see their doc comments for why counts, not
+    /// flags). Re-verifies the deferred generation
     /// is still the live page: the page that was waiting can itself have been torn down again (a second
     /// `deactivate()`/`activate()` cycle) before this flush's completion landed, in which case there is
     /// nothing to resume — that page is gone, `scriptEvaluator` no longer points at it, and whichever
     /// page is current now will get its own `ready` → `handleReady()` call in due course.
     private func resumeDeferredReadyIfNeeded() {
-        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0,
+        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0,
             let generation = deferredReadyGeneration
         else { return }
         deferredReadyGeneration = nil
@@ -994,23 +1057,35 @@ enum CodePaneMode: Equatable {
         }
         let base64Data = Data(content.utf8).base64EncodedString()
         let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        // round-10: bumped before the RPC starts, decremented — unconditionally, success or failure —
+        // in its completion below. See `outstandingFileWriteCount`'s doc comment for why a deferred
+        // `ready` also waits on this.
+        outstandingFileWriteCount += 1
         Task { [weak self] in
-            let outcome = await Task.detached(priority: .userInitiated) { () -> Result<SpacesDeviceWorkspaceFileWriteResult, Error> in
-                do {
-                    return .success(
-                        try SpacesDeviceClient.workspaceFileWrite(
-                            workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256, device: device))
-                } catch { return .failure(error) }
-            }.value
-            guard let self else { return }
-            switch outcome {
-            case .success(let result):
+            do {
+                let result = try await deviceGateway.workspaceFileWrite(
+                    workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256, device: device)
                 switch CodePaneBridge.fileWritePayload(result) {
-                case .success(let payload): self.reply(id: id, generation: generation, result: payload)
-                case .failure(let error): self.reply(id: id, generation: generation, error: error)
+                case .success(let payload):
+                    // round-10: only an actually-committed write (never a CAS conflict, which wrote
+                    // nothing to disk) has a baseline worth adopting into a flushed snapshot. `sha256`
+                    // is documented to be populated whenever `didWrite == true`, but the type is
+                    // Optional — skip adoption defensively if it somehow isn't.
+                    if result.didWrite, let sha = result.sha256 {
+                        self?.lastCommittedFileWrite = (path: path, expectedBase: baseSHA256, sha256: sha, content: content)
+                        self?.adoptCommittedWriteIntoEditorState()
+                    }
+                    self?.reply(id: id, generation: generation, result: payload)
+                case .failure(let error):
+                    self?.reply(id: id, generation: generation, error: error)
                 }
-            case .failure(let error):
-                self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.outstandingFileWriteCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.outstandingFileWriteCount -= 1
+                self?.resumeDeferredReadyIfNeeded()
             }
         }
     }

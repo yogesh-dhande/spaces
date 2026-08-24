@@ -21,16 +21,20 @@ extension SpacesDeviceWorkspaceFileSignatureStreamClient: CodePaneFileSignatureS
 /// Seam over the `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
 /// staleness guards (page generation, diff-request/file-read token, diff/file-signature subscription
 /// generation) protect against races with hibernation and scope/path changes, plus the review-comment
-/// CRUD/send calls (kept here too, rather than called directly like `workspaceFileWrite` is, so
+/// CRUD/send calls and `workspaceFileWrite` (kept here too, rather than called directly, so
 /// `CodePaneContentControllerTests` can assert exactly which comment/args a dispatched RPC resolves to
-/// without a live device). `workspaceFileWrite` itself stays a direct `SpacesDeviceClient` call: nothing
-/// downstream of its completion re-keys a subscription off it the way `resubscribeFileSignature` does
-/// off `workspaceFileRead`, so it has no analogous need for this seam yet.
+/// without a live device) — `workspaceFileWrite`'s completion feeds the flushed-snapshot baseline
+/// adoption and the deferred-ready gate (`adoptCommittedWriteIntoEditorState`,
+/// `outstandingFileWriteCount`), exactly the class of completion this seam exists for.
 protocol CodePaneDeviceGateway: Sendable {
     func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult
 
     func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
         -> SpacesDeviceWorkspaceFileReadResult
+
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult
 
     func subscribeWorkspaceDiffSignature(
         workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord,
@@ -73,6 +77,15 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileRead(workspaceID: workspaceID, relativePath: relativePath, device: device)
+        }.value
+    }
+
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceFileWrite(
+                workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256, device: device)
         }.value
     }
 

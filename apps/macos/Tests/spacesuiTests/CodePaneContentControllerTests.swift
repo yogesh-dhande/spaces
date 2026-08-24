@@ -399,6 +399,60 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         for waiter in waiters { waiter.resume() }
     }
 
+    // MARK: - File write (round-10)
+
+    private(set) var fileWriteCalls: [(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?)] = []
+    private var fileWriteResult: Result<SpacesDeviceWorkspaceFileWriteResult, any Error>?
+    /// round-10: `workspaceFileWrite` calls to hold open rather than answering right away, counted down
+    /// on each arrival — mirrors `holdNextUpsertAttempts`'s shape exactly.
+    private var holdNextFileWriteAttempts = 0
+    private var pendingFileWriteCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceFileWriteResult, any Error>)] =
+        []
+    private var fileWriteCallArrivalCount = 0
+
+    func setFileWriteResult(_ result: Result<SpacesDeviceWorkspaceFileWriteResult, any Error>) { fileWriteResult = result }
+
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
+        fileWriteCalls.append((workspaceID, relativePath, base64Data, expectedSHA256))
+        if holdNextFileWriteAttempts > 0 {
+            holdNextFileWriteAttempts -= 1
+            let arrivalIndex = fileWriteCallArrivalCount
+            fileWriteCallArrivalCount += 1
+            return try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<SpacesDeviceWorkspaceFileWriteResult, any Error>) in
+                pendingFileWriteCalls.append((arrivalIndex, continuation))
+            }
+        }
+        guard let fileWriteResult else {
+            return SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "sha-default")
+        }
+        return try fileWriteResult.get()
+    }
+
+    /// round-10: makes the next `count` `workspaceFileWrite` calls suspend instead of resolving
+    /// immediately, so a test can observe the RPC still in flight (e.g. across a teardown) before
+    /// completing it via `completeHeldFileWriteCall`.
+    func holdNextFileWriteAttempts(_ count: Int) { holdNextFileWriteAttempts = count }
+
+    /// Resolves the held `workspaceFileWrite` call at `index` (0-based, arrival order among held calls
+    /// only) with `result`.
+    func completeHeldFileWriteCall(at index: Int, result: SpacesDeviceWorkspaceFileWriteResult) {
+        guard let position = pendingFileWriteCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceFileWrite call at arrival index \(index)")
+        }
+        pendingFileWriteCalls.remove(at: position).continuation.resume(returning: result)
+    }
+
+    /// Fails the held `workspaceFileWrite` call at `index`, mirroring `completeHeldFileWriteCall`.
+    func failHeldFileWriteCall(at index: Int, error: any Error) {
+        guard let position = pendingFileWriteCalls.firstIndex(where: { $0.arrivalIndex == index }) else {
+            preconditionFailure("no held workspaceFileWrite call at arrival index \(index)")
+        }
+        pendingFileWriteCalls.remove(at: position).continuation.resume(throwing: error)
+    }
+
     // MARK: - Review comments
     //
     // Simple record-and-answer stubs (no arrival ordering/waiters needed): unlike `workspaceDiff` and
@@ -2763,5 +2817,260 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(
             nextEvaluator.evaluatedScripts.contains { $0.contains(#""id":"provisional-1""#) && $0.contains(#""provisional":true"#) },
             "an UPDATE completion must never reconcile pendingReviewCommentState, even when its anchor and body match a stored entry exactly")
+    }
+
+    // MARK: - Committed workspaceFileWrite adopted into a flushed editorState snapshot (round-10)
+    //
+    // A save click issues `workspaceFileWrite` against the baseline the editor had open. If hibernation
+    // snapshots the editor before that write's completion lands, the snapshot still carries the
+    // pre-write baseline — left alone, the replacement page would rehydrate against that stale baseline
+    // and treat its own just-landed save as an external change. `adoptCommittedWriteIntoEditorState`
+    // folds the write's outcome into the snapshot so the baseline it rehydrates against is post-save.
+
+    private struct InjectedFileWriteFailure: Error {}
+
+    /// The core round-10 race: a write dispatched before hibernation is still in flight when the
+    /// replacement page's `ready` arrives. `handleReady()` must hold `spaces:init` back
+    /// (`outstandingFileWriteCount`), and once the write settles, the held init must reflect the
+    /// adopted baseline — carrying the write's sha as `baseSHA256`, the written text as `baseContent`,
+    /// and the flushed (post-click) buffer as `content`, still `dirty` since it diverges from what was
+    /// saved.
+    @Test func handleReadyDefersUntilAnOutstandingFileWriteSettlesThenAdoptsItsBaselineIntoTheFlushedSnapshot() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "sha-abc"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending
+        evaluator.completeOldestPending(
+            with:
+                #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
+        ) // editor-state flush: OLD baseSHA256, content diverges from what the write saved
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady() // deferred: the write RPC dispatched before teardown has not resolved
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must not send spaces:init while a workspaceFileWrite dispatched before teardown is still outstanding")
+
+        await gateway.completeHeldFileWriteCall(at: 0, result: SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "sha-new-1"))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(initScript?.contains(#""baseSHA256":"sha-new-1""#) ?? false, "the adopted baseline must carry the write's committed sha")
+        #expect(initScript?.contains(#""baseContent":"saved content""#) ?? false, "the adopted baseline's content must be what was written")
+        #expect(
+            initScript?.contains(#""content":"typed more after save""#) ?? false,
+            "the live buffer must stay the flushed (post-click) text, not the written text")
+        #expect(initScript?.contains(#""dirty":true"#) ?? false, "content diverging from the adopted baseline must still read as dirty")
+    }
+
+    /// Clean-adoption variant: nothing was typed after the save click, so the flushed snapshot's
+    /// `content` exactly equals what was written — the adopted snapshot must read as clean, not dirty.
+    @Test func aFlushedSnapshotMatchingTheWrittenContentAdoptsAsClean() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "sha-abc"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(
+            with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"saved content","dirty":true}"#
+        ) // editor-state flush: content matches exactly what the write saved
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.completeHeldFileWriteCall(at: 0, result: SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "sha-new-1"))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(initScript?.contains(#""baseSHA256":"sha-new-1""#) ?? false, "the adopted baseline must carry the write's committed sha")
+        #expect(initScript?.contains(#""dirty":false"#) ?? false, "a buffer exactly matching the adopted baseline must read as clean")
+        #expect(initScript?.contains(#""conflict":false"#) ?? false, "a clean adoption must not read as conflicted")
+    }
+
+    /// Opposite settle order: the write completes BEFORE the teardown flush stores its snapshot (the
+    /// flush's own `evaluateCodePaneScript` completion is driven last here). At write-completion time
+    /// `editorState` is still `nil` (nothing has stored a snapshot yet), so the completion's own
+    /// `adoptCommittedWriteIntoEditorState()` call is a no-op — the adoption can only happen once
+    /// `storeFlushedEditorState` runs its own call at the end. This proves that call site earns its
+    /// keep, not just the write-completion one.
+    @Test func aWriteThatCompletesBeforeTheTeardownFlushStoresIsStillAdoptedByTheFlush() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "sha-abc"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending — neither answered yet
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady() // deferred: both the teardown flushes and the write RPC are outstanding
+
+        // The write settles FIRST, with no stored `editorState` yet for its completion to patch.
+        await gateway.completeHeldFileWriteCall(at: 0, result: SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "sha-new-1"))
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "the teardown flushes are still outstanding even though the write has now settled")
+
+        // Only now does the teardown flush answer, storing the pre-write-baseline snapshot — this is
+        // the call site that must perform the adoption, since the write's own completion found nothing
+        // to patch.
+        evaluator.completeOldestPending(
+            with:
+                #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
+        ) // editor-state flush
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(
+            initScript?.contains(#""baseSHA256":"sha-new-1""#) ?? false,
+            "the flush's own adoption call must still fold the already-committed write's baseline in")
+        #expect(initScript?.contains(#""baseContent":"saved content""#) ?? false, "the adopted baseline's content must be what was written")
+        #expect(
+            initScript?.contains(#""content":"typed more after save""#) ?? false,
+            "the live buffer must stay the flushed (post-click) text, not the written text")
+        #expect(initScript?.contains(#""dirty":true"#) ?? false, "content diverging from the adopted baseline must still read as dirty")
+    }
+
+    /// Failure arm: the write is rejected/errors out, so nothing committed and nothing should be
+    /// adopted — the flushed snapshot must go out exactly as the teardown flush wrote it, still on the
+    /// pre-write baseline.
+    @Test func aFailedFileWriteAcrossHibernationLeavesTheFlushedSnapshotUnchanged() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "sha-abc"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(
+            with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
+        ) // editor-state flush
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.failHeldFileWriteCall(at: 0, error: InjectedFileWriteFailure())
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(initScript?.contains(#""baseSHA256":"sha-abc""#) ?? false, "a failed write must leave the flushed snapshot's baseline untouched")
+        #expect(
+            initScript?.contains(#""content":"typed more after save""#) ?? false,
+            "a failed write must leave the flushed snapshot's live buffer untouched")
+    }
+
+    /// CAS-chain guard: the flushed snapshot's `baseSHA256` does not match the baseline the write was
+    /// issued against, so it provably does not predate the write's landing (something else already
+    /// moved it) — the adoption must not run, leaving the flushed snapshot exactly as reported.
+    @Test func aFlushedSnapshotOnADifferentBaselineThanTheWriteIsNotAdopted() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.holdNextFileWriteAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileWrite",
+                params: ["path": "foo.ts", "content": "saved content", "options": ["baseSHA256": "sha-abc"]]))
+
+        while await gateway.fileWriteCalls.count < 1 {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(
+            with: #"{"path":"foo.ts","baseSHA256":"sha-different","baseContent":"let y = 2;","content":"typed more after save","dirty":true}"#
+        ) // editor-state flush: baseSHA256 does NOT match the write's expectedSHA256 ("sha-abc")
+        evaluator.completeOldestPending(with: "__none__") // comment-state flush
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        await gateway.completeHeldFileWriteCall(at: 0, result: SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "sha-new-1"))
+
+        await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let initScript = nextEvaluator.evaluatedScripts.first { $0.contains("spaces:init") }
+        #expect(
+            initScript?.contains(#""baseSHA256":"sha-different""#) ?? false,
+            "a snapshot on a baseline other than the one the write was issued against must not be patched")
+        #expect(!(initScript?.contains(#""baseSHA256":"sha-new-1""#) ?? false), "the write's sha must not appear: the CAS-chain guard must block adoption")
     }
 }
