@@ -154,9 +154,10 @@ public enum DatabaseSchema {
     /// automation's `script`/`agent` kind stamped onto the run at creation time: an automation's kind can be
     /// edited once its runs are terminal, but a retained historical run keeps the session shape it actually
     /// ran with, so opening its history dispatches on the run's own kind rather than the automation's current
-    /// one. `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been written
-    /// to its session; it makes prompt delivery survive a daemon restart deterministically — the two
-    /// agent-run phases (detecting/sending while NULL, awaiting done/end once set) derive from it so no
+    /// one. `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been taken
+    /// by the agent — the prompt was written and the agent is observably working on it, not merely written to
+    /// the PTY; it makes prompt delivery survive a daemon restart deterministically — the two
+    /// agent-run phases (detecting/delivering while NULL, awaiting done/end once set) derive from it so no
     /// in-memory state is lost on restart. Named separately so the fresh-schema SQL and the v11→v12 migration
     /// step share one definition.
     static let automationRunsSQL = """
