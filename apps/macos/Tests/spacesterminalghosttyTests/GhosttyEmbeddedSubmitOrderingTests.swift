@@ -296,6 +296,85 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         XCTAssertEqual(response.errorCode, .sessionNotRunning)
     }
 
+    /// A bare Enter is a submit too. It goes out as one write rather than the text-then-CR split, so it is
+    /// the path that can most easily answer for its enqueue instead of its bytes — and the automation
+    /// prompt ladder submits with exactly this request when an agent's composer swallowed the first Enter.
+    /// `cat` leaves bracketed paste off, so the submit queued ahead of the Enter idles out the sequencer's
+    /// carriage-return separation and the Enter's own write is still queued when the session goes away: it
+    /// must fail the send rather than report a keystroke that landed nowhere.
+    func testBareEnterWhoseWriteNeverReachesThePTYReportsFailure() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "echo SUBMIT_READY; cat", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        // Enqueued on the engine directly so it is unambiguously ahead of the Enter in the sequencer:
+        // handing both to detached tasks would leave which one enqueues first up to the scheduler.
+        _ = TerminalEngineActor.runSynchronously {
+            hostBox.value.core.handleControlRequestOnEngine(TerminalControlRequest(command: "send", text: "SUBMIT_AHEAD", appendNewline: true))
+        }
+        let teardown = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150), clock: .continuous)
+            TerminalEngineActor.runSynchronously { hostBox.value.terminate() }
+        }
+        let response = await Task.detached {
+            hostBox.value.core.handleControlRequest(TerminalControlRequest(command: "send", text: "", appendNewline: true))
+        }.value
+        await teardown.value
+
+        XCTAssertFalse(response.ok, "a bare Enter whose bytes never reached the PTY must not report success")
+        XCTAssertEqual(response.errorCode, .sessionNotRunning)
+        // The message pins the failure to the send's own write acknowledgement rather than to any earlier
+        // guard that also reports a session as not running.
+        XCTAssertEqual(response.message, "Terminal session stopped accepting input before the send reached it.")
+    }
+
+    /// The emission half of the same contract for a one-write submit: it must answer for the host-PTY
+    /// write, not for ghostty accepting the bytes. Same proof as the two-write submit's — the child never
+    /// reads its stdin, so a payload this size takes real time to write and a send that returned on
+    /// ghostty's acceptance would come back in milliseconds.
+    func testBareSubmitWriteAnswersOnlyOnceItsHostPTYWriteCompleted() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        // A byte payload with appendNewline is the same one-write submit the bare Enter takes, sized so the
+        // write cannot complete instantly while still finishing well inside the acknowledgement budget when
+        // the machine is busy running the rest of the suite.
+        let sentAt = ContinuousClock.now
+        let response = await Task.detached {
+            hostBox.value.core.handleControlRequest(
+                TerminalControlRequest(command: "send", bytes: Data(repeating: 0x41, count: 2 << 20), appendNewline: true))
+        }.value
+
+        XCTAssertTrue(response.ok, response.message)
+        // Writing this payload to the PTY takes tens of milliseconds; answering when ghostty accepted it
+        // comes back in one or two. The threshold sits between them rather than at either end so a loaded
+        // machine only ever makes the real write slower.
+        XCTAssertGreaterThanOrEqual(
+            sentAt.duration(to: .now), .milliseconds(25),
+            "the submit answered before its bytes could have reached the PTY, so it answered for ghostty's queue instead")
+    }
+
     /// The barrier a submit waits on must not touch the terminal, and the only way to prove that is to
     /// submit while the parser is in a state where *any* byte would change what the child's output
     /// renders as. The child emits the lead byte of `\u{2713}` (0xE2), pauses, then completes the

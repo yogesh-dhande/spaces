@@ -218,5 +218,33 @@
             #expect(!response.ok, "a submit whose carriage return never reached the PTY must not report success")
             #expect(response.errorCode == .sessionNotRunning)
         }
+
+        /// A bare Enter is a submit too, written as one write rather than the text-then-CR split, so it is
+        /// the path that can most easily answer for its enqueue instead of its bytes. Sent into a session
+        /// that is already torn down, its write has nowhere to go: the send must fail rather than report a
+        /// keystroke that landed nowhere.
+        @Test func bareEnterWhoseWriteNeverReachesThePTYReportsFailure() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+            let core = try await startSubmitCore(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+            let coreBox = Box(core)
+            defer { TerminalEngineActor.runSynchronously { coreBox.value.terminate() } }
+            let outputPath = paths.outputPath
+            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+            TerminalEngineActor.runSynchronously { coreBox.value.terminate() }
+            let response = await Task.detached {
+                coreBox.value.handleControlRequest(TerminalControlRequest(command: "send", text: "", appendNewline: true))
+            }.value
+
+            #expect(!response.ok, "a bare Enter whose bytes never reached the PTY must not report success")
+            #expect(response.errorCode == .sessionNotRunning)
+            // The message pins the failure to the send's own write acknowledgement rather than to any
+            // earlier guard that also reports a session as not running.
+            #expect(response.message == "Terminal session stopped accepting input before the send reached it.")
+        }
     }
 #endif

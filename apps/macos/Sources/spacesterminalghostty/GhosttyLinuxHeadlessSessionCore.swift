@@ -995,8 +995,15 @@
             markLocalOwnerCommandInputOutputResyncPending()
             var bytes = payload
             if request.appendNewline { bytes.append(0x0D) }
-            enqueueControlInputWrite(bytes)
-            return TerminalControlHandling(response: TerminalControlResponse(ok: true, message: "Sent input."))
+            let acknowledgement = enqueueControlInputWrite(bytes)
+            // A submit answers for its Enter however that Enter was written. A bare Enter and a byte payload
+            // go out as one write rather than the two-write split, but they are still submits, so their
+            // acknowledgement is what the response resolves against — otherwise a teardown racing the queued
+            // CR would report a submitted prompt that never landed. Input without a newline is not a submit
+            // and keeps the unwaited enqueue.
+            return TerminalControlHandling(
+                response: TerminalControlResponse(ok: true, message: "Sent input."),
+                writeAcknowledgement: request.appendNewline ? acknowledgement : nil)
         }
 
         @discardableResult private func enqueueControlInputWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {

@@ -1652,15 +1652,27 @@
                 // rather than sampled here, so the pacing can never be decided against a framing the bytes
                 // did not go out with. Enter is a CR because shells and Claude Code accept LF or CR while
                 // Codex and OpenCode submit only on CR. An empty text with appendNewline is a bare Enter
-                // (e.g. answering a TUI dialog): there is nothing to frame, so the CR goes in alone. Byte
-                // payloads are opaque input rather than composer text, so they keep the single inline write.
+                // (e.g. answering a TUI dialog, or the automation prompt ladder's submit): there is nothing
+                // to frame, so the CR goes in alone. Byte payloads are opaque input rather than composer
+                // text, so they keep the single inline write.
                 var submitAcknowledgement: TerminalInputWriteAcknowledgement?
                 if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
                     submitAcknowledgement = enqueueControlInputSubmit(text)
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
-                    enqueueControlInputWrite(bytes)
+                    // A submit answers for its Enter however that Enter was written. A bare Enter and a byte
+                    // payload go out as one write rather than the two-write split, but they are still
+                    // submits: their write answers for the host-PTY writes ghostty produced for it and the
+                    // response resolves against that acknowledgement — otherwise a child that exits with
+                    // the CR still queued would report a submitted prompt that never landed. Input without
+                    // a newline is not a submit and keeps the unwaited enqueue, so ordinary interactive
+                    // writes never pay a round trip for an answer no caller asked for.
+                    if request.appendNewline {
+                        submitAcknowledgement = enqueueControlInputSubmitWrite(bytes)
+                    } else {
+                        enqueueControlInputWrite(bytes)
+                    }
                 }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
@@ -1673,6 +1685,21 @@
         @discardableResult private func enqueueControlInputWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {
             controlInputSequencer.enqueueWrite { [weak self] in
                 await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) == true ? .delivered : .notDelivered }
+            }
+        }
+
+        /// A submit that goes out as one write: a bare Enter, or a byte payload with its appended carriage
+        /// return. Like each half of the two-write submit, it answers for the host-PTY writes ghostty
+        /// produced for it rather than for ghostty having accepted the bytes, so a send whose Enter was
+        /// still queued when the child exited fails instead of reporting a prompt as submitted.
+        private func enqueueControlInputSubmitWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                let writes = await TerminalEngineActor.run { () -> TerminalInputWriteBatch? in
+                    guard let self else { return nil }
+                    return self.rendererHostStorage.sendRawBytesAwaitingEmission(bytes)
+                }
+                guard let writes else { return .notDelivered }
+                return await writes.outcome()
             }
         }
 
