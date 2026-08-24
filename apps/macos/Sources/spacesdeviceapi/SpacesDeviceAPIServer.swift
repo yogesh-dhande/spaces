@@ -1631,15 +1631,38 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let missing: Bool
     }
 
+    /// Substituted for the real content hash in `computeWorkspaceFileScopeSignature` whenever the watched
+    /// file is a regular, existing file over `workspaceFileMaxBytes` (10 MiB) — the same cap
+    /// `handleWorkspaceFileReadRequest` enforces on a bounded read. Unlike that request handler, the
+    /// 2-second poll timer that computes this value runs for the pane's entire subscription lifetime, and
+    /// the client deliberately keeps a subscription alive on a file whose *open* was already rejected as
+    /// oversized (see the recovery-subscription comment in
+    /// `CodePaneContentController.restoreFileSignatureMonitoringAfterFailedOpen`), specifically to learn
+    /// when it shrinks back under the cap. Without a gate here, that subscription would fully re-read and
+    /// hash a multi-GB file every 2 seconds for as long as the pane stays open.
+    ///
+    /// A stable sentinel, not a skipped tick, because this state needs to be broadcast and deduped like any
+    /// other signature: skipping would mean an oversized file gets no connect-time frame, and a
+    /// readable→oversized transition would go silent instead of announcing itself the way every other
+    /// signature change does. This value is stable for as long as the file stays over the cap (it does not
+    /// vary with the file's exact size), so `lastBroadcastValue`'s tick-to-tick comparison suppresses every
+    /// repeat tick and an actively growing file broadcasts nothing after the first crossing. It can never
+    /// collide with a real signature (never 64 hex characters) or with the missing state (`sha256: nil`),
+    /// so crossing the cap in either direction always compares as changed and broadcasts exactly once.
+    static let workspaceFileSignatureOversizedSentinel = "oversized"
+
     /// Producer + 2s poll timer for one (workspace, path) scope's `subscribeWorkspaceFileSignature` stream.
     /// Mirrors `WorkspaceDiffSignatureSubscription`'s architecture (producer + poll timer on a dedicated
     /// `streamQueue`, connect-time frame from the latest computed value, keepalive cadence via
     /// `workspaceDiffSignatureKeepaliveShouldBroadcast`, reused unchanged — see that function's doc comment)
-    /// with one deliberate divergence: a provider failure here SKIPS the tick's broadcast/`lastBroadcastValue`
+    /// with one deliberate divergence: a provider FAILURE here (the file is unreadable or unresolvable — see
+    /// `computeWorkspaceFileScopeSignature`'s `nil` returns) SKIPS the tick's broadcast/`lastBroadcastValue`
     /// update entirely, rather than substituting a sentinel the way diff's `workspaceDiffSignatureUnavailableSentinel`
-    /// does. `{sha256, missing}` has no natural third state to stand in for "unavailable" the way a single
-    /// opaque signature string does, so inventing one would be an arbitrary wire value with no real meaning
-    /// to a client. `tick` still increments unconditionally on every fire (including a skipped one) so the
+    /// does: failure has no meaningful wire value to report, so inventing one would be arbitrary. An
+    /// OVERSIZED file is a different case and is not treated as a failure: it is an authoritative,
+    /// reportable file state with its own dedicated sentinel (`workspaceFileSignatureOversizedSentinel`),
+    /// broadcast and deduped the same way `missing` is — see that constant's doc comment and
+    /// `computeWorkspaceFileScopeSignature`'s size gate. `tick` still increments unconditionally on every fire (including a skipped one) so the
     /// ~20s keepalive cadence measured in tick count keeps counting through an intermittent failure.
     /// Accepted gap: a Linux relay's keepalive-based disconnect detection pauses for the duration of a
     /// persistent read failure (e.g. a permissions error mid-poll) and resumes the moment the file becomes
@@ -1792,6 +1815,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // replacement case safe; the race is orthogonal and already accepted elsewhere in this file).
             return nil
         }
+        // Stat-based size gate: this poll runs every 2s for the whole life of a subscription, unlike
+        // `handleWorkspaceFileReadRequest`'s one-shot bounded read, so hashing here has no natural size
+        // bound of its own — see `workspaceFileSignatureOversizedSentinel`'s doc comment for why an
+        // oversized file gets a stable sentinel instead of either an unbounded hash or a skipped tick.
+        guard let size = attributes[.size] as? Int else { return nil }
+        if size > Self.workspaceFileMaxBytes {
+            return WorkspaceFileSignatureValue(sha256: Self.workspaceFileSignatureOversizedSentinel, missing: false)
+        }
+        // Stat-then-hash TOCTOU: a file that grows past the cap between this stat and the hashing open
+        // below gets one full hash of whatever is on disk at open time; the next tick's stat catches the
+        // crossing. Same accepted stat-then-open race as `handleWorkspaceFileReadRequest`'s documented
+        // pair — the cost here is one-time, replacing what was previously a continuous per-tick cost.
         guard let hash = SpacesDeviceWorkspaceGitHashing.streamingSHA256Hex(atPath: resolvedPath) else { return nil }
         return WorkspaceFileSignatureValue(sha256: hash, missing: false)
     }

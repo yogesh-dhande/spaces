@@ -1110,9 +1110,14 @@ public struct SpacesDeviceWorkspaceFileSignatureRequest: Codable, Sendable, Equa
     }
 }
 
-/// `sha256` is nil iff `missing` is true — the file does not currently exist at `path`. This is the
-/// same hash `workspaceFileRead`/`workspaceFileWrite` traffic in, so the web side can compare it
-/// directly against its own CAS baseline without any translation.
+/// `sha256` is nil iff `missing` is true — the file does not currently exist at `path`. Otherwise `sha256`
+/// is usually the same hash `workspaceFileRead`/`workspaceFileWrite` traffic in, so the web side can
+/// compare it directly against its own CAS baseline without any translation — except when the file exists
+/// but is over the daemon's 10 MiB read cap, in which case `sha256` carries a stable non-hash sentinel
+/// (`"oversized"`) rather than a content hash. No client needs to special-case that value: the web side
+/// treats every frame as a content-free "go look" signal (`EditorView.subscribeToFileSignature`), and the
+/// Swift host only ever compares values for change-detection dedupe, so the sentinel simply never matches
+/// any real CAS baseline — correctly, since the content is not readable at that size.
 public struct SpacesDeviceWorkspaceFileSignatureFrame: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let path: String

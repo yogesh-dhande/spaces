@@ -1190,6 +1190,86 @@
             }
         }
 
+        /// Guards the round-11 finding that `computeWorkspaceFileScopeSignature` hashed a watched file's
+        /// entire content on every 2s poll tick with no size bound, unlike `handleWorkspaceFileReadRequest`'s
+        /// bounded read — so a client's recovery subscription for a file whose *open* was rejected as
+        /// oversized (see the comment block in `CodePaneContentController.restoreFileSignatureMonitoringAfterFailedOpen`)
+        /// would re-hash a multi-GB file indefinitely for as long as the pane stayed subscribed. Also guards
+        /// the shrink-recovery contract that same client subscription depends on: crossing back under the
+        /// cap must still produce a real content-hash frame, not a stuck sentinel.
+        func testSubscribeWorkspaceFileSignatureReportsAStableOversizedSentinelAndRecoversWhenTheFileShrinks() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                let path = repo.appendingPathComponent("big.txt")
+                try "small content".write(to: path, atomically: true, encoding: .utf8)
+                let smallSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("small content".utf8))
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "big.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in frames.append(frame) },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+
+                // Step 1: the connect-time frame carries the small file's real content hash.
+                let connectDeadline = Date().addingTimeInterval(5)
+                while frames.count == 0, Date() < connectDeadline {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                guard let firstFrame = frames.values.first else {
+                    XCTFail("expected a connect-time frame carrying the small file's real hash")
+                    return
+                }
+                XCTAssertEqual(firstFrame.sha256, smallSHA)
+                XCTAssertFalse(firstFrame.missing)
+
+                // Step 2: overwrite the file past the 10 MiB cap (atomically, so no poll tick can observe a
+                // partially-written file). The next distinct frame must carry the stable oversized sentinel,
+                // never a real hash of that much content.
+                let oversizedData = Data(repeating: 0x61, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1)
+                try oversizedData.write(to: path, options: .atomic)
+
+                let oversizedDeadline = Date().addingTimeInterval(5)
+                while frames.values.last?.sha256 == smallSHA, Date() < oversizedDeadline {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                let oversizedFrame = try XCTUnwrap(frames.values.last)
+                XCTAssertEqual(oversizedFrame.sha256, SpacesDeviceAPIServer.workspaceFileSignatureOversizedSentinel)
+                XCTAssertFalse(oversizedFrame.missing)
+                let framesAtOversized = frames.count
+
+                // Step 3: the sentinel must be STABLE — at least 2 further poll ticks (this 4.5s window
+                // covers t≈+2s and t≈+4s from the oversized frame) must not produce another frame while the
+                // file stays oversized. This is the "stable" half of the fix: without it, an actively
+                // oversized file would keep broadcasting every tick just like the unbounded-hash bug it
+                // replaces, only with a constant payload instead of a real hash.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(
+                    frames.count, framesAtOversized,
+                    "the oversized sentinel must dedupe across ticks the same way a real unchanged hash does — no repeat frames while the file "
+                        + "stays oversized")
+
+                // Step 4: shrink back to different small content. The recovery contract: a real content-hash
+                // frame must arrive again, proving the provider resumes hashing once the file is back under
+                // the cap — this is what the client's rejected-open recovery subscription depends on.
+                let recoveredContent = "recovered content"
+                try recoveredContent.write(to: path, atomically: true, encoding: .utf8)
+                let recoveredSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data(recoveredContent.utf8))
+
+                let recoverDeadline = Date().addingTimeInterval(5)
+                while frames.values.last?.sha256 != recoveredSHA, Date() < recoverDeadline {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                let recoveredFrame = try XCTUnwrap(frames.values.last)
+                XCTAssertEqual(recoveredFrame.sha256, recoveredSHA)
+                XCTAssertFalse(recoveredFrame.missing)
+            }
+        }
+
         /// A subscribed path that does not exist is a legitimate reportable state (`missing: true`, `sha256:
         /// nil`), not a subscribe-time refusal — mirrors `testWorkspaceFileReadOnAMissingFileReturnsNotFound`'s
         /// scenario, but for the signature stream, whose contract is to report absence rather than error on it.

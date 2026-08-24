@@ -1017,10 +1017,13 @@ enum CodePaneMode: Equatable {
             // the ONLY channel that can ever announce the file became readable again for these two cases
             // (shrinks back under 10 MiB, or gets replaced back with a regular file) — so both need a
             // recovery subscription installed here. The signature provider is safe to subscribe to in
-            // this state: per `SpacesDeviceAPIServer`, it hashes file content regardless of size, and
-            // skips ticks for a non-regular-file path while resuming normal ticks once the path becomes a
-            // regular file again, so a change back to readable produces a real frame the web side refetches
-            // on, and existing dedupe (`lastActedFileSignatureValue`) prevents a refetch loop from it.
+            // this state: per `SpacesDeviceAPIServer`, the provider stat-gates at the same 10 MiB read cap
+            // and reports a stable "oversized" sentinel above it instead of hashing, and skips ticks for a
+            // non-regular-file path — resuming real hashes once the file shrinks back under the cap, or
+            // ticks again once the path becomes a regular file again. Either readable transition still
+            // produces a changed frame the web side refetches on, and the sentinel's own stability plus
+            // existing dedupe (`lastActedFileSignatureValue`) prevent both broadcast churn and refetch
+            // loops for as long as the file stays oversized.
             //
             // Any other failure (offline device, daemon hiccup, a transport error like `.unavailable`) is
             // not an authoritative answer about the path — the daemon may not have even examined it — so
