@@ -124,10 +124,20 @@ enum CodePaneMode: Equatable {
     /// same reason as the floor above.
     var diffSignatureReconnectCap: Duration = .seconds(30)
 
-    /// Bumped on every `workspaceFileRead` call; mirrors `latestDiffRequestToken` exactly, but for the
-    /// file-signature stream: only the completion of the latest read is allowed to (re)point
-    /// `resubscribeFileSignature` at its path.
-    private var latestFileReadRequestToken = 0
+    /// Bumped on every `workspaceFileRead` call whose dispatch is a NAVIGATION — i.e. it changes which
+    /// path the pane is showing (`pathChanged == true`), as opposed to a same-path reread of the file
+    /// already open (e.g. `EditorView.handleExternalChange`'s live-reload re-read after a
+    /// `spaces:fileSignature` push). `performFileRead` captures this as `navToken` at dispatch time and
+    /// its success arm checks it before letting a navigation's completion (re)point
+    /// `resubscribeFileSignature` at its path — deliberately narrower than `latestDiffRequestToken`
+    /// (which every diff fetch bumps): a same-path reread must NOT bump this, or a slower navigation to
+    /// a different path in flight at the same time would see its own already-captured token look stale
+    /// once the reread bumps past it. A same-path reread's completion is instead guarded by
+    /// `subscribedFilePath == path` — see `performFileRead`'s success-arm comment for the full set of
+    /// interleavings this two-branch scheme closes (this replaced a single request-token guard that
+    /// covered every read indiscriminately and could let a stale reread's completion resubscribe the
+    /// stream to the wrong file after a navigation had already moved on).
+    private var latestFileNavigationToken = 0
 
     /// The workspace-relative path the live file-signature stream is pointed at, or `nil` when nothing
     /// is subscribed. Unlike `DiffSignatureScope`, a plain `String?` is enough here: a path (unlike a
@@ -429,7 +439,14 @@ enum CodePaneMode: Equatable {
         lastActedFilePath = nil
         fileSignatureSubscriptionGeneration += 1
         fileSignatureReconnectFailures = 0
-        latestFileReadRequestToken += 1
+        // Teardown is itself a "no path is active" transition: `subscribedFilePath = nil` above already
+        // invalidates any outstanding same-path REREAD on its own (its guard checks
+        // `subscribedFilePath == path`, which can never hold once it's `nil`), but a REREAD is only
+        // half of `performFileRead`'s success-arm guard — an outstanding NAVIGATION checks
+        // `latestFileNavigationToken` instead, which `subscribedFilePath` going `nil` does nothing to.
+        // This bump is what invalidates that half: a navigation completing after this point must not
+        // resubscribe a pane that has since hibernated.
+        latestFileNavigationToken += 1
     }
 
     /// Pulls the web app's live editor snapshot before the page underneath it disappears, closing the
@@ -792,16 +809,21 @@ enum CodePaneMode: Equatable {
                 error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
             return
         }
-        // Every workspaceFileRead call claims "latest read"; a completion that isn't the latest one
-        // anymore must not retarget the live file-signature stream below (mirrors
-        // `latestDiffRequestToken`'s doc comment).
-        latestFileReadRequestToken += 1
-        let requestToken = latestFileReadRequestToken
-        // Whether THIS dispatch is changing the monitored path, captured before the conditional bump
-        // below runs — a failed open below only needs to restore anything when it was the one that
+        // Whether THIS dispatch is changing the monitored path, captured before any of the conditional
+        // bumps below run — a failed open below only needs to restore anything when it was the one that
         // just tore down the previous path's monitoring in the first place (see
-        // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment).
+        // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment), and the success arm further
+        // down uses it to pick which "am I still current" guard applies.
         let pathChanged = subscribedFilePath != path
+        // Only a navigation (an actual path change) claims a fresh "latest navigation wins" token — a
+        // same-path reread of the file already open (`EditorView.handleExternalChange`'s live-reload
+        // re-read) must NOT bump this, or a slower navigation to a different path in flight at the same
+        // time would see its own already-captured `navToken` look stale once the reread bumps past it.
+        // See `latestFileNavigationToken`'s doc comment and the success arm below for why.
+        if pathChanged {
+            latestFileNavigationToken += 1
+        }
+        let navToken = latestFileNavigationToken
         // Mirrors `performWorkspaceDiff`'s `diffSignatureSubscriptionGeneration` bump: invalidate a
         // pending old-path backoff retry HERE, at dispatch time, only on an actual path change — see
         // that call site's doc comment for why this must be conditional, not unconditional.
@@ -822,7 +844,32 @@ enum CodePaneMode: Equatable {
                 switch CodePaneBridge.fileReadPayload(result) {
                 case .success(let payload):
                     self.reply(id: id, generation: generation, result: payload)
-                    guard self.latestFileReadRequestToken == requestToken else { return }
+                    // Subscription ownership keys off the latest NAVIGATION, not the latest arbitrary
+                    // read: a same-path reread of the file already open (dispatched with
+                    // `pathChanged == false`) can complete after a *different* file's navigation has
+                    // already taken over, and must not steal the subscription back. Four interleavings
+                    // motivate the two branches below (see also `latestFileNavigationToken`'s doc
+                    // comment):
+                    //  (a) nav to B completes, then A's reread (dispatched while A was still current)
+                    //      completes after it → A's reread is skipped, since `subscribedFilePath` is
+                    //      now B and its `== path` check (path == A) fails.
+                    //  (b) A's reread completes BEFORE B's navigation does → it passes
+                    //      (`subscribedFilePath` is still A at that moment), but the
+                    //      `resubscribeFileSignature` call below is a no-op for it — that method guards
+                    //      on `subscribedFilePath != path`, already equal — so it's just a harmless
+                    //      baseline refresh. B's navigation resubscribes normally once its own read
+                    //      lands.
+                    //  (c) two navigations, B then C, in flight concurrently → B's completion carries
+                    //      the now-stale `navToken` and is skipped once C's navigation has bumped
+                    //      `latestFileNavigationToken` past it; C's (latest) completion passes. This
+                    //      mirrors the web side's own latest-request-wins guard for navigation.
+                    //  (d) teardown nils `subscribedFilePath` and bumps `latestFileNavigationToken`,
+                    //      invalidating both branches for anything still in flight.
+                    if pathChanged {
+                        guard self.latestFileNavigationToken == navToken else { return }
+                    } else {
+                        guard self.subscribedFilePath == path else { return }
+                    }
                     // Recorded before resubscribing, mirroring `performWorkspaceDiff`'s
                     // `lastActedScopeSignature`/`lastActedScope` bookkeeping.
                     self.lastActedFileSignatureValue = FileSignatureValue(sha256: result.sha256, missing: false)

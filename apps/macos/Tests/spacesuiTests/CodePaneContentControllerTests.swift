@@ -1288,6 +1288,106 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(path == "bar.ts", "the subscription must target the later path, not the superseded first one")
     }
 
+    // The two tests below cover the "reread-of-the-still-open-file races a navigation" interleaving
+    // (round-2 review Fix 4): unlike `lateFileReadResponseDoesNotRetargetTheStreamToASupersededPath`
+    // above (two NAVIGATIONS, B then C — both bump the request token), here only ONE of the two
+    // in-flight reads is a navigation; the other is a same-path reread of the file the pane already
+    // has open (`EditorView.handleExternalChange`'s live-reload re-read, triggered by A's own
+    // still-live file-signature stream while B's slower open is in flight). Before this fix, a single
+    // `latestFileReadRequestToken` guard could not tell "a same-path reread happened to be dispatched
+    // after the navigation" apart from "a second navigation superseded the first" — it always favored
+    // whichever read was dispatched LAST, which is always the reread (the web app only re-reads the
+    // path it's currently showing, so a reread can only ever be dispatched after whatever navigation
+    // most recently changed `subscribedFilePath`) — stranding the file-signature stream on the stale
+    // path regardless of completion order. `latestFileNavigationToken` fixes this by only letting
+    // navigations compete for "latest wins"; a reread instead only checks it's still looking at the
+    // currently-subscribed path.
+
+    /// Interleaving (a) from the success-arm guard's doc comment: B's navigation resolves first (the
+    /// reply reaches JS, which navigates the pane to B), then A's now-stale reread resolves last and
+    /// must be skipped rather than stealing the subscription back to A — this is the exact ordering
+    /// `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment and the round-2 review both traced
+    /// as silently killing external-change monitoring for B under the old single-token guard.
+    @Test func bsNavigationCompletingBeforeAsStaleRereadLeavesTheSubscriptionOnB() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // Open A ("foo.ts"): ends up subscribed to A.
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts")
+
+        // Start opening B ("bar.ts") — its read is deliberately held, simulating a slow open.
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        // While B is still pending, A's still-live file-signature stream would trigger the web app to
+        // re-read the file it currently shows (still A at this point) — dispatched with
+        // `pathChanged == false` since `subscribedFilePath` is still "foo.ts".
+        content.dispatch(fileReadRequest(id: "req-3", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(3)
+
+        // B's (the navigation's) underlying read resolves FIRST.
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+        #expect(await gateway.subscribedFilePath(at: 1) == "bar.ts", "B's navigation must resubscribe the stream to bar.ts")
+
+        // A's stale reread resolves last — it must be skipped (`subscribedFilePath` is now "bar.ts",
+        // not the "foo.ts" it read), not steal the subscription back to A.
+        await gateway.completeFileReadCall(
+            at: 2, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a2", size: 0, isBinaryGuess: false))
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 2, "A's stale reread must not install a third subscription")
+        #expect(await gateway.subscribedFilePath(at: 1) == "bar.ts", "the subscription must still target B after A's stale reread completes")
+    }
+
+    /// Interleaving (b): A's reread resolves FIRST this time, while `subscribedFilePath` is still
+    /// "foo.ts" (B hasn't navigated yet) — its guard passes, but the `resubscribeFileSignature` call it
+    /// triggers is a no-op (already subscribed to "foo.ts"), so it must not disturb anything. B's
+    /// navigation then resolves and resubscribes normally, exactly as if the reread had never happened.
+    @Test func aStaleSamePathRereadCompletingBeforeTheNavigationIsANoOpRefresh() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        content.dispatch(fileReadRequest(id: "req-3", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(3)
+
+        // A's reread resolves FIRST, while it's still the current/subscribed path.
+        await gateway.completeFileReadCall(
+            at: 2, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a2", size: 0, isBinaryGuess: false))
+        await settle()
+        #expect(
+            await gateway.fileSubscribeCallCount() == 1,
+            "A's same-path reread, still current when it completed, must behave as a no-op baseline refresh, not a fresh subscribe")
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts", "the existing subscription to A must be untouched")
+
+        // B's navigation resolves after — it still resubscribes normally, unaffected by A's earlier
+        // no-op refresh.
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+        #expect(await gateway.subscribedFilePath(at: 1) == "bar.ts", "B's navigation must still resubscribe to bar.ts after A's no-op refresh")
+    }
+
     @Test func disconnectOnTheFileSignatureStreamSchedulesABackoffRetryThatResubscribesTheSamePath() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())

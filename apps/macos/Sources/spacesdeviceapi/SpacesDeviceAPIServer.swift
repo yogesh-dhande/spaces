@@ -3276,13 +3276,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// only ever runs against a path already confirmed regular. The read is still bounded to `cap + 1` bytes
     /// rather than trusting the stat's size: the stat and this read are not atomic, so a file replaced or
     /// grown in between would otherwise let an unbounded read-to-EOF materialize an arbitrarily large
-    /// payload despite the size guard having passed. Returns `nil` exactly where `contents(atPath:)` would
-    /// have (path does not exist, or exists but could not be opened/read), so callers keep their existing
+    /// payload despite the size guard having passed. Returns `nil` only when the path could not be opened, or
+    /// the read itself threw (e.g. permissions) — never for an existing empty file: `FileHandle.read(upToCount:)`
+    /// returning `nil` at EOF is a *successful* read of zero bytes, which this maps to empty `Data`, matching
+    /// what `FileManager.contents(atPath:)` returns for an empty file. Callers keep their existing
     /// not-found/unreadable distinctions unchanged.
     private static func boundedReadWorkspaceFile(atPath path: String, cap: Int) -> Data? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
-        return try? handle.read(upToCount: cap + 1)
+        do {
+            return try handle.read(upToCount: cap + 1) ?? Data()
+        } catch {
+            return nil
+        }
     }
 
     /// Resolves `workspaceID` to its checkout directory, or throws the same `NSError(domain:

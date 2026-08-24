@@ -2179,3 +2179,254 @@ describe("CommentsController — Fix 3 (round-3 codex): loadInitial retries a tr
     expect(listSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("CommentsController — Fix 2 (round-2 P1): sendBatch drains persists registered during its own await", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("includes a card's NEW body/revision when its persist registers (and resolves) during the drain, not just the persist in flight at click time", async () => {
+    const { bridge, controller } = setup();
+    const x = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "x original",
+    });
+    const y = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "y original",
+    });
+    await controller.loadInitial();
+
+    // Card X: an edit+blur whose persist is held open — this is the persist in flight the instant
+    // "Send batch" is clicked.
+    const cardX = controller.hooks.renderCard({ comment: x, position: { lineNumber: 1, outdated: false } });
+    const textareaX = cardX.querySelector("textarea")!;
+    textareaX.value = "x edited";
+    textareaX.dispatchEvent(new Event("input"));
+    bridge.holdNextUpsert = true;
+    textareaX.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
+
+    const sendBatchPromise = controller.sendBatch(); // races X's still-unresolved persist
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    expect(bridge.sendCalls).toHaveLength(0); // still draining X
+
+    // While sendBatch is still awaiting X (the one-shot `holdNextUpsert` was already spent on X, so
+    // this persist is NOT held), card Y is edited and blurred — its persist REGISTERS during
+    // sendBatch's await, which the old one-shot snapshot would have missed entirely.
+    const cardY = controller.hooks.renderCard({ comment: y, position: { lineNumber: 1, outdated: false } });
+    const textareaY = cardY.querySelector("textarea")!;
+    textareaY.value = "y edited";
+    textareaY.dispatchEvent(new Event("input"));
+    textareaY.dispatchEvent(new Event("blur")); // fires persistBody(y), resolves on its own
+
+    // Let Y's persist land (and update this.drafts) before X is released, proving the drain loop —
+    // not the original one-shot snapshot — is what picks it up.
+    await vi.waitFor(() => expect(bridge.drafts.get(y.id)?.body).toBe("y edited"));
+    const yNewRevision = bridge.drafts.get(y.id)!.revision;
+    expect(yNewRevision).toBe(y.revision + 1);
+
+    bridge.releaseHeldUpsert?.(); // let X's persist land too
+    await sendBatchPromise;
+
+    expect(bridge.sendCalls).toHaveLength(1);
+    const sent = bridge.sendCalls[0]!;
+    const yEntry = sent.comments.find((c) => c.id === y.id)!;
+    expect(yEntry.revision).toBe(yNewRevision); // Y's NEW revision, not its stale pre-edit one
+    expect(sent.text).toContain("y edited");
+    expect(sent.text).not.toContain("y original");
+    expect(sent.text).toContain("x edited"); // X's own edit went through too
+    expect(bridge.drafts.size).toBe(0);
+  });
+
+  it("a persist that registers mid-drain and fails aborts the batch, sending nothing", async () => {
+    const { bridge, controller } = setup();
+    const x = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "x original",
+    });
+    const y = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "y original",
+    });
+    await controller.loadInitial();
+    const container = document.createElement("div");
+    controller.mount(container);
+
+    const cardX = controller.hooks.renderCard({ comment: x, position: { lineNumber: 1, outdated: false } });
+    const textareaX = cardX.querySelector("textarea")!;
+    textareaX.value = "x edited";
+    textareaX.dispatchEvent(new Event("input"));
+    bridge.holdNextUpsert = true;
+    textareaX.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
+
+    const sendBatchPromise = controller.sendBatch(); // drain-loop iteration 1 awaits X alone
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    // Card Y's persist is parked on a manually-controlled promise (rather than the one-shot
+    // `holdNextUpsert`, already spent on X) so it can be released deterministically AFTER X's
+    // iteration has resolved and the drain loop has re-snapshotted the maps — proving iteration 2,
+    // not just iteration 1's original snapshot, is what catches this failure.
+    let rejectY: ((err: unknown) => void) | undefined;
+    const originalUpsert = bridge.reviewCommentUpsert;
+    bridge.reviewCommentUpsert = (input) => {
+      if (input.id === y.id) {
+        return new Promise<SpacesReviewComment>((_resolve, reject) => {
+          rejectY = reject;
+        });
+      }
+      return originalUpsert(input);
+    };
+
+    const cardY = controller.hooks.renderCard({ comment: y, position: { lineNumber: 1, outdated: false } });
+    const textareaY = cardY.querySelector("textarea")!;
+    textareaY.value = "y edited but will fail";
+    textareaY.dispatchEvent(new Event("input"));
+    textareaY.dispatchEvent(new Event("blur")); // fires persistBody(y), registers mid-drain, parked on rejectY
+
+    // Release X: iteration 1 resolves (X succeeded), the loop re-snapshots and finds Y still
+    // pending, so it starts iteration 2 awaiting Y.
+    //
+    // `rejectY` is already defined at this point (it was captured synchronously back when Y's blur
+    // fired, above) — waiting on it here would resolve on the very first check and prove nothing.
+    // What actually needs waiting for is the drain loop reaching iteration 2 and parking on Y: X's
+    // release only *starts* a chain of several microtask ticks (the held upsert's own promise
+    // resolving, `doPersistBody(x)` resuming and returning, `persistBody(x)`'s `finally` running,
+    // the loop's `Promise.all`s settling) before `sendBatch` re-snapshots `pendingPersistById` and
+    // captures Y's still-pending promise into its next `Promise.all`. A `setTimeout` macrotask
+    // boundary only runs after every microtask already queued has drained, so it is what actually
+    // guarantees that chain has finished — and the loop is durably awaiting Y — before Y is
+    // rejected below. Rejecting any earlier (e.g. right after a same-tick `vi.waitFor` check that
+    // was already satisfied) races the loop's own re-snapshot: Y can be rejected and removed from
+    // `pendingPersistById` by its own `finally` block before the loop ever re-reads the map, which
+    // makes iteration 2 see an empty map and exit the loop as if nothing were left to drain —
+    // exactly the bug this test exists to catch, so the synchronization here has to be airtight.
+    bridge.releaseHeldUpsert?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    rejectY!(new Error("save failed")); // Y's persist fails, caught by doPersistBody, resolves to false
+    await sendBatchPromise;
+
+    expect(bridge.sendCalls).toHaveLength(0); // aborted — nothing sent
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).toBe("flex");
+    expect(bridge.drafts.get(y.id)?.body).toBe("y original"); // the failed persist never touched the server copy
+  });
+});
+
+describe("CommentsController — Fix 3 (round-2 P1): captures the target agent when the action starts", () => {
+  const AGENT_2: CodePaneAgentSummary = { id: "a2", label: "codex · fix", sessionId: "s2" };
+
+  function setup(agents: readonly CodePaneAgentSummary[]) {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, agents, { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("sendOne sends to the agent shown at click time, not a dropdown pick made during the pending-persist await", async () => {
+    const { bridge, controller, diffViewFake } = setup([AGENT, AGENT_2]);
+    controller.onAgentSelected(AGENT.id);
+
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "Please add a null check";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody, held open mid-flight
+
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click(); // sendOne captures AGENT before awaiting the still-pending blur persist
+
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    // A dropdown pick changes the selection while sendOne is still awaiting the pending persist.
+    controller.onAgentSelected(AGENT_2.id);
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+
+    expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId); // captured at click time, not AGENT_2
+  });
+
+  it("sendOne sends to the agent shown at click time even when an agents-update auto-selects a different one during the await", async () => {
+    const { bridge, controller, diffViewFake } = setup([AGENT]); // sole agent: auto-selected
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "Please add a null check";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur"));
+
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+    sendBtn.click();
+
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    // AGENT's session ends; AGENT_2 is the sole remaining agent, so `onAgentsChanged`'s auto-default
+    // rule (see `selectDefaultAgentId`) re-selects it while sendOne is still awaiting.
+    controller.onAgentsChanged([AGENT_2]);
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+
+    expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId); // captured at click time, not AGENT_2
+  });
+
+  it("sendBatch sends to the agent captured at click time, through the Fix-2 drain loop, not a selection change made during it", async () => {
+    const { bridge, controller } = setup([AGENT, AGENT_2]);
+    controller.onAgentSelected(AGENT.id);
+
+    const x = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "x original",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: x, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "x edited";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
+
+    const sendBatchPromise = controller.sendBatch(); // captures AGENT before draining X's pending persist
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    controller.onAgentSelected(AGENT_2.id); // selection changes mid-drain
+
+    bridge.releaseHeldUpsert?.();
+    await sendBatchPromise;
+
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId); // captured at click time, not AGENT_2
+  });
+});

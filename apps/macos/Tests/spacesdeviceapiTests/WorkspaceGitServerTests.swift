@@ -257,6 +257,55 @@
             }
         }
 
+        /// `FileHandle.read(upToCount:)` returns `nil` at EOF, which an existing zero-byte regular file hits
+        /// immediately — that must read back as a successful empty read (matching what
+        /// `FileManager.contents(atPath:)` returns for an empty file), not the "exists but could not be
+        /// read" unreadable-file branch the two tests above cover for a genuine open/read failure.
+        func testWorkspaceFileReadOfAZeroByteFileReturnsEmptyDataInsteadOfInternalError() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("EMPTY.md")
+                try Data().write(to: path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "EMPTY.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileRead)
+                let data = try XCTUnwrap(Data(base64Encoded: result.base64Data))
+                XCTAssertEqual(data, Data())
+                XCTAssertEqual(result.size, 0)
+                XCTAssertEqual(result.sha256, SpacesDeviceWorkspaceGitHashing.sha256Hex(Data()))
+            }
+        }
+
+        /// Companion to the read test: a CAS write over an existing zero-byte file, with `expectedSHA256`
+        /// set to the empty-data hash, must be recognized as a matching-content write rather than tripping
+        /// the unreadable-existing-file hard error `testWorkspaceFileWriteCreateOnAnExistingButUnreadableFileReturnsInternalErrorInsteadOfOverwritingIt`
+        /// covers for a genuine open/read failure.
+        func testWorkspaceFileWriteOverAnExistingZeroByteFileWithMatchingEmptyHashSucceeds() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("EMPTY.md")
+                try Data().write(to: path)
+                let emptySHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data())
+
+                let content = Data("no longer empty".utf8)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "EMPTY.md", base64Data: content.base64EncodedString(),
+                                expectedSHA256: emptySHA)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileWrite)
+                XCTAssertTrue(result.didWrite)
+                XCTAssertEqual(try Data(contentsOf: path), content)
+            }
+        }
+
         /// A FIFO opened for reading blocks until a writer appears, with no timeout — `contents(atPath:)`
         /// would wedge this workspace's serial queue forever. The regular-file type guard (checked from the
         /// same `attributesOfItem` stat used for the size pre-check) must refuse it before any open happens,

@@ -523,69 +523,101 @@ export class CommentsController {
    * every open card as a side effect of a toolbar click would be a surprising, hard-to-predict
    * side effect of its own.
    *
-   * Awaits every persist currently in flight (`pendingPersistById`) before reading anything from
-   * `this.drafts`, so the bodies/revisions read below are always post-persist. This closes both
-   * possible race orderings between this call and a just-blurred card's fire-and-forget
+   * Drains `pendingPersistById`/`pendingDeleteById` in a loop — not a one-shot snapshot-then-await
+   * — before reading anything from `this.drafts`, so the bodies/revisions read below are always
+   * post-persist for every entry that was in flight at ANY point during the drain, not just the
+   * ones in flight the instant "Send batch" was clicked. A one-shot snapshot taken before the first
+   * await would miss a persist that *registers during* that await (e.g. another card gets
+   * edited-and-blurred while this method is waiting): `this.drafts` would still hold that card's
+   * stale pre-edit body/revision when the membership below is computed, and if the send RPC then
+   * beat the delayed upsert to the daemon, the daemon would archive the stale body and reject the
+   * upsert as already-sent — silently discarding the user's edit. Looping — re-snapshotting both
+   * maps fresh after every `Promise.all` and only stopping once both come back empty — closes that
+   * window: any persist that registers mid-drain is caught by the next iteration. Once the loop
+   * exits, the membership computation below (`reanchorComments`, the sendable filter, `ids`/
+   * `comments`) runs synchronously with no intervening await — JS is single-threaded, so nothing can
+   * register between the last empty-maps check and the `reviewCommentsSend` call below. This closes
+   * both possible race orderings between this call and a just-blurred card's fire-and-forget
    * `persistBody`:
    *   - Upsert-wins-first: if this were reached without waiting, the daemon's own `revision` check
    *     would reject this send as a `conflict` (see `handleSendFailure`), which re-fetches and
    *     re-renders — self-correcting, not a duplicate or an orphan.
-   *   - Send-wins-first: without waiting, `reviewCommentsSend` could reach the daemon's
-   *     `reviewCommentQueue` *before* the racing upsert does, archiving whatever body the daemon
+   *   - Send-wins-first: without draining, `reviewCommentsSend` could reach the daemon's
+   *     `reviewCommentQueue` *before* a racing upsert does, archiving whatever body the daemon
    *     currently has (the stale, pre-edit one) and then rejecting the delayed upsert as
    *     already-sent/gone — silently discarding the user's edit, with no error surfaced, because
    *     the client raced itself rather than something the daemon's revision check can catch.
-   * Awaiting every in-flight persist first removes this second ordering entirely: by the time
-   * `sendableAnchored`/ids/`comments`/text are computed, every persist that was in flight at the
-   * moment "Send batch" was clicked has settled, so `this.drafts` reflects its bumped
-   * revision/body. This is not the same as `sendOne`/`deleteDraft`'s `resolveId` re-keying — a
-   * persist that isn't a provisional-to-server swap doesn't change an id's identity, only its
-   * body/revision — so nothing here needs `resolveId`.
+   * This is not the same as `sendOne`/`deleteDraft`'s `resolveId` re-keying — a persist that isn't a
+   * provisional-to-server swap doesn't change an id's identity, only its body/revision — so nothing
+   * here needs `resolveId`.
    *
-   * A *failed* awaited persist is a distinct case from the successful-racing-persist ordering
-   * above, and cannot be handled the same way: `doPersistBody`'s catch block surfaces the error but
-   * never updates `this.drafts`' body or revision, so after the await, `this.drafts` still holds
-   * the pre-edit body at the pre-edit revision — indistinguishable, from this method's point of
-   * view, from a card that was never edited at all. The daemon's revision CAS has nothing to catch
-   * here (the revision never bumped), so sending would silently archive/deliver the wrong (stale)
-   * text. `pendingPersistById`'s promises therefore resolve to a boolean, and this method checks
-   * every one of them and aborts before computing anything if any failed, leaving every draft
-   * untouched so the user can retry. A `deleteDraft` call awaiting a pending persist internally
-   * (see `pendingDeleteById`'s doc comment) is already covered correctly by the combined wait below
-   * — by the time a `pendingDeleteById` promise resolves, any persist it was itself waiting on has
-   * already resolved too, so there is no extra sequencing to add for that case.
+   * The residual window this cannot close: a blur that happens AFTER the drain loop has already
+   * exited and `reviewCommentsSend` has already been issued. That is the same still-focused-card
+   * acceptance noted above (a card mid-edit with no blur yet sends its last-saved body by design),
+   * and the daemon's revision CAS turns a same-card race of that shape into a `conflict`
+   * (self-correcting, see `handleSendFailure`) rather than a silent loss, because that upsert is now
+   * the one racing an already-issued send rather than the reverse. This is the unavoidable minimum
+   * without daemon-side coordination of persist-vs-send ordering.
+   *
+   * A *failed* persist (drained at any iteration) is a distinct case from the successful-racing-
+   * persist ordering above, and cannot be handled the same way: `doPersistBody`'s catch block
+   * surfaces the error but never updates `this.drafts`' body or revision, so after the drain,
+   * `this.drafts` still holds the pre-edit body at the pre-edit revision — indistinguishable, from
+   * this method's point of view, from a card that was never edited at all. The daemon's revision CAS
+   * has nothing to catch here (the revision never bumped), so sending would silently
+   * archive/deliver the wrong (stale) text. `pendingPersistById`'s promises therefore resolve to a
+   * boolean, and this method checks every one of them at every iteration and aborts before computing
+   * anything if any failed, leaving every draft untouched so the user can retry. A `deleteDraft` call
+   * awaiting a pending persist internally (see `pendingDeleteById`'s doc comment) is already covered
+   * correctly by the combined wait — by the time a `pendingDeleteById` promise resolves, any persist
+   * it was itself waiting on has already resolved too, so there is no extra sequencing to add for
+   * that case.
+   *
+   * Starvation is not a concern worth guarding against: each extra loop iteration requires another
+   * user blur (a real interaction happening in real time), so the loop is naturally bounded by how
+   * fast a person can type and click — no cap is added.
    */
   async sendBatch(): Promise<void> {
-    // Snapshot into arrays before awaiting either map: a persist or delete that starts (and
-    // registers its own promise) *after* this snapshot is taken belongs to a later interaction and
-    // must not be waited on here.
-    const [persistResults] = await Promise.all([
-      Promise.all([...this.pendingPersistById.values()]),
-      Promise.all([...this.pendingDeleteById.values()]),
-    ]);
-    if (persistResults.some((ok) => !ok)) {
-      // A blur-time persist that was in flight when "Send batch" was clicked failed — this.drafts
-      // still holds the pre-edit body/revision (doPersistBody's catch never updates either), so
-      // sending now would deliver stale text the daemon's revision CAS has no way to catch (the
-      // revision only bumps on a successful persist). Abort before anything is computed/sent,
-      // leaving every draft untouched so the user can re-blur (or edit again) and retry.
-      this.surfaceError(undefined, "A recent edit failed to save — nothing was sent. Try again.");
-      return;
-    }
-
+    // Fix 3 (round-2 P1): capture the agent shown on the "Send batch" button at click time, before
+    // any await — see the identical capture at the top of `sendOne` for the full rationale. A
+    // selection change (dropdown pick, or an agents-update auto-selecting a different agent) during
+    // the drain below must not reroute the batch to a different agent's terminal; if this agent's
+    // session has ended by send time, `reviewCommentsSend` below fails loudly through the existing
+    // failure path, which is preferable to silently delivering into whatever agent is selected now.
     const agent = this.agents.find((a) => a.id === this.selectedAgentId);
     if (!agent) return; // toolbar keeps this disabled in this state; defensive no-op if reached anyway
+
+    // Fix 2 (round-2 P1): drain until quiescent — see the class doc comment above for the full race
+    // this closes. Re-snapshot both maps fresh on every iteration so a persist/delete that registers
+    // during the just-awaited `Promise.all` is caught on the next pass instead of being missed.
+    for (;;) {
+      const persists = [...this.pendingPersistById.values()];
+      const deletes = [...this.pendingDeleteById.values()];
+      if (persists.length === 0 && deletes.length === 0) break;
+      const [persistResults] = await Promise.all([Promise.all(persists), Promise.all(deletes)]);
+      if (persistResults.some((ok) => !ok)) {
+        // A blur-time persist that was in flight during the drain failed — this.drafts still holds
+        // the pre-edit body/revision (doPersistBody's catch never updates either), so sending now
+        // would deliver stale text the daemon's revision CAS has no way to catch (the revision only
+        // bumps on a successful persist). Abort before anything is computed/sent, leaving every
+        // draft untouched so the user can re-blur (or edit again) and retry.
+        this.surfaceError(undefined, "A recent edit failed to save — nothing was sent. Try again.");
+        return;
+      }
+    }
+
     const anchored = reanchorComments(this.drafts, this.files);
     const sendableAnchored = anchored.filter((ac) => {
       // Sendability is judged on LIVE text (falling back to the persisted body when there is no live
       // entry), not just `comment.body`: a card cleared by the blur handler's auto-discard fires
-      // `deleteDraft` (now awaited above), but if that delete RPC itself fails (a transport-shaped
+      // `deleteDraft` (drained above), but if that delete RPC itself fails (a transport-shaped
       // rejection, not a typed one — see `reconcileMirrorAfterRejection`), the row survives in
       // `this.drafts` with its old non-empty body even though the user emptied it on screen.
       // Consulting live text here excludes it from the batch either way. The BODY actually sent
       // (below) stays the persisted one, unchanged from before this fix — by the time this filter
-      // runs, every surviving sendable card's in-flight persist has already resolved (see the await
-      // above), so persisted and live text agree for anything this filter lets through.
+      // runs, every surviving sendable card's in-flight persist has already resolved (the drain loop
+      // above only exits once both maps are empty), so persisted and live text agree for anything
+      // this filter lets through.
       const liveText = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
       return liveText.trim().length > 0;
     });
@@ -864,15 +896,27 @@ export class CommentsController {
    * this call was handed, and the `!isProvisional && draft.body === body` fast path just below can
    * never incorrectly fire. `sendOne` therefore always re-issues its own upsert with the live `body`
    * it was given, self-healing the failed save.
+   *
+   * Fix 3 (round-2 P1): the agent is captured at the very top, before the pending-persist await —
+   * not re-resolved from `this.selectedAgentId` after it, the way it used to be. The click targeted
+   * the agent shown on the card's Send button at click time; `selectedAgentId` can change during the
+   * await (a dropdown pick, or an agents-update auto-selecting a different agent — see
+   * `onAgentsChanged`), and resolving it after the await would silently reroute the comment into
+   * whatever agent happens to be selected by the time the persist settles, not the one the user
+   * actually clicked "Send to". If the captured agent's session has ended by send time, the
+   * `reviewCommentsSend` call below fails loudly through the existing failure path — preferable to
+   * silently delivering into a different agent's terminal.
    */
   private async sendOne(id: string, body: string): Promise<void> {
+    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
+    if (!agent) return;
+
     const pending = this.pendingPersistById.get(id);
     if (pending) await pending;
     const resolvedId = this.resolveId(id);
 
     const draft = this.drafts.find((d) => d.id === resolvedId);
-    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
-    if (!draft || !agent) return;
+    if (!draft) return;
     if (body.trim().length === 0) {
       // Mirrors the blur-time rule: an emptied-out (or still-provisional, never-typed-into) draft
       // is discarded, never sent.
