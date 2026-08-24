@@ -311,6 +311,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       diffView.setLayout(state.layout);
     } else if (action.type === "setScope") {
       diffLoaded = false;
+      // round-14 fix: a scope change is a new retry context — `diffRetryFailures`'s climb belongs to
+      // the PREVIOUS scope's failure streak. Left unreset, a new scope whose first pull also fails
+      // transiently would inherit that climbed count and its first retry could wait up to the 30s cap
+      // instead of the 1s floor. Mirrors the Swift host's own reset of its reconnect-failure counters
+      // on a scope/path change (CodePaneContentController.swift's diffSignatureReconnectFailures /
+      // fileSignatureReconnectFailures), and EditorView.open()'s own reset of externalChangeRetryFailures
+      // on a successful open.
+      diffRetryFailures = 0;
       // round-13 Fix 2: clear synchronously, before refreshDiff's await can yield control, so the
       // diff area never shows files from a scope other than the toolbar's current pick — a stale
       // diff labeled as the new scope is worse than a loading gap while the fetch is in flight.

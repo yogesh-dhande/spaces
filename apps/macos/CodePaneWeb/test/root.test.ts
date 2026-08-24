@@ -252,6 +252,47 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     await vi.advanceTimersByTimeAsync(1);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(4);
   });
+
+  it("a scope change resets the backoff floor even without an intervening success (round-14 fix)", async () => {
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    rejectDiff(0, new Error("f0")); // call 0: scope A's initial pull fails
+    await mounted;
+
+    // Climb scope A's retry counter through 3 consecutive transient failures: after this,
+    // diffRetryFailures is 4, and the next scheduled retry (not yet fired) is due at 8000ms.
+    const climbDelays = [1000, 2000, 4000];
+    let totalCalls = 1;
+    for (const delay of climbDelays) {
+      await vi.advanceTimersByTimeAsync(delay);
+      totalCalls += 1;
+      expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // this retry fired
+      rejectDiff(totalCalls - 1, new Error("climb"));
+      await vi.advanceTimersByTimeAsync(0); // let the rejection schedule the next retry
+    }
+    expect(totalCalls).toBe(4);
+
+    // Switch scopes now, WITHOUT letting scope A's pending 8000ms retry ever fire. The scope switch's
+    // own token bump makes that pending timer a no-op when it eventually would have fired (see the
+    // "a scope switch while a retry is pending supersedes it" test above); it fires a fresh pull for
+    // scope B instead.
+    clickButton(container, "vs main");
+    await vi.advanceTimersByTimeAsync(0);
+    totalCalls += 1;
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // scope B's immediate pull
+
+    // Scope B's own first pull also fails transiently.
+    rejectDiff(totalCalls - 1, new Error("b0"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // WITH THE FIX: the scope change reset diffRetryFailures to 0, so this retry is due at the 1s
+    // floor, not at 16s (the delay `1000 * 2 ** 4` would inherit from scope A's climbed counter).
+    await vi.advanceTimersByTimeAsync(999);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // not yet due
+    await vi.advanceTimersByTimeAsync(1);
+    totalCalls += 1;
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // retried at the floor
+  });
 });
 
 describe("mountRoot's refreshDiff — permanent vs. transient failure classification (round-7 Fix 2)", () => {
