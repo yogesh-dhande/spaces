@@ -164,6 +164,43 @@ export class CommentsController {
    *  cleared wholesale (see `loadInitial`). It exists solely so a second teardown landing inside
    *  that window (`collectStateForFlush`) still has something to recover the typed text from. */
   private readonly restoredPendingById = new Map<string, PendingReviewCommentEntry>();
+  /** Fix 4 (round-2) / round-2b: ids removed locally (a send or delete completing) while EITHER
+   *  `loadInitial`'s own `reviewCommentList` call OR `reconcileMirrorAfterRejection`'s own relist
+   *  call is in flight — see `listCallsInFlight`. Each method's response is a snapshot taken when its
+   *  RPC was dispatched, so a send/delete that completes locally before that response actually lands
+   *  is otherwise invisible to it: the response still carries the now-archived/deleted row, and
+   *  merging it in (both methods' response-wins rule — see each one's own doc comment) would
+   *  resurrect it as a ghost card right after the user watched it disappear. Recorded under the
+   *  removed draft's RESOLVED id (`resolveId`) — the same id a response row would be keyed by — at
+   *  the moment `sendOne`/`sendBatch`/`doDeleteDraft` complete successfully, guarded by
+   *  `this.listCallsInFlight > 0` (true whenever either method has a response still outstanding).
+   *  Both `loadInitial` and `reconcileMirrorAfterRejection` filter their own response against this
+   *  set before merging, on their success path only — a rejected `reviewCommentList` call consumed no
+   *  response, so it has nothing here to apply or clear (see `listCallsInFlight`'s doc comment for why
+   *  a failed call must leave the set untouched for whichever call actually applies it later).
+   *
+   *  A tombstone lives for as long as ANY list call that predates the removal is still un-applied: the
+   *  completing call's own filter step clears the set only once `listCallsInFlight` has returned to
+   *  zero after ITS OWN decrement, never while the other call is still outstanding — that other call's
+   *  response is an equally stale snapshot with respect to the same removed id, so clearing early
+   *  would let it resurrect the exact ghost this set exists to prevent. The resulting slight
+   *  over-retention across an overlapping call (a tombstone staying recorded a little longer than the
+   *  one call that actually needed it) is deliberate, not a leak — the set is still bounded by
+   *  whichever of the two calls finishes last. */
+  private readonly removedWhileListInFlight = new Set<string>();
+  /** Count of `reviewCommentList` calls currently in flight, across BOTH `loadInitial`'s own call
+   *  (including each retry attempt's — see `scheduleLoadInitialRetry`) and
+   *  `reconcileMirrorAfterRejection`'s own relist call. A plain boolean is not enough here: the two
+   *  calls can genuinely overlap — a `loadInitial` retry can still be parked on the daemon when a
+   *  rejected send/delete fires `reconcileMirrorAfterRejection`'s own relist — and a boolean would be
+   *  clobbered to `false` by whichever of the two completes first, prematurely closing the tombstone
+   *  window the other call's still-outstanding (and equally stale) response still needs. Incremented
+   *  right before each of the two methods' own `reviewCommentList` await, decremented on every outcome
+   *  path of each (their success and catch branches alike). Gates whether a successful removal needs
+   *  to record a `removedWhileListInFlight` tombstone at all (`this.listCallsInFlight > 0`): at zero
+   *  there is no in-flight response left to race, so the row is simply never in a later response — the
+   *  ordinary, unraced case that needs no bookkeeping. */
+  private listCallsInFlight = 0;
   /** Consecutive-failure counter and pending-timer handle for `loadInitial`'s retry-on-transient-
    *  failure mechanism — same shape as `EditorView`'s `externalChangeRetryFailures`/
    *  `externalChangeRetryTimer` (see that class for the fuller rationale). `root.ts` calls
@@ -284,10 +321,16 @@ export class CommentsController {
     // Cancels any pending retry: this call — whether the original one-time invocation or the retry
     // timer's own re-invocation — is itself a fresh attempt that supersedes it.
     clearTimeout(this.loadInitialRetryTimer);
+    this.listCallsInFlight += 1;
     let response: SpacesReviewComment[];
     try {
       response = await this.bridge.reviewCommentList();
     } catch (err) {
+      // Decrement only — never clear `removedWhileListInFlight` here: this attempt consumed no
+      // response, so any tombstone recorded during its window is still owed to whichever call next
+      // actually applies a response (this method's own retry, or an overlapping
+      // `reconcileMirrorAfterRejection` relist) — see `removedWhileListInFlight`'s doc comment.
+      this.listCallsInFlight -= 1;
       // Only the FIRST failure in a retry run shows the banner — re-showing it on every retry
       // attempt would be a distracting flicker for what is, from the user's point of view, a single
       // ongoing "still trying to load" condition.
@@ -296,9 +339,19 @@ export class CommentsController {
       return;
     }
     this.loadInitialRetryFailures = 0;
-    const responseIds = new Set(response.map((d) => d.id));
+    // Fix 4 (round-2) / round-2b: drop any response row a send/delete already removed locally while
+    // this call — or an overlapping `reconcileMirrorAfterRejection` relist — was in flight (see
+    // `removedWhileListInFlight`'s doc comment) before folding the response in. The tombstones this
+    // filter consumes are cleared only once `listCallsInFlight` has returned to zero after THIS
+    // call's own decrement below: an overlapping reconcile relist still outstanding needs the same
+    // tombstones for its own equally-stale response, so clearing them here while it is still in
+    // flight would reopen the exact race this filter exists to close.
+    const survivingResponse = response.filter((d) => !this.removedWhileListInFlight.has(d.id));
+    this.listCallsInFlight -= 1;
+    if (this.listCallsInFlight === 0) this.removedWhileListInFlight.clear();
+    const responseIds = new Set(survivingResponse.map((d) => d.id));
     const stillLocalOnly = this.drafts.filter((d) => !responseIds.has(this.resolveId(d.id)));
-    this.drafts = [...response, ...stillLocalOnly];
+    this.drafts = [...survivingResponse, ...stillLocalOnly];
     // The restore→list-merge race `restoredPendingById` exists to bridge (see its doc comment) is
     // over now that this response has landed: an id present in `response` is a real draft object
     // going forward, covered normally by `this.drafts`/`liveBodies`; an id absent from it was
@@ -552,6 +605,10 @@ export class CommentsController {
     for (const id of ids) {
       this.collapsedIds.delete(id);
       this.forgetDraftState(id);
+      // Fix 4 (round-2) / round-2b: see `doDeleteDraft`'s identical guard — a `loadInitial` or
+      // `reconcileMirrorAfterRejection` response already dispatched before this batch send completed
+      // still carries these rows.
+      if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(id);
     }
     this.refresh();
   }
@@ -597,19 +654,33 @@ export class CommentsController {
    *  resolved yet — see `pendingPersistById`'s doc comment), then delegates to `doPersistBody`,
    *  registering *that* call's own promise before awaiting it so a `sendOne`/`deleteDraft` racing
    *  this one waits for it in turn. Resolves to whether THIS call's own persist succeeded — the
-   *  `priorPersist` await above is for ordering only, so its own result is irrelevant here. */
+   *  `priorPersist` await above is for ordering only, so its own result is irrelevant here.
+   *
+   * The awaited `priorPersist` may have re-keyed a provisional id to its server-assigned id (see
+   * `doPersistBody`'s `idAliases` bookkeeping) while this call was parked waiting for it — `id` is
+   * re-resolved right after the await, mirroring `deleteDraft`'s own post-await re-resolve, so
+   * `doPersistBody` is called (and `pendingPersistById` registered) under the CURRENT key rather
+   * than the now-stale one. Without this, `doPersistBody` would look up a draft that no longer
+   * exists under the original `id` and silently no-op — dropping the second blur's edit. Registers
+   * under both `id` and the resolved id (like `deleteDraft`'s `preResolvedId` pair) so a
+   * `sendOne`/`deleteDraft` call still holding the original id can find this run too. */
   private async persistBody(id: string, body: string): Promise<boolean> {
     const priorPersist = this.pendingPersistById.get(id);
     if (priorPersist) await priorPersist; // e.g. two blur events for the same id in quick succession
+    const resolvedId = this.resolveId(id);
 
-    const thisPersist = this.doPersistBody(id, body);
+    const thisPersist = this.doPersistBody(resolvedId, body);
     this.pendingPersistById.set(id, thisPersist);
+    if (resolvedId !== id) this.pendingPersistById.set(resolvedId, thisPersist);
     try {
       return await thisPersist;
     } finally {
-      // Only clear if nothing newer has already overwritten this id's entry — a later persist for
-      // the same id may have started (and registered its own promise) while this one was in flight.
+      // Only clear if nothing newer has already overwritten this key's entry — a later persist (or
+      // delete) for the same id may have started while this one was in flight.
       if (this.pendingPersistById.get(id) === thisPersist) this.pendingPersistById.delete(id);
+      if (resolvedId !== id && this.pendingPersistById.get(resolvedId) === thisPersist) {
+        this.pendingPersistById.delete(resolvedId);
+      }
     }
   }
 
@@ -623,15 +694,23 @@ export class CommentsController {
    * — still the only place a persist failure is shown to the user) but deliberately does NOT update
    * `this.drafts`, so a caller cannot tell success from failure by inspecting the draft alone; the
    * boolean is what lets `sendBatch` distinguish the two (see its doc comment) and abort rather than
-   * send a body/revision that never actually changed. */
+   * send a body/revision that never actually changed.
+   *
+   * Re-resolves `id` at entry as a second line of defense — `persistBody` already re-resolves after
+   * its own await before calling in here, so this is normally a no-op, but it keeps this method
+   * correct on its own for any other caller. A draft still missing after that re-resolve is
+   * genuinely gone (sent or deleted while this persist was queued behind a prior one — see
+   * `doDeleteDraft`'s await of `pendingPersistById`), not merely looked up under a stale alias, so
+   * `true` (nothing to persist, not a failure) is the right answer. */
   private async doPersistBody(id: string, body: string): Promise<boolean> {
-    const draft = this.drafts.find((d) => d.id === id);
+    const resolvedId = this.resolveId(id);
+    const draft = this.drafts.find((d) => d.id === resolvedId);
     if (!draft) return true;
-    const isProvisional = this.provisionalIds.has(id);
+    const isProvisional = this.provisionalIds.has(resolvedId);
     let persisted: SpacesReviewComment;
     try {
       persisted = await this.bridge.reviewCommentUpsert({
-        id: isProvisional ? undefined : id,
+        id: isProvisional ? undefined : resolvedId,
         filePath: draft.filePath,
         side: draft.side,
         lineNumber: draft.lineNumber,
@@ -648,27 +727,27 @@ export class CommentsController {
     // kept typing during the await, that live text is newer than what was just saved, so it must
     // survive under whatever id the draft is keyed by after this (the server id, for a provisional
     // draft's first persist; the same id otherwise).
-    const live = this.liveBodies.get(id);
+    const live = this.liveBodies.get(resolvedId);
     if (live !== undefined) {
-      this.liveBodies.delete(id);
+      this.liveBodies.delete(resolvedId);
       if (live !== body) this.liveBodies.set(persisted.id, live);
     }
     if (isProvisional) {
-      this.provisionalIds.delete(id);
-      this.idAliases.set(id, persisted.id);
+      this.provisionalIds.delete(resolvedId);
+      this.idAliases.set(resolvedId, persisted.id);
       // A focus-restore capture in flight for this id (see `pendingFocus`'s doc comment) must
       // follow the id to its new key too, or a rebuild racing this persist would fail to find the
       // card it meant to refocus.
-      if (this.pendingFocus?.id === id) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
+      if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
       // Batch-tray membership (see `collapsedIds`'s doc comment) must follow the id the same way —
       // otherwise a card added to the batch while still provisional would silently fall out of
       // `collapsedIds` the moment its first persist re-keys it to the server id, reappearing inline.
-      if (this.collapsedIds.has(id)) {
-        this.collapsedIds.delete(id);
+      if (this.collapsedIds.has(resolvedId)) {
+        this.collapsedIds.delete(resolvedId);
         this.collapsedIds.add(persisted.id);
       }
     }
-    this.drafts = this.drafts.map((d) => (d.id === id ? persisted : d));
+    this.drafts = this.drafts.map((d) => (d.id === resolvedId ? persisted : d));
     this.refresh();
     return true;
   }
@@ -698,9 +777,25 @@ export class CommentsController {
    * which map key(s) to publish this run under; the real re-resolve used by the delete logic itself
    * happens again inside `doDeleteDraft`, after awaiting the pending persist, since that persist
    * could re-key `id` between now and then.
+   *
+   * round-16 Fix 3: coalesces concurrent deletes for the same draft instead of unconditionally
+   * starting a new run. Emptying a persisted comment's textarea and clicking Delete fires blur's
+   * silent auto-discard delete first, then the click's own (non-silent) delete, both for the same
+   * row — `pendingDeleteById` already tracks in-flight deletes for `sendBatch` to await, but
+   * `doDeleteDraft` itself never checked it, so both calls would independently issue
+   * `reviewCommentDelete` for the same id: the first wins, the second gets `notFound` and, being
+   * non-silent, surfaces a spurious "Failed to delete the comment." banner plus a pointless
+   * reconcile. Returning the already-registered run instead fixes that. Accepted asymmetry: the
+   * coalesced click inherits the earlier (blur) run's `silent` flag, so a blur-discard's failure
+   * stays bannerless even though the user also clicked Delete — `reconcileMirrorAfterRejection`
+   * still converges the mirror either way, and the failure case itself is rare-of-rare. Keyed on the
+   * same id only: a second, unrelated card's delete has its own id/preResolvedId pair and starts its
+   * own run as usual.
    */
   private async deleteDraft(id: string, silent: boolean): Promise<void> {
     const preResolvedId = this.resolveId(id);
+    const existing = this.pendingDeleteById.get(id) ?? this.pendingDeleteById.get(preResolvedId);
+    if (existing) return existing;
     const run = this.doDeleteDraft(id, silent);
     this.pendingDeleteById.set(id, run);
     if (preResolvedId !== id) this.pendingDeleteById.set(preResolvedId, run);
@@ -743,6 +838,10 @@ export class CommentsController {
     this.drafts = this.drafts.filter((d) => d.id !== resolvedId);
     this.collapsedIds.delete(resolvedId);
     this.forgetDraftState(id, resolvedId);
+    // Fix 4 (round-2) / round-2b: a `loadInitial` or `reconcileMirrorAfterRejection` response already
+    // dispatched before this delete completed still carries this row — tombstone it so that response
+    // doesn't resurrect it as a ghost card.
+    if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(resolvedId);
     this.refresh();
   }
 
@@ -821,6 +920,10 @@ export class CommentsController {
     this.drafts = this.drafts.filter((d) => d.id !== persisted.id);
     this.collapsedIds.delete(persisted.id);
     this.forgetDraftState(id, resolvedId, persisted.id);
+    // Fix 4 (round-2) / round-2b: see `doDeleteDraft`'s identical guard — a `loadInitial` or
+    // `reconcileMirrorAfterRejection` response already dispatched before this send completed still
+    // carries this row.
+    if (this.listCallsInFlight > 0) this.removedWhileListInFlight.add(persisted.id);
     this.refresh();
   }
 
@@ -1104,6 +1207,12 @@ export class CommentsController {
    * Implemented inline rather than sharing a helper with `loadInitial`'s merge: two call sites with
    * different keep-predicates isn't worth a parameterized abstraction, and inlining keeps each
    * site's doc comment next to the rule it actually applies.
+   *
+   * round-2b: before applying the keep-rule above, the response itself is filtered against
+   * `removedWhileListInFlight` the same way `loadInitial`'s response is — see that set's doc comment
+   * and `listCallsInFlight`'s for why this relist needs its own tombstone guard: this method's own
+   * `reviewCommentList` call is just as much a stale snapshot, racing a concurrent unrelated
+   * send/delete, as `loadInitial`'s is.
    */
   private async reconcileMirrorAfterRejection(err: unknown): Promise<void> {
     if (
@@ -1112,22 +1221,39 @@ export class CommentsController {
     ) {
       return;
     }
+    this.listCallsInFlight += 1;
+    let response: SpacesReviewComment[];
     try {
-      const response = await this.bridge.reviewCommentList();
-      const responseIds = new Set(response.map((d) => d.id));
-      const stillRelevantLocalOnly = this.drafts.filter((d) => {
-        const resolvedId = this.resolveId(d.id);
-        if (responseIds.has(resolvedId)) return false; // response rows win, same as loadInitial
-        return (
-          this.provisionalIds.has(resolvedId) ||
-          this.pendingPersistById.has(resolvedId) ||
-          this.pendingPersistById.has(d.id)
-        );
-      });
-      this.drafts = [...response, ...stillRelevantLocalOnly];
+      response = await this.bridge.reviewCommentList();
     } catch {
-      // Swallowed — see doc comment above.
+      // Decrement only — never clear `removedWhileListInFlight` here: this relist consumed no
+      // response, so any tombstone recorded during its window is still owed to whichever call next
+      // actually applies a response (an overlapping `loadInitial`, or a later reconcile) — see
+      // `removedWhileListInFlight`'s doc comment. The failure itself is swallowed — see doc comment
+      // above.
+      this.listCallsInFlight -= 1;
+      return;
     }
+    // round-2b: drop any response row a send/delete already removed locally while this relist — or
+    // an overlapping `loadInitial` — was in flight (see `removedWhileListInFlight`'s doc comment)
+    // before applying this method's own keep-rule below (kept exactly as it was — only the
+    // response-side filter is new here). Tombstones are cleared only once `listCallsInFlight` has
+    // returned to zero after THIS call's own decrement: an overlapping `loadInitial` still in flight
+    // needs the same tombstones for its own equally-stale response.
+    const survivingResponse = response.filter((d) => !this.removedWhileListInFlight.has(d.id));
+    this.listCallsInFlight -= 1;
+    if (this.listCallsInFlight === 0) this.removedWhileListInFlight.clear();
+    const responseIds = new Set(survivingResponse.map((d) => d.id));
+    const stillRelevantLocalOnly = this.drafts.filter((d) => {
+      const resolvedId = this.resolveId(d.id);
+      if (responseIds.has(resolvedId)) return false; // response rows win, same as loadInitial
+      return (
+        this.provisionalIds.has(resolvedId) ||
+        this.pendingPersistById.has(resolvedId) ||
+        this.pendingPersistById.has(d.id)
+      );
+    });
+    this.drafts = [...survivingResponse, ...stillRelevantLocalOnly];
   }
 
   /** Common failure path for both `sendOne` and `sendBatch`: surfaces the error, then reconciles

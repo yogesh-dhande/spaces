@@ -269,7 +269,17 @@ enum CodePaneMode: Equatable {
     }
 
     var contentView: NSView { rootView }
-    var displayTitle: String { "Code" }
+    /// "Code — <workspace name>" for every code pane, not only ones in a global panel window's
+    /// retargeting monitor: a workspace panel's code pane already reads unambiguously from its tab
+    /// bar's own workspace context, but a uniform title is simpler than a scope-conditional one and
+    /// still correct there, and it is what a monitor's retarget needs to actually change when it
+    /// swaps workspaces (see `PanelCoordinator.retargetGlobalWindowCodePanes`). Falls back to the raw
+    /// workspace id, mirroring `sendInitPayload`'s `workspaceName` resolution, for the brief window
+    /// before the workspace's overview data has loaded.
+    var displayTitle: String {
+        let workspaceName = hosting?.codePaneWorkspaceInfo(workspaceID: workspaceID)?.name ?? workspaceID
+        return "Code — \(workspaceName)"
+    }
 
     func activate(focus: Bool) {
         if webView == nil { installWebView() }
@@ -284,6 +294,13 @@ enum CodePaneMode: Equatable {
     /// The pane itself is going away for good, not just hibernating: on top of `deactivate()`'s web
     /// view teardown, discard the in-memory editor snapshot and live-mode tracking too, since there
     /// is no pane left for a future `spaces:init` to ever rehydrate them into.
+    ///
+    /// Both callers of `close()` (an ordinary pane close and
+    /// `PanelCoordinator.retargetGlobalWindowCodePanes`'s close-and-reinstall) discard this instance
+    /// afterward rather than ever reactivating it, so the generation bumps below only need to hold for
+    /// as long as this instance keeps existing — they do not need to protect a hypothetical later
+    /// `activate()` on the same, already-closed instance (a scenario that does not occur in the
+    /// product: a controller that has been closed is never handed a new lease on life, it is replaced).
     func close() {
         teardownWebView()
         editorState = nil
@@ -814,13 +831,14 @@ enum CodePaneMode: Equatable {
                 case .failure(let error):
                     self.reply(id: id, generation: generation, error: error)
                     self.restoreFileSignatureMonitoringAfterFailedOpen(
-                        pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
+                        path: path, error: error, pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
                 }
             } catch {
                 guard let self else { return }
-                self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                let bridgeError = CodePaneBridge.mapClientError(error)
+                self.reply(id: id, generation: generation, error: bridgeError)
                 self.restoreFileSignatureMonitoringAfterFailedOpen(
-                    pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
+                    path: path, error: bridgeError, pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
             }
         }
     }
@@ -845,17 +863,52 @@ enum CodePaneMode: Equatable {
     /// equivalent fetch-retry loop — nothing else will ever re-arm external-change monitoring for a file
     /// still open in the pane — so a failed open must proactively restore it here instead of relying on
     /// the web side. See that comment for the reverse cross-reference.
-    private func restoreFileSignatureMonitoringAfterFailedOpen(pathChanged: Bool, dispatchGeneration: Int, device: SpacesPairedDeviceRecord) {
-        // Not this dispatch's path change (nothing was torn down for it to restore), or a newer
+    ///
+    /// `pathChanged` (captured at dispatch time, before this read even started) is what already keeps
+    /// this from ever touching a live, still-subscribed stream: a re-read of the file the pane is ALREADY
+    /// showing — e.g. `EditorView.handleExternalChange`'s own re-read after a live `spaces:fileSignature`
+    /// push, including the file being deleted while the pane is visible — dispatches with
+    /// `subscribedFilePath == path`, so `pathChanged` is false and this whole function is a no-op. Only a
+    /// read for a DIFFERENT path than whatever was last subscribed reaches the guard below.
+    private func restoreFileSignatureMonitoringAfterFailedOpen(
+        path: String, error: CodePaneBridge.BridgeError, pathChanged: Bool, dispatchGeneration: Int, device: SpacesPairedDeviceRecord
+    ) {
+        // Not this dispatch's path change (nothing was torn down for it to restore, and no live stream
+        // for THIS path needs installing either — see this method's doc comment), or a newer
         // path-changing dispatch has since bumped the generation again and its own success/failure arm
         // now owns this state — either way, this stale completion must not interfere.
         guard pathChanged, fileSignatureSubscriptionGeneration == dispatchGeneration else { return }
         // `lastActedFilePath` is still the previous file's path in both stranding sub-cases: the
         // live-stream case (nothing on this failed path ever clears it), and the disconnected-with-
         // pending-retry case (cleared only by a different-path resubscribe, which never ran since this
-        // dispatch's read failed). `nil` means no file was ever successfully read yet this pane's life —
-        // there is nothing to restore.
-        guard let restorePath = lastActedFilePath else { return }
+        // dispatch's read failed). `nil` means no file was ever successfully read yet this pane's life.
+        guard let restorePath = lastActedFilePath else {
+            // Nothing to restore — but a nil `lastActedFilePath` also covers a post-hibernation
+            // rehydration reconcile read: teardown clears it unconditionally (see `teardownWebView`), so
+            // the pane's very first read after rehydrating always lands here regardless of whether a
+            // file was open before hibernation. If that read's answer is the daemon's authoritative
+            // notFound for a file deleted during hibernation, install a stream for it anyway rather than
+            // leaving the pane with no live monitoring at all: the web side's resulting deleted-file
+            // placeholder/conflict has no other way to learn the file reappears — its recovery contract
+            // is "the same live-reload branch catches it," which needs a signature event to ever fire.
+            // The daemon's signature poll handles a missing path by design (that's how a
+            // deleted-then-recreated file is caught at all), so subscribing to a currently-missing path
+            // is the intended shape here, not a workaround.
+            //
+            // notFound only, deliberately: any other failure (offline device, daemon hiccup, a transport
+            // error) is not an authoritative answer about the path — the web side already schedules its
+            // own bounded-backoff re-read for those (see `EditorView.handleExternalChange`'s catch
+            // branch), and that retry's own eventual success installs the stream through the normal path.
+            //
+            // Accepted micro-cost: a fresh pane's first-ever open of a typo'd path also lands here (no
+            // `lastActedFilePath`, notFound) and installs a stream for a path that will never exist. The
+            // web side filters signature events by `currentPath`, so nothing misfires, and the next
+            // successful open replaces the subscription — one lstat poll every 2s until then isn't worth
+            // a special case to avoid.
+            guard error.code == .notFound else { return }
+            resubscribeFileSignature(path: path, device: device)
+            return
+        }
         // Stop and drop whatever is (or isn't) currently installed, then resubscribe fresh. Clearing
         // `subscribedFilePath` first is what lets `resubscribeFileSignature`'s own `!= path` guard pass.
         // Restoring over a still-healthy A stream (failure arrived before any disconnect ever happened)
@@ -1365,4 +1418,3 @@ private extension CodePaneMode {
         self = wireValue == "editor" ? .editor : .diff
     }
 }
-

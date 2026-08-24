@@ -7292,6 +7292,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict, presentation: presentation)
             return
         }
+        // Captured before any branch below presents `workspace.id`: every remaining branch (the
+        // loading placeholder, the setup detail, or the full panel — including its own
+        // same-workspace fast path further down) ends up presenting this workspace, so this one
+        // comparison, made once here, covers all of them instead of needing to be repeated per
+        // branch. `nil` means nothing has been presented yet this launch (`detailPane` starts
+        // `.none`), which must never retarget a monitor — it stays on its persisted workspace
+        // until a real selection change, not merely the first workspace this session shows.
+        let previousWorkspaceID = visibleDetailWorkspaceID
+        if let previousWorkspaceID, previousWorkspaceID != workspace.id {
+            // Every global panel window's code pane is a workspace-following review monitor: the
+            // sidebar selecting a different workspace retargets its diff to match, in `.diff`
+            // mode, discarding whatever it held in memory for the old workspace. A code pane in
+            // the workspace's own panel (below) is untouched by this — it belongs to that one
+            // workspace and never retargets.
+            panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: workspaceDeviceID, workspaceID: workspace.id)
+        }
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {

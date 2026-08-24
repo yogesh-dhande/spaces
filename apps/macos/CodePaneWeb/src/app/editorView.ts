@@ -469,6 +469,24 @@ export class EditorView {
       // nobody is looking at anymore. Mirrors root.ts's identical early bail at the top of
       // `refreshDiff`'s own catch block.
       if (generation !== this.openGeneration || fetchToken !== this.externalChangeFetchToken) return;
+      if (err instanceof SpacesBridgeError && err.code === "invalidArgument") {
+        // Fix 3 (round-2): `invalidArgument` is the daemon's durable, decoded answer for a file that
+        // can never be read as text — over the 10 MiB `workspaceFileRead` cap, or not valid UTF-8
+        // (see `CodePaneBridge.swift`'s `fileReadPayload`/`mapClientError`), not a transient failure
+        // like the generic branch below handles. Retrying it forever would silently poll a file that
+        // can never succeed. This run reached a decoded outcome, so the retry counter resets exactly
+        // like the `notFound`/success paths below, and the failure is surfaced — but WITHOUT
+        // scheduling a retry, and WITHOUT tearing down the open-file state or the signature
+        // subscription: recovery is left to the next signature-change event naturally re-entering
+        // this method (e.g. the file shrinking back under the cap, or being rewritten as valid
+        // UTF-8), not a retry loop of our own. A dirty buffer's own Save stays CAS-guarded (see
+        // `save()`), so nothing here risks silently overwriting unsaved local edits.
+        this.externalChangeRetryFailures = 0;
+        this.banner.className = "banner error";
+        this.banner.textContent = err.message;
+        this.banner.style.display = "flex";
+        return;
+      }
       if (!(err instanceof SpacesBridgeError) || err.code !== "notFound") {
         // Not an authoritative "the file is gone" answer (offline device, daemon hiccup, a
         // transport failure) — this read could not run to a decodable conclusion at all, unlike
@@ -774,23 +792,52 @@ export class EditorView {
    *   `state.conflict` restores straight into conflict state (skipping edit mode entirely): the
    *   snapshot doesn't distinguish "changed" from "deleted on disk" on disk (`diskMissing` is
    *   deliberately not part of `CodePaneEditorState` — see its doc comment), so this always shows
-   *   the more common "changed" wording until `handleExternalChange` (below) corrects it. Neither
-   *   dirty branch replaces the restored buffer from disk, but both fire `handleExternalChange`
-   *   once the restored state is in place: its own `workspaceFileRead` is the host's ONLY trigger
-   *   for re-arming the daemon's file-signature stream (`subscribeToFileSignature` here is just a
-   *   DOM listener; teardown clears the host's subscription state and nothing else re-establishes
-   *   it), and its existing 4-case decision reconciles whatever happened on disk during
-   *   hibernation — a no-op when disk still matches `baseSHA256`, silent-reload/diff3/conflict when
-   *   it changed, or the deleted branches when the file is gone — without ever clobbering the
-   *   restored buffer, by the same rules it already applies to a live external-change event.
-   * - not dirty: only the path is worth restoring — the buffer matched disk when it was pushed, so
-   *   a fresh read of the (possibly now-stale) clean copy wins, through the normal `open()` path
-   *   (same error handling, same immediate re-push, same file-signature resubscription).
+   *   the more common "changed" wording until `handleExternalChange` (below) corrects it.
+   * - not dirty: the buffer matched disk when it was pushed, so the snapshot's own content is
+   *   restored directly, the same shape the dirty branches use, rather than re-read through
+   *   `open()` (round-16 Fix 1). `open()`'s catch renders a bare error and returns on a read
+   *   failure, leaving no path in the box and no subscription installed — strictly worse than the
+   *   "File deleted on disk" placeholder a visible pane shows for the same deletion. Restoring the
+   *   snapshot first and reconciling through `handleExternalChange` gives the clean case every
+   *   outcome `open()` had (disk unchanged is a same-hash no-op, disk changed silently reloads) plus
+   *   the ones it didn't (disk deleted shows the placeholder instead of an error; a transport-shaped
+   *   read failure gets `handleExternalChange`'s own bounded-backoff retry instead of giving up) —
+   *   at no extra read cost, since `handleExternalChange` always does its own fresh read regardless
+   *   of caller.
+   *
+   * None of the three branches replaces the restored buffer from disk before firing
+   * `handleExternalChange`, but every one of them fires it once the restored state is in place:
+   * its own `workspaceFileRead` is the host's ONLY trigger for re-arming the daemon's
+   * file-signature stream (`subscribeToFileSignature` here is just a DOM listener; teardown clears
+   * the host's subscription state and nothing else re-establishes it), and its existing 4-case
+   * decision reconciles whatever happened on disk during hibernation — a no-op when disk still
+   * matches `baseSHA256`, silent-reload/diff3/conflict when it changed, or the deleted branches
+   * when the file is gone — without ever clobbering the restored buffer, by the same rules it
+   * already applies to a live external-change event.
    */
   async restoreState(state: CodePaneEditorState | undefined): Promise<void> {
     if (!state) return;
     if (!state.dirty) {
-      await this.open(state.path);
+      this.input.value = state.path;
+      this.currentPath = state.path;
+      this.baseSHA256 = state.baseSHA256;
+      this.baseContent = state.baseContent;
+      this.latestContent = state.content;
+      this.dirty = false;
+      this.conflict = false;
+      this.diskMissing = false;
+      this.pendingMergeUndo = undefined;
+      this.banner.style.display = "none";
+      this.saveBtn.disabled = true; // mirrors a freshly opened clean file: nothing unsaved exists
+      this.loadIntoCodeView(state.path, state.content);
+      this.subscribeToFileSignature(state.path);
+      // No push here: this is a same-value echo of the snapshot the host already holds, not a new
+      // state transition — pushing it back would be a no-op round trip (same reasoning as the
+      // non-conflict dirty branch below).
+      // Reconciles against whatever happened on disk during hibernation and re-arms the host's
+      // file-signature stream (see this method's doc comment) — fired after the restored state is
+      // already in place so the reconcile operates on the snapshot's own baseline.
+      void this.handleExternalChange();
       return;
     }
     this.input.value = state.path;
@@ -895,6 +942,14 @@ export class EditorView {
     // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner/
     // `saveBtn` — all of those now describe the newly opened file, not this one.
     const generation = this.openGeneration;
+    // Fix 2 (round-2): `generation` alone only guards against a NEWER open() — it says nothing about
+    // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
+    // flight (e.g. a live `spaces:fileSignature` push for this pane's own write landing on disk,
+    // racing this call's own success/failure response). That reconcile can set `pendingMergeUndo`,
+    // the merge indicator, or full conflict state — this save's late-arriving arms below must not
+    // clobber whatever it decided. Captured here, alongside `generation`, and re-checked after the
+    // write settles (see both arms below).
+    const fetchToken = this.externalChangeFetchToken;
     try {
       // Captured before the await: this exact string is what's being submitted, and (per the
       // success arm below) what ends up on disk. `this.latestContent` can move on underneath this
@@ -907,6 +962,12 @@ export class EditorView {
         });
       } catch (err) {
         if (generation !== this.openGeneration) return; // a later open() already won; this failure is moot
+        // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
+        // write was in flight and already decided this file's UI state (merge indicator, conflict
+        // compare, or a silent clean reload) — this failure is for a write that's now superseded by
+        // that decision, so it must not overwrite the banner or re-enable/disable Save out from under
+        // it. See `fetchToken`'s doc comment above.
+        if (fetchToken !== this.externalChangeFetchToken) return;
         // A rejected write (offline device, timeout, daemon error — e.g. a `SpacesBridgeError` with
         // code `unavailable`) never got a decodable answer from the daemon at all, unlike the
         // `conflict` branch below which is a durable CAS rejection the daemon *did* decode and
@@ -933,15 +994,22 @@ export class EditorView {
         return;
       }
       if ("conflict" in result) {
-        // Route into the same external-change handling a live file-signature push uses: a CAS
-        // rejection is itself evidence disk moved since this save's baseline, and
-        // `handleExternalChange` always does its own fresh read rather than trusting this result's
-        // (possibly already-stale-again) `currentSHA256`/`fileMissing` — see its doc comment. This
-        // is the locked auto-merge/conflict-compare model replacing a permanent "save disabled
-        // until reopen" latch.
+        // Deliberately NOT guarded by `fetchToken` (Fix 2, round-2): this only re-invokes
+        // `handleExternalChange()`, which is idempotent against whatever an already-in-flight
+        // reconcile did — it always does its own fresh read and re-derives state from scratch, so
+        // calling it again here (superseded or not) is harmless. Route into the same external-change
+        // handling a live file-signature push uses: a CAS rejection is itself evidence disk moved
+        // since this save's baseline, and `handleExternalChange` always does its own fresh read
+        // rather than trusting this result's (possibly already-stale-again)
+        // `currentSHA256`/`fileMissing` — see its doc comment. This is the locked auto-merge/
+        // conflict-compare model replacing a permanent "save disabled until reopen" latch.
         await this.handleExternalChange();
         return;
       }
+      // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
+      // write was in flight and already decided this file's UI state — this plain-success path must
+      // not overwrite it with a now-stale baseline/dirty/banner. See `fetchToken`'s doc comment above.
+      if (fetchToken !== this.externalChangeFetchToken) return;
       // The pair (submitted, write hash) is self-consistent by construction — adopt the write's own
       // hash as the next CAS baseline directly rather than re-reading the file. A re-read here would
       // instead race whatever else might write the file (e.g. an agent) between this save and the

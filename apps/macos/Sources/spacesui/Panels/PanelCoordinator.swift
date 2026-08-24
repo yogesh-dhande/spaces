@@ -1225,6 +1225,57 @@ import spacesterminalcore
         return content
     }
 
+    /// Retargets every open code pane in a `.globalWindow` panel to `(deviceID, workspaceID)` — the
+    /// "workspace-following review monitor" behavior: a code pane placed in a panel window (as
+    /// opposed to a workspace's own panel, which never retargets — see `showWorkspaceDetail`'s call
+    /// site) tracks whichever workspace the main window's sidebar has selected, so switching
+    /// workspaces there switches every open monitor's diff along with it. Always lands in `.diff`
+    /// mode, the same entry point a freshly opened monitor gets.
+    ///
+    /// Retarget is close-and-reinstall on the same pane id, not a live descriptor edit:
+    /// `CodePaneContentController.descriptor`/`workspaceID` are `let`, so a new controller instance
+    /// is the only way to point a pane at a different workspace. Closing the old controller first
+    /// discards its in-memory editor buffer and pending-review-comment snapshot exactly as an
+    /// ordinary pane close does — safe, since comment drafts are persisted per workspace in the
+    /// daemon DB and an unsaved editor buffer gets no confirmation on an ordinary close either.
+    ///
+    /// The old controller is removed from `codePaneControllers` *before* installing the
+    /// replacement: `installCodePaneController` is idempotent and returns the existing controller
+    /// for an already-populated pane id, so installing first would hand back the very controller
+    /// this is trying to replace. The replacement is installed before `mutateLayout` runs, because
+    /// `mutateLayout` synchronously calls `render(scope:)`, which reads the new title off
+    /// `codePaneControllers[pane.id]` — it has to already be the new controller when that happens.
+    /// `mutateLayout`'s own activation scan only re-activates panes when the selected tab changes,
+    /// which a same-tab retarget never does, so `activateContentIfVisible` is called explicitly
+    /// after, mirroring `claimReplacedPane`'s terminal-pane retarget precedent.
+    ///
+    /// Deliberately unconditional on device reachability — `mayCreateCodePane`'s "install door" gate
+    /// is not applied here — because an unreachable device's monitor still has to retarget locally so
+    /// its title and content reflect the newly selected workspace; the pane's own bridge calls
+    /// already surface an unavailable state per RPC once the page loads, the same as any other code
+    /// pane opened against a device that cannot currently service daemon actions.
+    func retargetGlobalWindowCodePanes(toDeviceID deviceID: String, workspaceID: String) {
+        for (scope, state) in panels {
+            guard case .globalWindow = scope else { continue }
+            for tab in state.layout.tabs {
+                for pane in PanelLayoutEngine.panes(in: tab) {
+                    guard case .codePane(let paneDeviceID, let paneWorkspaceID) = pane.content else { continue }
+                    // Second dedupe layer, on top of the caller's own same-workspace guard: a monitor
+                    // already showing the target workspace (e.g. two panel windows both already
+                    // retargeted to it) is left untouched rather than closed and reinstalled for
+                    // nothing.
+                    guard paneDeviceID != deviceID || paneWorkspaceID != workspaceID else { continue }
+                    codePaneControllers.removeValue(forKey: pane.id)?.close()
+                    let content = installCodePaneController(paneID: pane.id, deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff)
+                    mutateLayout(scope: scope) { PanelLayoutEngine.retargetPane(paneID: pane.id, to: content.descriptor, in: $0) }
+                    if let retargetedPane = PanelLayoutEngine.pane(withID: pane.id, in: layout(for: scope)) {
+                        activateContentIfVisible(scope: scope, pane: retargetedPane)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Content lifecycle
 
     /// - Parameter focusIntent: The intent of the open that needs this content, carried into the

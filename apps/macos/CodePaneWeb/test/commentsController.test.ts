@@ -536,6 +536,128 @@ describe("CommentsController — Fix 1: card actions serialize against a blur's 
   });
 });
 
+describe("CommentsController — Fix 1 (round-2): persistBody re-resolves a stale id after a prior persist already re-keyed it", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("a second blur on the same still-open card re-resolves through the alias the first blur's persist just created, sending the newer body as an update instead of silently no-opping", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first body";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody(provisionalDraft.id, "first body"), held mid-flight
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    expect(bridge.upsertCallCount).toBe(1);
+
+    // A second blur for the same id in quick succession — persistBody's own doc-comment example —
+    // queues behind the still-unresolved first persist rather than issuing its own upsert yet.
+    textarea.value = "second body";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the second call reach its own await
+    expect(bridge.upsertCallCount).toBe(1); // still just the held create — the second call is queued, not yet run
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.upsertCallCount).toBe(2)); // the second call's own update lands
+
+    expect(bridge.drafts.size).toBe(1); // no orphaned duplicate row
+    const [persisted] = [...bridge.drafts.values()];
+    expect(persisted!.id).not.toBe(provisionalDraft.id); // re-keyed to the server id, as usual
+    // Before this fix, doPersistBody looked up the STALE provisional id (never re-resolved after the
+    // await), found nothing, and returned `true` without persisting — silently dropping this edit.
+    expect(persisted!.body).toBe("second body");
+  });
+
+  it("sendBatch carries the newer body once the re-resolved second persist has landed", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first body";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+
+    textarea.value = "second body";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    bridge.releaseHeldUpsert?.();
+    await vi.waitFor(() => expect(bridge.upsertCallCount).toBe(2));
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
+
+    await controller.sendBatch();
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.sendCalls[0]!.text).toContain("second body");
+    expect(bridge.sendCalls[0]!.text).not.toContain("first body");
+  });
+
+  it("a persist that arrives after its draft was deleted while queued behind the draft's own create resolves true, with no update RPC and no banner", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const container = document.createElement("div");
+    controller.mount(container);
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const provisionalDraft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: provisionalDraft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = "first body";
+    textarea.dispatchEvent(new Event("input"));
+
+    bridge.holdNextUpsert = true;
+    textarea.dispatchEvent(new Event("blur")); // fires persistBody, held mid-flight (the draft's own create)
+
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    deleteBtn.click(); // deleteDraft queues behind the still-unresolved create
+
+    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    bridge.releaseHeldUpsert?.();
+    // Waits on the controller's own re-render rather than `bridge.drafts.size` — the mock's bridge-
+    // level map is cleared synchronously inside `reviewCommentDelete`, one microtask *before*
+    // `doDeleteDraft` resumes from its own await and updates the controller's local `this.drafts`, so
+    // polling the bridge map alone can observe "deleted" before the controller's own mirror is caught
+    // up, letting the stale blur below race a delete still in its last leg.
+    await vi.waitFor(() => {
+      const rendered = diffViewFake.setComments.mock.calls.at(-1)![0] as unknown[];
+      expect(rendered.length).toBe(0);
+    });
+
+    const rendersBeforeStaleBlur = diffViewFake.setComments.mock.calls.length;
+    const upsertCallsBeforeStaleBlur = bridge.upsertCallCount;
+
+    // A straggler edit lands on the same (never-rebuilt, now-orphaned) card after the delete has
+    // already fully resolved — mirrors a stray keystroke, or a slow DOM teardown, racing a card
+    // another surface just deleted. This card's `lastSavedBody` closure is still "first body" (it
+    // was never re-rendered), so this reads as a genuine edit and fires persistBody again.
+    textarea.value = "second body";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 0)); // flush persistBody's synchronous fast path
+
+    expect(bridge.upsertCallCount).toBe(upsertCallsBeforeStaleBlur); // no update RPC was issued
+    expect(bridge.drafts.size).toBe(0); // still nothing server-side
+    expect(diffViewFake.setComments.mock.calls.length).toBe(rendersBeforeStaleBlur); // no re-render
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none"); // no banner
+  });
+});
+
 describe("CommentsController — Fix 2: live text and focus survive a wholesale annotation rebuild", () => {
   function setup() {
     const bridge = makeBridge();
@@ -874,6 +996,290 @@ describe("CommentsController — Fix 4: loadInitial merges instead of clobbering
 
     const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
     expect(rendered.filter((c) => c.body === "Landed mid-flight")).toHaveLength(1); // not double-listed
+  });
+});
+
+describe("CommentsController — Fix 4 (round-2): loadInitial drops a response row a concurrent send/delete already removed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // `makeBridge`'s `reviewCommentList` snapshots `drafts.values()` at *release* time, not at the
+  // moment the call was dispatched (see its doc comment) — so a delete/send that fully lands before
+  // release already leaves the row out on its own, which would make these tests pass whether or not
+  // the fix exists. Each test below restores the row into `bridge.drafts` right before releasing (or
+  // before letting a retry attempt call through), standing in for a response the daemon had already
+  // serialized *before* the removal committed — the actual race `removedWhileListInFlight` guards
+  // against, and the only case in which this bug can manifest.
+
+  it("drops a response row a delete already removed locally while reviewCommentList was in flight", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "server-side comment",
+    });
+    await controller.loadInitial(); // ordinary rehydration: seeds this.drafts with the persisted row
+
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+
+    bridge.holdNextList = true;
+    const loadPromise = controller.loadInitial(); // a second call in flight (e.g. a retry), response pending
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    deleteBtn.click();
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(0)); // the delete lands for real, server-side
+
+    bridge.drafts.set(draft.id, draft); // stand in for the daemon's already-serialized stale response
+    bridge.releaseHeldList?.();
+    await loadPromise;
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === draft.id)).toBe(false); // no ghost card
+  });
+
+  it("drops a response row a sendBatch already sent locally while reviewCommentList was in flight", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "server-side comment",
+    });
+    await controller.loadInitial();
+    const draft = firstAnchoredComment(diffViewFake);
+
+    bridge.holdNextList = true;
+    const loadPromise = controller.loadInitial();
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+
+    await controller.sendBatch();
+    expect(bridge.sendCalls).toHaveLength(1);
+    expect(bridge.drafts.size).toBe(0); // sendBatch's own bridge call removes it synchronously on success
+
+    bridge.drafts.set(draft.id, draft); // stand in for the daemon's already-serialized stale response
+    bridge.releaseHeldList?.();
+    await loadPromise;
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === draft.id)).toBe(false); // sent comment doesn't reappear
+  });
+
+  it("a plain load with no concurrent removal is unaffected", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "plain comment",
+    });
+    await controller.loadInitial();
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.body === "plain comment")).toBe(true);
+  });
+
+  it("a removal during a failed list attempt still drops the row on the successful retry, and the tombstone doesn't leak into a later, unrelated call", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "server-side comment",
+    });
+    await controller.loadInitial(); // ordinary rehydration, seeds this.drafts
+    const draft = firstAnchoredComment(diffViewFake);
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+
+    vi.useFakeTimers();
+    const listSpy = vi.spyOn(bridge, "reviewCommentList");
+
+    // The built-in `holdNextList`/`failNextList` flags can't express "pause, then reject" together —
+    // a manual deferred promise stands in for a transient failure that lands after a local removal
+    // already raced it, matching `loadInitialRetryFailures`'s retry mechanism this exercises.
+    let rejectFirst!: (err: unknown) => void;
+    listSpy.mockImplementationOnce(() => new Promise((_resolve, reject) => (rejectFirst = reject)));
+    const loadPromise1 = controller.loadInitial(); // parks on the manual promise; listCallsInFlight is 1
+    await vi.waitFor(() => expect(rejectFirst).toBeDefined());
+
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+    deleteBtn.click();
+    await vi.waitFor(() => expect(bridge.drafts.size).toBe(0)); // the delete lands for real
+
+    rejectFirst(new SpacesBridgeError("unavailable", "device offline"));
+    await loadPromise1; // catches, schedules a retry — the tombstone recorded above is NOT cleared here
+    expect(listSpy).toHaveBeenCalledTimes(1);
+
+    // Stand in for the daemon's already-serialized stale response, same as the earlier tests — this
+    // retry attempt is the one that must apply (then clear) the tombstone recorded during the failure.
+    bridge.drafts.set(draft.id, draft);
+    await vi.advanceTimersByTimeAsync(1000); // retry #1 fires at the backoff floor and succeeds
+    expect(listSpy).toHaveBeenCalledTimes(2);
+
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === draft.id)).toBe(false); // still no ghost card on the retry
+
+    // The tombstone must not leak past the attempt that consumed it: a later, unrelated load with the
+    // row legitimately present must show it normally.
+    bridge.drafts.set(draft.id, draft);
+    await controller.loadInitial();
+    const rendered2 = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered2.some((c) => c.id === draft.id)).toBe(true);
+  });
+});
+
+describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own relist shares the Fix 4 tombstone with loadInitial", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not resurrect an unrelated draft whose delete completed while the rejection relist was in flight", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    // A's delete is rejected with a typed error, triggering reconcileMirrorAfterRejection's own
+    // relist — held open via the same `holdNextList`/`releaseHeldList` machinery the Fix 4 tests use
+    // for `loadInitial`, since both methods call the same `reviewCommentList` RPC.
+    bridge.failNextDelete = new SpacesBridgeError("notFound", "already sent");
+    bridge.holdNextList = true;
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnA.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // reconcile's own relist is parked
+
+    // While that relist is in flight, an UNRELATED draft (B) is deleted successfully.
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnB.click();
+    await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false)); // B's delete lands for real, server-side
+
+    const rendersBeforeRelease = diffViewFake.setComments.mock.calls.length;
+
+    // Stand in for the daemon's already-serialized stale response to reconcile's relist, still
+    // carrying B — same technique the Fix 4 (round-2) tests above use for `loadInitial`'s response.
+    bridge.drafts.set(b.id, b);
+    bridge.releaseHeldList?.();
+
+    await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(rendersBeforeRelease));
+    const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === b.id)).toBe(false); // no ghost card for the unrelated removal
+  });
+
+  it("a loadInitial retry and a rejection relist overlapping: the first to resolve does not clear the tombstone the second still needs", async () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial(); // ordinary rehydration, seeds this.drafts with both rows
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+
+    // Park a SECOND `loadInitial` call (e.g. a retry) on a manually-controlled promise — the same
+    // technique the round-3 codex Fix 3 tests above use — since the built-in `holdNextList` flag is
+    // one-shot and reconcile's own relist below needs that mechanism for itself.
+    const listSpy = vi.spyOn(bridge, "reviewCommentList");
+    let resolveLoadList!: (response: SpacesReviewComment[]) => void;
+    listSpy.mockImplementationOnce(() => new Promise((resolve) => (resolveLoadList = resolve)));
+    const loadPromise = controller.loadInitial();
+
+    // A's delete is rejected, firing reconcileMirrorAfterRejection's own relist — held via the
+    // built-in mechanism now that the mock-once above has been consumed by loadInitial's call.
+    bridge.failNextDelete = new SpacesBridgeError("notFound", "already sent");
+    bridge.holdNextList = true;
+    const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnA.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // both list calls are now in flight
+
+    // While BOTH are in flight, an UNRELATED draft (B) is deleted successfully.
+    const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnB.click();
+    await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false));
+
+    // Stand in for the daemon's already-serialized stale response B rides back in on, for BOTH
+    // pending calls.
+    bridge.drafts.set(b.id, b);
+
+    // Resolve loadInitial's own call FIRST, while reconcile's relist is still parked — its own
+    // decrement must not bring the shared counter to zero yet (reconcile's own call is still
+    // outstanding), so it must not clear the tombstone reconcile's relist still needs.
+    resolveLoadList([...bridge.drafts.values()]);
+    await loadPromise;
+
+    let rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === b.id)).toBe(false); // loadInitial's own response didn't resurrect B
+
+    // Now release reconcile's relist — its response is the same stale snapshot, still carrying B.
+    // If the tombstone had been cleared early by loadInitial's completion above, this would
+    // resurrect B as a ghost card.
+    const rendersBeforeRelease = diffViewFake.setComments.mock.calls.length;
+    bridge.releaseHeldList?.();
+    await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(rendersBeforeRelease));
+
+    rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
+    expect(rendered.some((c) => c.id === b.id)).toBe(false); // still no ghost card from the second, overlapping response
   });
 });
 
@@ -1265,6 +1671,84 @@ describe("CommentsController — round-16 Fix 2: a typed rejection reconciles th
     expect(listSpy).not.toHaveBeenCalled();
     const rendered = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[]).map((ac) => ac.comment);
     expect(rendered.some((c) => c.id === a.id)).toBe(true); // untouched — no relist happened
+  });
+});
+
+describe("CommentsController — round-16 Fix 3: a blur auto-discard and a click Delete for the same row coalesce", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container };
+  }
+
+  it("a blur-triggered auto-discard held in flight is coalesced with a click-triggered delete for the same row, firing only one reviewCommentDelete RPC", async () => {
+    const { bridge, controller, container } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "existing comment",
+    });
+    await controller.loadInitial();
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+
+    textarea.value = "";
+    textarea.dispatchEvent(new Event("input"));
+    bridge.holdNextDelete = true;
+    textarea.dispatchEvent(new Event("blur")); // fires deleteDraft(id, true), held open mid-flight
+    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined());
+
+    deleteBtn.click(); // fires deleteDraft(id, false) for the same row — must coalesce, not issue a second RPC
+
+    bridge.releaseHeldDelete?.();
+    await vi.waitFor(() => expect(bridge.drafts.has(created.id)).toBe(false));
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1); // exactly one reviewCommentDelete RPC fired
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex"); // the coalesced (silent) run's outcome produced no spurious banner
+  });
+
+  it("sequential deletes for two different cards each fire their own RPC — coalescing keys on the same id only", async () => {
+    const { bridge, controller } = setup();
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnA.click();
+    await vi.waitFor(() => expect(bridge.drafts.has(a.id)).toBe(false));
+
+    const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
+    const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
+    deleteBtnB.click();
+    await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false));
+
+    expect(deleteSpy).toHaveBeenCalledTimes(2); // each row's delete is independent — no cross-row coalescing
   });
 });
 

@@ -79,6 +79,27 @@ extension ProcessProfileEnvironmentSuites {
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
+        /// Two live workspaces on one device, neither carrying a terminal session — the retarget tests
+        /// only need `showWorkspaceDetail` to resolve a workspace and reach its full-panel branch
+        /// (`deviceWorkspaceSummary` + `findWorkspace` both need an entry), not any terminal-pane
+        /// machinery. Distinct branches (`feature-1`/`feature-2`) so a retargeted pane's title can be told
+        /// apart from its predecessor's.
+        private func twoWorkspaceSection(deviceID: String) -> AppKitController.DeviceSection {
+            let workspace1 = SpacesDeviceWorkspaceSummary(
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature-1", baseBranch: "main",
+                dir: "/tmp/workspace-1", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+            let workspace2 = SpacesDeviceWorkspaceSummary(
+                id: "workspace-2", projectID: "project-1", projectName: "Project", branch: "feature-2", baseBranch: "main",
+                dir: "/tmp/workspace-2", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+            let overview = SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [workspace1, workspace2], sessions: [], retainedTerminalSessionIDs: [])
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
         /// A workspace panel restoring a terminal pane and a code pane side by side resolves each to its
         /// own controller instance: the terminal by session id in `contentControllers`, the code pane by
         /// pane id in `codePaneControllers`. Proves the dual-store design keeps the two content kinds from
@@ -465,6 +486,229 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 codeContent.contentView.subviews.contains { $0 is WKWebView },
                 "rejoining the window activates the code pane the detached scan correctly skipped")
+        }
+
+        // MARK: - Phase 6: workspace-following review monitors (`.globalWindow` code panes retarget)
+
+        /// The single funnel (`showWorkspaceDetail`) presenting a different workspace than it last
+        /// presented retargets every `.globalWindow` code pane to the new workspace: the pane's
+        /// descriptor, its persisted layout, its controller instance (a fresh one — retarget is
+        /// close-and-reinstall, not a live edit), and its title all move to the newly selected
+        /// workspace. The very first `showWorkspaceDetail` call of a session must not retarget — a
+        /// restored monitor stays on its saved workspace until a real subsequent change — so this
+        /// exercises that call first and confirms it is a no-op before exercising the real change.
+        @Test func showWorkspaceDetailRetargetsAGlobalPanelWindowsCodePaneToTheNewlySelectedWorkspace() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let originalContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "precondition: the monitor's controller exists")
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+
+            // First-ever presentation this session: `visibleDetailWorkspaceID` starts nil, so this must
+            // not retarget even though the monitor is already showing this same workspace.
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (originalContent as AnyObject?),
+                "presenting the workspace the monitor already shows, for the first time this session, does not retarget it")
+
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+
+            let retargetedContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "the monitor's pane id keeps a live controller after retargeting")
+            #expect(
+                (retargetedContent as AnyObject?) !== (originalContent as AnyObject?),
+                "retarget installs a fresh controller instance rather than mutating the old one in place")
+            #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected workspace")
+            #expect(retargetedContent.initialMode == .diff, "a retargeted monitor lands in diff mode")
+            #expect(
+                retargetedContent.displayTitle == "Code — feature-2",
+                "the title reflects the newly selected workspace's name")
+            let pane = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" })
+            #expect(
+                pane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
+                "the layout's pane descriptor moves to the new workspace")
+
+            let record = try #require(controller.clientDatabase().panelWindows().first { $0.id == "panel-1" }, "the retarget persists")
+            let persistedLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(record.layoutJSON.utf8))
+            let persistedPane = try #require(PanelLayoutEngine.allPanes(in: persistedLayout).first { $0.id == "monitor" })
+            #expect(
+                persistedPane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
+                "the persisted layout on disk reflects the retarget, not just the in-memory copy")
+        }
+
+        /// An overview tick re-presenting the workspace already shown (`showWorkspaceDetail` firing
+        /// repeatedly for an unchanged selection, as it does on every background refresh) must not churn
+        /// a monitor: no retarget, no new controller instance.
+        @Test func overviewTickRepresentingTheSameWorkspaceDoesNotChurnTheMonitor() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            let contentAfterFirstPresentation = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .backgroundRefresh)
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .backgroundRefresh)
+
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?)
+                    === (contentAfterFirstPresentation as AnyObject?),
+                "repeated presentation of the same workspace never retargets or replaces the monitor's controller")
+        }
+
+        /// A code pane in a workspace's own panel (`.workspace` scope) belongs to that one workspace and
+        /// never retargets, even while a `.globalWindow` monitor open at the same time does. Locks in the
+        /// Part 3 requirement that placement — not a flag — is what decides retargeting behavior.
+        @Test func retargetGlobalWindowCodePanesLeavesAWorkspaceScopedCodePaneUntouched() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let workspaceLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(workspaceLayout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: workspaceScope, focusIntent: .withoutFocus)
+            let globalLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
+            let ownedContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "owned"))
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
+                "the workspace-scoped pane is neither closed nor moved")
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "owned") as AnyObject?) === (ownedContentBefore as AnyObject?),
+                "the workspace-scoped pane's controller instance is untouched by a retarget targeting the same workspace id")
+            let monitorPane = try #require(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1"))).first {
+                    $0.id == "monitor"
+                })
+            #expect(
+                monitorPane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
+                "meanwhile the global-window monitor did retarget")
+        }
+
+        /// When a workspace's own panel already holds a code pane for it and a `.globalWindow` monitor is
+        /// also retargeted onto the same workspace, `openOrFocusCodePane` still prefers the workspace
+        /// panel's pane (`scopeSortKey` sorts `.workspace` before `.globalWindow`) — a monitor existing
+        /// alongside the workspace's own pane must not change which one "Review changes" focuses.
+        @Test func openOrFocusCodePanePrefersTheWorkspacesOwnPanelPaneOverAGlobalWindowMonitor() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let workspaceLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(workspaceLayout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: workspaceScope, focusIntent: .withoutFocus)
+            let globalLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
+
+            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
+
+            #expect(focused)
+            #expect(
+                controller.panelCoordinator.layout(for: workspaceScope).focusedPaneID == "owned",
+                "the workspace's own panel pane is focused, not the global-window monitor")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
+                "no duplicate pane is installed in the workspace's own panel")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1"))).map(\.id) == [
+                    "monitor"
+                ], "the global-window monitor is left exactly as it was")
+        }
+
+        /// Deleting (or otherwise retiring) a monitor's target workspace closes its pane through the
+        /// existing, unmodified `closeCodePanes` path — retargeting introduces no special-case fallback
+        /// that would try to move the monitor to some other workspace instead of closing it.
+        @Test func deletingAMonitorsWorkspaceClosesItsPaneViaTheExistingPrunePath() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil,
+                "precondition: the monitor retargeted to workspace-2 and is still open")
+
+            controller.panelCoordinator.closeCodePanes(workspaceID: "workspace-2")
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).isEmpty,
+                "the monitor's pane closes through the existing prune path rather than retargeting elsewhere")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") == nil, "its controller is torn down")
+        }
+
+        /// A restored monitor stays on its persisted workspace through the first `showWorkspaceDetail`
+        /// call of a session (even one presenting a *different* workspace than the monitor holds — restore
+        /// must not retarget, full stop) and only moves once a genuine subsequent selection change fires.
+        @Test func restoreLeavesAMonitorOnItsSavedWorkspaceUntilARealSelectionChange() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            // Restored monitor is already on workspace-1, matching what its persisted layout says.
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let restoredContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+
+            // The session's very first presented workspace is a *different* one (workspace-2) — e.g. the
+            // sidebar's default selection at launch. Restore's monitor must not react to this.
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (restoredContent as AnyObject?),
+                "the first-ever presentation this session does not retarget the restored monitor, even to a workspace other than its own")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"),
+                "the monitor is still on its persisted workspace")
+
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            // A genuine subsequent change (workspace-2 -> workspace-1, both real presentations now)
+            // retargets normally.
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
+                "a real subsequent selection change still retargets the monitor")
         }
     }
 }

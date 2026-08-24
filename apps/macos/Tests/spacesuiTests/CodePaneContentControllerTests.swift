@@ -1526,6 +1526,99 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(currentPath == "baz.ts", "the third (current) path must remain the one subscribed")
     }
 
+    // MARK: - notFound rehydration read still installs a file-signature stream (round-16 Fix 2)
+    //
+    // Hibernation teardown (`teardownWebView`) clears `lastActedFilePath`/`subscribedFilePath`
+    // unconditionally, so a rehydration reconcile read (the web side's `restoreState` firing
+    // `handleExternalChange`) always dispatches with nothing to restore. If that read's daemon answer
+    // is the authoritative notFound (the file was deleted during hibernation), a stream must still be
+    // installed for the requested path — otherwise the web side's deleted-file state has no live
+    // signal to ever recover from.
+
+    /// Simulates hibernation by deactivating (which tears down monitoring state) and reactivating, then
+    /// dispatches the rehydration reconcile read for the same path that failed notFound.
+    @Test func aNotFoundRehydrationReadAfterTeardownInstallsAFileSignatureSubscriptionForTheRequestedPath() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // Hibernate: teardown clears `lastActedFilePath`/`subscribedFilePath` unconditionally, so the
+        // pane's very first read after rehydrating always finds nothing to restore.
+        content.deactivate()
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // The web side's `restoreState` reconcile read for the file, which was deleted while hibernating.
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "foo.ts is gone", code: .notFound))
+
+        await gateway.waitForFileSubscribeCallCount(2)
+        let subscribedPath = await gateway.subscribedFilePath(at: 1)
+        #expect(subscribedPath == "foo.ts", "a notFound rehydration read must still install a file-signature subscription for the requested path")
+    }
+
+    /// A transport-shaped failure (not the daemon's authoritative notFound) is not a durable answer
+    /// about the path — the web side's own bounded-backoff retry owns recovering it, so the host must
+    /// not install a subscription here.
+    @Test func aTransportShapedRehydrationReadFailureDoesNotInstallAFileSignatureSubscription() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.deactivate()
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        struct InjectedTransportFailure: Error {}
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: InjectedTransportFailure())
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 1, "a transport-shaped rehydration read failure must not install a subscription")
+    }
+
+    /// A file already open and monitored in a visible (non-hibernating) pane whose disk copy is
+    /// deleted re-reads the SAME path (the web side's `handleExternalChange` reacting to a live
+    /// `spaces:fileSignature` push) — `pathChanged` is false for this dispatch, so the existing healthy
+    /// stream must not be torn down and reopened.
+    @Test func aLiveVisiblePaneDeletionNotFoundDoesNotChurnTheExistingStream() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "foo.ts is gone", code: .notFound))
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 1, "a notFound re-read of the already-subscribed path must not resubscribe or churn the existing stream")
+    }
+
     // MARK: - Editor-state / mode hibernation snapshot (round-5)
 
     // No "/" in the path: JSONEncoder escapes forward slashes as "\/" in the emitted JS, which would
