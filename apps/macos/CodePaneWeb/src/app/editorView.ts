@@ -412,6 +412,15 @@ export class EditorView {
       if (generation !== this.openGeneration) return; // a later open() already won
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
       this.renderMessage(message, "error");
+      // A failed open leaves the previously-open file (if any) fully displayed but its own pending
+      // external-change reconcile — if one was in flight — was just discarded by the `openGeneration`
+      // bump above. Fire a fresh one for it: `handleExternalChange` captures the CURRENT generation and
+      // a fresh fetch token at its own entry, so this reconcile is first-class, not itself discarded by
+      // the very bump that stranded the previous one. If disk didn't actually change, this is a no-op
+      // extra read; if it did, this is the only thing that will ever catch it (see
+      // `CodePaneContentController.swift`'s `restoreFileSignatureMonitoringAfterFailedOpen` doc comment
+      // for the paired Swift-side reasoning).
+      if (this.currentPath !== undefined) void this.handleExternalChange();
       return; // leave the input editable so the user can correct the path
     }
     if (generation !== this.openGeneration) return; // a later open() already won
@@ -438,6 +447,14 @@ export class EditorView {
       // requires the user to have typed something new, which is new unsaved work the original
       // consent never covered.
       this.showDiscardBanner(path);
+      // Same reconcile as the catch block above, for the same reason: this refusal leaves the
+      // previously-open file (`this.currentPath`, guaranteed defined by this branch's own condition, so
+      // no guard needed here unlike the catch block) current, and any of its own in-flight reconcile was
+      // just discarded by the generation bump. This also repairs a Swift-side wrinkle: the successful
+      // read for `path` already retargeted the device's file-signature subscription to `path`, so this
+      // reconcile's own `workspaceFileRead(this.currentPath)` reaches Swift as a path change and its
+      // success arm resubscribes the signature stream back to `this.currentPath` as a byproduct.
+      void this.handleExternalChange();
       return;
     }
     this.resultsList.replaceChildren();

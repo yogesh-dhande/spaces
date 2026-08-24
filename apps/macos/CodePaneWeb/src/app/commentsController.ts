@@ -1258,6 +1258,18 @@ export class CommentsController {
     // editorView.ts's ~500ms debounce for editor buffer edits): a comment body is short and the
     // save is not latency-sensitive the way a file buffer is, so there is no reason to accept the
     // added complexity of a partial-typing race window here.
+    //
+    // Accepted v1 behavior: quitting the app while a comment textarea still has focus loses whatever
+    // was typed since the last blur. For a still-provisional draft that never blurred even once,
+    // that's the ENTIRE comment — a provisional draft has no daemon row until its first successful
+    // `persistBody`. This is consistent with the editor's own rule that only quitting and reopening
+    // the app loses an unsaved edit. Hibernation/teardown is NOT this loss window:
+    // `collectStateForFlush` already revives live in-progress text across hibernation via
+    // `spaces:init`. Any click on Send/Add-to-batch/elsewhere blurs the textarea first (browsers
+    // deliver `blur` before `click`), so the loss window is exactly "quit with the caret still in a
+    // card." A debounced durable persist was considered and rejected: routing the COMMON typing flow
+    // through the provisional-draft-to-server-id re-key and card-rebuild machinery on every keystroke
+    // risks focus/caret churn on every comment, just to cover this one quit-only edge.
     textarea.addEventListener("blur", () => {
       const body = textarea.value;
       if (body.trim().length === 0) {

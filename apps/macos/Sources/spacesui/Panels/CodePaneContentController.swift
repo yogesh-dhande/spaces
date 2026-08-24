@@ -1072,6 +1072,20 @@ enum CodePaneMode: Equatable {
         // `subscribedFilePath` first is what lets `resubscribeFileSignature`'s own `!= path` guard pass.
         // Restoring over a still-healthy A stream (failure arrived before any disconnect ever happened)
         // just stops and reopens it — brief, harmless churn, not special-cased away.
+        //
+        // Deliberately NOT cleared here: `lastActedFileSignatureValue` for `restorePath`.
+        // `resubscribeFileSignature`'s own `lastActedFilePath == path` case (see its
+        // `if lastActedFilePath != path { lastActedFileSignatureValue = nil; lastActedFilePath = nil }`)
+        // skips the clear when the restore target is the same path already recorded there, keeping the
+        // existing dedupe baseline intact. That means a signature change the web app fetched but
+        // discarded during the failed open (because it lost the reconcile race — its own read landed
+        // after the `openGeneration` bump from the newer, now-failed, open attempt) is suppressed as a
+        // duplicate once this restored stream reconnects and the daemon resends that same current value,
+        // since the value on record here never moved. Recovery for that exact window is intentionally
+        // NOT this restore's job: it's owned by `EditorView.open()`'s failed/refused-open fix, which
+        // fires `handleExternalChange()` at both of its early returns to re-fetch and reconcile the file
+        // directly, rather than this Swift side force-forwarding a synthetic connect frame to paper over
+        // a dedupe value it deliberately left untouched.
         fileSignatureStream?.stop()
         fileSignatureStream = nil
         subscribedFilePath = nil

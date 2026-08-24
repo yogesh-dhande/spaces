@@ -1344,7 +1344,10 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     // discarded by the recheck above), landing with `discard: true` so this completion isn't
     // re-litigated as its own conflict.
     (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3)); // a.ts, b.ts, b.ts again
+    // a.ts, b.ts, a.ts (round-13 fix: the refused-open reconcile fired when the recheck above raised
+    // the banner, for the still-current a.ts — left unresolved here, it never blocks this test), b.ts
+    // again.
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
     settle["b.ts"]!.resolve({ content: "b content v2", sha256: "sha-b2", size: 12 });
     await settle["b.ts"]!.promise;
 
@@ -1522,7 +1525,9 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     // Second discard click: no further edit happens this time, so this click's consent generation
     // still matches `bufferEditGeneration` when the reopen completes.
     (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3)); // a.ts, b.ts, b.ts again
+    // a.ts, b.ts, a.ts (round-13 fix: the refused-open reconcile fired when the re-raise above ran,
+    // for the still-current a.ts — left unresolved here, it never blocks this test), b.ts again.
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
     settle["b.ts"]!.resolve({ content: "b content v2", sha256: "sha-b2", size: 12 });
     await settle["b.ts"]!.promise;
 
@@ -1842,6 +1847,156 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\nmore\n" });
 
     expect((container.querySelector(".banner.merge") as HTMLElement).style.display).toBe("none");
+  });
+});
+
+describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  /** Index-ordered deferred reads, not keyed by path: unlike the round-15 block's `makeDeferredRead`
+   *  (which keys by path and so can only ever hold the LATEST call for a given path), these tests need
+   *  to hold two separate in-flight reads for the SAME path ("a.ts") at once — the live reconcile
+   *  triggered by a signature push, and the fix's own reconcile fired from a later failed/refused open
+   *  of a different path. Indexing by call order keeps both addressable independently. */
+  function makeIndexedDeferredRead(): {
+    workspaceFileRead: SpacesBridge["workspaceFileRead"];
+    calls: { path: string; resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }[];
+  } {
+    const calls: { path: string; resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }[] = [];
+    const workspaceFileRead = vi.fn((path: string) => {
+      let resolve!: (result: WorkspaceFileReadResult) => void;
+      let reject!: (err: unknown) => void;
+      const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      calls.push({ path, resolve, reject, promise });
+      return promise;
+    });
+    return { workspaceFileRead, calls };
+  }
+
+  it("failure leg: a failed open of a different file fires a reconcile for the still-current file instead of stranding its own discarded reconcile", async () => {
+    const { workspaceFileRead, calls } = makeIndexedDeferredRead();
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    // 1. Open a.ts, resolving immediately.
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    calls[0]!.resolve({ content: "C0\n", sha256: "H0", size: 3 });
+    await calls[0]!.promise;
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "a.ts", baseSHA256: "H0", baseContent: "C0\n", content: "C0\n", dirty: false, conflict: false }),
+    );
+
+    // 2. A live signature push for a.ts starts a reconcile read for it; hold it.
+    fireFileSignature({ path: "a.ts", sha256: "H1", missing: false });
+    await vi.waitFor(() => expect(calls.length).toBe(2));
+    expect(calls[1]!.path).toBe("a.ts");
+
+    // 3. Start opening b.ts — bumps openGeneration, which will discard A's in-flight reconcile once it
+    // resolves. Hold B's read too.
+    pressEnter(input, "b.ts");
+    await vi.waitFor(() => expect(calls.length).toBe(3));
+    expect(calls[2]!.path).toBe("b.ts");
+
+    // 4. Resolve A's held reconcile read. The existing generation guard discards it — the buffer must
+    // stay untouched. This pins the PRE-EXISTING discard behavior (not new from this fix); it is what
+    // creates the stranding the fix addresses.
+    calls[1]!.resolve({ content: "C1\n", sha256: "H1", size: 3 });
+    await calls[1]!.promise;
+    await vi.waitFor(() => {
+      expect(view.collectStateForFlush()).toBe(
+        JSON.stringify({ path: "a.ts", baseSHA256: "H0", baseContent: "C0\n", content: "C0\n", dirty: false, conflict: false }),
+      );
+    });
+
+    // 5. B's open fails.
+    calls[2]!.reject(new SpacesBridgeError("notFound", "no such file: b.ts"));
+    await calls[2]!.promise.catch(() => {});
+
+    // 6. WITH THE FIX: the catch block fires a fresh reconcile for the still-current a.ts.
+    await vi.waitFor(() => expect(calls.length).toBe(4));
+    expect(calls[3]!.path).toBe("a.ts");
+    calls[3]!.resolve({ content: "C1\n", sha256: "H1", size: 3 });
+    await calls[3]!.promise;
+
+    // 7. The buffer silently reloaded from the fresh reconcile — the change that would otherwise have
+    // been lost for good is caught.
+    await vi.waitFor(() => {
+      expect(view.collectStateForFlush()).toBe(
+        JSON.stringify({ path: "a.ts", baseSHA256: "H1", baseContent: "C1\n", content: "C1\n", dirty: false, conflict: false }),
+      );
+    });
+  });
+
+  it("refusal leg: a discard-gated open of a different file fires a reconcile for the still-current file instead of stranding its own discarded reconcile", async () => {
+    const { workspaceFileRead, calls } = makeIndexedDeferredRead();
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    // 1. Open a.ts cleanly.
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    calls[0]!.resolve({ content: "C0\n", sha256: "H0", size: 3 });
+    await calls[0]!.promise;
+
+    // 2. A is clean, so openGated's upfront check lets B's read start directly, no banner yet. Hold it.
+    pressEnter(input, "b.ts");
+    await vi.waitFor(() => expect(calls.length).toBe(2));
+    expect(calls[1]!.path).toBe("b.ts");
+
+    // 3. While B's read is in flight, edit A — openGated's upfront check ran before this happened, so
+    // only open()'s completion-time recheck can catch it (same setup as the round-15 Fix A test).
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "C0 edited\n" });
+
+    // 4. Resolve B's held read successfully.
+    calls[1]!.resolve({ content: "CB\n", sha256: "HB", size: 3 });
+    await calls[1]!.promise;
+
+    // 5. The completion recheck refuses to replace A and raises the discard banner instead.
+    const banner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    expect(banner.textContent).toContain("Unsaved changes in a.ts");
+
+    // 6. WITH THE FIX: the refusal fires a fresh reconcile for a.ts too. Resolve it with disk content
+    // identical to what's already the baseline — the common "nothing actually changed" case.
+    await vi.waitFor(() => expect(calls.length).toBe(3));
+    expect(calls[2]!.path).toBe("a.ts");
+    calls[2]!.resolve({ content: "C0\n", sha256: "H0", size: 3 });
+    await calls[2]!.promise;
+
+    // 7. Same-hash no-op: the discard banner and the edited buffer are untouched.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("flex");
+    expect(banner.textContent).toContain("Unsaved changes in a.ts");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "a.ts", baseSHA256: "H0", baseContent: "C0\n", content: "C0 edited\n", dirty: true, conflict: false }),
+    );
+  });
+
+  it("control: a first-ever open that fails has no previously-open file to reconcile, so no extra read fires", async () => {
+    const workspaceFileRead = vi.fn().mockRejectedValueOnce(new SpacesBridgeError("notFound", "no such file: a.ts"));
+    const bridge = makeBridge({ workspaceFileRead });
+    new EditorView(container, bridge);
+    const input = container.querySelector("input") as HTMLInputElement;
+
+    pressEnter(input, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(container.querySelector(".msg.error")).not.toBeNull());
+
+    expect(workspaceFileRead).toHaveBeenCalledTimes(1);
   });
 });
 
