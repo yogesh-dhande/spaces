@@ -129,9 +129,19 @@ enum SpacesMobileAutomations {
     }
 
     /// "next in 5 min" for an enabled cron automation with a next fire time, else nil — a manual or
-    /// disabled automation never fires on its own.
+    /// disabled automation never fires on its own. `now` is meant to be
+    /// `SpacesMobileAppModel.relativeTimeReference` at every call site on the poll (a 30-second-cadence
+    /// clock, not `Date()` directly — see that property's doc comment for why).
+    ///
+    /// A published `nextFireTime` is not guaranteed to stay future-dated relative to `now`: a refresh that
+    /// failed retains the last-known overview while the reference keeps advancing, and even a fresh
+    /// overview can be read moments after the daemon's own scheduler tick was due to fire it. Rather than
+    /// assume the common case and hand a non-positive interval to the formatter — which renders it as
+    /// "ago" ("next 5s ago") — this matches the Mac's `AutomationsViewModel.nextRunDescription`, which
+    /// treats the same interval as "due".
     static func nextFireDescription(_ automation: TerminalServiceAutomationSummary, relativeTo now: Date = Date()) -> String? {
         guard automation.enabled, let fireDate = date(automation.nextFireTime) else { return nil }
+        guard fireDate > now else { return "next due" }
         return "next \(relativeFormatter().localizedString(for: fireDate, relativeTo: now))"
     }
 
@@ -185,13 +195,24 @@ enum SpacesMobileAutomations {
     }
 
     /// "started 5 min ago" for a run that has started, else nil (a queued/skipped run never started).
+    /// `now` is meant to be `SpacesMobileAppModel.relativeTimeReference`, which advances in 30-second jumps
+    /// off the poll cadence and can still trail a run that started only moments before the jump caught up.
+    /// Handed to the formatter unguarded, that reads in the future tense ("started in 5s") until the
+    /// reference's next jump (#540); clamping `now` up to `started` avoids the wrong tense but then compares
+    /// `started` against itself, which the formatter's numeric abbreviated style renders as "in 0 sec"
+    /// rather than as the present. Neither reads right, so the boundary — `now` at or before `started` — is
+    /// worded directly instead of routing through the formatter at all.
     static func startedDescription(_ run: TerminalServiceAutomationRunSummary, relativeTo now: Date = Date()) -> String? {
         guard let started = date(run.startedAt) else { return nil }
+        guard now > started else { return "started now" }
         return "started \(relativeFormatter().localizedString(for: started, relativeTo: now))"
     }
 
     /// Wall-clock duration for a run that has started: its end time if ended, else `now` for a still-
-    /// running run, so a caller re-rendering on a timer sees the duration keep advancing.
+    /// running run, so a caller re-rendering on `SpacesMobileAppModel.relativeTimeReference`'s 30-second
+    /// cadence sees the duration keep advancing between real overview changes. The `max(0, ...)` below
+    /// already keeps this safe against a `now` that trails `started` — the same skew `startedDescription`
+    /// guards against — since a negative interval floors to zero rather than rendering a negative time.
     static func durationDescription(_ run: TerminalServiceAutomationRunSummary, relativeTo now: Date = Date()) -> String? {
         guard let started = date(run.startedAt) else { return nil }
         let end = date(run.endedAt) ?? now

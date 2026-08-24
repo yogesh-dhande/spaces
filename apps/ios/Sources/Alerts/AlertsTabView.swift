@@ -95,7 +95,12 @@ struct AlertsTabView: View {
             dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.detail,
             detailIsMonospaced: false
         ) {
-            Text(SpacesMobileAttention.abbreviatedAge(of: event.date)).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+            // Reads the shared 30-second label clock rather than `Date()` so this age keeps advancing on
+            // its own cadence even when the overview payload itself is unchanged (#540) — see
+            // `SpacesMobileAppModel.relativeTimeReference`. `abbreviatedAge` already floors anything under
+            // 60 seconds to "now", so a reference trailing `event.date` cannot render a negative age.
+            Text(SpacesMobileAttention.abbreviatedAge(of: event.date, relativeTo: model.relativeTimeReference)).font(.system(size: 11))
+                .foregroundStyle(Theme.mutedSecondary).monospacedDigit()
         }
         if let session = event.sessionID.flatMap({ model.session(forSessionID: $0) }) {
             Button {

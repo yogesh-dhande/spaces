@@ -61,7 +61,13 @@ struct AutomationsListView: View {
 
     private func automationRow(_ row: SpacesMobileAutomationRow) -> some View {
         let automation = row.automation
-        var detailParts = [SpacesMobileAutomations.triggerSummary(automation), SpacesMobileAutomations.nextFireDescription(automation)]
+        var detailParts = [
+            SpacesMobileAutomations.triggerSummary(automation),
+            // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across
+            // the 2-second overview poll instead of jittering (#540) — see
+            // `SpacesMobileAppModel.relativeTimeReference`.
+            SpacesMobileAutomations.nextFireDescription(automation, relativeTo: model.relativeTimeReference),
+        ]
         if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
             detailParts.append(workspaceName)
         }
