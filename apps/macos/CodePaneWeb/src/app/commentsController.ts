@@ -213,6 +213,16 @@ export class CommentsController {
    *  count a prior run left behind. */
   private loadInitialRetryFailures = 0;
   private loadInitialRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The send currently being delivered, if any — `sendOne` and `sendBatch` both await it before
+   *  starting and publish their own run into it, so overlapping send gestures (double-click on a
+   *  card's Send, Send batch while a single send is pending, two batch clicks) serialize instead of
+   *  racing. The daemon rejects a whole send request when ANY of its comments is already archived,
+   *  so letting the second gesture run concurrently would turn the first one's success into a false
+   *  "not a draft" failure — and for a batch, would leave every other draft unsent. After the wait,
+   *  the second sender re-validates against post-send state: a sent draft is gone from `this.drafts`,
+   *  so a double-click's second `sendOne` no-ops and a trailing `sendBatch` sends only what actually
+   *  remains. */
+  private sendInFlight: Promise<void> | undefined;
 
   private readonly banner: HTMLElement;
   private bannerTimer: ReturnType<typeof setTimeout> | undefined;
@@ -514,6 +524,21 @@ export class CommentsController {
     this.refreshCardsOnly();
   }
 
+  /** Public entry point for the toolbar's "Send batch" button — see `sendInFlight`'s doc comment for
+   *  why this only waits for/publishes into the shared marker rather than doing any send work itself.
+   *  `doSendBatch` (below) is the unchanged original body. */
+  async sendBatch(): Promise<void> {
+    while (this.sendInFlight) await this.sendInFlight;
+    const run = this.doSendBatch();
+    const published = run.finally(() => {
+      // Only clear our own marker — a queued sender that started after us must not have its marker
+      // wiped by our finally.
+      if (this.sendInFlight === published) this.sendInFlight = undefined;
+    });
+    this.sendInFlight = published;
+    await run;
+  }
+
   /**
    * Sends every current sendable draft in one call. Unlike `sendOne`, this reads bodies from
    * `this.drafts` (the last-persisted value), not live from any card's textarea: a card mid-edit
@@ -577,7 +602,7 @@ export class CommentsController {
    * user blur (a real interaction happening in real time), so the loop is naturally bounded by how
    * fast a person can type and click — no cap is added.
    */
-  async sendBatch(): Promise<void> {
+  private async doSendBatch(): Promise<void> {
     // Fix 3 (round-2 P1): capture the agent shown on the "Send batch" button at click time, before
     // any await — see the identical capture at the top of `sendOne` for the full rationale. A
     // selection change (dropdown pick, or an agents-update auto-selecting a different agent) during
@@ -927,6 +952,21 @@ export class CommentsController {
     this.refresh();
   }
 
+  /** Public entry point for a card's "Send" button — see `sendInFlight`'s doc comment for why this
+   *  only waits for/publishes into the shared marker rather than doing any send work itself.
+   *  `doSendOne` (below) is the unchanged original body. */
+  private async sendOne(id: string, body: string): Promise<void> {
+    while (this.sendInFlight) await this.sendInFlight;
+    const run = this.doSendOne(id, body);
+    const published = run.finally(() => {
+      // Only clear our own marker — a queued sender that started after us must not have its marker
+      // wiped by our finally.
+      if (this.sendInFlight === published) this.sendInFlight = undefined;
+    });
+    this.sendInFlight = published;
+    await run;
+  }
+
   /** `body` is read live from the card's textarea at click time (not the last-persisted value),
    *  so clicking Send immediately after typing — before the textarea has had a chance to blur —
    *  still sends exactly what is on screen, persisting it first (creating it, if the card is still
@@ -957,7 +997,7 @@ export class CommentsController {
    * `reviewCommentsSend` call below fails loudly through the existing failure path — preferable to
    * silently delivering into a different agent's terminal.
    */
-  private async sendOne(id: string, body: string): Promise<void> {
+  private async doSendOne(id: string, body: string): Promise<void> {
     const agent = this.agents.find((a) => a.id === this.selectedAgentId);
     if (!agent) return;
 

@@ -2585,3 +2585,98 @@ describe("CommentsController — Fix 3 (round-2 P1): captures the target agent w
     expect(bridge.sendCalls[0]!.sessionId).toBe(AGENT.sessionId); // captured at click time, not AGENT_2
   });
 });
+
+describe("CommentsController — Fix (P2): overlapping sends serialize instead of racing to a false failure", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    return { bridge, controller, diffViewFake };
+  }
+
+  it("double-click Send: exactly one reviewCommentsSend call reaches the bridge, no error banner, and the card is gone", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "please fix this",
+    });
+    await controller.loadInitial();
+
+    const container = document.createElement("div");
+    controller.mount(container);
+
+    const card = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
+
+    bridge.holdNextSend = true;
+    sendBtn.click(); // first sendOne: reaches the (held) send RPC and publishes itself into `sendInFlight`
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // Second click lands while the first send is still in flight — without the fix this races the
+    // daemon's single-writer queue and comes back a false "not a draft" failure once the first send
+    // wins. With the fix it queues behind `sendInFlight` instead.
+    sendBtn.click();
+
+    bridge.releaseHeldSend?.(); // one-shot hold: only the first send was ever parked open
+    await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
+    // Let the queued second sendOne resume, re-validate against post-send state (the draft is already
+    // gone from `this.drafts`), and no-op.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(bridge.sendCalls).toHaveLength(1); // the second click never issued a second RPC
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex"); // no false "not a draft" failure surfaced
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(0); // the card is gone
+  });
+
+  it("Send batch queued behind a pending single send: the single send delivers A, then the batch delivers exactly B", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const a = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment A",
+    });
+    const b = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "comment B",
+    });
+    await controller.loadInitial();
+
+    const container = document.createElement("div");
+    controller.mount(container);
+
+    const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
+    const sendBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === `Send to ${AGENT.label}`)!;
+
+    bridge.holdNextSend = true; // one-shot: holds only A's send, not B's later one
+    sendBtnA.click();
+    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+
+    // "Send batch" fires while A's single send is still pending — it must queue behind A rather than
+    // racing it (which would either false-fail A once it lands, or leave B unsent).
+    const batchPromise = controller.sendBatch();
+
+    bridge.releaseHeldSend?.(); // release A's held send; the queued batch then runs and sends B
+    await batchPromise;
+
+    expect(bridge.sendCalls).toHaveLength(2);
+    expect(bridge.sendCalls[0]!.comments.map((c) => c.id)).toEqual([a.id]);
+    expect(bridge.sendCalls[1]!.comments.map((c) => c.id)).toEqual([b.id]); // batch recomputed its sendable set post-A
+
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex");
+    const anchoredAfter = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(anchoredAfter).toHaveLength(0); // both cards gone
+  });
+});
