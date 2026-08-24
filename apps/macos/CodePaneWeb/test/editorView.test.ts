@@ -2124,3 +2124,119 @@ describe("EditorView — external-change execution-failure retry: invalidArgumen
     );
   });
 });
+
+describe("EditorView — invalidArgument banner clears once the file becomes readable again (round-1 Fix 1)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  it("a recovery read whose content matches the baseline (same sha256) hides the banner and does not reload", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"))
+      // The file is back to exactly the baseline content — same hash as `baseSHA256`, which
+      // invalidArgument never touched.
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.className).toBe("banner error");
+    expect(banner.style.display).toBe("flex");
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+
+    expect(banner.style.display).toBe("none");
+    // Same-hash early return: no reload, buffer/state untouched from the original open.
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({ path: "a.ts", baseSHA256: "sha-1", baseContent: "hello\n", content: "hello\n", dirty: false, conflict: false }),
+    );
+  });
+
+  it("a recovery read with new content on a clean buffer hides the banner and silently reloads", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"))
+      .mockResolvedValueOnce({ content: "hello v2\n", sha256: "sha-2", size: 9 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).toBe("flex");
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+
+    expect(banner.style.display).toBe("none");
+    // Clean-buffer silent reload: the new content and hash are adopted as the fresh baseline.
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "hello v2\n",
+        content: "hello v2\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("guard: a spurious same-hash event never clears an unrelated banner (the merge indicator) it did not put up", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 })
+      // Spurious dedupe: same content/hash as what the merge already adopted as its baseline.
+      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+
+    pressEnter(container.querySelector("input") as HTMLInputElement, "a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    // Mine: edits line1 only. Theirs: appends line3 only. Non-overlapping — auto-merges cleanly.
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    const merge = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.merge") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    expect(merge.textContent).toContain("Merged external changes");
+
+    // The `unreadableBannerVisible` flag was never set — this run never touched the invalidArgument
+    // branch — so this spurious same-hash event must not clear the merge indicator it did not show.
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
+
+    expect((container.querySelector(".banner") as HTMLElement).className).toBe("banner merge");
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("flex");
+    expect((container.querySelector(".banner") as HTMLElement).textContent).toContain("Merged external changes");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "line1\nline2\nline3\n",
+        content: "line1 edited\nline2\nline3\n",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+  });
+});

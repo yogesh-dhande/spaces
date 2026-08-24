@@ -79,14 +79,24 @@ export function renderFileList(
 /**
  * Additions/deletions for a file's stat display, counted from its patch's
  * `+`/`-` prefixed lines rather than a separate daemon-provided count (the
- * bridge contract does not carry one — see `DiffFileEntry`).
+ * bridge contract does not carry one — see `DiffFileEntry`). Counting starts
+ * only once a `@@` hunk header has been seen: the `+++ b/...`/`--- a/...`
+ * file-header preamble lines always appear before the first hunk header, so
+ * gating on `inHunk` excludes them without needing a `+++`/`---` special-case
+ * that would otherwise also (incorrectly) skip a real hunk line whose content
+ * happens to start with `++` or `--` (e.g. `++x` renders as `+++x`).
  */
 function countChanges(file: DiffFileEntry): { additions: number; deletions: number } {
   if (!file.patch) return { additions: 0, deletions: 0 };
   let additions = 0;
   let deletions = 0;
+  let inHunk = false;
   for (const line of file.patch.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
     if (line.startsWith("+")) additions++;
     else if (line.startsWith("-")) deletions++;
   }

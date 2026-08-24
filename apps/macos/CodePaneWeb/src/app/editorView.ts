@@ -138,6 +138,25 @@ export class EditorView {
    *  await yields control back to the DOM, and two overlapping CAS writes racing the same baseline
    *  would let the second silently win with a hash the first's in-flight write invalidates. */
   private saveInFlight = false;
+  /** True exactly while `this.banner` is showing the `invalidArgument` "file can no longer be
+   *  displayed" error from `handleExternalChange`'s catch branch — not the merge indicator, the
+   *  discard-consent prompt, the conflict compare view, or any other banner use, all of which use
+   *  the same DOM element but set this flag themselves. Set `true` where that error is shown; the
+   *  next `handleExternalChange` run that reaches a decoded outcome (a successful read or an
+   *  authoritative `notFound`) clears the flag and hides the banner before branching on the read
+   *  result, since a file that was unreadable a moment ago may now be exactly back at the baseline
+   *  (the same-hash early return) or freshly readable (the clean-buffer silent reload) — either way
+   *  the stale error must not linger over a file that reads fine again. Gating the clear on this
+   *  flag (rather than clearing unconditionally on every decoded outcome) is what stops a spurious
+   *  same-hash dedupe event from wiping out an unrelated banner it did not put up, in particular the
+   *  merge indicator `showMergeIndicator` shows on the same element.
+   *
+   *  Deliberately NOT part of `CodePaneEditorState` (mirrors `pendingMergeUndo`'s doc comment): a
+   *  hibernation restore's `restoreState` re-runs `handleExternalChange`, which re-derives this from
+   *  scratch — a still-unreadable file re-enters the catch and re-shows the banner on its own, and a
+   *  now-readable file heals through the normal decoded-outcome path either way, so nothing is lost
+   *  by not carrying this flag across the snapshot. */
+  private unreadableBannerVisible = false;
   private searchTimer: ReturnType<typeof setTimeout> | undefined;
   private editorStatePushTimer: ReturnType<typeof setTimeout> | undefined;
   /** Unsubscribes the previous `subscribeFileSignature` listener; replaced (not layered) every time
@@ -482,6 +501,7 @@ export class EditorView {
         // UTF-8), not a retry loop of our own. A dirty buffer's own Save stays CAS-guarded (see
         // `save()`), so nothing here risks silently overwriting unsaved local edits.
         this.externalChangeRetryFailures = 0;
+        this.unreadableBannerVisible = true;
         this.banner.className = "banner error";
         this.banner.textContent = err.message;
         this.banner.style.display = "flex";
@@ -512,6 +532,18 @@ export class EditorView {
     if (generation !== this.openGeneration) return; // a later open() already won
     if (fetchToken !== this.externalChangeFetchToken) return; // a later external-change fetch already won
     if (path !== this.currentPath) return;
+
+    if (this.unreadableBannerVisible) {
+      // This run reached a decoded outcome (a successful read, or `notFound` below), so whatever
+      // made the file unreadable no longer holds. Clear the stale `invalidArgument` error now, before
+      // branching on the read result below: every branch below either overwrites the banner with its
+      // own (deleted placeholder, conflict, merge indicator) or leaves it hidden (same-hash return,
+      // clean-buffer reload), so clearing first is harmless in all of them. Gated on the flag itself
+      // (not run unconditionally) so this can never clear a banner this run did not put up — see the
+      // flag's doc comment.
+      this.unreadableBannerVisible = false;
+      this.banner.style.display = "none";
+    }
 
     if (disk === undefined) {
       if (!this.dirty) {
