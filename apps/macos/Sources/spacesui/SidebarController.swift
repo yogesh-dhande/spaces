@@ -2410,6 +2410,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 isEnabled: daemonActionsEnabled)
         }
         menu.addItem(.separator())
+        // Not gated on `daemonActionsEnabled`: routes through the same editor-preference dispatch as
+        // every other "open editor" action (⌘⌥E, the workspace detail's editor button), which for the
+        // built-in default opens/focuses/retargets the singleton Editor window unconditionally, with no
+        // session or process to start on the workspace's daemon.
+        addItem(
+            "Open in Editor", symbol: "macwindow.badge.plus", target: self, action: #selector(openWorkspaceInEditorMenuItem(_:)),
+            identifier: workspace.id)
+        menu.addItem(.separator())
         addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
         // Reveal in Finder needs a path on this Mac, so it is offered only for local-device workspaces.
         if host.isLocalWorkspace(workspace) {
@@ -2449,6 +2457,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         host.hideWorkspace(id: id)
+    }
+
+    @objc private func openWorkspaceInEditorMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.openWorkspaceEditor(workspaceID: id)
     }
 
     @objc private func deleteWorkspaceMenuItem(_ sender: NSMenuItem) {

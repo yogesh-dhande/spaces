@@ -772,16 +772,20 @@ extension ProcessProfileEnvironmentSuites {
         /// there is no follow-up prune the way a terminal pane's self-heals via a later fresh overview.
         @Test func aStaleEpochStillPrunesACodePaneForAGoneWorkspace() throws {
             let controller = makeController()
-            var layout = PanelLayoutEngine.appendTab(
+            let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             controller.deviceSections = [section(processSessionID: "predecessor")]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            // The code pane's only legitimate placement is the global singleton window (a workspace-scope
+            // layout has every code pane pruned out of it on restore), so this test's code pane is
+            // installed there directly rather than alongside the terminal pane above.
+            let codeLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: codeLayout, frame: nil)
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the terminal pane is placed")
             #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "precondition: the code pane's controller exists")
             let epochBeforeClaim = controller.panelCoordinator.paneReplacementEpoch

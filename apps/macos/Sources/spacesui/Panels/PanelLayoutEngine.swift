@@ -46,6 +46,18 @@ enum PanelLayoutEngine {
 
     static func pane(withID paneID: String, in layout: PanelLayout) -> Pane? { allPanes(in: layout).first { $0.id == paneID } }
 
+    /// Whether a panel window's identity strip should offer "Open Selected Pane in New Window" for
+    /// this tab: the tab must hold more than one pane (a lone pane has nothing to split off), and
+    /// the pane the strip displays — `selectedPane(in:)`, the same resolution
+    /// `PanelCoordinator.globalWindowIdentity` uses to pick the strip's shown pane — must be a
+    /// terminal session. A code pane (the Editor) is never offered a move: its window IS its
+    /// placement, and moving it would mean recreating it, losing its unsaved buffer.
+    static func canMoveFocusedPaneOutOfPanelWindow(in tab: PanelTab) -> Bool {
+        guard panes(in: tab).count > 1, let pane = selectedPane(in: tab) else { return false }
+        if case .terminalSession = pane.content { return true }
+        return false
+    }
+
     /// The tab and pane holding a given content descriptor, if any.
     static func location(of content: PaneContentDescriptor, in layout: PanelLayout) -> (tabID: String, paneID: String)? {
         for tab in layout.tabs { if let pane = panes(in: tab).first(where: { $0.content == content }) { return (tab.id, pane.id) } }
@@ -199,7 +211,7 @@ enum PanelLayoutEngine {
             if layout.selectedTabID == tab.id {
                 let fallbackIndex = max(0, min(tabIndex, layout.tabs.count - 1))
                 layout.selectedTabID = layout.tabs.indices.contains(fallbackIndex) ? layout.tabs[fallbackIndex].id : nil
-                layout.focusedPaneID = layout.selectedTabID.flatMap { id in layout.tabs.first { $0.id == id } }.map { panes(in: $0) }?.first?.id
+                layout.focusedPaneID = layout.selectedTabID.flatMap { id in layout.tabs.first { $0.id == id } }.flatMap { selectedPane(in: $0) }?.id
             }
         }
         return normalized(layout)
@@ -225,6 +237,35 @@ enum PanelLayoutEngine {
             return node
         }
     }
+
+    /// Removes an entire tab (every pane in it, as one unit) from a layout, for moving a whole tab into
+    /// its own window. Mirrors `removePane`'s "last pane closes the tab" branch — selection falls back to
+    /// the adjacent tab — but starts from the tab itself, so a multi-pane tab leaves intact instead of
+    /// being torn down pane by pane. Returns nil when `tabID` is not in the layout.
+    static func removeTab(tabID: String, from layout: PanelLayout) -> (tab: PanelTab, layout: PanelLayout)? {
+        guard let index = layout.tabs.firstIndex(where: { $0.id == tabID }) else { return nil }
+        var layout = layout
+        let tab = layout.tabs.remove(at: index)
+        if layout.selectedTabID == tab.id {
+            let fallbackIndex = max(0, min(index, layout.tabs.count - 1))
+            layout.selectedTabID = layout.tabs.indices.contains(fallbackIndex) ? layout.tabs[fallbackIndex].id : nil
+            layout.focusedPaneID = layout.selectedTabID.flatMap { id in layout.tabs.first { $0.id == id } }.flatMap { selectedPane(in: $0) }?.id
+        }
+        return (tab, normalized(layout))
+    }
+
+    /// Builds a standalone single-tab layout around an already-existing tab, keeping its pane ids, split
+    /// structure, and remembered focus unchanged — used to seed a fresh global window when a whole tab
+    /// (via `removeTab`) or a legacy multi-tab window's tab (via `splitIntoSoloTabLayouts`) moves into one.
+    static func layout(soloTab tab: PanelTab) -> PanelLayout {
+        PanelLayout(tabs: [tab], selectedTabID: tab.id, focusedPaneID: selectedPane(in: tab)?.id)
+    }
+
+    /// Splits a layout into one single-tab layout per tab, preserving each tab's pane ids, split
+    /// structure, and remembered focus. Global windows are tabless going forward, so this is used only
+    /// once, at restore time, to unfold a legacy persisted global window that still has multiple tabs
+    /// into that many separate windows instead of collapsing or dropping any of them.
+    static func splitIntoSoloTabLayouts(_ layout: PanelLayout) -> [PanelLayout] { layout.tabs.map { self.layout(soloTab: $0) } }
 
     static func selectTab(tabID: String, in layout: PanelLayout) -> PanelLayout {
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return layout }
@@ -270,24 +311,41 @@ enum PanelLayoutEngine {
 
     /// Drops panes whose content no longer exists: a terminal pane whose session id is not in
     /// `keepingSessionIDs`, and — only when `keepingWorkspaceKeys` is supplied — a code pane whose
-    /// `(deviceID, workspaceID)` is not in it. `keepingWorkspaceKeys` defaults to nil rather than an
-    /// empty set so a caller that only tracks session liveness (a workspace-scoped panel's own
-    /// restore, whose code panes are always for that panel's own workspace) leaves code panes
-    /// untouched, exactly as before this parameter existed, instead of having to pass the panel's
-    /// single workspace back in. Splits collapse and empty tabs disappear exactly as explicit closes do.
+    /// `(deviceID, workspaceID)` is not in it. `keepingWorkspaceKeys` defaults to nil so a caller that
+    /// has no opinion about code panes (a `.globalWindow` restore, which prunes them itself against
+    /// workspace liveness via `panelWindowRestoreDecision`) leaves them untouched. Splits collapse and
+    /// empty tabs disappear exactly as explicit closes do.
     ///
-    /// A code pane is kept for any workspace that still exists, running or not: a stopped workspace's
-    /// working tree is still there to review, and a pane may have been legitimately opened after the
-    /// stop, so restore cannot tell "stopped while this app was closed" apart from "opened on a stopped
-    /// workspace" and deliberately keeps both. Live clients close code panes by observing the
-    /// running→not-running transition instead (see the `closeCodePanes(deviceID:workspaceIDs:)` call
-    /// sites in `SidebarController`).
-    static func prunedLayout(_ layout: PanelLayout, keepingSessionIDs: Set<String>, keepingWorkspaceKeys: Set<WorkspaceKey>? = nil) -> PanelLayout {
+    /// A `.workspace`-scope restore (`AppKitController.restoredWorkspacePanelLayout`) passes the empty
+    /// set deliberately, to unconditionally strip every code pane: the editor's only legitimate
+    /// placement is the global singleton window, so a code pane surviving in a persisted
+    /// `.workspace`-scope layout is always a leftover from before that constraint, never a pane that
+    /// belongs there. There is no dedicated migration for this — pruning it here, every time the layout
+    /// decodes, is the whole fix.
+    ///
+    /// For a caller that does supply keys, a code pane is kept for any workspace that still exists,
+    /// running or not: a stopped workspace's working tree is still there to review, and a pane may have
+    /// been legitimately opened after the stop, so restore cannot tell "stopped while this app was
+    /// closed" apart from "opened on a stopped workspace" and deliberately keeps both. Live clients
+    /// close code panes by observing the running→not-running transition instead (see the
+    /// `closeCodePanes(deviceID:workspaceIDs:)` call sites in `SidebarController`).
+    ///
+    /// `droppingAllCodePanes` enforces the Editor singleton at this same restore chokepoint: a code
+    /// pane's owning workspace can still be alive while a *different* window already holds the live
+    /// Editor — e.g. a persisted global window with a code pane whose device was offline at launch,
+    /// restoring after the user opened a fresh Editor via ⌘⌥E in the meantime. `panelWindowRestoreDecision`
+    /// passes `true` whenever `PanelCoordinator.anyGlobalCodePanePlacement()` already found a live one, so
+    /// the restoring window's code pane is dropped unconditionally rather than kept on workspace liveness
+    /// alone, closing the two-Editor race this way instead of at the open path.
+    static func prunedLayout(
+        _ layout: PanelLayout, keepingSessionIDs: Set<String>, keepingWorkspaceKeys: Set<WorkspaceKey>? = nil, droppingAllCodePanes: Bool = false
+    ) -> PanelLayout {
         var layout = layout
         let deadPaneIDs = allPanes(in: layout).filter { pane in
             switch pane.content {
             case .terminalSession(_, let sessionID): return !keepingSessionIDs.contains(sessionID)
             case .codePane(let deviceID, let workspaceID):
+                if droppingAllCodePanes { return true }
                 guard let keepingWorkspaceKeys else { return false }
                 return !keepingWorkspaceKeys.contains(WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID))
             }

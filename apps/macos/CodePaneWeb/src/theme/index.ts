@@ -1,4 +1,10 @@
-import { getFiletypeFromFileName, preloadHighlighter, registerCustomCSSVariableTheme, type SupportedLanguages } from "@pierre/diffs";
+import {
+  getFiletypeFromFileName,
+  getSharedHighlighter,
+  preloadHighlighter,
+  registerCustomCSSVariableTheme,
+  type SupportedLanguages,
+} from "@pierre/diffs";
 
 /**
  * Theme name registered with `@pierre/diffs`' shared Shiki highlighter. Its
@@ -90,7 +96,30 @@ export function preloadCodePaneHighlighter(): Promise<void> {
     // static grammar/theme registry, or build-time filtering the emitted
     // chunks, is disproportionate complexity right now. Revisit if bundle
     // size becomes a shipping concern.
-    preloadPromise = preloadHighlighter({ themes: [CODE_PANE_THEME_NAME], langs: LANGUAGES });
+    preloadPromise = preloadHighlighter({ themes: [CODE_PANE_THEME_NAME], langs: LANGUAGES }).then(async () => {
+      // Shiki's `normalizeTheme` replaces every non-hex theme color (every
+      // color here, since this theme is all `var(--diffs-*)` strings) with a
+      // sentinel hex like `#00000001` and records the reverse mapping in
+      // `theme.colorReplacements`. Shiki's own render paths call
+      // `applyColorReplacements` to swap sentinels back before use, but
+      // @pierre/diffs' EDITOR tokenizer calls the shared highlighter's
+      // `setTheme(name)` directly and styles token spans from the returned
+      // `colorMap` with no such swap, so edited lines get inline colors like
+      // `rgba(0,0,0,0.004)` and become invisible. Wrapping `setTheme` here to
+      // pre-substitute sentinels back to their `var(--diffs-*)` originals
+      // fixes the editor path outright; Shiki's own `applyColorReplacements`
+      // is unaffected because looking up an already-substituted `var()`
+      // string in `colorReplacements` is just a miss that leaves it
+      // unchanged.
+      const highlighter = await getSharedHighlighter({ themes: [CODE_PANE_THEME_NAME], langs: LANGUAGES });
+      const originalSetTheme = highlighter.setTheme.bind(highlighter);
+      highlighter.setTheme = (name) => {
+        const result = originalSetTheme(name);
+        const replacements = result.theme.colorReplacements;
+        if (!replacements) return result;
+        return { ...result, colorMap: result.colorMap.map((color) => replacements[color.toLowerCase()] ?? color) };
+      };
+    });
   }
   return preloadPromise;
 }

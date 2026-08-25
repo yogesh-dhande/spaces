@@ -157,6 +157,31 @@ final class CommandPalettePanel: NSPanel {
         }
     }
 
+    /// The funnel every "open a built-in window" action (⌘⌥E, the sidebar's "Open in Editor" item,
+    /// the palette's own row) routes through so none of them has to know the palette is involved.
+    /// Built-in window opens key their window synchronously: if the palette is currently key, that
+    /// keying makes it resign key, and an ORDINARY resign-key dismissal would restore the palette's
+    /// captured return focus, pulling key straight back from the window `open()` just raised. So when
+    /// the palette is visible, this dismisses it (via `dismissCommandPaletteForBuiltInWindowNavigation`,
+    /// which is built exactly for this reentrancy) BEFORE calling `open()`, not after. A failed open
+    /// still owes the user their prior focus — dismissing up front must not silently drop whatever the
+    /// palette interrupted — so `open()` returning `false` restores the return focus captured before
+    /// the dismissal. When the palette isn't visible there is nothing to protect against, so `open()`
+    /// just runs directly.
+    func withPaletteDismissedForBuiltInOpen(_ open: () -> Bool) -> Bool {
+        guard let panel = commandPalettePanel, panel.isVisible else { return open() }
+        let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
+        let returnCodePaneID = commandPaletteReturnCodePaneID
+        let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
+        dismissCommandPaletteForBuiltInWindowNavigation()
+        let opened = open()
+        if !opened {
+            restoreCommandPaletteReturnFocus(
+                terminalSessionID: returnTerminalSessionID, codePaneID: returnCodePaneID, applicationProcessID: returnApplicationProcessID)
+        }
+        return opened
+    }
+
     func commandPaletteDefaultWorkspaceID() -> String? {
         let focusedTerminalWorkspaceID: String?
         if let terminalSessionID = host.panelCoordinator.focusedSessionID() {
@@ -749,6 +774,24 @@ final class CommandPalettePanel: NSPanel {
             context?.completion(choice)
             return
         }
+        guard let focusRequest = item.focusRequest else {
+            // An `.editorAction` row (currently just "Open in Editor") carries no focus
+            // request: opening the workspace's Editor is a synchronous, in-process call, not
+            // a window to await, so it skips the pending-execution/return-focus machinery
+            // below entirely. Mirrors AlertsController's `automationRunTarget` branch, which
+            // is the same "no focusRequest means a different, synchronous action" shape.
+            //
+            // Palette dismissal and failure-restore for a builtin Editor open are owned by the
+            // funnel itself (`AppKitController.openWorkspaceEditor`, via
+            // `withPaletteDismissedForBuiltInOpen`) rather than here, since ⌘⌥E and the sidebar's
+            // "Open in Editor" item need that exact same dismiss-before-open contract and would
+            // otherwise have to duplicate it. For a failed EXTERNAL editor launch the palette
+            // intentionally stays open — the external branch dismisses only after a successful
+            // launch, see its comment in `openWorkspaceEditor`.
+            host.openWorkspaceEditor(workspaceID: item.workspaceID)
+            host.reloadData()
+            return
+        }
         // Return focus is a cancellation contract. Selection keeps a private copy so a
         // failed execution can still restore it, while the dismissal callback cannot race
         // a successful target focus.
@@ -761,7 +804,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let focused = await self.host.executeWindowFocus(item.focusRequest)
+            let focused = await self.host.executeWindowFocus(focusRequest)
             guard self.pendingSelectionExecution?.id == execution.id else { return }
             self.pendingSelectionExecution = nil
             guard focused else {

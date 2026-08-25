@@ -54,17 +54,34 @@ export class DiffView {
   private files: readonly DiffFileEntry[] = [];
   private filesByPath = new Map<string, DiffFileEntry>();
   private commentsByFile = new Map<string, AnchoredComment[]>();
-  /** Bumped on every `setFiles` call so CodeView's per-item `version` always
-   * changes when a file's content changes across a live refresh. Item
-   * identity (object references) is rebuilt fresh each call, so relying on
-   * reference equality would under-invalidate; a shared generation counter
-   * over-invalidates unchanged files instead, which only costs a redundant
-   * re-measure, not a correctness bug. `setComments` deliberately does NOT
-   * bump this: an annotation-only change (a comment created/edited/deleted)
-   * should not force every file to re-highlight, only re-evaluate its
-   * `annotations` array — `@pierre/diffs` diffs that array by value
-   * independently of `version` (see its exported `areDiffLineAnnotationsEqual`). */
+  /** The single monotonic source of every `CodeViewItem.version` ever assigned — by `setFiles`
+   * (reseeding every file's entry to a fresh increment of this counter) and by `setComments`
+   * (bumping one changed file's own entry to a fresh increment of this same counter; see
+   * `itemVersions`'s doc comment). Every assignment site increments `generation` first and stores
+   * the result, so no version number is ever issued twice: a version `setComments` hands one file
+   * can never collide with a later `setFiles` reseed, or vice versa. That's what makes `@pierre/
+   * diffs`' `CodeView.syncItemRecord` short-circuit (`if (item.version === nextItem.version) return
+   * false`) a reliable "did anything actually change" check rather than an occasional false
+   * negative. `setFiles`/`setError`/`setLoading` also rely on this to change every file's version
+   * whenever a file's content identity changes (a live refresh, an error, or a loading placeholder);
+   * item identity (object references) is rebuilt fresh each call, so relying on reference equality
+   * would under-invalidate, while a shared counter instead over-invalidates unchanged files, which
+   * only costs a redundant re-measure, not a correctness bug. */
   private generation = 0;
+  /** Per-file `CodeViewItem.version`, keyed by file path — reseeded to a freshly bumped
+   * `generation` whenever `setFiles` rebuilds the item set (see `buildItem`), then bumped
+   * independently per file by `setComments` — also by drawing a fresh increment of `generation`
+   * (see its doc comment) — when that file's `annotations` actually change. This exists because
+   * `@pierre/diffs`' `CodeView.syncItemRecord` (`dist/components/CodeView.js`) short-circuits
+   * `if (item.version === nextItem.version) return false` for both `setItems` and `updateItem` —
+   * there is no independent value-diffing of `annotations`, so a changed `annotations` array is
+   * silently dropped unless the item's `version` itself changes. A single shared counter bumped on
+   * every call would also satisfy that contract, but would mark every file's item dirty (and due
+   * for re-measure) on every comment edit; per-file entries let `setComments` touch only the file
+   * whose comment list actually changed, while still drawing every entry's value from the same
+   * monotonic `generation` counter so a version `setComments` issues can never collide with a later
+   * `setFiles` reseed. */
+  private itemVersions = new Map<string, number>();
 
   constructor(container: HTMLElement, layout: DiffLayout, hooks: DiffCommentHooks) {
     this.layout = layout;
@@ -93,6 +110,7 @@ export class DiffView {
     this.generation += 1;
     this.files = files;
     this.filesByPath = new Map(files.map((file) => [file.path, file]));
+    this.itemVersions = new Map(files.map((file) => [file.path, this.generation]));
     // A prior `setError` call (see its doc comment) repurposes `emptyEl` for a factual error
     // message; any successful refresh — including one that lands on a genuinely empty diff —
     // supersedes that, so restore the plain "No changes" wording every time this runs rather than
@@ -123,12 +141,26 @@ export class DiffView {
   }
 
   /**
-   * Re-renders every file's `annotations` from a freshly re-anchored comment list, without
-   * bumping `generation` (see its doc comment) or touching scroll position. Called whenever the
-   * draft set changes (create/edit/delete/send) and whenever `refreshDiff` re-anchors drafts
-   * against a new diff.
+   * Re-renders each file's `annotations` from a freshly re-anchored comment list, touching only
+   * the files whose comment list actually changed (see `annotationListEquals`) and leaving
+   * `generation`/scroll position alone. Called whenever the draft set changes (create/edit/delete/
+   * send) and whenever `refreshDiff` re-anchors drafts against a new diff.
+   *
+   * Uses per-item `updateItem` calls rather than one `setItems` pass over every file: `CodeView`
+   * only adopts a changed `annotations` array when the item's own `version` changes (see
+   * `itemVersions`'s doc comment), so this bumps just the affected file's version instead of a
+   * shared counter that would mark every file in the diff dirty for a single comment edit.
+   *
+   * `forceCardRender` (default `false`) bypasses the `annotationListEquals` short-circuit below, so
+   * every file in `touchedPaths` gets a version bump + `updateItem` even when its comment objects
+   * and anchors are byte-for-byte identical to last time. `CommentsController.refreshCardsOnly()`
+   * needs exactly this: a card's rendered DOM depends on more than its `AnchoredComment` — the Send
+   * button's label and disabled state depend on the currently selected agent — so an agent-selection
+   * change must force every commented file's card to re-render even though `annotationListEquals`
+   * (which only compares comment identity and anchor position) correctly reports no change there.
    */
-  setComments(anchored: readonly AnchoredComment[]): void {
+  setComments(anchored: readonly AnchoredComment[], forceCardRender = false): void {
+    const previousByFile = this.commentsByFile;
     this.commentsByFile = new Map();
     for (const ac of anchored) {
       if (!ac.position) continue; // file gone from the diff entirely: tray-only, nothing to attach to
@@ -137,7 +169,16 @@ export class DiffView {
       this.commentsByFile.set(ac.comment.filePath, list);
     }
     if (!this.codeView || this.files.length === 0) return;
-    this.codeView.setItems(this.files.map((file) => this.buildItem(file)));
+
+    const touchedPaths = new Set([...previousByFile.keys(), ...this.commentsByFile.keys()]);
+    for (const path of touchedPaths) {
+      if (!forceCardRender && annotationListEquals(previousByFile.get(path), this.commentsByFile.get(path))) continue;
+      const file = this.filesByPath.get(path);
+      if (!file) continue; // file no longer part of the diff — nothing left in CodeView to update
+      this.generation += 1;
+      this.itemVersions.set(path, this.generation);
+      this.codeView.updateItem(this.buildItem(file));
+    }
   }
 
   /**
@@ -152,6 +193,7 @@ export class DiffView {
     this.generation += 1;
     this.files = [];
     this.filesByPath = new Map();
+    this.itemVersions = new Map();
     this.emptyEl.textContent = message;
     this.emptyEl.classList.add("error");
     this.emptyEl.style.display = "flex";
@@ -171,6 +213,7 @@ export class DiffView {
     this.generation += 1;
     this.files = [];
     this.filesByPath = new Map();
+    this.itemVersions = new Map();
     this.emptyEl.textContent = "Loading diff…";
     this.emptyEl.classList.remove("error");
     this.emptyEl.style.display = "flex";
@@ -258,9 +301,16 @@ export class DiffView {
       id: file.path,
       type: "diff",
       fileDiff: scopedDiff,
-      version: this.generation,
+      version: this.itemVersion(file.path),
       annotations: this.buildAnnotations(file.path),
     };
+  }
+
+  /** Current `CodeViewItem.version` for a file — see `itemVersions`'s doc comment. Falls back to
+   *  `generation` for a file `setComments` has never bumped yet (every file gets an `itemVersions`
+   *  entry from `setFiles`, so this fallback is only ever exercised defensively). */
+  private itemVersion(path: string): number {
+    return this.itemVersions.get(path) ?? this.generation;
   }
 
   private buildAnnotations(filePath: string): DiffLineAnnotation<AnchoredComment>[] | undefined {
@@ -278,7 +328,24 @@ export class DiffView {
       id: path,
       type: "file",
       file: { name: path, contents: message, lang: "text", cacheKey: path },
-      version: this.generation,
+      version: this.itemVersion(path),
     };
   }
+}
+
+/**
+ * Value-equality check for one file's comment list across two `setComments` calls: same length,
+ * with each entry's `comment` object reference unchanged and the same anchored `position`. Object
+ * references are stable across a re-anchor unless the underlying comment was actually replaced
+ * (`CommentsController.doPersistBody` swaps in the daemon's response object on every successful
+ * persist, including a body-only edit), so this catches every case that needs the card re-rendered:
+ * comments added/removed, a re-anchor moving a comment's line, and a body/edit-count change.
+ */
+function annotationListEquals(a: readonly AnchoredComment[] | undefined, b: readonly AnchoredComment[] | undefined): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined || a.length !== b.length) return false;
+  return a.every((ac, index) => {
+    const other = b[index]!;
+    return ac.comment === other.comment && ac.position!.lineNumber === other.position!.lineNumber && ac.position!.outdated === other.position!.outdated;
+  });
 }

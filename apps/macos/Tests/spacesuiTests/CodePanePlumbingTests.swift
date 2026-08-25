@@ -1,6 +1,7 @@
 import AppKit
 import Testing
 import WebKit
+import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
 
@@ -8,9 +9,10 @@ import spacesterminalcore
 @testable import workspacecore
 
 extension ProcessProfileEnvironmentSuites {
-    /// Covers Phase 1 of the code-pane feature at the `PanelCoordinator` level: the dual-store keying
-    /// (terminal panes by session id in `contentControllers`, code panes by pane id in
-    /// `codePaneControllers`) and restore of a persisted `.codePane` pane.
+    /// Covers the code-pane feature at the `PanelCoordinator` level: the dual-store keying (terminal
+    /// panes by session id in `contentControllers`, code panes by pane id in `codePaneControllers`), the
+    /// Editor's confinement to the global singleton window, and pruning of a legacy persisted code pane
+    /// out of a `.workspace`-scope layout on restore.
     ///
     /// Builds a real `AppKitController` the way `PanelReplacementHoldTests` does (a fabricated
     /// lease/profile over a throwaway temp directory, so the suite never touches real lease state), then
@@ -56,12 +58,11 @@ extension ProcessProfileEnvironmentSuites {
         /// disturbing the merged-sidebar row (an offline device keeps its rows, so `deviceID(forWorkspaceID:)`
         /// still resolves).
         private func section(
-            deviceID: String, sessionID: String, workspaceID: String = "workspace-1",
-            loadState: AppKitController.SidebarDeviceLoadState = .loaded
+            deviceID: String, sessionID: String, workspaceID: String = "workspace-1", loadState: AppKitController.SidebarDeviceLoadState = .loaded
         ) -> AppKitController.DeviceSection {
             let workspace = SpacesDeviceWorkspaceSummary(
-                id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                dir: "/tmp/\(workspaceID)", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [])
+                id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(workspaceID)",
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [])
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace],
@@ -86,11 +87,11 @@ extension ProcessProfileEnvironmentSuites {
         /// apart from its predecessor's.
         private func twoWorkspaceSection(deviceID: String) -> AppKitController.DeviceSection {
             let workspace1 = SpacesDeviceWorkspaceSummary(
-                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature-1", baseBranch: "main",
-                dir: "/tmp/workspace-1", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature-1", baseBranch: "main", dir: "/tmp/workspace-1",
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
             let workspace2 = SpacesDeviceWorkspaceSummary(
-                id: "workspace-2", projectID: "project-1", projectName: "Project", branch: "feature-2", baseBranch: "main",
-                dir: "/tmp/workspace-2", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+                id: "workspace-2", projectID: "project-1", projectName: "Project", branch: "feature-2", baseBranch: "main", dir: "/tmp/workspace-2",
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace1, workspace2], sessions: [], retainedTerminalSessionIDs: [])
@@ -100,24 +101,25 @@ extension ProcessProfileEnvironmentSuites {
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
-        /// A workspace panel restoring a terminal pane and a code pane side by side resolves each to its
-        /// own controller instance: the terminal by session id in `contentControllers`, the code pane by
-        /// pane id in `codePaneControllers`. Proves the dual-store design keeps the two content kinds from
-        /// colliding rather than one overwriting the other.
+        /// A terminal pane restored in a workspace's own panel and a code pane restored in the global
+        /// singleton window resolve to their own controller instance: the terminal by session id in
+        /// `contentControllers`, the code pane by pane id in `codePaneControllers`. Proves the dual-store
+        /// design keeps the two content kinds from colliding rather than one overwriting the other — the
+        /// scopes differ because a code pane's only legitimate placement is the global singleton window.
         @Test func aTerminalPaneAndACodePaneKeyToDistinctControllers() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
-            var layout = PanelLayoutEngine.appendTab(
+            let terminalLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            let json = String(decoding: try JSONEncoder().encode(terminalLayout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
-
             controller.panelCoordinator.restoreLayoutIfNeeded(
                 scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
+            let codeLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: codeLayout, frame: nil)
 
             let terminalContent = controller.panelCoordinator.content(forSessionID: "sess-1")
             let codeContent = controller.panelCoordinator.codePaneContent(forPaneID: "code")
@@ -131,16 +133,17 @@ extension ProcessProfileEnvironmentSuites {
         @Test func codePaneLookupSurvivesTerminalSessionChurn() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
-            var layout = PanelLayoutEngine.appendTab(
+            let terminalLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            let json = String(decoding: try JSONEncoder().encode(terminalLayout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             controller.panelCoordinator.restoreLayoutIfNeeded(
                 scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
+            let codeLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: codeLayout, frame: nil)
             let codeContentBefore = controller.panelCoordinator.codePaneContent(forPaneID: "code")
             #expect(codeContentBefore != nil, "precondition: the code pane's controller exists")
 
@@ -153,11 +156,12 @@ extension ProcessProfileEnvironmentSuites {
                 "the code pane's controller is untouched by the unrelated terminal session closing")
         }
 
-        /// A persisted `.codePane` pane is rebuilt on restore rather than dropped: the layout keeps the
-        /// pane, and the pane is backed by a live controller, not merely an inert layout entry. Exercised
-        /// with no device overview at all, since a code pane carries no daemon-side session to reconcile
-        /// and so does not depend on one to restore.
-        @Test func restoringAWorkspacePanelRebuildsAPersistedCodePane() throws {
+        /// A persisted `.workspace`-scope code pane is a leftover from before the Editor's placement was
+        /// confined to the global singleton window (in-panel code panes were removed entirely): restoring
+        /// the workspace's panel prunes it unconditionally (`AppKitController.restoredWorkspacePanelLayout`
+        /// passes `keepingWorkspaceKeys: []`), so restore finds nothing left to install rather than
+        /// rebuilding a placement that can no longer exist in this scope.
+        @Test func restoringAWorkspacePanelPrunesALegacyPersistedCodePane() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             let layout = PanelLayoutEngine.appendTab(
@@ -169,10 +173,8 @@ extension ProcessProfileEnvironmentSuites {
                 scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
 
             let restored = controller.panelCoordinator.layout(for: .workspace(deviceID: deviceID, workspaceID: "workspace-1"))
-            #expect(PanelLayoutEngine.allPanes(in: restored).map(\.id) == ["code"], "the code pane is not dropped by restore")
-            #expect(
-                controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil,
-                "restore rebuilds a live controller for the pane, not just the layout entry")
+            #expect(PanelLayoutEngine.allPanes(in: restored).isEmpty, "the legacy code pane is pruned rather than restored")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") == nil, "no controller is built for the pruned pane")
         }
 
         /// Deleting, stopping, or restarting a workspace closes its code panes but leaves another
@@ -212,7 +214,8 @@ extension ProcessProfileEnvironmentSuites {
             var layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "code-target", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code-other-workspace", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: layout)
+                tabID: "tab-2", pane: Pane(id: "code-other-workspace", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: layout
+            )
             layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-3", pane: Pane(id: "code-other-device", content: .codePane(deviceID: "other-device", workspaceID: "workspace-1")),
                 to: layout)
@@ -224,9 +227,9 @@ extension ProcessProfileEnvironmentSuites {
             controller.panelCoordinator.closeCodePanes(deviceID: deviceID, workspaceIDs: ["workspace-1"])
 
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted()
-                    == ["code-other-device", "code-other-workspace", "term"],
-                "only the matching device+workspace pane leaves the layout")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted() == [
+                    "code-other-device", "code-other-workspace", "term",
+                ], "only the matching device+workspace pane leaves the layout")
             #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-target") == nil, "the target pane's controller is torn down")
             #expect(
                 controller.panelCoordinator.codePaneContent(forPaneID: "code-other-workspace") != nil,
@@ -256,91 +259,65 @@ extension ProcessProfileEnvironmentSuites {
             controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: ["workspace-live"])
 
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted()
-                    == ["code-live", "code-other-device"], "workspace-gone's pane on the pruned device closes; the other device's pane does not")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted() == [
+                    "code-live", "code-other-device",
+                ], "workspace-gone's pane on the pruned device closes; the other device's pane does not")
         }
 
-        /// `openOrFocusCodePane` — the "Review changes" shortcut's handler — creates one code pane per
-        /// workspace panel and re-focuses it on a second call instead of creating a second one.
-        @Test func openOrFocusCodePaneCreatesOnceAndFocusesAfter() throws {
+        /// `openOrFocusGlobalEditorWindow` — the ⌘⌥E shortcut, the sidebar's "Open in Editor" item, and
+        /// every other open-editor entry point — creates one code pane in the global singleton window
+        /// when none is open anywhere yet, and re-focuses that same pane on a second call instead of
+        /// creating a second one. The freshly minted window id is not knowable ahead of time, so the test
+        /// recovers it from `onLayoutChanged`.
+        @Test func openOrFocusGlobalEditorWindowOpensAFreshSingletonWindowWhenNoneExistsAndFocusesOnASecondCall() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
-            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            var openedGlobalScopes: [PanelScope] = []
+            controller.panelCoordinator.onLayoutChanged = { scope, _ in if case .globalWindow = scope { openedGlobalScopes.append(scope) } }
 
-            let opened = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
+            let opened = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: "workspace-1")
+
             #expect(opened)
-            let paneID = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first?.id)
+            let globalScope = try #require(openedGlobalScopes.first, "a fresh global window scope was minted")
+            let panes = PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope))
+            #expect(panes.map(\.content) == [.codePane(deviceID: deviceID, workspaceID: "workspace-1")])
+            let paneID = try #require(panes.first?.id)
 
-            let focusedAgain = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
+            let focusedAgain = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: "workspace-1")
 
             #expect(focusedAgain)
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == [paneID],
-                "the second call focuses the existing code pane instead of opening a second one")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == [paneID],
+                "the second call focuses the existing pane instead of opening a second one")
         }
 
-        /// Fix 6 (P2 review): an already-open code pane stays focusable while its device is offline,
-        /// mirroring the terminal-pane parity rule (`canOpenOrFocusTerminalPane`) — focusing a pane that
-        /// already exists is client-side, so an unreachable device never withholds it; only *creating* a
-        /// fresh one is refused (`PanelCoordinator.mayCreateCodePane`, gated on `.offline`, not merely "no
-        /// section yet"). `restoreLayoutIfNeeded` installs the persisted pane's controller unconditionally
-        /// (a code pane has no daemon-side session to reconcile), so restoring it is unaffected by the
-        /// device's load state, and `openOrFocusCodePane`'s existing-placement branch focuses it without
-        /// ever reaching the creation gate — this is deliberately not exercised through the *refused*
-        /// creation branch, since that branch's `host.showWorkspaceDeviceUnavailableError` presents a real
-        /// `NSAlert.runModal()` that would hang the suite (see `PanelReplacementHoldTests.swift`'s
-        /// identical caution); `AppKitControllerDeviceParityTests.aFreshCodePaneIsRefusedForADeviceThatCannotAct`
-        /// covers that refusal's pure decision logic instead.
-        @Test func openOrFocusCodePaneFocusesAnExistingPaneEvenWhileItsDeviceIsOffline() throws {
+        /// Fix 6 (P2 review): an already-open Editor window stays focusable while its device is offline —
+        /// focusing a pane that already exists is client-side, so an unreachable device never withholds
+        /// it; only *creating* a fresh one is refused (`PanelCoordinator.mayCreateCodePane`, gated on
+        /// `.offline`). This is deliberately not exercised through the *refused* creation branch, since
+        /// that branch's `host.showWorkspaceDeviceUnavailableError` presents a real `NSAlert.runModal()`
+        /// that would hang the suite (see `PanelReplacementHoldTests.swift`'s identical caution);
+        /// `AppKitControllerDeviceParityTests.aFreshCodePaneIsRefusedForADeviceThatCannotAct` covers that
+        /// refusal's pure decision logic instead.
+        @Test func openOrFocusGlobalEditorWindowFocusesAnExistingWindowEvenWhileItsDeviceIsOffline() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1", loadState: .offline("Connection refused"))]
             controller.rebuildFlatSidebarData()
-            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
-
-            #expect(focused, "the existing pane focuses even though its device cannot service a fresh creation")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code"],
-                "no second pane is installed alongside the restored one")
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "the restored pane's controller is live")
-        }
-
-        /// A code pane already open in a global panel window is the same pane `openOrFocusCodePane` must
-        /// find: it focuses that pane instead of installing a duplicate in the workspace's own panel.
-        /// Mirrors the terminal convention of focusing a session's pane wherever it lives
-        /// (`placement(forSessionID:)`), which the code-pane lookup did not follow before this fix — it
-        /// searched only the workspace's own panel scope.
-        @Test func openOrFocusCodePaneFocusesAnExistingPaneInAGlobalPanelWindowInsteadOfDuplicating() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
-            controller.rebuildFlatSidebarData()
-            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
-            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            let layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "code-global", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
 
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
+            let focused = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: "workspace-1")
 
-            #expect(focused)
+            #expect(focused, "the existing window focuses even though its device cannot service a fresh creation")
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["code-global"],
-                "no duplicate pane is installed in the global panel window")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).isEmpty,
-                "the workspace's own panel gains no code pane")
-            #expect(
-                controller.panelCoordinator.layout(for: globalScope).focusedPaneID == "code-global",
-                "the existing pane in the global panel window is focused")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code"],
+                "no second pane is installed alongside the existing one")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "the existing pane's controller is live")
         }
 
         /// `focusPane(forCodePaneID:)` — the code-pane counterpart of `focusPane(forSessionID:)`, used to
@@ -371,19 +348,34 @@ extension ProcessProfileEnvironmentSuites {
 
         /// The workspace panel view's window-membership seam (`WorkspacePanelView.onWindowMembershipChanged`,
         /// wired in `panelCoordinator.panelView(for:)`) hibernates a code pane's `WKWebView` when the panel
-        /// view leaves the window — a workspace switch removing it from the main window's detail container
-        /// while keeping the panel alive detached — and rebuilds it when the panel rejoins a window. A
-        /// terminal pane in the same selected tab is untouched by the same transition: Ghostty surfaces are
-        /// meant to survive detachment, so only code-pane content hibernates.
+        /// view leaves the window while keeping the panel alive detached, and rebuilds it when the panel
+        /// rejoins a window. A terminal pane split alongside it in the same global singleton window is
+        /// untouched by the same transition: Ghostty surfaces are meant to survive detachment, so only
+        /// code-pane content hibernates. Splits (but not tabs) are allowed in the global window, so a
+        /// terminal pane and a code pane can legitimately sit side by side there.
         @Test func panelLeavingTheWindowHibernatesItsCodePaneButLeavesItsTerminalPaneAlone() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
-            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            // Both panes sit in the same (only, selected) tab as split children, so restoring selection
-            // activates both — proving the terminal pane is left alone rather than merely never having
-            // been activated in the first place.
+            // Pre-populates "sess-1"'s controller through the same `.withoutFocus` restore path
+            // `aTerminalPaneAndACodePaneKeyToDistinctControllers` uses, before the `.globalWindow` restore
+            // below ever runs. `restorePanelWindow`'s own terminal branch always prepares with `.focus` (a
+            // restored window's focused pane re-activates on completion), and a fake session with no real
+            // daemon behind it always fails preparation — with `.focus` that reports itself with a real,
+            // blocking `NSAlert.runModal()` (`terminalPaneOpenFailureUsesModalAlert`), which nothing in this
+            // test process can dismiss. Priming the controller here first means `restorePanelWindow`'s guard
+            // (`contentControllers[sessionID] == nil`) finds it already installed and never schedules that
+            // `.focus` preparation at all; the `.withoutFocus` task this priming step itself schedules can
+            // still fail later, silently, exactly as intended for a non-interactive open.
+            let terminalLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "term-ws", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
+            let terminalJSON = String(decoding: try JSONEncoder().encode(terminalLayout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: terminalJSON)
+            controller.panelCoordinator.restoreLayoutIfNeeded(
+                scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
+
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayout(
                 version: PanelLayout.currentVersion,
                 tabs: [
@@ -395,22 +387,10 @@ extension ProcessProfileEnvironmentSuites {
                                 children: [
                                     .leaf(Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1"))),
                                     .leaf(Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1"))),
-                                ]))),
+                                ])))
                 ], selectedTabID: "tab-1", focusedPaneID: "code")
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-
-            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
             let panelView = controller.panelCoordinator.panelView(for: scope)
-            // Joins a window before `restoreSelection`, matching production order (AppKitController
-            // attaches the panel view to the detail container before calling `restoreSelection`): a
-            // code pane only activates while its panel view is windowed (Fix 4's window-membership
-            // gate in `activateContentIfVisible`), so restoring selection first would leave it
-            // inactive and falsify this test's own precondition below.
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
-            window.contentView?.addSubview(panelView)
-            #expect(panelView.window === window, "precondition: the panel view joined a window")
-            controller.panelCoordinator.restoreSelection(scope: scope)
 
             let terminalContentBefore = controller.panelCoordinator.content(forSessionID: "sess-1")
             #expect(terminalContentBefore != nil, "precondition: the terminal pane's controller exists")
@@ -426,77 +406,21 @@ extension ProcessProfileEnvironmentSuites {
                 (controller.panelCoordinator.content(forSessionID: "sess-1") as AnyObject?) === (terminalContentBefore as AnyObject?),
                 "the terminal pane's controller is untouched by the detach path")
 
-            window.contentView?.addSubview(panelView)
-
-            #expect(
-                codeContent.contentView.subviews.contains { $0 is WKWebView }, "rejoining the window rebuilds the code pane's web view")
-        }
-
-        /// Fix 4 regression: a *background* layout mutation reached while the panel is detached must not
-        /// undo the hibernation the detach just performed. `closePane(sessionIsTerminating: true)` (an
-        /// externally-driven close, e.g. overview pruning — see
-        /// `AppKitController.terminalPaneCloseMovesKeyboardFocus`) removes tab-1's only pane, which
-        /// removes the whole tab and falls back to selecting tab-2 — the code pane's tab — entirely
-        /// through `mutateLayout`'s internal `activateContentIfVisible` scan, never through
-        /// `activateFocusedPane` (which would bypass the window-membership gate this test exercises).
-        /// Rejoining the window afterward must still activate the code pane the detached scan correctly
-        /// skipped.
-        @Test func detachedPanelDoesNotReactivateACodePaneSelectedByABackgroundMutation() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
-            controller.rebuildFlatSidebarData()
-            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            // tab-1 (selected, terminal-only) and tab-2 (unselected, code pane) — closing tab-1's only
-            // pane removes the tab and falls back to tab-2.
-            var layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendUnselectedTab(
-                tabID: "tab-2", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: layout)
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-
-            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
-            let panelView = controller.panelCoordinator.panelView(for: scope)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
             window.contentView?.addSubview(panelView)
-            controller.panelCoordinator.restoreSelection(scope: scope)
 
-            let codeContent = try #require(
-                controller.panelCoordinator.codePaneContent(forPaneID: "code") as? CodePaneContentController,
-                "precondition: the code pane's controller exists")
-            #expect(
-                !codeContent.contentView.subviews.contains { $0 is WKWebView },
-                "precondition: the code pane's unselected tab is not activated")
-
-            panelView.removeFromSuperview()
-            #expect(panelView.window == nil, "precondition: the panel view left the window")
-
-            controller.panelCoordinator.closePane(forSessionID: "sess-1", sessionIsTerminating: true)
-
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code"],
-                "precondition: closing tab-1's only pane removed the tab, leaving tab-2 as the sole (and now selected) tab")
-            #expect(
-                !codeContent.contentView.subviews.contains { $0 is WKWebView },
-                "a background mutation selecting the code pane's tab while detached must not activate it")
-
-            window.contentView?.addSubview(panelView)
-
-            #expect(
-                codeContent.contentView.subviews.contains { $0 is WKWebView },
-                "rejoining the window activates the code pane the detached scan correctly skipped")
+            #expect(codeContent.contentView.subviews.contains { $0 is WKWebView }, "rejoining a window rebuilds the code pane's web view")
         }
 
-        // MARK: - Phase 6: workspace-following review monitors (`.globalWindow` code panes retarget)
+        // MARK: - Workspace-following Editor window (`.globalWindow` code pane retargets on selection)
 
         /// The single funnel (`showWorkspaceDetail`) presenting a different workspace than it last
-        /// presented retargets every `.globalWindow` code pane to the new workspace: the pane's
-        /// descriptor, its persisted layout, its controller instance (a fresh one — retarget is
-        /// close-and-reinstall, not a live edit), and its title all move to the newly selected
-        /// workspace. The very first `showWorkspaceDetail` call of a session must not retarget — a
-        /// restored monitor stays on its saved workspace until a real subsequent change — so this
-        /// exercises that call first and confirms it is a no-op before exercising the real change.
+        /// presented retargets the `.globalWindow` code pane to the new workspace: the pane's descriptor,
+        /// its persisted layout, its controller instance (a fresh one — retarget is close-and-reinstall,
+        /// not a live edit), and its title all move to the newly selected workspace. The very first
+        /// `showWorkspaceDetail` call of a session must not retarget — a restored monitor stays on its
+        /// saved workspace until a real subsequent change — so this exercises that call first and confirms
+        /// it is a no-op before exercising the real change.
         @Test func showWorkspaceDetailRetargetsAGlobalPanelWindowsCodePaneToTheNewlySelectedWorkspace() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
@@ -530,13 +454,10 @@ extension ProcessProfileEnvironmentSuites {
                 "retarget installs a fresh controller instance rather than mutating the old one in place")
             #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected workspace")
             #expect(retargetedContent.initialMode == .diff, "a retargeted monitor lands in diff mode")
-            #expect(
-                retargetedContent.displayTitle == "Code — feature-2",
-                "the title reflects the newly selected workspace's name")
+            #expect(retargetedContent.displayTitle == "Code — feature-2", "the title reflects the newly selected workspace's name")
             let pane = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" })
             #expect(
-                pane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
-                "the layout's pane descriptor moves to the new workspace")
+                pane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "the layout's pane descriptor moves to the new workspace")
 
             let record = try #require(controller.clientDatabase().panelWindows().first { $0.id == "panel-1" }, "the retarget persists")
             let persistedLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(record.layoutJSON.utf8))
@@ -572,8 +493,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
-                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
-                "precondition: the monitor retargeted to workspace-2")
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "precondition: the monitor retargeted to workspace-2")
 
             // A detour through Alerts: nils out `visibleDetailWorkspaceID`, but must not disturb which
             // workspace was last presented.
@@ -588,8 +508,7 @@ extension ProcessProfileEnvironmentSuites {
             #expect(retargetedContent.initialMode == .diff, "the retargeted monitor lands in diff mode")
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
-                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"),
-                "the layout's pane descriptor moves back to workspace-1")
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the layout's pane descriptor moves back to workspace-1")
         }
 
         /// A same-workspace reselection must never retarget the monitor, whether or not an Alerts detour
@@ -612,8 +531,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
 
             #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?)
-                    === (contentAfterFirstPresentation as AnyObject?),
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (contentAfterFirstPresentation as AnyObject?),
                 "a same-workspace reselection never retargets the monitor, even across an Alerts detour")
         }
 
@@ -636,96 +554,15 @@ extension ProcessProfileEnvironmentSuites {
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .backgroundRefresh)
 
             #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?)
-                    === (contentAfterFirstPresentation as AnyObject?),
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (contentAfterFirstPresentation as AnyObject?),
                 "repeated presentation of the same workspace never retargets or replaces the monitor's controller")
         }
 
-        /// A code pane in a workspace's own panel (`.workspace` scope) belongs to that one workspace and
-        /// never retargets, even while a `.globalWindow` monitor open at the same time does. Locks in the
-        /// Part 3 requirement that placement — not a flag — is what decides retargeting behavior.
-        @Test func retargetGlobalWindowCodePanesLeavesAWorkspaceScopedCodePaneUntouched() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
-            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            let workspaceLayout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            let json = String(decoding: try JSONEncoder().encode(workspaceLayout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.panelCoordinator.restoreLayoutIfNeeded(scope: workspaceScope, focusIntent: .withoutFocus)
-            let globalLayout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
-            let ownedContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "owned"))
-            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
-            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
-            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
-
-            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
-
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
-                "the workspace-scoped pane is neither closed nor moved")
-            #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "owned") as AnyObject?) === (ownedContentBefore as AnyObject?),
-                "the workspace-scoped pane's controller instance is untouched by a retarget targeting the same workspace id")
-            let monitorPane = try #require(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1"))).first {
-                    $0.id == "monitor"
-                })
-            #expect(
-                monitorPane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
-                "meanwhile the global-window monitor did retarget")
-        }
-
-        /// When a workspace's own panel already holds a code pane for it and a `.globalWindow` monitor is
-        /// also open — already showing that same workspace — `openOrFocusCodePane` prefers the global
-        /// monitor over the workspace's own pane (`resolveCodePaneForNavigation`'s `.reuseGlobal` case
-        /// wins before `.focusLocal` is even considered): the "one global pane, one local pane per
-        /// workspace" cap is enforced by always routing a gesture to the global pane first, not by which
-        /// scope sorts first. Since the monitor already targets `workspace-1`, no retarget is needed —
-        /// the same controller instance is reused, only focused.
-        @Test func openOrFocusCodePanePrefersAGlobalWindowMonitorOverTheWorkspacesOwnPanelPane() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
-            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            let workspaceLayout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            let json = String(decoding: try JSONEncoder().encode(workspaceLayout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.panelCoordinator.restoreLayoutIfNeeded(scope: workspaceScope, focusIntent: .withoutFocus)
-            let globalLayout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
-            let monitorContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
-
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff)
-
-            #expect(focused)
-            #expect(
-                controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1")).focusedPaneID == "monitor",
-                "the global-window monitor is focused, not the workspace's own panel pane")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: .globalWindow(panelWindowID: "panel-1"))).map(\.id) == [
-                    "monitor"
-                ], "no duplicate pane is installed in the global panel window")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).map(\.id) == ["owned"],
-                "the workspace's own panel pane is left exactly as it was")
-            #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContentBefore as AnyObject?),
-                "reusing a monitor already showing the gesture's workspace does not retarget it — same controller instance")
-        }
-
-        /// Reusing a global monitor for a gesture whose workspace it does not currently show retargets it
-        /// — closing and reinstalling on the same pane id (`retargetCodePane`, shared with
-        /// `retargetGlobalWindowCodePanes`) — and, unlike that sidebar-follow path (always `.diff`), the
-        /// fresh controller lands directly in the navigation gesture's own requested mode.
-        @Test func openOrFocusCodePaneRetargetsAGlobalMonitorAndAppliesTheGesturesMode() throws {
+        /// Reusing a global singleton for `openOrFocusGlobalEditorWindow` whose workspace it does not
+        /// currently show retargets it — closing and reinstalling on the same pane id (`retargetCodePane`,
+        /// shared with `retargetGlobalWindowCodePanes`) — and lands in `.diff` mode, the mode every
+        /// open-editor entry point requests.
+        @Test func openOrFocusGlobalEditorWindowRetargetsAnExistingSingletonToDiffMode() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
@@ -736,113 +573,19 @@ extension ProcessProfileEnvironmentSuites {
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
             let originalContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
 
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
+            let focused = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: "workspace-1")
 
             #expect(focused)
             let retargetedContent = try #require(
                 controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
-                "the monitor's pane id keeps a live controller after retargeting")
-            #expect(
-                (retargetedContent as AnyObject?) !== (originalContent as AnyObject?), "retarget installs a fresh controller instance")
-            #expect(retargetedContent.workspaceID == "workspace-1", "the new controller is scoped to the gesture's workspace")
-            #expect(retargetedContent.initialMode == .editor, "the fresh controller lands directly in the gesture's mode, not always diff")
+                "the singleton's pane id keeps a live controller after retargeting")
+            #expect((retargetedContent as AnyObject?) !== (originalContent as AnyObject?), "retarget installs a fresh controller instance")
+            #expect(retargetedContent.workspaceID == "workspace-1", "the new controller is scoped to the requested workspace")
+            #expect(retargetedContent.initialMode == .diff, "every open-editor entry point lands in diff mode")
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
-                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the layout's pane descriptor moves to the gesture's workspace")
-            #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "monitor", "the retargeted monitor is focused")
-        }
-
-        /// Reusing a global monitor already showing the gesture's workspace does not retarget it (same
-        /// controller instance, per the inverted-priority test above), but its mode still switches to
-        /// match the gesture: `requestMode`'s live-push path pushes a `spaces:setMode` script into the
-        /// page — the same push a toolbar click's echo would confirm — rather than silently dropping the
-        /// gesture's mode just because a pane already happened to be open.
-        @Test func openOrFocusCodePaneReusingAnAlreadyTargetedGlobalMonitorSwitchesItsModeWithoutRetargeting() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
-            let layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
-            let monitorContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController)
-            monitorContent.activate(focus: false)
-            let evaluator = RecordingCodePaneScriptEvaluator()
-            monitorContent.scriptEvaluator = evaluator
-            monitorContent.handleReady()
-
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
-
-            #expect(focused)
-            #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContent as AnyObject?),
-                "reusing a monitor already on the gesture's workspace does not retarget it")
-            #expect(
-                evaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") && $0.contains(#""mode":"editor""#) },
-                "the gesture's mode is pushed into the already-live pane instead of being dropped")
-        }
-
-        /// A workspace's own local pane is reused when no global monitor is open anywhere, and its mode
-        /// switches to match the gesture — the same "focus, then apply mode" shape `reuseGlobalCodePane`
-        /// follows for a global monitor above.
-        @Test func openOrFocusCodePaneReusesTheWorkspacesOwnPaneAndAppliesTheGesturesModeWhenNoGlobalMonitorIsOpen() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
-            controller.rebuildFlatSidebarData()
-            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            let layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "owned", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
-            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
-            let ownedContent = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "owned") as? CodePaneContentController)
-            ownedContent.activate(focus: false)
-            let evaluator = RecordingCodePaneScriptEvaluator()
-            ownedContent.scriptEvaluator = evaluator
-            ownedContent.handleReady()
-
-            let focused = controller.panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: "workspace-1", mode: .editor)
-
-            #expect(focused)
-            #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "owned") as AnyObject?) === (ownedContent as AnyObject?),
-                "the workspace's own pane is reused, not recreated")
-            #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "owned", "the reused pane is focused")
-            #expect(
-                evaluator.evaluatedScripts.contains { $0.contains("spaces:setMode") && $0.contains(#""mode":"editor""#) },
-                "the gesture's mode is pushed into the reused local pane")
-        }
-
-        /// `openOrReuseCodePaneInNewTab` is the new-tab picker's "Diff"/"Open file…" row completion
-        /// (`AppKitController+TerminalPaneContent.presentNewTabSessionPicker`, which only has
-        /// `host`/`panelCoordinator` access): it must route through the same reuse-before-create
-        /// resolution order as `openOrFocusCodePane`, not create unconditionally — an already-open
-        /// global monitor is reused instead of installing a duplicate in the panel the picker was
-        /// invoked from.
-        @Test func openOrReuseCodePaneInNewTabReusesAnAlreadyOpenGlobalMonitorInsteadOfCreatingADuplicate() throws {
-            let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
-            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
-            let workspaceScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
-            let layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
-            let monitorContentBefore = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
-
-            controller.panelCoordinator.openOrReuseCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", mode: .diff, in: workspaceScope)
-
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["monitor"],
-                "no duplicate pane is installed in the global panel window")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: workspaceScope)).isEmpty,
-                "the workspace's own panel, where the new-tab picker was invoked, gains no code pane")
-            #expect(
-                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (monitorContentBefore as AnyObject?),
-                "the existing global monitor is reused, not retargeted or recreated")
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the layout's pane descriptor moves to the requested workspace")
+            #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "monitor", "the retargeted singleton is focused")
         }
 
         /// Deleting (or otherwise retiring) a monitor's target workspace closes its pane through the
@@ -898,8 +641,7 @@ extension ProcessProfileEnvironmentSuites {
                 "the first-ever presentation this session does not retarget the restored monitor, even to a workspace other than its own")
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
-                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"),
-                "the monitor is still on its persisted workspace")
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the monitor is still on its persisted workspace")
 
             let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
@@ -909,8 +651,41 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
-                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
-                "a real subsequent selection change still retargets the monitor")
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "a real subsequent selection change still retargets the monitor")
+        }
+
+        // MARK: - Legacy multi-tab global window restore (decision: global windows carry no tabs)
+
+        /// A global panel window persisted before global windows dropped tabs can still have more than
+        /// one tab in its saved layout. Restoring it must not collapse or drop any of them: each tab
+        /// becomes its own single-tab window, the original record's id and frame staying with its first
+        /// tab. The split result is persisted immediately so this is a one-time migration.
+        @Test func reopenPersistedPanelWindowsSplitsALegacyMultiTabWindowIntoOneWindowPerTab() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            var legacyLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code-1", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            legacyLayout = PanelLayoutEngine.appendUnselectedTab(
+                tabID: "tab-2", pane: Pane(id: "code-2", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: legacyLayout)
+            let json = String(decoding: try JSONEncoder().encode(legacyLayout), as: UTF8.self)
+            try controller.clientDatabase().upsertPanelWindow(
+                SpacesClientDatabase.PanelWindowRecord(id: "legacy-1", layoutJSON: json, frame: (x: 10, y: 20, width: 300, height: 200)))
+
+            controller.reopenPersistedPanelWindowsIfPossible()
+
+            let originalScope = PanelScope.globalWindow(panelWindowID: "legacy-1")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: originalScope)).map(\.id) == ["code-1"],
+                "the original record keeps its id and its first tab only")
+            let persistedRows = try controller.clientDatabase().panelWindows()
+            #expect(persistedRows.count == 2, "the split result is persisted as two rows, not left as one multi-tab row")
+            let splitOffRow = try #require(persistedRows.first { $0.id != "legacy-1" })
+            let splitOffLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(splitOffRow.layoutJSON.utf8))
+            #expect(splitOffLayout.tabs.map(\.id) == ["tab-2"], "the second tab becomes its own window, with no tab lost or collapsed")
+            #expect(PanelLayoutEngine.allPanes(in: splitOffLayout).map(\.id) == ["code-2"])
+            #expect(splitOffRow.frame?.x == 34, "the split-off window's frame is cascaded off the original rather than stacking exactly on it")
         }
     }
 }

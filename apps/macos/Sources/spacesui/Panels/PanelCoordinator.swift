@@ -115,15 +115,20 @@ import spacesterminalcore
         view.onMoveTab = { [weak self] tabID, insertionIndex in self?.moveTab(scope: scope, tabID: tabID, insertionIndex: insertionIndex) }
         view.onRenameTab = { [weak self] tabID, title in self?.renameTab(scope: scope, tabID: tabID, title: title) }
         view.onNewTab = { [weak self] in
-            guard let self else { return }
-            // A global panel window's "+" creates a fresh ad hoc session directly; only a
-            // workspace panel's "+" (in the main window) opens the target picker.
-            switch scope {
-            case .workspace: self.host.presentNewTabSessionPicker(scope: scope)
-            case .globalWindow: self.host.openNewTerminalTab(scope: scope)
-            }
+            // Only a `.workspace` panel's tab strip carries a "+": a global window has no tab
+            // strip and no tab-creation control (decision: no tabs on global windows), so its
+            // identity strip never wires this closure to anything and it should never fire here.
+            guard let self, case .workspace = scope else { return }
+            self.host.presentNewTabSessionPicker(scope: scope)
         }
         view.onSplitPane = { [weak self] paneID, direction in self?.beginSplit(scope: scope, paneID: paneID, direction: direction) }
+        view.onOpenTabInNewWindow = { [weak self] tabID in self?.moveTabToNewPanelWindow(scope: scope, tabID: tabID) }
+        view.onOpenSelectedPaneInNewWindow = { [weak self] tabID in
+            guard let self, let tab = self.layout(for: scope).tabs.first(where: { $0.id == tabID }),
+                let paneID = PanelLayoutEngine.selectedPane(in: tab)?.id
+            else { return }
+            self.movePaneToNewPanelWindow(scope: scope, paneID: paneID)
+        }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
         view.paneContentProvider = { [weak self] pane in self?.content(forPane: pane) }
@@ -345,15 +350,6 @@ import spacesterminalcore
     /// The session whose pane currently holds keyboard focus in the key window, if any. Answers nil
     /// while a code pane holds focus — it has no session id.
     func focusedSessionID() -> String? { (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? any TerminalPaneContentHosting)?.sessionID }
-
-    /// The workspace a focused code pane belongs to, if a code pane currently holds keyboard focus in
-    /// the key window. The code-pane counterpart of `focusedSessionID()`, used to resolve which
-    /// workspace a global panel window's "new terminal" action targets when the focused pane has no
-    /// session of its own to look a workspace up from.
-    func focusedCodePaneWorkspaceID() -> String? {
-        guard case .codePane(_, let workspaceID) = contentOwning(responder: NSApp.keyWindow?.firstResponder)?.descriptor else { return nil }
-        return workspaceID
-    }
 
     /// The pane id of a focused code pane in the key window, if any. The palette's return-focus
     /// capture for a code pane, the code-pane counterpart of `focusedSessionID()`: a code pane has no
@@ -662,9 +658,9 @@ import spacesterminalcore
     /// Whether a fresh code pane may be installed for `workspaceID`, refusing — with the reason,
     /// naming the device — a creation whose device cannot service any daemon action right now.
     /// Mirrors `mayActOnTerminalPane`'s "install door" reasoning: focusing a code pane that
-    /// already exists is client-side and always allowed, and `openOrFocusCodePane` never reaches
-    /// this helper for that case (its own existing-placement branch returns first), so this only
-    /// ever needs to gate creation, never focus.
+    /// already exists is client-side and always allowed, and `openOrFocusGlobalEditorWindow` never
+    /// reaches this helper for that case (its own existing-placement branch returns first), so this
+    /// only ever needs to gate creation, never focus.
     private func mayCreateCodePane(workspaceID: String) -> Bool {
         guard AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forWorkspaceID: workspaceID)) else {
             host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
@@ -725,6 +721,11 @@ import spacesterminalcore
                 else { continue }
                 _ = ensureContentController(request: request, focusIntent: focusIntent)
             case .codePane(let paneDeviceID, let paneWorkspaceID):
+                // Unreachable in practice: this function only ever restores `.workspace` scope (the
+                // guard above), and `host.restoredWorkspacePanelLayout` prunes every code pane out of a
+                // `.workspace`-scope layout before returning it (a code pane's only legitimate placement
+                // is the global singleton window). Handled anyway so this switch stays exhaustive over
+                // `PaneContentDescriptor` without assuming the pruning guarantee here too.
                 installCodePaneController(paneID: pane.id, deviceID: paneDeviceID, workspaceID: paneWorkspaceID)
             }
         }
@@ -772,6 +773,50 @@ import spacesterminalcore
     private func isLonePane(scope: PanelScope) -> Bool {
         let layout = layout(for: scope)
         return layout.tabs.count == 1 && PanelLayoutEngine.allPanes(in: layout).count == 1
+    }
+
+    /// Moves a whole tab (every pane in its split, as one unit) into a fresh global window — the
+    /// tab-header context menu's "Open Tab in New Window", offered for every tab kind in a workspace
+    /// panel. This is a `.workspace`-scope action (the tab bar it hangs off of only exists there;
+    /// `.globalWindow` scope uses the identity strip instead), and a code pane can only ever live in
+    /// `.globalWindow` scope, so `panes[0].content` is never `.codePane` here — it is handled only for
+    /// `PaneContentDescriptor`'s exhaustiveness.
+    ///
+    /// The tab's pane ids are carried over unchanged rather than reissued the way
+    /// `moveSessionToNewPanelWindow` reissues a terminal pane's id: a code pane's content controller is
+    /// keyed by its pane id (it has no session id of its own), so a split mixing a code pane with other
+    /// content has to keep that id fixed for the controller lookup to keep resolving after the move.
+    func moveTabToNewPanelWindow(scope: PanelScope, tabID: String) {
+        guard let tab = layout(for: scope).tabs.first(where: { $0.id == tabID }) else { return }
+        let panes = PanelLayoutEngine.panes(in: tab)
+        if panes.count == 1, case .codePane = panes[0].content { return }
+        mutateLayout(scope: scope) { PanelLayoutEngine.removeTab(tabID: tabID, from: $0)?.layout ?? $0 }
+        let newScope = PanelScope.globalWindow(panelWindowID: UUID().uuidString)
+        mutateLayout(scope: newScope) { _ in PanelLayoutEngine.layout(soloTab: tab) }
+        host.showPanelScope(newScope)
+        activateFocusedPane(scope: newScope)
+    }
+
+    /// Moves one pane out of its tab into its own fresh global window — the tab-header context menu's
+    /// "Open Selected Pane in New Window" (offered only when the tab has more than one pane; a
+    /// single-pane tab has nothing left behind, so that case is `moveTabToNewPanelWindow` instead), and
+    /// also a `.globalWindow` panel's identity-strip menu item of the same name
+    /// (`PanelWindowIdentityStripView.menu(for:)`). The identity strip offers that item only when its
+    /// tab's displayed pane is a terminal session (`PanelLayoutEngine.canMoveFocusedPaneOutOfPanelWindow`):
+    /// the Editor's window IS its placement, and moving it would mean recreating it, losing its unsaved
+    /// buffer. So the `.codePane` branch below stays a defensive no-op rather than dead code — the tab
+    /// header path already excludes code panes (see `moveTabToNewPanelWindow`'s doc comment), and the
+    /// identity-strip path excludes them by never offering the menu item in the first place.
+    func movePaneToNewPanelWindow(scope: PanelScope, paneID: String) {
+        guard let pane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) else { return }
+        switch pane.content {
+        case .codePane: return
+        case .terminalSession(_, let sessionID):
+            guard let workspaceID = contentControllers[sessionID]?.workspaceID,
+                let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
+            else { return }
+            moveSessionToNewPanelWindow(request)
+        }
     }
 
     /// Materializes (if needed) and fronts a global panel's window shell.
@@ -1083,11 +1128,6 @@ import spacesterminalcore
             guard let self, let result else { return }
             switch result {
             case .terminal(let request): self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
-            case .codePane(let deviceID, let workspaceID, let mode):
-                self.resolveCodePanePickerChoice(deviceID: deviceID, workspaceID: workspaceID, mode: mode) {
-                    self.fillSplitWithCodePane(
-                        scope: scope, paneID: paneID, direction: direction, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
-                }
             }
         }
     }
@@ -1139,35 +1179,11 @@ import spacesterminalcore
 
     // MARK: - Code panes
 
-    /// Where a code-pane navigation gesture (the "Review changes" shortcut, and the "Diff"/"Open
-    /// file…" picker rows in both the new-tab and split pickers) should land.
-    enum CodePaneNavigationTarget {
-        /// A code pane already open in some `.globalWindow` panel — reuse it, retargeting first if it
-        /// isn't already showing the gesture's workspace.
-        case reuseGlobal(PanePlacement)
-        /// No global pane open anywhere, but the gesture's own workspace already has one in its own
-        /// panel — reuse that.
-        case focusLocal(PanePlacement)
-        /// Nothing open anywhere — the gesture creates its own pane at its own placement.
-        case none
-    }
-
-    /// Resolution order for every code-pane navigation gesture: a global-window pane, if one is open
-    /// anywhere, is reused before a workspace's own pane, which is reused before creating anything
-    /// fresh. This is how the "one global pane, one local pane per workspace" caps are enforced — by
-    /// resolution order always preferring reuse over creation, never by closing an existing pane (a
-    /// stale layout left over with more than one global pane is left alone; this only decides which one
-    /// a gesture routes to).
-    private func resolveCodePaneForNavigation(deviceID: String, workspaceID: String) -> CodePaneNavigationTarget {
-        if let placement = anyGlobalCodePanePlacement() { return .reuseGlobal(placement) }
-        if let placement = localCodePanePlacement(deviceID: deviceID, workspaceID: workspaceID) { return .focusLocal(placement) }
-        return .none
-    }
-
     /// The first code pane open in any `.globalWindow` panel, in `scopeSortKey` order (deterministic in
-    /// the case, against convention, that more than one is open). Workspace-agnostic on purpose: any
-    /// open global pane is the one navigation-gesture reuse targets, retargeting it to the gesture's
-    /// workspace when it isn't already showing it.
+    /// the case, against convention, that more than one is open). The editor's only placement is the
+    /// global singleton window, so this is also the whole answer to "is the Editor window open, and
+    /// where" — `openOrFocusGlobalEditorWindow` reuses it, and `retargetGlobalWindowCodePanes` follows
+    /// the sidebar's selection into it.
     private func anyGlobalCodePanePlacement() -> PanePlacement? {
         for (scope, state) in panels.sorted(by: { scopeSortKey($0.key) < scopeSortKey($1.key) }) {
             guard case .globalWindow = scope else { continue }
@@ -1181,52 +1197,26 @@ import spacesterminalcore
         return nil
     }
 
-    /// Where a workspace's own code pane lives in its `.workspace(deviceID, workspaceID)` panel, if one
-    /// is open there.
-    private func localCodePanePlacement(deviceID: String, workspaceID: String) -> PanePlacement? {
-        guard let state = panels[.workspace(deviceID: deviceID, workspaceID: workspaceID)] else { return nil }
-        for tab in state.layout.tabs {
-            for pane in PanelLayoutEngine.panes(in: tab) {
-                guard case .codePane = pane.content else { continue }
-                return PanePlacement(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID), tabID: tab.id, paneID: pane.id)
-            }
-        }
-        return nil
-    }
+    /// Whether a live global code pane (the Editor) is already open anywhere. Restore-time pruning
+    /// (`AppKitController.panelWindowRestoreDecision`, via `reopenPersistedPanelWindowsIfPossible`)
+    /// reads this fresh for every pending persisted window so a code pane it is about to restore never
+    /// duplicates one that is already live — see `PanelLayoutEngine.prunedLayout`'s
+    /// `droppingAllCodePanes` parameter for the full offline-device race this closes.
+    var hasLiveGlobalCodePane: Bool { anyGlobalCodePanePlacement() != nil }
 
-    /// Focuses the workspace's existing code pane per `resolveCodePaneForNavigation`'s resolution
-    /// order — a global panel window first, then the workspace's own panel — applying `mode` to
-    /// whichever pane it finds, or opens a fresh one in `mode` in the workspace's own panel when none is
-    /// open anywhere. The "Review changes" shortcut's action. Mirrors the terminal convention
-    /// (`placement(forSessionID:)`, `openOrFocusTerminalPane`): a code pane opened via the split/new-tab
-    /// picker, or restored at startup, is the same pane as one opened from this shortcut, so the
-    /// shortcut must find and focus it instead of installing a duplicate.
-    @discardableResult func openOrFocusCodePane(deviceID: String, workspaceID: String, mode: CodePaneMode) -> Bool {
-        guard let scope = workspaceScope(forWorkspaceID: workspaceID) else { return false }
-        restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
-        switch resolveCodePaneForNavigation(deviceID: deviceID, workspaceID: workspaceID) {
-        case .reuseGlobal(let placement):
-            reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
+    /// Opens or focuses the singleton global Editor window — the ⌘⌥E shortcut, the sidebar's "Open in
+    /// Editor" item (when the editor preference is `.builtin`), and every other open-editor entry
+    /// point. The Editor's only placement is this global singleton: `anyGlobalCodePanePlacement` always
+    /// returns the first (and, by construction, only) one open anywhere, and every such pane already
+    /// retargets to the sidebar's current workspace automatically (`retargetGlobalWindowCodePanes`), so
+    /// this reuses that same placement rather than tracking a separate identity for it.
+    @discardableResult func openOrFocusGlobalEditorWindow(deviceID: String, workspaceID: String) -> Bool {
+        if let globalPlacement = anyGlobalCodePanePlacement() {
+            reuseGlobalCodePane(globalPlacement, deviceID: deviceID, workspaceID: workspaceID, mode: .diff)
             return true
-        case .focusLocal(let placement):
-            focus(placement: placement)
-            (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
-            return true
-        case .none: return openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
         }
-    }
-
-    /// Routes a code-pane picker row (the split picker's and new-tab picker's "Diff"/"Open file…" rows)
-    /// through the same reuse-before-create resolution order as `openOrFocusCodePane`, falling through
-    /// to `createIfNothingToReuse` only when nothing is open anywhere to reuse.
-    private func resolveCodePanePickerChoice(deviceID: String, workspaceID: String, mode: CodePaneMode, createIfNothingToReuse: () -> Void) {
-        switch resolveCodePaneForNavigation(deviceID: deviceID, workspaceID: workspaceID) {
-        case .reuseGlobal(let placement): reuseGlobalCodePane(placement, deviceID: deviceID, workspaceID: workspaceID, mode: mode)
-        case .focusLocal(let placement):
-            focus(placement: placement)
-            (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
-        case .none: createIfNothingToReuse()
-        }
+        return openCodePaneInNewTab(
+            deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, in: .globalWindow(panelWindowID: UUID().uuidString))
     }
 
     /// Reuses an already-open global-window code pane for a navigation gesture: retargets it first if
@@ -1236,8 +1226,6 @@ import spacesterminalcore
     /// new controller instance, installed directly in `mode` — so the trailing `requestMode(mode)` call
     /// below is a guarded no-op in that case, and only does real work when no retarget was needed (the
     /// pane was already showing the gesture's workspace, so the live page has to be pushed to switch).
-    /// Calling it unconditionally, rather than branching, keeps this in step with `focusLocal`'s
-    /// identical "focus, then apply mode" shape in `openOrFocusCodePane`/`resolveCodePanePickerChoice`.
     private func reuseGlobalCodePane(_ placement: PanePlacement, deviceID: String, workspaceID: String, mode: CodePaneMode) {
         let needsRetarget: Bool
         switch PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope))?.content {
@@ -1251,12 +1239,9 @@ import spacesterminalcore
         (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
     }
 
-    /// Opens a fresh code pane as a new tab, in its workspace's panel by default or an explicit scope
-    /// (mirrors `openSessionInNewTab`). The creation arm every code-pane navigation gesture reaches
-    /// once `resolveCodePaneForNavigation` finds nothing to reuse: `openOrFocusCodePane`'s `.none`
-    /// case, and the new-tab picker's "Diff"/"Open file…" rows via
-    /// `openOrReuseCodePaneInNewTab`'s `createIfNothingToReuse`. The `mayCreateCodePane` gate below
-    /// covers both callers at once.
+    /// Opens a fresh code pane as a new tab in an explicit scope (mirrors `openSessionInNewTab`). The
+    /// creation arm `openOrFocusGlobalEditorWindow` reaches once `anyGlobalCodePanePlacement` finds
+    /// nothing to reuse.
     @discardableResult func openCodePaneInNewTab(deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil)
         -> Bool
     {
@@ -1269,35 +1254,6 @@ import spacesterminalcore
         host.showPanelScope(resolvedScope)
         activateFocusedPane(scope: resolvedScope)
         return true
-    }
-
-    /// The new-tab picker's "Diff"/"Open file…" row entry point (`presentNewTabSessionPicker` in
-    /// `AppKitController+TerminalPaneContent`, which only has `host`/`panelCoordinator` access, not
-    /// `PanelCoordinator`'s privates): routes through `resolveCodePanePickerChoice`'s
-    /// reuse-before-create order, falling back to a fresh pane in `scope` when nothing is open
-    /// anywhere to reuse.
-    func openOrReuseCodePaneInNewTab(deviceID: String, workspaceID: String, mode: CodePaneMode, in scope: PanelScope) {
-        resolveCodePanePickerChoice(deviceID: deviceID, workspaceID: workspaceID, mode: mode) {
-            self.openCodePaneInNewTab(deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, in: scope)
-        }
-    }
-
-    /// Fills a split with a fresh code pane, the code-pane counterpart of `fillSplit`. Reached
-    /// from the split picker's "Diff"/"Open file…" rows, which — like the new-tab picker — offer
-    /// a workspace-scoped panel's code-pane rows without filtering by current device
-    /// reachability, so this needs its own `mayCreateCodePane` gate rather than inheriting one
-    /// from the picker.
-    private func fillSplitWithCodePane(
-        scope: PanelScope, paneID: String, direction: PaneSplitDirection, deviceID: String, workspaceID: String, mode: CodePaneMode
-    ) {
-        guard mayCreateCodePane(workspaceID: workspaceID) else { return }
-        let newPaneID = UUID().uuidString
-        let content = installCodePaneController(paneID: newPaneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode)
-        let pane = Pane(id: newPaneID, content: content.descriptor)
-        mutateLayout(scope: scope) { layout in
-            PanelLayoutEngine.splitPane(paneID: paneID, direction: direction, newPane: pane, newSplitID: UUID().uuidString, in: layout) ?? layout
-        }
-        activateFocusedPane(scope: scope)
     }
 
     /// Builds (or returns the already-live) controller for a code pane, keyed by pane id since a code
@@ -1475,6 +1431,12 @@ import spacesterminalcore
         withRuntimeTargetTitlePass {
             guard let state = panels[scope], let view = state.view else { return }
             for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+            // A `.globalWindow` scope's identity strip carries the workspace label alongside the
+            // pane title; recompute it fresh here too (the same way a full `render(scope:)` does),
+            // rather than letting the view patch a title into whatever identity it last rendered —
+            // that identity's workspace label can go stale (e.g. a git branch rename) independently
+            // of any pane-title change. No-op for a `.workspace` scope, which has no identity strip.
+            if case .globalWindow = scope { view.updateIdentity(globalWindowIdentity(scope: scope, layout: state.layout)) }
             syncPaneAccessibilityTitles(scope: scope)
             syncPanelWindowTitle(scope: scope)
             syncFocusedPaneFooter(scope: scope)
@@ -1513,7 +1475,11 @@ import spacesterminalcore
     private func refreshTabTitles(forSessionID sessionID: String?) {
         withRuntimeTargetTitlePass {
             guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
-            view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+            let scopeLayout = layout(for: placement.scope)
+            view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: scopeLayout), forTabID: placement.tabID)
+            // See the matching comment in `refreshTabTitles(scope:)`: a `.globalWindow` scope's
+            // identity strip needs its identity recomputed fresh, not just its pane title patched.
+            if case .globalWindow = placement.scope { view.updateIdentity(globalWindowIdentity(scope: placement.scope, layout: scopeLayout)) }
             syncPaneAccessibilityTitles(scope: placement.scope)
             syncPanelWindowTitle(scope: placement.scope)
             syncFocusedPaneFooter(scope: placement.scope)
@@ -1644,10 +1610,36 @@ import spacesterminalcore
             guard let state = panels[scope], let view = state.view else { return }
             var titles: [String: String] = [:]
             for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
-            view.apply(layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+            let identity = globalWindowIdentity(scope: scope, layout: state.layout)
+            view.apply(
+                layout: state.layout, titlesByTabID: titles, identity: identity,
+                newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
             syncPaneAccessibilityTitles(scope: scope)
             syncPanelWindowTitle(scope: scope)
             syncFocusedPaneFooter(scope: scope)
         }
+    }
+
+    /// The identity-strip content for a `.globalWindow` panel's one tab; nil for a `.workspace`
+    /// panel, which has no identity strip. A global window carries no tabs (the tab strip, tab
+    /// creation, and its new-tab button are all absent from that chrome), so its layout has at
+    /// most one tab by construction — every path that opens a `.globalWindow` scope
+    /// (`moveSessionToNewPanelWindow`, `moveTabToNewPanelWindow`, `movePaneToNewPanelWindow`, and
+    /// `AppKitController.reopenPersistedPanelWindow`'s legacy-window split) starts it with exactly
+    /// one, and nothing can append a second.
+    private func globalWindowIdentity(scope: PanelScope, layout: PanelLayout) -> PanelWindowIdentity? {
+        guard case .globalWindow = scope, let tab = layout.tabs.first, let pane = PanelLayoutEngine.selectedPane(in: tab) else { return nil }
+        let workspaceID: String?
+        let followsSidebar: Bool
+        switch pane.content {
+        case .codePane(_, let paneWorkspaceID):
+            workspaceID = paneWorkspaceID
+            followsSidebar = true
+        case .terminalSession(_, let sessionID):
+            workspaceID = contentControllers[sessionID]?.workspaceID
+            followsSidebar = false
+        }
+        let workspaceLabel = workspaceID.map { host.findWorkspace(id: $0)?.1.displayName ?? $0 } ?? "Workspace"
+        return PanelWindowIdentity(workspaceLabel: workspaceLabel, paneTitle: tabTitle(forTabID: tab.id, in: layout), followsSidebar: followsSidebar)
     }
 }

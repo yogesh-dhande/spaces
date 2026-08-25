@@ -84,8 +84,7 @@ import workspacecore
     @Test func listsSidebarTargetsInOrderExcludingBrowsers() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: [])
 
         // "New terminal session" leads; the browser (docs) is dropped; everything else keeps sidebar order.
@@ -97,38 +96,10 @@ import workspacecore
         #expect(presentation.items.map(\.kind) == [.window, .process, .missingConfiguredProcess, .agent, .window])
     }
 
-    /// The "Diff" and "Open file…" rows follow "New terminal session" only once the invoking
-    /// workspace's device is known (a code pane always needs a concrete device id); they are absent
-    /// above with `newTerminalDeviceID: ""`, exercised here with a real device id.
-    @Test func listsDiffAndOpenFileRowsOnceTheDeviceIsKnown() {
-        let workspace = richWorkspace(id: "workspace-1")
-        let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "device-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: [])
-
-        #expect(presentation.items.map(\.id).prefix(3) == ["picker:new", "picker:diff", "picker:openFile"])
-        #expect(presentation.items.map(\.label).prefix(3) == ["New terminal session", "Diff", "Open file…"])
-
-        guard case .codePane(let diffDeviceID, let diffWorkspaceID, let diffMode)? = presentation.choices["picker:diff"] else {
-            Issue.record("expected a codePane choice for the Diff row")
-            return
-        }
-        #expect(diffDeviceID == "device-1")
-        #expect(diffWorkspaceID == "workspace-1")
-        #expect(diffMode == .diff)
-
-        guard case .codePane(_, _, let openFileMode)? = presentation.choices["picker:openFile"] else {
-            Issue.record("expected a codePane choice for the Open file… row")
-            return
-        }
-        #expect(openFileMode == .editor)
-    }
-
     @Test func liveAndExitedTargetsResolveToExistingSessionRequestsBuiltLikeTheSidebar() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: [])
 
         // The configured process has no overview session entry, so the request is the fallback the
@@ -154,8 +125,7 @@ import workspacecore
     @Test func notStartedConfiguredProcessCarriesTheOnlyStartChoice() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: [])
 
         guard case .startProcess(let workspaceID, let processKey, let processTemplateID)? = presentation.choices["picker:workspace-1::2"] else {
@@ -176,8 +146,7 @@ import workspacecore
     @Test func excludesTargetsAlreadyOpenInAPaneButKeepsNotStartedRows() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: ["session-web-workspace-1", "session-shell-workspace-1"])
 
         // The two open sessions (web, shell) drop; the sessionless not-started row (api) and the
@@ -197,8 +166,7 @@ import workspacecore
                     runState: .running, canOpenTerminal: true, canStop: true)
             ])
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: ["session-shell"])
 
         #expect(presentation.items.map(\.id) == ["picker:new"])
@@ -223,8 +191,7 @@ import workspacecore
                     runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
             ])
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: [])
 
         #expect(try #require(presentation.items.first { $0.label == "shell-1" }).detail == nil)
@@ -250,8 +217,7 @@ import workspacecore
         let workspaceContext = context(for: workspace, sessions: sessions)
 
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: workspaceContext.overview,
-            scopedWorkspaces: [workspaceContext],
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: workspaceContext.overview, scopedWorkspaces: [workspaceContext],
             openSessionIDs: [])
 
         #expect(try #require(presentation.items.first { $0.label == "Codex busy" }).detail == "reviewing PR 493")
@@ -262,7 +228,7 @@ import workspacecore
         let workspaceA = richWorkspace(id: "workspace-1")
         let workspaceB = richWorkspace(id: "workspace-2")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalDeviceID: "", newTerminalOverview: context(for: workspaceA).overview,
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspaceA).overview,
             scopedWorkspaces: [context(for: workspaceA), context(for: workspaceB)],
             openSessionIDs: ["session-web-workspace-1", "session-agent-workspace-2"])
 

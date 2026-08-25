@@ -5,10 +5,11 @@ import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 
-/// Which entry point created a code pane. Both the "Diff" and "Open file…" picker rows produce the
-/// same `.codePane` descriptor — the mode is carried purely as a runtime hint to the controller and
-/// is never persisted. A restored pane always rebuilds as `.diff`, since the descriptor alone
-/// cannot say which entry point created it.
+/// The Editor pane's current view: reviewing working-tree changes, or editing a file. Every pane opens
+/// in `.diff` (see `PanelCoordinator.openOrFocusGlobalEditorWindow`); `.editor` is reached only by
+/// switching views from inside the pane itself (`spaces:setMode`). The mode is carried purely as a
+/// runtime hint to the controller and is never persisted — a restored pane always rebuilds as `.diff`,
+/// since the `.codePane` descriptor alone cannot say which view was showing.
 enum CodePaneMode: Equatable {
     case diff
     case editor
@@ -460,6 +461,12 @@ enum CodePaneMode: Equatable {
             configuration.setURLSchemeHandler(CodePaneSchemeHandler(baseDirectory: baseDirectory), forURLScheme: CodePaneSchemeHandler.scheme)
         }
         let webView = WKWebView(frame: rootView.bounds, configuration: configuration)
+        #if DEBUG
+            // Lets Safari's Web Inspector attach to the code pane in dev builds, which is the only
+            // way to probe the live page (computed styles, CSS variable resolution) inside the
+            // shadow DOM the diff library renders into.
+            webView.isInspectable = true
+        #endif
         webView.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(webView)
         NSLayoutConstraint.activate([
@@ -822,7 +829,7 @@ enum CodePaneMode: Equatable {
         guard let hosting else {
             reply(
                 id: id, generation: generation,
-                error: CodePaneBridge.BridgeError(code: .unavailable, message: "The code pane's host is no longer available."))
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "The Editor's host is no longer available."))
             return
         }
         switch plan {

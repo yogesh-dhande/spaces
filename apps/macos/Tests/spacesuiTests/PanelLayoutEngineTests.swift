@@ -159,6 +159,41 @@ import Testing
         #expect(layout.focusedPaneID == "c")
     }
 
+    /// The neighbor tab's fallback focus must restore its remembered pane, not always its
+    /// first pane: build a fallback tab whose split remembers focus on its second pane, then
+    /// close the *other*, single-pane tab that leaves it as the last pane standing.
+    @Test func removingLastPaneFallsBackToNeighborsRememberedFocus() throws {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        layout = try #require(PanelLayoutEngine.splitPane(paneID: "b", direction: .right, newPane: pane("c"), newSplitID: "s1", in: layout))
+        layout = PanelLayoutEngine.focusPane(paneID: "c", in: layout)
+        layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
+
+        layout = PanelLayoutEngine.removePane(paneID: "a", from: layout)
+
+        #expect(layout.tabs.map(\.id) == ["tab-2"])
+        #expect(layout.selectedTabID == "tab-2")
+        #expect(layout.focusedPaneID == "c")
+    }
+
+    /// Moving the selected tab into its own window (`removeTab`) must resolve the fallback
+    /// tab's focus the same way `removePane`'s "last pane closes the tab" branch does: through
+    /// `selectedPane(in:)`'s remembered focus, not the fallback tab's first pane.
+    @Test func removeTabFallsBackToNeighborsRememberedFocus() throws {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        layout = try #require(PanelLayoutEngine.splitPane(paneID: "b", direction: .right, newPane: pane("c"), newSplitID: "s1", in: layout))
+        layout = PanelLayoutEngine.focusPane(paneID: "c", in: layout)
+        layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
+
+        let removed = PanelLayoutEngine.removeTab(tabID: "tab-1", from: layout)
+
+        #expect(removed?.tab.id == "tab-1")
+        #expect(removed?.layout.tabs.map(\.id) == ["tab-2"])
+        #expect(removed?.layout.selectedTabID == "tab-2")
+        #expect(removed?.layout.focusedPaneID == "c")
+    }
+
     @Test func prunedLayoutDropsDeadSessionsAndEmptyTabs() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .down, newPane: pane("b"), newSplitID: "s1", in: layout))
@@ -324,6 +359,35 @@ import Testing
     @Test func selectedPaneFallsBackToTheFirstPaneWithoutFocusMemory() {
         let tab = PanelTab(id: "tab-1", title: nil, lastFocusedPaneID: nil, root: .leaf(pane("a")))
         #expect(PanelLayoutEngine.selectedPane(in: tab)?.id == "a")
+    }
+
+    /// A single-pane tab has nothing to split off, so a panel window's identity strip never offers
+    /// "Open Selected Pane in New Window" for it, even though its one pane is a terminal.
+    @Test func cannotMoveFocusedPaneOutOfAnUnsplitTab() {
+        let tab = layoutWithTab("tab-1", paneID: "a").tabs[0]
+        #expect(!PanelLayoutEngine.canMoveFocusedPaneOutOfPanelWindow(in: tab))
+    }
+
+    /// A split tab whose displayed pane (the one `selectedPane(in:)` resolves) is a terminal session
+    /// can be moved out — this is the ordinary case the identity strip's menu item exists for.
+    @Test func canMoveFocusedPaneOutOfPanelWindowWhenTheDisplayedPaneIsATerminal() throws {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))
+        layout = PanelLayoutEngine.focusPane(paneID: "b", in: layout)
+        let tab = try #require(layout.tabs.first)
+        #expect(PanelLayoutEngine.canMoveFocusedPaneOutOfPanelWindow(in: tab))
+    }
+
+    /// The Editor's window IS its placement — moving it would mean recreating it and losing its
+    /// unsaved buffer — so a split tab whose displayed pane is a code pane never offers the move,
+    /// even though the tab holds more than one pane.
+    @Test func cannotMoveFocusedPaneOutOfPanelWindowWhenTheDisplayedPaneIsACodePane() throws {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        let codePane = Pane(id: "code", content: .codePane(deviceID: "device", workspaceID: "workspace-1"))
+        layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: codePane, newSplitID: "s1", in: layout))
+        layout = PanelLayoutEngine.focusPane(paneID: "code", in: layout)
+        let tab = try #require(layout.tabs.first)
+        #expect(!PanelLayoutEngine.canMoveFocusedPaneOutOfPanelWindow(in: tab))
     }
 
     @Test func layoutRoundTripsThroughJSON() throws {

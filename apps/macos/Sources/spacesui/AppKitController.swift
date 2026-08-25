@@ -309,7 +309,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
-    private var reviewChangesShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var newTabShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
@@ -5085,13 +5084,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// `canOpenOrFocusTerminalPane`, this takes no `hasExistingPane` flag: a code pane has
     /// no daemon-side session to attach, but building its content still means installing a
     /// pane into the layout and persisting it, so a device that cannot act right now must
-    /// not have one added on its behalf. Both `PanelCoordinator` call sites that create a
-    /// code pane (`openCodePaneInNewTab`, `fillSplitWithCodePane`) are reached only through
-    /// `resolveCodePaneForNavigation`'s `.none` case — its `.reuseGlobal`/`.focusLocal`
-    /// cases focus (and, for `.reuseGlobal`, possibly retarget) an existing pane and return
-    /// before creation is even considered — so this only ever needs to ask "can we create,"
-    /// never "can we create or is one already there." Pure for the same test-seam reason as
-    /// `canOpenOrFocusTerminalPane`.
+    /// not have one added on its behalf. `PanelCoordinator.openCodePaneInNewTab` is reached
+    /// only from `openOrFocusGlobalEditorWindow`'s "nothing to reuse" branch — the
+    /// "reuse an existing global pane" branch focuses (and, if needed, retargets) it and
+    /// returns before creation is even considered — so this only ever needs to ask "can we
+    /// create," never "can we create or is one already there." Pure for the same test-seam
+    /// reason as `canOpenOrFocusTerminalPane`.
     nonisolated static func canCreateCodePane(deviceAcceptsDaemonActions: Bool) -> Bool { deviceAcceptsDaemonActions }
 
     /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
@@ -8423,10 +8421,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    /// Editors offered in settings, filtered to those installed on this Mac. Detection and
-    /// launch both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
+    /// Editors offered in settings: the built-in Editor first (always available, needs nothing
+    /// installed), then the external editors installed on this Mac. Detection and launch of the
+    /// external editors both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
     /// Desktop) does not require a path or display-name update here.
-    func installedEditorOptions() -> [EditorPreference] { [.vscode, .devin, .zed].filter(isEditorInstalled) }
+    func installedEditorOptions() -> [EditorPreference] { [.builtin] + [.vscode, .devin, .zed].filter(isEditorInstalled) }
 
     private func isEditorInstalled(_ editor: EditorPreference) -> Bool {
         guard let bundleID = editor.bundleIdentifier else { return false }
@@ -10265,12 +10264,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func openWorkspaceEditor(workspaceID: String) {
+    /// The single dispatch point for every "open editor" action (⌘⌥E, the sidebar's "Open in
+    /// Editor" item, the command palette): resolves the configured `EditorPreference` — `.builtin`
+    /// when unset, since that is the default — and either focuses the global Editor window in-process
+    /// or launches the configured external editor. Returns whether the open succeeded (errors are
+    /// still presented here, exactly as before).
+    ///
+    /// The builtin branch keys the Editor window synchronously, so ANY entry point that runs while
+    /// the command palette is key must dismiss the palette first: an open palette resigning key
+    /// mid-open would run its ORDINARY dismissal, whose return-focus restore would pull key straight
+    /// back from the Editor. That dismiss-before-open (and restore-on-failure) contract is centralized
+    /// in `commandPalette.withPaletteDismissedForBuiltInOpen`, which no-ops when the palette isn't
+    /// visible, so every caller gets it for free without needing to know whether the palette is
+    /// involved.
+    ///
+    /// The external-editor branch below keeps its own, different contract: it dismisses the palette
+    /// only AFTER a successful launch (see its comment), since a declined or failed external launch
+    /// should leave the palette open rather than silently closing it.
+    @discardableResult func openWorkspaceEditor(workspaceID: String) -> Bool {
         do {
             guard let (project, workspace) = findWorkspace(id: workspaceID) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace not found.")
             }
-            let target = try resolveEditorLaunch(try clientAppConfig().editor)
+            let editor = try clientAppConfig().editor ?? .builtin
+            if editor == .builtin {
+                // The coordinator reports false when no Editor exists and its creation door is
+                // closed (e.g. the workspace's device is unreachable) — that is a failed open, and
+                // `withPaletteDismissedForBuiltInOpen` restores the palette's return focus for it.
+                return commandPalette.withPaletteDismissedForBuiltInOpen {
+                    self.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: project.deviceID, workspaceID: workspaceID)
+                }
+            }
+            let target = try resolveEditorLaunch(editor)
             // The owning device comes from the row the workspace was found in, so the
             // remote/local branch below can never run the local path for a remote workspace.
             let deviceID = project.deviceID
@@ -10287,14 +10312,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // `deviceUnreachableError`'s `isLocal` branch.
                 guard deviceAcceptsDaemonActions(forDeviceID: deviceID) else {
                     showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
-                    return
+                    return false
                 }
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
                 else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }
                 switch target {
                 case .vscode(let editor, let support):
-                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return }
+                    // The user can decline the SSH-remote extension install this prompts for; that
+                    // cancellation is itself a failure to open, not an error to present (the prompt
+                    // already explained the choice), so it reports false like any other non-open.
+                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return false }
                     try EditorLauncher.openRemoteVSCode(
                         cliExecutablePath: support.cliExecutableURL.path, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
                         directory: workspace.dir)
@@ -10313,15 +10341,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // every action it takes and the main window was already hidden before the editor was
             // asked for.
             commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
-        } catch { showError(error) }
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
     }
 
-    /// Resolves the configured editor to a launchable CLI from its installed bundle,
-    /// throwing a clear error when no editor is configured or it is not installed.
-    private func resolveEditorLaunch(_ editor: EditorPreference?) throws -> EditorLaunchTarget {
-        guard let editor, editor != .none, let bundleID = editor.bundleIdentifier else {
-            throw WorkspaceError.configError(message: "Preferred editor is not configured.")
-        }
+    /// Resolves an external editor preference (never `.builtin`, intercepted by the caller before this
+    /// runs) to a launchable CLI from its installed bundle, throwing a clear error when it is not
+    /// installed.
+    private func resolveEditorLaunch(_ editor: EditorPreference) throws -> EditorLaunchTarget {
+        guard let bundleID = editor.bundleIdentifier else { throw WorkspaceError.configError(message: "Preferred editor is not configured.") }
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
             throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
         }
@@ -10626,9 +10657,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
         }
-        if let reviewChangesShortcutSpec {
-            registerHotkey(spec: reviewChangesShortcutSpec, id: GlobalHotkey.reviewChanges.rawValue, signature: signature, target: target)
-        }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(
@@ -10694,14 +10722,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.isTextInputFocused() { return event }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
-                // In a global panel window the new tab opens there, targeting the
-                // focused pane's workspace; otherwise it lands in the selected
-                // workspace's panel.
-                if let panelWindowID = self.panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
-                    self.openNewTerminalTab(scope: .globalWindow(panelWindowID: panelWindowID))
-                } else if let workspaceID = self.selectedWorkspaceID {
-                    self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut)
-                }
+                // Global panel windows carry no tabs (and so no "new tab" of their own): this
+                // always lands in the selected workspace's panel, even when a panel window is key.
+                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut) }
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
@@ -11110,24 +11133,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .next: focusGlobalWindowNavigation(direction: 1)
         case .previous: focusGlobalWindowNavigation(direction: -1)
         case .openEditor: openGlobalEditorFromHotkey()
-        case .reviewChanges: openGlobalReviewChangesFromHotkey()
         }
     }
 
+    /// The ⌘⌥E shortcut and every other "open editor" entry point (sidebar "Open in Editor", palette)
+    /// resolve "which workspace" the same way: a focused tracked Chrome window, else the app's selected
+    /// workspace, else the daemon's last-active workspace.
     private func openGlobalEditorFromHotkey() {
         guard let workspaceID = globalEditorWorkspaceID() else { return }
         openWorkspaceEditor(workspaceID: workspaceID)
-    }
-
-    /// Focuses the target workspace's existing code pane (diff mode) or opens one, resolving "which
-    /// workspace" via `globalEditorWorkspaceID()`: a focused tracked Chrome window, else the app's
-    /// selected workspace, else the daemon's last-active workspace. Deliberately reuses that resolution
-    /// unchanged for parity with the "Open editor" hotkey, which has the same limitation — a key global
-    /// panel window's focused pane is not consulted; accepted so the two shortcuts always agree on
-    /// "which workspace".
-    private func openGlobalReviewChangesFromHotkey() {
-        guard let workspaceID = globalEditorWorkspaceID(), let deviceID = deviceID(forWorkspaceID: workspaceID) else { return }
-        panelCoordinator.openOrFocusCodePane(deviceID: deviceID, workspaceID: workspaceID, mode: .diff)
     }
 
     private func globalEditorWorkspaceID() -> String? {
@@ -11188,7 +11202,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
         sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
-        reviewChangesShortcutSpec = loadShortcutSpec(resolver, setting: .guiReviewChangesShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenTerminalShortcut)
         newTabShortcutSpec = loadShortcutSpec(resolver, setting: .guiNewTabShortcut)
         openFinderShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenFinderShortcut)
@@ -11250,7 +11263,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
-        case .guiReviewChangesShortcut: return reviewChangesShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiNewTabShortcut: return newTabShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
@@ -12426,6 +12438,11 @@ struct CommandPaletteItem: Sendable {
     enum Source: Sendable {
         case alertsAttention
         case workspaceTarget
+        /// A workspace-scoped action row (currently only "Open in Editor") rather than a
+        /// focusable runtime target. Excluded from the empty-query recency ranking, which
+        /// only ever surfaces `.workspaceTarget` rows, so it appears in the palette only
+        /// once the user searches for its workspace or its label.
+        case editorAction
     }
 
     enum Status: Sendable {
@@ -12446,7 +12463,11 @@ struct CommandPaletteItem: Sendable {
     let label: String
     let detail: String?
     let status: Status
-    let focusRequest: AppKitController.WindowFocusRequest
+    /// Nil for a `.editorAction` row: opening the workspace's Editor is a synchronous,
+    /// in-process call to `openWorkspaceEditor(workspaceID:)`, not a window to focus, the
+    /// same reason `AlertsController`'s automation-run alert leaves its own `focusRequest`
+    /// nil in favor of `automationRunTarget`. Every other row focuses a runtime target.
+    let focusRequest: AppKitController.WindowFocusRequest?
     let recentFocusIdentity: String
 
     var workspaceContextText: String {
@@ -12477,6 +12498,10 @@ struct CommandPaletteItem: Sendable {
     }
 
     var focusIdentity: String {
+        // `.editorAction` rows never reach either dedup loop in `visibleCommandPaletteItems`
+        // (they're neither `.alertsAttention` nor `.workspaceTarget`), so this branch is
+        // unreachable in practice; it exists only to keep this property total.
+        guard let focusRequest else { return "editor:\(workspaceID)" }
         switch focusRequest {
         case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
         case .workspaceWindow(let workspaceID, let index): return "window:\(workspaceID):\(index)"
@@ -12997,6 +13022,17 @@ extension AppKitController {
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: .agentWindow(agentWindow), detail: detail)))
                     }
                 }
+                // Every visible workspace gets one editor row regardless of what runtime targets it
+                // has, mirroring the sidebar row's "Open in Editor" item, which is available whether
+                // or not the workspace is running. `kind: .window` reuses the same icon a foreground
+                // code pane gets (`iconSymbol`'s `.window` case falls back to the code-brackets glyph
+                // when `detail` isn't a URL), since this row is not itself a runtime target with an
+                // index in `WorkspaceRunShortcutTarget.Kind`'s numbered-shortcut vocabulary.
+                items.append(
+                    CommandPaletteItem(
+                        id: "\(workspace.id)::editor", source: .editorAction, alertsAttentionID: nil, workspaceID: workspace.id,
+                        workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name, kind: .window,
+                        label: "Open in Editor", detail: nil, status: .none, focusRequest: nil, recentFocusIdentity: "editor:\(workspace.id)"))
             }
         }
 

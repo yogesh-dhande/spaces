@@ -267,44 +267,38 @@ import workspacecore
     }
 
     private func generalSettingsCards() -> [NSView] {
+        // `.builtin` is always first and always available: it opens the app's own Editor window and
+        // needs nothing installed, so `options` is never empty.
         let options = host.installedEditorOptions()
-        let currentEditor: EditorPreference? = {
-            guard let editor = host.configCache?.editor, editor != .none else { return nil }
-            return editor
-        }()
+        let currentEditor = host.configCache?.editor ?? .builtin
         let editorPopUp = NSPopUpButton()
         editorPopUp.translatesAutoresizingMaskIntoConstraints = false
         editorPopUp.autoenablesItems = false
-        if options.isEmpty {
-            editorPopUp.addItem(withTitle: "None detected")
-            editorPopUp.isEnabled = false
-        } else {
-            editorPopUp.addItem(withTitle: "Select editor")
-            editorPopUp.item(at: 0)?.isEnabled = false
-            for option in options {
-                editorPopUp.addItem(withTitle: option.displayName)
-                editorPopUp.itemArray.last?.representedObject = option
-            }
-            if let current = currentEditor, let item = editorPopUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == current })
-            {
-                editorPopUp.select(item)
-            } else {
-                editorPopUp.selectItem(at: 0)
-            }
-            editorPopUp.target = self
-            editorPopUp.action = #selector(editorPreferenceChanged(_:))
+        for option in options {
+            editorPopUp.addItem(withTitle: option.displayName)
+            editorPopUp.itemArray.last?.representedObject = option
         }
+        if !options.contains(currentEditor) {
+            // The saved preference points at an editor that is no longer installed (e.g. it was
+            // uninstalled after being chosen). Represent it as a disabled item rather than silently
+            // falling back to selecting Built-in: the popup must reflect the actual stored setting,
+            // even though it can't be launched until the user picks a different, enabled option.
+            editorPopUp.addItem(withTitle: "\(currentEditor.displayName) (not installed)")
+            editorPopUp.itemArray.last?.representedObject = currentEditor
+            editorPopUp.itemArray.last?.isEnabled = false
+        }
+        if let item = editorPopUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == currentEditor }) {
+            editorPopUp.select(item)
+        }
+        editorPopUp.target = self
+        editorPopUp.action = #selector(editorPreferenceChanged(_:))
         editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
         editorPopUp.setAccessibilityIdentifier("settings-editor")
 
-        var editorContentViews: [NSView] = [
+        let editorContentViews: [NSView] = [
             host.settingsLabeledField(
                 name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp)
         ]
-        if let current = currentEditor, !options.contains(current) {
-            let note = host.helpTextLabel("Saved editor \"\(current.displayName)\" is not installed.")
-            editorContentViews.append(note)
-        }
         let editorCard = host.formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
 
         return [appearanceSettingsCard(), editorCard]
@@ -388,9 +382,9 @@ import workspacecore
 
     @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
-        if host.configCache?.editor == preference { return }
+        if (host.configCache?.editor ?? .builtin) == preference { return }
         do {
-            try host.clientDatabase().setSetting(key: ClientSettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
+            try host.clientDatabase().setSetting(key: ClientSettingsKey.appEditor, value: preference.rawValue)
             host.configCache = try AppKitController.clientAppConfig()
         } catch { host.showError(error) }
     }

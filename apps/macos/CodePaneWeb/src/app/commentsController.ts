@@ -1486,7 +1486,12 @@ export class CommentsController {
 
   /** Cheaper path for a change that only affects card rendering (agent selection/list), not the
    *  draft set or anchoring itself — still needs the cards re-rendered (their Send button's label
-   *  and disabled state depend on the selected agent), but the tray rows don't. */
+   *  and disabled state depend on the selected agent), but the tray rows don't. Passes the SAME
+   *  `AnchoredComment` objects and anchors `setComments` was last called with — nothing about the
+   *  comments or their positions changed, only the agent selection did — so `setComments`'s
+   *  `annotationListEquals` short-circuit would otherwise skip every file here. `forceCardRender:
+   *  true` bypasses that check so each commented file's card still gets rebuilt against the newly
+   *  selected agent. */
   private refreshCardsOnly(): void {
     if (this.pointerPressActive) {
       // Don't downgrade an already-queued full refresh to this cheaper one.
@@ -1496,7 +1501,7 @@ export class CommentsController {
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
     const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
-    this.diffView?.setComments(visible);
+    this.diffView?.setComments(visible, true);
   }
 
   /** Replays whichever refresh was deferred by the press-scoped rebuild gate once the press ends
