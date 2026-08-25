@@ -529,6 +529,12 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     /// the same detection from `.terminalList`); it reports a detected kind even before the session's
     /// first hook signal, when no agent-orchestration row exists yet.
     public let foregroundDetectedAgentKind: String?
+    /// Whether the program running in this session has bracketed paste (DECSET 2004) enabled, as the
+    /// daemon's live runtime state reports it. Carried over the wire for the same reason
+    /// `foregroundDetectedAgentKind` is: a remote `spaces agent spawn` waits for the spawned agent to be
+    /// ready for input, and readiness is the agent being identified AND its interface having taken the
+    /// terminal over — process identity alone precedes the composer by a second or two.
+    public let bracketedPasteActive: Bool
     /// When this session's program last rang the terminal bell, as the daemon recorded it (nil until a
     /// bell arrives). Clients derive a bell alert from it and use its value as the alert's dismissal
     /// identity; the daemon coalesces repeats so the value only moves for a bell worth re-raising.
@@ -540,7 +546,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
         rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
-        foregroundDetectedAgentKind: String? = nil, foregroundCommand: String? = nil, bellAt: String? = nil
+        foregroundDetectedAgentKind: String? = nil, foregroundCommand: String? = nil, bellAt: String? = nil, bracketedPasteActive: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -567,6 +573,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
         self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
+        self.bracketedPasteActive = bracketedPasteActive
         self.bellAt = bellAt
     }
 
@@ -596,6 +603,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowSourceID
         case hasFinalRender
         case foregroundDetectedAgentKind
+        case bracketedPasteActive
         case bellAt
     }
 
@@ -627,6 +635,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
         foregroundDetectedAgentKind = try container.decodeIfPresent(String.self, forKey: .foregroundDetectedAgentKind)
+        bracketedPasteActive = try container.decodeIfPresent(Bool.self, forKey: .bracketedPasteActive) ?? false
         bellAt = try container.decodeIfPresent(String.self, forKey: .bellAt)
     }
 }

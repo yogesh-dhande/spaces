@@ -233,19 +233,19 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertNil(resolvedAutomationRunID(environment: [WorkspaceOrchestrator.automationRunIDEnvVar: "   "]))
     }
 
-    func testAgentSpawnDetectionTimeoutErrorNamesCommandAndTail() {
-        let message = AgentSpawnDetectionTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
+    func testAgentSpawnReadinessTimeoutErrorNamesCommandAndTail() {
+        let message = AgentSpawnReadinessTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
         XCTAssertEqual(
             message,
-            "Agent session session-1 was not detected as a running coding agent within 90s (foreground classification never identified `codex`). The session is left running; inspect with: spaces terminal tail session-1"
+            "Agent session session-1 was not ready to receive input within 90s (`codex` was never identified as a running coding agent, or its interface never started reading input). The session is left running; inspect with: spaces terminal tail session-1"
         )
     }
 
-    func testAgentSpawnRemoteDetectionTimeoutErrorNamesCommandAndRemoteTail() {
-        let message = AgentSpawnRemoteDetectionTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
+    func testAgentSpawnRemoteReadinessTimeoutErrorNamesCommandAndRemoteTail() {
+        let message = AgentSpawnRemoteReadinessTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
         XCTAssertEqual(
             message,
-            "Remote agent session session-1 was not detected as a running coding agent within 90s (foreground classification never identified `codex`). The session is left running; inspect with: spaces terminal tail session-1 --device <name>"
+            "Remote agent session session-1 was not ready to receive input within 90s (`codex` was never identified as a running coding agent, or its interface never started reading input). The session is left running; inspect with: spaces terminal tail session-1 --device <name>"
         )
     }
 
@@ -322,24 +322,65 @@ final class AgentOrchestrationCLITests: XCTestCase {
         }
     }
 
-    func testAwaitReadinessReturnsDetectedKindOncePresent() throws {
+    func testAwaitReadinessReturnsDetectedKindOnceTheAgentIsDetectedAndReadingInput() throws {
         let clock = FakeClock()
         var reads = 0
         let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: clock.now, sleep: { _ in }
         ) {
             reads += 1
-            return .init(detectedKind: reads >= 3 ? .codex : nil, state: .running)
+            return .init(detectedKind: reads >= 3 ? .codex : nil, bracketedPasteActive: reads >= 3, state: .running)
         }
-        XCTAssertEqual(outcome, .detected(.codex))
+        XCTAssertEqual(outcome, .ready(.codex))
         XCTAssertEqual(reads, 3)
+    }
+
+    /// The gap this closes: foreground classification fires on process identity, a second or two before
+    /// the agent's TUI has taken the terminal over. Returning there hands the orchestrator a session that
+    /// swallows the prompt it sends next, so a detected agent that has not enabled bracketed paste is not
+    /// yet ready.
+    func testAwaitReadinessKeepsPollingWhileADetectedAgentHasNotStartedReadingInput() throws {
+        let clock = FakeClock(step: 40)
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) {
+            reads += 1
+            return .init(detectedKind: .claude, bracketedPasteActive: false, state: .running)
+        }
+        XCTAssertEqual(outcome, .timedOut)
+        XCTAssertGreaterThan(reads, 1)
+    }
+
+    /// And the wait resolves the moment that same session reports the mode, without needing a fresh
+    /// detection.
+    func testAwaitReadinessResolvesWhenADetectedAgentStartsReadingInput() throws {
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
+        ) {
+            reads += 1
+            return .init(detectedKind: .claude, bracketedPasteActive: reads >= 2, state: .running)
+        }
+        XCTAssertEqual(outcome, .ready(.claude))
+        XCTAssertEqual(reads, 2)
+    }
+
+    /// Bracketed paste without a detected agent is not readiness either: a plain program that enables the
+    /// mode is not the coding agent spawn was told to wait for.
+    func testAwaitReadinessKeepsPollingWhileNoAgentIsDetected() throws {
+        let clock = FakeClock(step: 40)
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) { .init(detectedKind: nil, bracketedPasteActive: true, state: .running) }
+        XCTAssertEqual(outcome, .timedOut)
     }
 
     func testAwaitReadinessTimesOutWhileTheChildKeepsRunningUndetected() throws {
         let clock = FakeClock(step: 40)
         let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
-        ) { .init(detectedKind: nil, state: .running) }
+        ) { .init(detectedKind: nil, bracketedPasteActive: false, state: .running) }
         XCTAssertEqual(outcome, .timedOut)
     }
 
@@ -352,7 +393,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
         ) {
             reads += 1
-            return .init(detectedKind: nil, state: reads >= 2 ? .exited : .starting)
+            return .init(detectedKind: nil, bracketedPasteActive: false, state: reads >= 2 ? .exited : .starting)
         }
         XCTAssertEqual(outcome, .ended(.exited))
         XCTAssertEqual(reads, 2)
@@ -361,7 +402,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
     func testAwaitReadinessReportsAFailedChildAsEnded() throws {
         let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
-        ) { .init(detectedKind: nil, state: .failed) }
+        ) { .init(detectedKind: nil, bracketedPasteActive: false, state: .failed) }
         XCTAssertEqual(outcome, .ended(.failed))
     }
 
@@ -370,7 +411,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
     func testAwaitReadinessPrefersTheChildExitOverAStaleClassification() throws {
         let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
-        ) { .init(detectedKind: .claude, state: .exited) }
+        ) { .init(detectedKind: .claude, bracketedPasteActive: true, state: .exited) }
         XCTAssertEqual(outcome, .ended(.exited))
     }
 
@@ -380,7 +421,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
         let clock = FakeClock(step: 40)
         let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
-        ) { .init(detectedKind: nil, state: nil) }
+        ) { .init(detectedKind: nil, bracketedPasteActive: false, state: nil) }
         XCTAssertEqual(outcome, .timedOut)
     }
 
@@ -401,10 +442,10 @@ final class AgentOrchestrationCLITests: XCTestCase {
             reads += 1
             return try snapshotOrPending {
                 if reads == 1 { throw TerminalSessionPersistenceError.unknownSession("session-race") }
-                return .init(detectedKind: .codex, state: .running)
+                return .init(detectedKind: .codex, bracketedPasteActive: true, state: .running)
             }
         }
-        XCTAssertEqual(outcome, .detected(.codex))
+        XCTAssertEqual(outcome, .ready(.codex))
         XCTAssertEqual(reads, 2)
     }
 

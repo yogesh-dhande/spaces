@@ -102,13 +102,11 @@
 
             let firstMarker = "SUBMIT_ORDER_FIRST"
             let secondMarker = "SUBMIT_ORDER_SECOND"
-            let firstResponse = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
-            }
+            // Handled from here, off the engine: a send waits for its writes to reach the PTY, and that
+            // wait must not be held on the engine those writes run on.
+            let firstResponse = core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
             #expect(firstResponse.ok, "\(firstResponse.message)")
-            let secondResponse = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
-            }
+            let secondResponse = core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
             #expect(secondResponse.ok, "\(secondResponse.message)")
 
             // Each marker appears once as the PTY echo of the typed line and once as `cat`'s output of the
@@ -153,18 +151,14 @@
             try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
 
             let marker = "SUBMIT_UNFRAMED_MARKER"
-            let response = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
-            }
+            let sentAt = ContinuousClock.now
+            let response = core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
             #expect(response.ok, "\(response.message)")
-
-            // Half the 500ms separation in: the text may be echoed, but the CR must not have landed yet —
-            // with an immediate CR, `cat` emits the completed line within milliseconds and this trips.
-            try? await Task.sleep(for: .milliseconds(250))
-            let midway = (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? ""
+            // The send answers only once its bytes reached the PTY, so the round trip itself measures the
+            // separation: an immediate CR would return in milliseconds.
             #expect(
-                Self.occurrences(of: marker, in: midway) < 2,
-                "an unframed submit's CR landed immediately instead of waiting out the separation: \(midway)")
+                sentAt.duration(to: .now) >= .milliseconds(450),
+                "an unframed submit's CR landed immediately instead of waiting out the separation")
 
             try await waitAsync { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
         }
@@ -186,9 +180,7 @@
 
             let marker = "SUBMIT_FRAMED_MARKER"
             let sentAt = ContinuousClock.now
-            let response = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
-            }
+            let response = core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
             #expect(response.ok, "\(response.message)")
 
             try await waitAsync { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
@@ -197,6 +189,62 @@
             #expect(
                 ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("\u{1b}[200~"),
                 "the receiver enabled bracketed paste, so the submit's text must have gone out framed")
+        }
+
+        /// Linux mirror of the embedded teardown test: a send answers for its bytes, not for its enqueue,
+        /// so a session torn down while the submit still had a write outstanding must report failure. This
+        /// is what keeps an automation from recording a seed prompt as delivered that no agent received.
+        /// `cat` leaves bracketed paste off, so the CR is still waiting out its separation when the session
+        /// goes away.
+        @Test func submitWhoseSessionIsTornDownBeforeItsCarriageReturnReportsFailure() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+            let core = try await startSubmitCore(command: "echo SUBMIT_READY; cat", paths: paths)
+            let coreBox = Box(core)
+            defer { TerminalEngineActor.runSynchronously { coreBox.value.terminate() } }
+            let outputPath = paths.outputPath
+            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+            let teardown = Task.detached {
+                try? await Task.sleep(for: .milliseconds(150))
+                TerminalEngineActor.runSynchronously { coreBox.value.terminate() }
+            }
+            let response = core.handleControlRequest(TerminalControlRequest(command: "send", text: "SUBMIT_TORN_DOWN", appendNewline: true))
+            await teardown.value
+
+            #expect(!response.ok, "a submit whose carriage return never reached the PTY must not report success")
+            #expect(response.errorCode == .sessionNotRunning)
+        }
+
+        /// A bare Enter is a submit too, written as one write rather than the text-then-CR split, so it is
+        /// the path that can most easily answer for its enqueue instead of its bytes. Sent into a session
+        /// that is already torn down, its write has nowhere to go: the send must fail rather than report a
+        /// keystroke that landed nowhere.
+        @Test func bareEnterWhoseWriteNeverReachesThePTYReportsFailure() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+            let core = try await startSubmitCore(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+            let coreBox = Box(core)
+            defer { TerminalEngineActor.runSynchronously { coreBox.value.terminate() } }
+            let outputPath = paths.outputPath
+            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+            TerminalEngineActor.runSynchronously { coreBox.value.terminate() }
+            let response = await Task.detached {
+                coreBox.value.handleControlRequest(TerminalControlRequest(command: "send", text: "", appendNewline: true))
+            }.value
+
+            #expect(!response.ok, "a bare Enter whose bytes never reached the PTY must not report success")
+            #expect(response.errorCode == .sessionNotRunning)
+            // The message pins the failure to the send's own write acknowledgement rather than to any
+            // earlier guard that also reports a session as not running.
+            #expect(response.message == "Terminal session stopped accepting input before the send reached it.")
         }
     }
 #endif
