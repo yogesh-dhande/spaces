@@ -2,7 +2,7 @@ import { getFiletypeFromFileName, preloadHighlighter, registerCustomCSSVariableT
 
 /**
  * Theme name registered with `@pierre/diffs`' shared Shiki highlighter. Its
- * colors resolve through CSS custom properties (`--shiki-*`, see
+ * colors resolve through CSS custom properties (`--diffs-*`, see
  * `styles/tokens.css`) rather than a baked palette, so syntax highlighting
  * follows the app's own light/dark tokens instead of shipping a second,
  * independent color scheme. See `docs/design.md` (read by this plugin's
@@ -73,8 +73,11 @@ let preloadPromise: Promise<void> | undefined;
  */
 export function preloadCodePaneHighlighter(): Promise<void> {
   if (!preloadPromise) {
-    // No variableDefaults: styles/tokens.css defines every `--shiki-*`
-    // variable this theme reads directly, for both light and dark.
+    // No variableDefaults: this theme's colors resolve through CSS custom
+    // properties prefixed `--diffs-` (the prefix is hardcoded by
+    // @pierre/diffs' formatCSSVariablePrefix, not something this call can
+    // change), and styles/tokens.css defines every one of them directly,
+    // for both light and dark.
     registerCustomCSSVariableTheme(CODE_PANE_THEME_NAME, {}, true);
     // @pierre/diffs references Shiki's full dynamic-import grammar/theme
     // registry, so Vite's build emits every Shiki grammar and theme as its

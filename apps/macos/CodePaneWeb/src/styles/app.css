@@ -3,7 +3,7 @@
  * ("Toolbar") mockup so the pane reads as native Spaces chrome rather than a
  * web page loaded in a WKWebView. Structural layout only lives here — actual
  * diff/editor content painting is `@pierre/diffs`' own concern (see
- * diffView.ts/editorView.ts), styled through the `--shiki-*` variables in
+ * diffView.ts/editorView.ts), styled through the `--diffs-*` variables in
  * tokens.css instead of hand-written line/token CSS.
  */
 

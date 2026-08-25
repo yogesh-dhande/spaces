@@ -115,24 +115,85 @@ body {
 /*
  * `@pierre/diffs`' CSS-variables Shiki theme (registered by
  * `theme/index.ts` via `registerCustomCSSVariableTheme`) reads these exact
- * variable names — see the shiki `createCssVariablesTheme` implementation.
- * Mapping them onto the app tokens above, instead of passing
- * `variableDefaults`, means syntax colors repaint automatically whenever
- * `data-theme` changes, with no separate light/dark theme registration.
+ * variable names, all prefixed `--diffs-` (see `formatCSSVariablePrefix` in
+ * `@pierre/diffs/dist/utils/formatCSSVariablePrefix.js`, which the library
+ * hardcodes and does not let callers change). Mapping them onto the app
+ * tokens above, instead of passing `variableDefaults`, means syntax colors
+ * repaint automatically whenever `data-theme` changes, with no separate
+ * light/dark theme registration.
+ *
+ * A `--shiki-*` mapping shipped here previously: shiki's own default
+ * variable prefix is `--shiki-`, but `@pierre/diffs` overrides it to
+ * `--diffs-` before constructing the theme, so every token span's inline
+ * `color: var(--diffs-token-keyword)` (etc.) resolved to nothing and fell
+ * back to plain inherited text color — flat, monochrome diffs.
  */
 :root {
-  --shiki-foreground: var(--fg);
-  --shiki-background: var(--bg);
-  --shiki-token-keyword: var(--sy-key);
-  --shiki-token-string: var(--sy-str);
-  --shiki-token-string-expression: var(--sy-str);
-  --shiki-token-comment: var(--sy-com);
-  --shiki-token-constant: var(--sy-num);
-  --shiki-token-parameter: var(--fg2);
-  --shiki-token-function: var(--sy-fn);
-  --shiki-token-link: var(--sy-type);
-  --shiki-token-punctuation: var(--fg2);
-  --shiki-token-inserted: var(--add-fg);
-  --shiki-token-deleted: var(--del-fg);
-  --shiki-token-changed: var(--orange);
+  --diffs-foreground: var(--fg);
+  --diffs-background: var(--bg);
+  --diffs-token-keyword: var(--sy-key);
+  --diffs-token-string: var(--sy-str);
+  --diffs-token-string-expression: var(--sy-str);
+  --diffs-token-comment: var(--sy-com);
+  --diffs-token-constant: var(--sy-num);
+  --diffs-token-parameter: var(--fg2);
+  --diffs-token-function: var(--sy-fn);
+  --diffs-token-link: var(--sy-type);
+  --diffs-token-punctuation: var(--fg2);
+  --diffs-token-inserted: var(--add-fg);
+  --diffs-token-deleted: var(--del-fg);
+  --diffs-token-changed: var(--orange);
+}
+
+/*
+ * `@pierre/diffs`' own diff-chrome CSS (`dist/style.js`, injected into each
+ * `<diffs-container>` shadow root) reads a second set of `--diffs-*`
+ * variables for backgrounds, foregrounds, and the addition/deletion/
+ * modified accent colors used for file-card chrome, line tinting, and
+ * gutter numbers. Its `:host` block computes those (e.g. `--diffs-bg`)
+ * from `light-dark(var(--diffs-light-bg, #fff), var(--diffs-dark-bg, #000))`
+ * and *also* sets `color-scheme: light dark` on the same host element, so
+ * `light-dark()` there follows the OS's dark-mode preference rather than
+ * our own `[data-theme]` attribute — and because `:host` assigns
+ * `--diffs-bg`/`color-scheme` directly, an inherited value from `:root`
+ * can never override them (a specified value on an element always beats
+ * inheritance). We don't fight `color-scheme`; instead we map both the
+ * "light" and "dark" half of every pair below to the *same* value for the
+ * theme that is currently active, so whichever branch `light-dark()` picks
+ * resolves to our palette either way.
+ *
+ * Only the vars whose library defaults are wrong for our theme (invisible
+ * tints, off-palette accent colors) are set here. Layout/spacing/font vars
+ * (gaps, column widths, font family/size) keep the library's defaults.
+ *
+ * The duplicated pairs above neutralize every place the library reads a var
+ * we've mapped, but not the library's *own* internal `light-dark()` math
+ * (mixer percentages, `--diffs-mixer`, and the context/hover/selection/
+ * changed-line background formulas), which keys off the used value of
+ * `color-scheme` rather than reading our vars at all. `:host` hardcodes
+ * `color-scheme: light dark`, so those formulas otherwise follow the OS
+ * appearance instead of our `[data-theme]`. A light-DOM author rule
+ * targeting the host element (below) overrides a shadow tree's own `:host`
+ * style at equal specificity, so we pin `color-scheme` to match the active
+ * theme there too. The page always stamps `data-theme` from the init
+ * payload before any diff renders, so there's no un-stamped case to handle.
+ */
+:root {
+  --diffs-light-bg: var(--bg);
+  --diffs-dark-bg: var(--bg);
+  --diffs-light: var(--fg);
+  --diffs-dark: var(--fg);
+  --diffs-light-addition-color: var(--add-fg);
+  --diffs-dark-addition-color: var(--add-fg);
+  --diffs-light-deletion-color: var(--del-fg);
+  --diffs-dark-deletion-color: var(--del-fg);
+  --diffs-light-modified-color: var(--orange);
+  --diffs-dark-modified-color: var(--orange);
+}
+
+:root[data-theme="dark"] diffs-container {
+  color-scheme: dark;
+}
+:root[data-theme="light"] diffs-container {
+  color-scheme: light;
 }
