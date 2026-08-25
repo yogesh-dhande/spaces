@@ -65,6 +65,13 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         throw NSError(domain: "GhosttyEmbeddedSubmitOrderingTests", code: 1)
     }
 
+    /// Engine-isolated; call from inside a `TerminalEngineActor.run`/`runSynchronously` bridge.
+    @TerminalEngineActor private static func snapshotText(of host: GhosttyEmbeddedSessionHost) -> String {
+        host.core.rendererHost.requestSurfaceRefresh()
+        GhosttyEmbeddedAppService.shared.tick()
+        return host.core.rendererHost.snapshotText() ?? ""
+    }
+
     private static func occurrences(of needle: String, in haystack: String) -> Int { haystack.components(separatedBy: needle).count - 1 }
 
     func testRapidSubmitSendsReachChildAsSeparateSubmissions() async throws {
@@ -98,13 +105,11 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
         let firstMarker = "SUBMIT_ORDER_FIRST"
         let secondMarker = "SUBMIT_ORDER_SECOND"
-        let firstResponse = TerminalEngineActor.runSynchronously {
-            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
-        }
+        // Handled from here, off the engine: a send waits for its writes to reach the PTY, and that wait
+        // must not be held on the engine those writes run on.
+        let firstResponse = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
         XCTAssertTrue(firstResponse.ok, firstResponse.message)
-        let secondResponse = TerminalEngineActor.runSynchronously {
-            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
-        }
+        let secondResponse = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
         XCTAssertTrue(secondResponse.ok, secondResponse.message)
 
         // Each marker appears once as the PTY echo of the typed line and once as `cat`'s output of the
@@ -152,21 +157,13 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
 
         let marker = "SUBMIT_UNFRAMED_MARKER"
-        let response = TerminalEngineActor.runSynchronously {
-            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
-        }
+        let sentAt = ContinuousClock.now
+        let response = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
         XCTAssertTrue(response.ok, response.message)
-
-        // Half the 500ms separation in: the text may be echoed, but the CR must not have landed yet —
-        // with an immediate CR, `cat` emits the completed line within milliseconds and this trips.
-        try? await Task.sleep(for: .milliseconds(250), clock: .continuous)
-        let midway = TerminalEngineActor.runSynchronously { () -> String in
-            GhosttyEmbeddedAppService.shared.tick()
-            return (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? ""
-        }
-        XCTAssertLessThan(
-            Self.occurrences(of: marker, in: midway), 2, "an unframed submit's CR landed immediately instead of waiting out the separation: \(midway)"
-        )
+        // The send answers only once its bytes have reached the PTY, so the round trip itself measures the
+        // separation the CR waited out: an immediate CR would return within milliseconds.
+        XCTAssertGreaterThanOrEqual(
+            sentAt.duration(to: .now), .milliseconds(450), "an unframed submit's CR landed immediately instead of waiting out the separation")
 
         try await waitUntil { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
     }
@@ -192,9 +189,7 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
         let marker = "SUBMIT_FRAMED_MARKER"
         let sentAt = ContinuousClock.now
-        let response = TerminalEngineActor.runSynchronously {
-            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
-        }
+        let response = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
         XCTAssertTrue(response.ok, response.message)
 
         try await waitUntil(pollInterval: 0.02) {
@@ -205,5 +200,227 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         XCTAssertTrue(
             ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("\u{1b}[200~"),
             "the receiver enabled bracketed paste, so the submit's text must have gone out framed")
+    }
+
+    /// An embedded submit answers for the host-PTY write ghostty produced for it, not for ghostty having
+    /// accepted the text. Ghostty hands input to its own IO thread, which calls back into the host PTY
+    /// driver, so the proof is temporal: the child here never reads its stdin, so writing a payload this
+    /// size takes real time, and a send that returned once ghostty took the text would come back in
+    /// milliseconds. The receiver enables bracketed paste, so the submit pays no separation delay and the
+    /// round trip measures the PTY write alone.
+    func testEmbeddedSubmitAnswersOnlyOnceItsHostPTYWriteCompleted() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        let sentAt = ContinuousClock.now
+        let response = host.core.handleControlRequest(
+            TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
+
+        XCTAssertTrue(response.ok, response.message)
+        XCTAssertGreaterThanOrEqual(
+            sentAt.duration(to: .now), .milliseconds(150),
+            "the submit answered before its bytes could have reached the PTY, so it answered for ghostty's queue instead")
+    }
+
+    /// The failure half of the same contract, and the case the acknowledgement exists for: the submit's
+    /// bytes are in the host PTY write queue when the child dies, so they never reach it. The CHILD is
+    /// killed rather than the session torn down deliberately — the ghostty surface stays alive, so the
+    /// only thing that can fail the send is the PTY write itself.
+    func testEmbeddedSubmitWhoseHostPTYWriteFailsReportsFailure() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        let childPID = try XCTUnwrap(TerminalEngineActor.runSynchronously { hostBox.value.core.childPID() })
+        let killer = Task.detached {
+            try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
+            kill(childPID, SIGKILL)
+        }
+        let response = host.core.handleControlRequest(
+            TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
+        await killer.value
+
+        XCTAssertFalse(response.ok, "a submit whose bytes never reached the PTY must not report success")
+        XCTAssertEqual(response.errorCode, .sessionNotRunning)
+    }
+
+    /// A send answers for its bytes, not for its enqueue: a session torn down while the submit still had a
+    /// write outstanding must report failure. This is the case that made an automation record a seed
+    /// prompt as delivered that no agent ever received — the write found no surface and silently did
+    /// nothing while the request had already been answered ok. `cat` leaves bracketed paste off, so the
+    /// submit's CR is still waiting out its separation when the session goes away.
+    func testSubmitWhoseSessionIsTornDownBeforeItsCarriageReturnReportsFailure() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "echo SUBMIT_READY; cat", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        let teardown = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150), clock: .continuous)
+            TerminalEngineActor.runSynchronously { hostBox.value.terminate() }
+        }
+        let response = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: "SUBMIT_TORN_DOWN", appendNewline: true))
+        await teardown.value
+
+        XCTAssertFalse(response.ok, "a submit whose carriage return never reached the PTY must not report success")
+        XCTAssertEqual(response.errorCode, .sessionNotRunning)
+    }
+
+    /// A bare Enter is a submit too. It goes out as one write rather than the text-then-CR split, so it is
+    /// the path that can most easily answer for its enqueue instead of its bytes — and the automation
+    /// prompt ladder submits with exactly this request when an agent's composer swallowed the first Enter.
+    /// `cat` leaves bracketed paste off, so the submit queued ahead of the Enter idles out the sequencer's
+    /// carriage-return separation and the Enter's own write is still queued when the session goes away: it
+    /// must fail the send rather than report a keystroke that landed nowhere.
+    func testBareEnterWhoseWriteNeverReachesThePTYReportsFailure() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "echo SUBMIT_READY; cat", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        // Enqueued on the engine directly so it is unambiguously ahead of the Enter in the sequencer:
+        // handing both to detached tasks would leave which one enqueues first up to the scheduler.
+        _ = TerminalEngineActor.runSynchronously {
+            hostBox.value.core.handleControlRequestOnEngine(TerminalControlRequest(command: "send", text: "SUBMIT_AHEAD", appendNewline: true))
+        }
+        let teardown = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150), clock: .continuous)
+            TerminalEngineActor.runSynchronously { hostBox.value.terminate() }
+        }
+        let response = await Task.detached {
+            hostBox.value.core.handleControlRequest(TerminalControlRequest(command: "send", text: "", appendNewline: true))
+        }.value
+        await teardown.value
+
+        XCTAssertFalse(response.ok, "a bare Enter whose bytes never reached the PTY must not report success")
+        XCTAssertEqual(response.errorCode, .sessionNotRunning)
+        // The message pins the failure to the send's own write acknowledgement rather than to any earlier
+        // guard that also reports a session as not running.
+        XCTAssertEqual(response.message, "Terminal session stopped accepting input before the send reached it.")
+    }
+
+    /// The emission half of the same contract for a one-write submit: it must answer for the host-PTY
+    /// write, not for ghostty accepting the bytes. Same proof as the two-write submit's — the child never
+    /// reads its stdin, so a payload this size takes real time to write and a send that returned on
+    /// ghostty's acceptance would come back in milliseconds.
+    func testBareSubmitWriteAnswersOnlyOnceItsHostPTYWriteCompleted() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+        let outputPath = paths.outputPath
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+        // A byte payload with appendNewline is the same one-write submit the bare Enter takes, sized so the
+        // write cannot complete instantly while still finishing well inside the acknowledgement budget when
+        // the machine is busy running the rest of the suite.
+        let sentAt = ContinuousClock.now
+        let response = await Task.detached {
+            hostBox.value.core.handleControlRequest(
+                TerminalControlRequest(command: "send", bytes: Data(repeating: 0x41, count: 2 << 20), appendNewline: true))
+        }.value
+
+        XCTAssertTrue(response.ok, response.message)
+        // Writing this payload to the PTY takes tens of milliseconds; answering when ghostty accepted it
+        // comes back in one or two. The threshold sits between them rather than at either end so a loaded
+        // machine only ever makes the real write slower.
+        XCTAssertGreaterThanOrEqual(
+            sentAt.duration(to: .now), .milliseconds(25),
+            "the submit answered before its bytes could have reached the PTY, so it answered for ghostty's queue instead")
+    }
+
+    /// The barrier a submit waits on must not touch the terminal, and the only way to prove that is to
+    /// submit while the parser is in a state where *any* byte would change what the child's output
+    /// renders as. The child emits the lead byte of `\u{2713}` (0xE2), pauses, then completes the
+    /// codepoint: the parser sits parked mid-UTF-8 for the whole window. A barrier that posted a payload
+    /// byte (a NUL was the obvious candidate) would be consumed as the sequence's continuation byte and
+    /// the child's own output would render as replacement characters — and, worse, the corrupted screen
+    /// would disagree with output.log, which records what the child actually wrote.
+    func testSubmitBarrierLeavesOutputParkedMidCodepointUntouched() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        // `/usr/bin/printf` rather than the shell builtin: an exiting process flushes, so the lead byte is
+        // in the PTY before the pause instead of possibly sitting in the shell's stdio buffer. Echo is off
+        // and nothing reads stdin, so the submitted bytes never come back as output of their own.
+        let host = try await startSubmitHost(
+            command: "stty -echo; /usr/bin/printf '\\033[?2004h'; echo SUBMIT_READY; /usr/bin/printf '\\342'; sleep 2;"
+                + " /usr/bin/printf '\\234\\223UTF8_TAIL\\n'; sleep 30",
+            paths: paths)
+        let hostBox = Box(host)
+        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
+
+        // output.log is written from Ghostty's data callback, which fires while `process_output` is
+        // processing those bytes — so the log ending in the lead byte means the parser has already taken
+        // it and is waiting for the continuation bytes.
+        let outputPath = paths.outputPath
+        try await waitUntil {
+            guard let data = FileManager.default.contents(atPath: outputPath), let last = data.last else { return false }
+            return last == 0xE2 && (String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)).contains("SUBMIT_READY")
+        }
+
+        let response = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: "MID_SEQUENCE_SUBMIT", appendNewline: true))
+        XCTAssertTrue(response.ok, response.message)
+
+        let renderedAtSubmit = TerminalEngineActor.runSynchronously { Self.snapshotText(of: hostBox.value) }
+        XCTAssertFalse(
+            renderedAtSubmit.contains("UTF8_TAIL"),
+            "the child finished its codepoint before the submit landed, so this run never exercised a parked parser")
+
+        try await waitUntil { Self.snapshotText(of: hostBox.value).contains("UTF8_TAIL") }
+        let rendered = TerminalEngineActor.runSynchronously { Self.snapshotText(of: hostBox.value) }
+        XCTAssertTrue(rendered.contains("\u{2713}UTF8_TAIL"), "the submit disturbed output the child wrote around it: \(rendered)")
+        XCTAssertFalse(rendered.contains("\u{FFFD}"), "the barrier injected a byte into the child's incomplete codepoint: \(rendered)")
     }
 }

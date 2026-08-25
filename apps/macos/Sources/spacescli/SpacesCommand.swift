@@ -324,16 +324,17 @@ struct AgentAnnotateCommand: ParsableCommand {
     }
 }
 
-/// Raised when a spawned agent's process is never identified as a running coding agent within the
-/// readiness budget — the daemon's foreground classifier saw nothing. The session is left running for
-/// inspection.
-struct AgentSpawnDetectionTimeoutError: LocalizedError {
+/// Raised when a spawned agent never becomes ready for input within the readiness budget — either the
+/// daemon's foreground classifier never identified a coding agent, or the identified agent's TUI never
+/// took the terminal over (a trust/auth gate holding it, or a start that stalled). The session is left
+/// running for inspection.
+struct AgentSpawnReadinessTimeoutError: LocalizedError {
     let sessionID: String
     let command: String
     let timeoutSeconds: Int
 
     var errorDescription: String? {
-        "Agent session \(sessionID) was not detected as a running coding agent within \(timeoutSeconds)s (foreground classification never identified `\(command)`). The session is left running; inspect with: spaces terminal tail \(sessionID)"
+        "Agent session \(sessionID) was not ready to receive input within \(timeoutSeconds)s (`\(command)` was never identified as a running coding agent, or its interface never started reading input). The session is left running; inspect with: spaces terminal tail \(sessionID)"
     }
 }
 
@@ -427,12 +428,12 @@ func performAgentSpawn(
     switch try AgentSpawnReadiness.awaitReadiness(
         deadline: deadline, pollInterval: pollInterval, snapshot: { try spawnedSessionSnapshot(childSessionID: childSessionID) })
     {
-    case .detected(let kind): detected = kind
+    case .ready(let kind): detected = kind
     case .ended(let state):
         throw AgentSpawnChildExitedError(
             sessionID: childSessionID, command: command, state: state, lastOutputLines: lastSpawnedSessionOutputLines(childSessionID: childSessionID),
             deviceName: nil)
-    case .timedOut: throw AgentSpawnDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
+    case .timedOut: throw AgentSpawnReadinessTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
     }
 
     // Auto-subscribe the spawning terminal, but only when the child already has an agent row: rows
@@ -470,7 +471,9 @@ func performAgentSpawn(
 private func spawnedSessionSnapshot(childSessionID: String) throws -> AgentSpawnReadiness.SessionSnapshot {
     try snapshotOrPending {
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: try TerminalSessionPaths.forSession(id: childSessionID))
-        return .init(detectedKind: runtimeState.foregroundDetectedAgentKind, state: runtimeState.state)
+        return .init(
+            detectedKind: runtimeState.foregroundDetectedAgentKind, bracketedPasteActive: runtimeState.bracketedPasteActive,
+            state: runtimeState.state)
     }
 }
 
@@ -481,7 +484,9 @@ private func spawnedSessionSnapshot(childSessionID: String) throws -> AgentSpawn
 /// poll. Factored out of `spawnedSessionSnapshot` so this catching policy is directly testable with an
 /// injected `read` closure, the same way `AgentSpawnReadiness.awaitReadiness` takes an injected `snapshot`.
 func snapshotOrPending(catching read: () throws -> AgentSpawnReadiness.SessionSnapshot) throws -> AgentSpawnReadiness.SessionSnapshot {
-    do { return try read() } catch TerminalSessionPersistenceError.unknownSession { return .init(detectedKind: nil, state: nil) }
+    do { return try read() } catch TerminalSessionPersistenceError.unknownSession {
+        return .init(detectedKind: nil, bracketedPasteActive: false, state: nil)
+    }
 }
 
 /// The last lines a spawned session wrote, for the failure message. Best effort: a child that died
@@ -504,8 +509,12 @@ private func remoteSpawnedSessionSnapshot(childSessionID: String, device: Spaces
     -> AgentSpawnReadiness.SessionSnapshot
 {
     let summaries = try SpacesDeviceClient.terminalSessions(device: device, clientApp: clientApp)
-    guard let summary = summaries.first(where: { $0.id == childSessionID }) else { return .init(detectedKind: nil, state: nil) }
-    return .init(detectedKind: summary.foregroundDetectedAgentKind.flatMap(TerminalDetectedAgentKind.init(rawValue:)), state: summary.state)
+    guard let summary = summaries.first(where: { $0.id == childSessionID }) else {
+        return .init(detectedKind: nil, bracketedPasteActive: false, state: nil)
+    }
+    return .init(
+        detectedKind: summary.foregroundDetectedAgentKind.flatMap(TerminalDetectedAgentKind.init(rawValue:)),
+        bracketedPasteActive: summary.bracketedPasteActive, state: summary.state)
 }
 
 /// The last lines a session spawned on a paired device wrote, for the failure message. Best effort for
@@ -561,13 +570,13 @@ func performRemoteAgentSpawn(
         deadline: deadline, pollInterval: pollInterval,
         snapshot: { try remoteSpawnedSessionSnapshot(childSessionID: childSessionID, device: device, clientApp: clientApp) })
     {
-    case .detected(let kind): detected = kind
+    case .ready(let kind): detected = kind
     case .ended(let state):
         throw AgentSpawnChildExitedError(
             sessionID: childSessionID, command: command, state: state,
             lastOutputLines: lastRemoteSpawnedSessionOutputLines(childSessionID: childSessionID, device: device, clientApp: clientApp),
             deviceName: device.name)
-    case .timedOut: throw AgentSpawnRemoteDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
+    case .timedOut: throw AgentSpawnRemoteReadinessTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
     }
 
     var subscribed = false
@@ -588,17 +597,16 @@ func performRemoteAgentSpawn(
         terminalSessionID: childSessionID, workspaceID: workspace, detectedAgent: detected.displayLabel, deviceID: device.id, subscribed: subscribed)
 }
 
-/// Raised when a remote spawned agent's process is never identified as a running coding agent within the
-/// readiness budget — the device's foreground classifier saw nothing. The session is left running on the
-/// device for inspection. Mirrors the local `AgentSpawnDetectionTimeoutError` (remote readiness is
-/// detection-based, not signal-based).
-struct AgentSpawnRemoteDetectionTimeoutError: LocalizedError {
+/// Raised when a remote spawned agent never becomes ready for input within the readiness budget. The
+/// device reports the same two readiness facts as a local session, so the remote wait ends for the same
+/// reasons as `AgentSpawnReadinessTimeoutError`; the session is left running on the device for inspection.
+struct AgentSpawnRemoteReadinessTimeoutError: LocalizedError {
     let sessionID: String
     let command: String
     let timeoutSeconds: Int
 
     var errorDescription: String? {
-        "Remote agent session \(sessionID) was not detected as a running coding agent within \(timeoutSeconds)s (foreground classification never identified `\(command)`). The session is left running; inspect with: spaces terminal tail \(sessionID) --device <name>"
+        "Remote agent session \(sessionID) was not ready to receive input within \(timeoutSeconds)s (`\(command)` was never identified as a running coding agent, or its interface never started reading input). The session is left running; inspect with: spaces terminal tail \(sessionID) --device <name>"
     }
 }
 

@@ -71,6 +71,18 @@ public final class AutomationService: @unchecked Sendable {
     }
     private var pendingKills: [String: PendingKill] = [:]
     private var workspaceCancellationsInProgress: Set<String> = []
+    /// The in-flight seed-prompt delivery ladder of each agent-kind run, keyed by run id, dropped by every
+    /// path that finalizes a run so a stopped or torn-down workspace leaves nothing behind. In-memory by
+    /// design: a daemon restart drops it, and a run whose prompt was not yet recorded delivered starts the
+    /// ladder over, which is the same thing the ladder does for any unconfirmed send.
+    ///
+    /// Accepted risk: a restart in the few seconds between the prompt landing and delivery being recorded
+    /// re-sends that prompt, so the agent can be seeded twice. The restarted ladder starts by watching the
+    /// session settle, so it cannot interrupt an agent that is working — only one that already went quiet
+    /// inside the run's 90s delivery budget can be re-prompted. Closing the window would mean persisting a
+    /// second phase marker alongside `prompt_delivered_at` and trusting an unverified send across the
+    /// restart, which is exactly the assumption the ladder exists to remove.
+    private var agentPromptDeliveries: [String: AutomationAgentPromptDelivery] = [:]
 
     public init(
         store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String, timeZone: @escaping @Sendable () -> TimeZone = { .current },
@@ -467,6 +479,7 @@ public final class AutomationService: @unchecked Sendable {
     /// ordinary pruning uses the gate-taking artifact cleanup path, while this stop must retain the run's
     /// terminal session and transcript for replay.
     private func markRunCanceledDuringWorkspaceStop(_ run: AutomationRun) throws {
+        agentPromptDeliveries[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
@@ -834,9 +847,10 @@ public final class AutomationService: @unchecked Sendable {
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
     }
 
-    /// Detection deadline for an agent-kind run: how long to wait for the daemon's foreground classifier to
-    /// identify the coding agent before failing the run. Matches the interactive `agent spawn` default (90s).
-    private static let agentDetectionDeadline: TimeInterval = 90
+    /// Readiness deadline for an agent-kind run: how long to wait for the agent to be identified AND ready
+    /// for its prompt, and for that prompt's write to reach the PTY, before failing the run. Matches the
+    /// interactive `agent spawn` default (90s) and covers the whole detect-then-deliver wait.
+    private static let agentReadinessDeadline: TimeInterval = 90
 
     /// Drives an agent-kind run through its two phases, both derived from the run row so a restart resumes
     /// deterministically: `promptDeliveredAt == nil` is the detecting/sending phase, otherwise the run is
@@ -872,10 +886,18 @@ public final class AutomationService: @unchecked Sendable {
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
     }
 
-    /// Detecting/sending phase (`promptDeliveredAt == nil`): wait for foreground detection, then deliver the
-    /// seed prompt. A session that ends before delivery fails the run (the agent never received its work). A
-    /// detection deadline miss also fails the run but leaves the session running for inspection (mirrors
-    /// `spaces agent spawn`, which reports a detection timeout without killing the session).
+    /// Detecting/sending phase (`promptDeliveredAt == nil`): wait for the agent to be ready for input, then
+    /// deliver the seed prompt. A session that ends before delivery fails the run (the agent never received
+    /// its work). A deadline miss also fails the run but leaves the session running for inspection (mirrors
+    /// `spaces agent spawn`, which reports a readiness timeout without killing the session).
+    ///
+    /// Readiness is two facts, not one. `foregroundDetectedAgentKind` says the coding agent process is
+    /// there, which is true a second or two after exec — before its TUI has taken the terminal over, and
+    /// possibly while a trust/auth dialog is holding input. `bracketedPasteActive` says the application
+    /// itself enabled bracketed paste (DECSET 2004), which is the mode every supported agent TUI runs its
+    /// composer in and the mode that makes the send chokepoint frame the prompt so its Enter lands as a
+    /// distinct keystroke. Sending on process identity alone is what let a prompt vanish into a
+    /// pre-raw-mode buffer or sit typed-but-unsubmitted in the composer.
     private func pollAgentDetectionPhase(_ run: AutomationRun, automation: Automation, sessionID: String, sessionLive: Bool) throws {
         guard sessionLive else {
             // Launch-persistence grace: just after a spawn the runtime row can be absent/stale under write-behind
@@ -887,29 +909,126 @@ public final class AutomationService: @unchecked Sendable {
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }
-        if let startedAt = run.startedAt, now().timeIntervalSince(startedAt) >= Self.agentDetectionDeadline {
-            logError("automation_agent_detection_timeout run=\(run.id) session=\(sessionID)")
+        let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
+        // Readiness is exactly two facts: a detected coding agent, and that agent reading input. What is
+        // on screen is deliberately out of scope — a trust/onboarding or auth dialog raised AFTER the TUI
+        // enabled bracketed paste satisfies this gate, so a seed prompt can still land in a modal and be
+        // recorded as delivered. No terminal-state fact distinguishes an active composer from a dialog,
+        // and reading the transcript to guess would be a heuristic on screen text; the gate narrows the
+        // window that made #556 reproducible and stops there. An orchestrator-driven `spaces agent spawn`
+        // (docs/spec.md) remains the answer for sessions that hit first-run dialogs.
+        let agentIsReady = runtimeState?.foregroundDetectedAgentKind != nil && runtimeState?.bracketedPasteActive == true
+        // Readiness gates every ladder step, not just the first: a supported coding agent keeps the pty's
+        // foreground process for the whole session — its tool commands run on pipes, which is exactly why
+        // foreground classification identifies the agent at all — so an in-flight ladder never loses
+        // readiness while the agent works. Anything that did take the terminal over would be something
+        // other than the agent, and writing a prompt into it is the failure this gate exists to prevent.
+        //
+        // Delivery is confirmed from what the terminal painted, never from the agent's `done` signal, even
+        // though a fast turn can reach `done` before the ladder confirms. A prose question reads as `done`
+        // too (spec.md), so an agent that asks something on startup would record a prompt as delivered that
+        // no composer ever took — and the awaiting phase would then finish the run successfully with the
+        // work never done. Hooks are user-installed besides, so that signal cannot carry delivery anyway. A
+        // `done` raised during delivery is not lost: the awaiting phase reads the agent's current row.
+        //
+        // Delivery runs before the deadline is enforced so a prompt the agent is visibly working on is
+        // recorded rather than failed by the same tick that would have confirmed it. Past the budget the
+        // ladder may still confirm what already landed but writes nothing, so a run reported as failed
+        // never leaves a prompt behind that starts an agent working afterwards. Accepted residual: a prompt
+        // accepted within the ladder's confirmation window of the deadline still fails, which takes an
+        // agent that spent nearly the whole 90s becoming ready.
+        let readinessExpired = run.startedAt.map { now().timeIntervalSince($0) >= Self.agentReadinessDeadline } ?? false
+        if agentIsReady, deliverAgentPrompt(run, automation: automation, sessionID: sessionID, writing: !readinessExpired) { return }
+        if readinessExpired {
+            // Which half of the wait ran out is the difference between "the agent never came up" and "the
+            // agent came up but its prompt never reached it", so the failure names the one that happened.
+            if agentIsReady {
+                logError("automation_agent_prompt_delivery_timeout run=\(run.id) session=\(sessionID)")
+            } else {
+                logError("automation_agent_detection_timeout run=\(run.id) session=\(sessionID)")
+            }
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }
-        let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
-        guard runtimeState?.foregroundDetectedAgentKind != nil else { return }
-        try deliverAgentPrompt(run, automation: automation, sessionID: sessionID)
     }
 
-    /// Delivers the agent's seed prompt as one submit-send (`appendNewline: true`): the session host's send
-    /// chokepoint writes the text and a separate, spaced Enter keystroke, which every supported agent TUI
-    /// (Claude Code, Codex, OpenCode) reads as a real submit — a client-side follow-up CR write would land
-    /// inline within the paste burst and is exactly what OpenCode leaves unsubmitted (issue #187). The
-    /// prompt is sent verbatim (nothing stripped). `promptDeliveredAt` is persisted only after the write
-    /// succeeds, so a restart or a failed write retries the whole send rather than resuming into a
-    /// never-submitted prompt.
-    private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String) throws {
-        guard let prompt = automation.agentPrompt else { return }
-        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt), appendNewline: true)
-        try store.updateAutomationRun(
-            id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
-            promptDeliveredAt: now())
+    /// Delivers the agent's seed prompt and records it only once the agent's terminal shows the prompt is
+    /// being worked on. Each tick advances `AutomationAgentPromptDelivery` — which documents the ladder,
+    /// the failures it exists for, and the measurements behind each step — by one step, decided from
+    /// whether the session's output mark moved since the last write.
+    ///
+    /// The prompt goes out as one submit-send (`appendNewline: true`): the session host's send chokepoint
+    /// writes the text as a paste and its submitting Enter as the following write, which every supported
+    /// agent TUI (Claude Code, Codex, OpenCode) reads as a real submit — a client-side follow-up CR write
+    /// would land inline within the paste burst and is exactly what OpenCode leaves unsubmitted (issue
+    /// #187). The prompt is sent verbatim (nothing stripped). A follow-up Enter is a submit-send with no
+    /// text, which the same chokepoint writes as a lone CR.
+    ///
+    /// A write the send path reports as unacknowledged never reached the PTY, so it neither starts nor
+    /// advances the ladder: the delivery state is dropped and the next tick starts a fresh attempt, with
+    /// the run's readiness deadline as the bound. The run either delivers or fails loudly, and can never
+    /// sit in the awaiting phase for a prompt no agent received.
+    /// Returns true when this tick recorded the prompt as delivered, which moves the run to its awaiting
+    /// phase and is what lets the caller skip the readiness deadline for a prompt the agent just took.
+    /// `writing: false` observes only — the ladder still advances, but a step that would write is dropped,
+    /// which is what keeps a run that is about to fail its readiness budget from seeding an agent anyway.
+    @discardableResult private func deliverAgentPrompt(
+        _ run: AutomationRun, automation: Automation, sessionID: String, writing: Bool
+    ) -> Bool {
+        guard let prompt = automation.agentPrompt else { return false }
+        let mark = sessionOutputMark(sessionID: sessionID)
+        guard var delivery = agentPromptDeliveries[run.id] else {
+            agentPromptDeliveries[run.id] = AutomationAgentPromptDelivery(observedMark: mark)
+            return false
+        }
+        let action = delivery.next(mark: mark)
+        agentPromptDeliveries[run.id] = delivery
+        switch action {
+        case .wait:
+            return false
+        case .sendPrompt:
+            if writing { writeAgentPromptInput(.text(prompt), run: run, sessionID: sessionID, detail: "prompt") }
+            return false
+        case .sendEnter:
+            if writing { writeAgentPromptInput(.text(""), run: run, sessionID: sessionID, detail: "enter") }
+            return false
+        case .recordDelivered:
+            agentPromptDeliveries[run.id] = nil
+            do {
+                try store.updateAutomationRun(
+                    id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID,
+                    startedAt: run.startedAt, endedAt: nil, promptDeliveredAt: now())
+                return true
+            } catch {
+                logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) error=\(error)")
+                return false
+            }
+        }
+    }
+
+    /// One submit-send for a delivery ladder step. An unacknowledged write clears the ladder so the next
+    /// tick starts a fresh attempt against a freshly observed terminal.
+    @discardableResult private func writeAgentPromptInput(
+        _ input: TerminalProfileInput, run: AutomationRun, sessionID: String, detail: String
+    ) -> Bool {
+        do {
+            try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: input, appendNewline: true)
+            return true
+        } catch {
+            agentPromptDeliveries[run.id] = nil
+            logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) write=\(detail) error=\(error)")
+            return false
+        }
+    }
+
+    /// How much the session's program has painted so far. A missing log is `.silent` rather than an error:
+    /// a session that has not written anything yet is exactly what "no reaction" means.
+    private func sessionOutputMark(sessionID: String) -> AutomationSessionOutputMark {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let attributes = try? FileManager.default.attributesOfItem(atPath: paths.outputPath)
+        else { return .silent }
+        return AutomationSessionOutputMark(
+            byteCount: (attributes[.size] as? NSNumber)?.intValue ?? 0, modifiedAt: attributes[.modificationDate] as? Date)
     }
 
     /// Awaiting phase (`promptDeliveredAt != nil`): the run completes on the first of — the agent row
@@ -993,6 +1112,7 @@ public final class AutomationService: @unchecked Sendable {
     /// on later ticks regardless of the now-terminal run status.
     @discardableResult private func finishRun(_ run: AutomationRun, status: AutomationRunStatus, exitCode: Int?) throws -> AutomationRun {
         let endedAt = now()
+        agentPromptDeliveries[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: status, skipReason: nil, exitCode: exitCode, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: endedAt, promptDeliveredAt: run.promptDeliveredAt)
@@ -1164,6 +1284,7 @@ public final class AutomationService: @unchecked Sendable {
     /// cancellation here must not invoke retention pruning: that uses ordinary artifact cleanup, whose
     /// row-less-agent branch acquires the workspace gate already held by the caller.
     private func markRunCanceledDuringWorkspaceTeardown(_ run: AutomationRun) throws {
+        agentPromptDeliveries[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)

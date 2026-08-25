@@ -655,13 +655,20 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
         try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains("SUBMIT_READY") == true }
 
-        // Submit a line, then quiesce immediately while the text and its trailing CR are still queued.
+        // Submit a line off the engine (a submit's write acknowledgement is awaited there, so it can only be
+        // issued the way the control socket issues it), then quiesce while the trailing CR is still queued:
+        // `cat` leaves bracketed paste off, so the sequencer holds the CR back for its separation window and
+        // the handoff has real pending input to drain.
         let submitMarker = "DRAIN_PAYLOAD"
-        TerminalEngineActor.runSynchronously {
-            _ = sourceCore.handleControlRequest(TerminalControlRequest(command: "send", text: submitMarker, appendNewline: true))
+        let sourceCoreBoxForSend = Box(sourceCore)
+        let submit = Task.detached {
+            sourceCoreBoxForSend.value.handleControlRequest(TerminalControlRequest(command: "send", text: submitMarker, appendNewline: true))
         }
+        try await Task.sleep(for: .milliseconds(100), clock: .continuous)
         guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
         _ = record
+        let submitResponse = await submit.value
+        XCTAssertTrue(submitResponse.ok, "a submit drained through handoff must still report the write that reached the PTY")
 
         // `cat` re-emits the line only after the CR lands, so its presence proves the CR was written before
         // the handoff record was returned. The direct-to-file writer installed by quiesce keeps appending.

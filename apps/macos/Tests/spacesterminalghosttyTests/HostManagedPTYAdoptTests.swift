@@ -376,6 +376,47 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driver.terminate()
     }
 
+    // MARK: - Input write acknowledgement
+
+    /// A write answers for the bytes, not for the enqueue. This is the teardown race a submit's
+    /// acknowledgement exists to catch: the marker write is queued behind a write large enough to still be
+    /// running (the write queue is serial), and the session is torn down while it waits its turn. Its
+    /// bytes never reach any PTY, and reporting them as delivered is what let an automation stamp a seed
+    /// prompt no agent ever received.
+    func testWriteTornDownBeforeItRunsReportsFailure() async throws {
+        let configuration = makeConfiguration(sessionID: "write-ack-teardown", command: "sleep 30")
+        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        try driver.startIfNeeded()
+
+        driver.sendRawBytes(Data(repeating: 0x41, count: 64 << 20))
+        let queuedWrite = driver.sendRawBytes(Data("QUEUED_SUBMIT\n".utf8))
+
+        // The race only exists while the marker write is still queued, so assert that rather than assume
+        // it: a run where the write ahead of it finished early would otherwise pass for the wrong reason.
+        XCTAssertNil(queuedWrite.wait(timeout: .milliseconds(200)), "the marker write was expected to still be queued behind the large write")
+
+        driver.terminate()
+
+        let outcome = await queuedWrite.outcome()
+        XCTAssertEqual(outcome, .notDelivered, "a write the torn-down session never performed must not report delivery")
+    }
+
+    /// The positive half of the same contract: a write to a live session reports delivery, and the bytes
+    /// are really there (the child echoes them back).
+    func testWriteToALiveSessionReportsDelivery() async throws {
+        let configuration = makeConfiguration(sessionID: "write-ack-delivered", command: "cat")
+        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let collector = OutputCollector()
+        driver.setOutputHandler { collector.append($0) }
+        try driver.startIfNeeded()
+        defer { driver.terminate() }
+
+        let outcome = await driver.sendRawBytes(Data("ack-marker\n".utf8)).outcome()
+
+        XCTAssertEqual(outcome, .delivered)
+        XCTAssertTrue(waitUntil { collector.string.contains("ack-marker") }, "the acknowledged bytes never reached the child")
+    }
+
     func testDirectHandoffWriteFailureAbortsExecAndRestoresOutputToHandler() throws {
         let configuration = makeConfiguration(sessionID: "direct-write-failure", command: "cat")
         let driver = HostManagedPTYTerminalSessionDriver(
