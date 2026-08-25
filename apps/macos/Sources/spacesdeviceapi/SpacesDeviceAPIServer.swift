@@ -132,13 +132,89 @@ extension SpacesDeviceAPICommand {
     /// serial state queue they hold it for that whole wait, so a session saturated by output stalls every
     /// other request on the daemon — including the `.ping` a client sends precisely to ask whether the
     /// link is still alive after an input send timed out. That probe would then time out too and the
-    /// client would tear down a healthy stream. Both transports divert these to `terminalControlQueue`
-    /// instead.
-    fileprivate var runsOnTerminalControlQueue: Bool {
+    /// client would tear down a healthy stream. Both transports divert these to the target session's own
+    /// lane instead (`TerminalControlLaneRegistry`), so a stalled engine holds up only that session.
+    fileprivate var runsOnTerminalControlLane: Bool {
         switch self {
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
         default: false
         }
+    }
+
+    /// `.ping` is the corroboration probe a pane sends after a keystroke's control request missed its
+    /// deadline, to ask whether the link is alive before it tears a stream down and shows the
+    /// connection-lost banner (`DeviceTerminalSessionStateModel.startLinkCorroborationProbe`). Both
+    /// transports answer it without ever entering the shared `spaces.device.api` queue, because the
+    /// daemon busy enough to make a keystroke late is exactly the daemon whose shared queue has a backlog
+    /// of inline work (`.overview` is a SQLite read plus a per-session filesystem walk, polled several
+    /// times a second) — a probe that queues behind that backlog measures the backlog, not the link, and
+    /// fails precisely when it is most needed.
+    fileprivate var isPingCommand: Bool {
+        if case .ping = self { return true }
+        return false
+    }
+}
+
+/// Per-session serial lanes for the engine-blocking terminal commands (`runsOnTerminalControlLane`).
+///
+/// One session's controls stay ordered among themselves — the client's input sequencer builds its
+/// delivery guarantees on top of that order — while different sessions stop serializing behind each
+/// other's engine round trips and grid-sized `.state` exports. That cross-session serialization was the
+/// entire cost of the single shared control queue it replaces: each queued item can hold a lane for the
+/// client's full 5s control deadline, so with N busy sessions a keystroke waited behind up to N other
+/// sessions' work, which is why the freeze showed up at roughly five streaming agents and not at one.
+///
+/// A lane exists only while requests are outstanding on it: it is retained on enqueue and released on
+/// completion, and dropped once the count reaches zero. That needs no session-teardown hook and no
+/// sweeper — a session that ends without the daemon being told, which is the common case, still leaves
+/// nothing behind — and it cannot lose ordering, because a lane is dropped only when there is nothing
+/// left to order against, so the next request for that session opens a fresh lane with an empty history.
+///
+/// What a lane isolates is the Device API's dispatch stage, and only that. Every lane still converges on
+/// the process-wide `TerminalEngineActor` (`SpacesdMain`'s `.state` export, `GhosttyEmbeddedSessionHost`'s
+/// control sockets), so one session's grid export can still hold another session's request once it is
+/// inside the engine. That is a separate, pre-existing property of the engine, tracked by issue #563, and
+/// removing the API-layer serialization is worth its own fix regardless: it is what the before/after
+/// lane-wait numbers and the ping test that goes red on the unfixed daemon measure.
+final class TerminalControlLaneRegistry: @unchecked Sendable {
+    /// Where a control request that carries no session id runs. Every command routed to a lane does carry
+    /// one (`SpacesDeviceAPICommand.terminalSessionID` answers for all four), so this is the optional's
+    /// leftover rather than a reachable case; giving it one shared lane keeps any future session-less
+    /// control command serialized with its own kind instead of silently gaining a lane per request.
+    private static let unkeyedLaneKey = ""
+
+    private let lock = NSLock()
+    private var lanes: [String: (queue: DispatchQueue, outstanding: Int)] = [:]
+
+    /// Returns the lane for `sessionID`, creating it if needed, and counts one outstanding request
+    /// against it. Every call must be paired with `release(forSessionID:)`.
+    func retain(forSessionID sessionID: String?) -> DispatchQueue {
+        let key = sessionID ?? Self.unkeyedLaneKey
+        lock.lock()
+        defer { lock.unlock() }
+        if var lane = lanes[key] {
+            lane.outstanding += 1
+            lanes[key] = lane
+            return lane.queue
+        }
+        let queue = DispatchQueue(label: "spaces.device.api.terminal-control.\(key)", qos: .userInitiated)
+        lanes[key] = (queue: queue, outstanding: 1)
+        return queue
+    }
+
+    func release(forSessionID sessionID: String?) {
+        let key = sessionID ?? Self.unkeyedLaneKey
+        lock.lock()
+        defer { lock.unlock() }
+        guard var lane = lanes[key] else { return }
+        lane.outstanding -= 1
+        if lane.outstanding <= 0 { lanes.removeValue(forKey: key) } else { lanes[key] = lane }
+    }
+
+    var laneCountForTesting: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return lanes.count
     }
 }
 
@@ -149,6 +225,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// that session id (the reader then falls through to the persisted/socket read).
     public typealias LiveTerminalSessionStateProvider = @Sendable (String) -> GhosttyRemoteSessionStatePayload?
 
+    static let pongResponse = SpacesDeviceAPIResponse(ok: true, message: "pong")
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
     static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
@@ -323,19 +400,41 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             fileprivate let connection: NWConnection
             private let server: SpacesDeviceAPIServer
             private let peerID: String
+            /// This connection's own serial queue. Its `NWConnection` runs on it, so the receive
+            /// callbacks, the newline framing, the decode, and the three fields below are confined here
+            /// rather than to the shared `spaces.device.api` queue.
+            ///
+            /// This is what makes `.ping` independent of the daemon's inline request backlog (see
+            /// `isPingCommand`). The shared queue is serial and answers `.overview` inline, so while it is
+            /// busy a connection started on it cannot even read its bytes off the socket, let alone decide
+            /// where to dispatch them; diverting `.ping` to a lane of its own would not have helped,
+            /// because the divert decision was itself made on the blocked queue. Everything other than
+            /// `.ping` still hops to the shared queue to be authorized and dispatched exactly as before,
+            /// so nothing else changes about which queue runs which handler.
+            private let connectionQueue: DispatchQueue
             private var buffer = Data()
             /// Set once a subscription or service tunnel takes the connection over, stopping the
             /// newline-delimited JSON read loop so the hijacking path owns all further bytes.
             private var didHijackConnection = false
             private var didReceiveEOF = false
+            /// Set when this connection's teardown has run, and read when the listener's accept handler
+            /// registers it. Confined to the Device API queue, which is what makes registration and
+            /// removal commute: the accept handler starts the connection before enqueueing the
+            /// registration (so an accept never waits on the shared queue's inline work), and a
+            /// connection that fails or is closed by the client in that window enqueues its teardown
+            /// first. That teardown removes nothing — the entry is not there yet — so without this flag
+            /// the registration that follows would insert an already-dead connection that nothing ever
+            /// removes, and a long-lived daemon would accumulate them along with their retain cycles.
+            fileprivate var didTearDownOnDeviceAPIQueue = false
 
             init(connection: NWConnection, server: SpacesDeviceAPIServer) {
                 self.connection = connection
                 self.server = server
                 peerID = String(describing: connection.endpoint)
+                connectionQueue = DispatchQueue(label: "spaces.device.api.connection.\(ObjectIdentifier(connection).hashValue)", qos: .userInitiated)
             }
 
-            func start(on queue: DispatchQueue) {
+            func start() {
                 connection.stateUpdateHandler = { [weak self] state in
                     guard let self else { return }
                     switch state {
@@ -344,14 +443,26 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         self.receiveNext()
                     case .failed(let error):
                         self.server.trace("request_connection_failed peer=\(self.peerID) error=\(error)")
-                        self.server.closeRequestConnectionAfterNetworkUpdate(connection: self.connection, cancelNetworkConnection: true)
+                        self.tearDown(cancelNetworkConnection: true)
                     case .cancelled:
                         self.server.trace("request_connection_cancelled peer=\(self.peerID)")
-                        self.server.closeRequestConnectionAfterNetworkUpdate(connection: self.connection, cancelNetworkConnection: false)
+                        self.tearDown(cancelNetworkConnection: false)
                     default: break
                     }
                 }
-                connection.start(queue: queue)
+                connection.start(queue: connectionQueue)
+            }
+
+            /// Marks this connection torn down and runs the server's cleanup, both in one hop onto the
+            /// Device API queue so the mark can never land after a registration enqueued behind it.
+            /// Idempotent: `.failed` followed by `.cancelled` runs it twice and the second pass finds
+            /// nothing left to remove.
+            private func tearDown(cancelNetworkConnection: Bool) {
+                server.performOnQueue {
+                    self.didTearDownOnDeviceAPIQueue = true
+                    self.server.closeRequestConnectionAfterNetworkUpdate(
+                        connection: self.connection, cancelNetworkConnection: cancelNetworkConnection)
+                }
             }
 
             private func receiveNext() {
@@ -401,13 +512,47 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     server.trace(
                         "request_received peer=\(peerID) command=\(request.commandName) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.clientApp?.installationID ?? "-")"
                     )
+                    // The corroboration probe's contract is that a pong proves this daemon decoded the
+                    // request and composed an answer, not that TCP connected. It still does: the line is
+                    // framed, decoded, and authorized against the pairing store here exactly as it was on
+                    // the shared queue, and a rejection is still an answer this daemon wrote. All that
+                    // changed is which queue those steps run on.
+                    guard !request.command.isPingCommand else {
+                        finishRequest(
+                            Result {
+                                try server.authorize(request)
+                                return SpacesDeviceAPIServer.pongResponse
+                            })
+                        return
+                    }
+                    // Everything else is authorized and dispatched on the shared Device API queue, which
+                    // is where the request handlers and the server state they touch live.
+                    if request.command.hijacksConnection { didHijackConnection = true }
+                    let residual = request.command.isTunnelCommand ? buffer : Data()
+                    server.queue.async { [weak self] in self?.dispatchOnDeviceAPIQueue(request, residual: residual) }
+                } catch { finishRequest(.failure(error)) }
+            }
+
+            /// Authorizes and routes one request. Runs on the shared Device API queue; the connection's
+            /// own queue reads and decodes the request and continues its read loop from `finishRequest`.
+            ///
+            /// Admission is rechecked here rather than relying on the check the read loop already made:
+            /// that one ran on this connection's own queue, and `stop()` / `resetPairingsAndStop()`
+            /// publish `acceptingRequests = false` on THIS queue, so a teardown can land in between and
+            /// the request would then be served after it. This queue is where that flag is published and
+            /// it serializes against the teardown itself, so the check and the work it guards are one
+            /// critical section. `.pair` makes the consequence concrete: it skips authorization by
+            /// design, so without this it could mint a token into a pairings file a reset had just
+            /// emptied.
+            private func dispatchOnDeviceAPIQueue(_ request: SpacesDeviceAPIRequest, residual: Data) {
+                do {
+                    try server.admitOnQueue()
                     try server.authorize(request)
                     guard !request.command.hijacksConnection else {
-                        didHijackConnection = true
                         if request.command.isTunnelCommand {
                             // Whatever remains buffered after the request line is pipelined tunnel data;
                             // hand it to the tunnel so those bytes reach the service.
-                            server.handleTunnelRequest(request, connection: connection, residual: buffer)
+                            server.handleTunnelRequest(request, connection: connection, residual: residual)
                         } else {
                             try server.handleSubscribeRequest(request, connection: connection)
                         }
@@ -425,7 +570,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnWorkspaceSetupQueue {
                         server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnTerminalControlQueue {
+                    } else if request.command.runsOnTerminalControlLane {
                         server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else {
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
@@ -434,12 +579,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             /// Sends one request result, then either resumes the reusable request session or closes it
-            /// after a thrown request error. Called only on the Device API queue, including completions
-            /// from the separate agent-hook worker queue.
+            /// after a thrown request error. Called from whichever queue produced the result — this
+            /// connection's own queue for `.ping`, the Device API queue for everything else, including
+            /// completions handed back from the worker queues — and only touches the connection, so it
+            /// needs no particular queue itself. The send is issued on `connectionQueue` so its
+            /// completion, which resumes the read loop, lands back where the connection's state lives.
             private func finishRequest(_ result: Result<SpacesDeviceAPIResponse, any Error>) {
                 switch result {
                 case .success(let response):
-                    server.sendResponse(response, to: connection) { [weak self] error in
+                    server.sendResponse(response, to: connection, on: connectionQueue) { [weak self] error in
                         guard let self else { return }
                         if let error {
                             self.server.trace("request_response_error peer=\(self.peerID) error=\(error)")
@@ -451,7 +599,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 case .failure(let error):
                     server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
                     let response = SpacesDeviceAPIServer.failureResponse(for: error)
-                    server.sendResponse(response, to: connection) { [weak self] _ in self?.connection.cancel() }
+                    server.sendResponse(response, to: connection, on: connectionQueue) { [weak self] _ in self?.connection.cancel() }
                 }
             }
         }
@@ -598,6 +746,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
                     if request.command.isSubscriptionCommand {
                         let action = try server.syncOnQueue {
+                            try server.admitOnQueue()
                             try server.authorize(request)
                             return try server.prepareLinuxSubscribe(request)
                         }
@@ -641,37 +790,81 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     }
 
                     let response: SpacesDeviceAPIResponse
+                    var admissionRefused = false
                     do {
                         // Authorization stays on the state queue; only the long or engine-blocking work
                         // moves off it. A command answered from a worker queue can finish after one that
                         // arrived later on another connection, which reorders nothing a client observes:
                         // each connection reads its response before sending its next request, and separate
                         // connections have no ordering guarantee to begin with.
-                        if request.command.isAgentHookCommand {
-                            try server.syncOnQueue { try server.authorize(request) }
+                        //
+                        // Admission (`admitOnQueue`) rides in the same hop as authorization, never in one
+                        // of its own: two hops would put a teardown between the check and the work. This
+                        // transport needs the guard for a reason of its own — a plain request connection
+                        // is never handed to `registerActiveConnection` (only subscriptions and tunnels
+                        // are), so `stopOnQueue`'s connection sweep does not close its socket and its
+                        // thread would otherwise keep serving requests after the server stopped. `.ping`
+                        // is exempt because it answers off this queue by design and mutates nothing; a
+                        // late pong costs a client one redial.
+                        if request.command.isPingCommand {
+                            // Answered on this client's own thread, never through `syncOnQueue`: the
+                            // corroboration probe must measure the link rather than the shared queue's
+                            // inline backlog (see `isPingCommand`). Authorization still runs, on the
+                            // pairing store's own lock, so a pong still means this daemon decoded the
+                            // request and composed the answer.
+                            try server.authorize(request)
+                            response = SpacesDeviceAPIServer.pongResponse
+                        } else if request.command.isAgentHookCommand {
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
                             response = try server.handleAgentHookRequestOnWorkerQueue(request)
                         } else if request.command.runsOnWorkspaceTeardownQueue {
-                            try server.syncOnQueue { try server.authorize(request) }
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
                             response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
                         } else if request.command.runsOnWorkspaceStopQueue {
-                            try server.syncOnQueue { try server.authorize(request) }
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
                             response = try server.handleWorkspaceStopRequestOnWorkerQueue(request)
                         } else if request.command.runsOnWorkspaceSetupQueue {
-                            try server.syncOnQueue { try server.authorize(request) }
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
                             response = try server.handleWorkspaceSetupRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnTerminalControlQueue {
-                            try server.syncOnQueue { try server.authorize(request) }
+                        } else if request.command.runsOnTerminalControlLane {
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
                             response = try server.handleTerminalControlRequestOnWorkerQueue(request)
                         } else {
                             response = try server.syncOnQueue {
+                                try server.admitOnQueue()
                                 try server.authorize(request)
                                 return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
                             }
                         }
-                    } catch { response = SpacesDeviceAPIServer.failureResponse(for: error) }
+                    } catch {
+                        admissionRefused = error is SpacesDeviceAPIServer.AdmissionRefused
+                        response = SpacesDeviceAPIServer.failureResponse(for: error)
+                    }
                     let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
                     try writeLoggedTLSResponse(responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
-                    if !response.ok, response.errorCode == .unauthorized { return }
+                    // A refusal ends the connection, not just this exchange, and returning here runs the
+                    // `defer` that closes the socket. `.unauthorized` means the client must re-pair before
+                    // anything it sends can be served. An admission refusal means the server has stopped:
+                    // this transport never hands a plain request socket to `registerActiveConnection`, so
+                    // `stopOnQueue`'s sweep does not close it, and a session client — which reuses one
+                    // connection for every request — would keep sending into a stopped server instead of
+                    // dialing the replacement listener the supervisor builds.
+                    if !response.ok, response.errorCode == .unauthorized || admissionRefused { return }
                 }
             }
 
@@ -929,9 +1122,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// themselves instead of racing the same workspace's setup state.
     private let workspaceSetupQueue = DispatchQueue(label: "spaces.device.api.workspace-setup", qos: .userInitiated)
     /// Terminal input and control round trips block on the target session's engine (see
-    /// `runsOnTerminalControlQueue`). Serialize them here so a stalled engine holds up only other
-    /// terminal controls and never the state queue that answers pings, overviews, and state reads.
-    private let terminalControlQueue = DispatchQueue(label: "spaces.device.api.terminal-control", qos: .userInitiated)
+    /// `runsOnTerminalControlLane`). They run on a serial lane per session (`TerminalControlLaneRegistry`)
+    /// so a stalled engine holds up only that session's own controls: never another session's, and never
+    /// the state queue that answers overviews and state reads.
+    private let terminalControlLanes = TerminalControlLaneRegistry()
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -940,6 +1134,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
     /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
     let queue: DispatchQueue
+    #if canImport(Network) && canImport(Security)
+        /// Where the `NWListener` runs: accepts and the listener's own state updates, kept off the shared
+        /// request queue so a busy daemon still accepts connections (see the accept handler in `start`).
+        private let listenerQueue = DispatchQueue(label: "spaces.device.api.listener", qos: .userInitiated)
+    #endif
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let terminalLinkTransferAuthorizationTTL: TimeInterval
@@ -981,7 +1180,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Only the `NWListener` transport reports waiting; `SpacesDeviceAPIListenerHealth` turns a wait
     /// that outlasts its grace period into a not-running verdict for the supervisor's health check.
     private var listenerWaitingSince: Date?
-    private var acceptingRequests = false
+    /// Written on the Device API queue but read from each request connection's own queue (see
+    /// `RequestConnection.connectionQueue`), so it is lock-guarded rather than queue-confined.
+    private var acceptingRequestsStorage = false
+    private var acceptingRequests: Bool {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return acceptingRequestsStorage
+        }
+        set {
+            stateLock.lock()
+            acceptingRequestsStorage = newValue
+            stateLock.unlock()
+        }
+    }
 
     public init(
         host: String, port: Int, identity: TerminalServiceTLSIdentity,
@@ -1065,6 +1278,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIListenerHealth.isRunning(listenerStarted: running, waitingSince: listenerWaitingSince, now: Date())
     }
 
+    /// Live control lanes. Zero once nothing is outstanding, which is what proves the lanes do not
+    /// accumulate for sessions that have gone away.
+    var terminalControlLaneCountForTesting: Int { terminalControlLanes.laneCountForTesting }
+
     var requestConnectionCountForTesting: Int {
         #if canImport(Network) && canImport(Security)
             if DispatchQueue.getSpecific(key: queueKey) != nil { return requestConnections.count }
@@ -1078,6 +1295,67 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if DispatchQueue.getSpecific(key: queueKey) != nil { return terminalLinkTransferAuthorizations[linkID]?.expiresAt }
         return queue.sync { terminalLinkTransferAuthorizations[linkID]?.expiresAt }
     }
+
+    #if canImport(Network) && canImport(Security)
+        /// Publishes "this listener is serving" — the port it took and the flags that let it accept — on
+        /// the Device API queue. Submitted from the listener's state callback before that callback signals
+        /// startup, so it is enqueued ahead of the barrier `start` runs once the signal wakes it.
+        private func publishListenerReady(_ listener: NWListener, port readyPort: Int) {
+            let listenerID = ObjectIdentifier(listener)
+            performOnQueue {
+                guard let current = self.listener, ObjectIdentifier(current) == listenerID else { return }
+                self.listeningPort = readyPort
+                self.acceptingRequests = true
+                self.setRunning(true)
+            }
+        }
+
+        /// Publishes "this listener is no longer serving" on the Device API queue, the queue that owns
+        /// `listener` and on which `stopOnQueue` publishes the same flags, so the two orderings cannot
+        /// interleave into a stopped server that still reports itself running. Dropping the listener is
+        /// part of the publication: it makes the state terminal, so a `.ready` this failure followed can
+        /// no longer be re-published by anything holding the same listener, and it is what `start`'s
+        /// barrier reads to refuse a listener that died during startup. The listener is cancelled here
+        /// because nothing else will: `stopOnQueue` tears down only the listener the server still holds.
+        /// The identity guard drops a callback from a listener already torn down or replaced.
+        private func publishListenerStopped(_ listener: NWListener) {
+            let listenerID = ObjectIdentifier(listener)
+            performOnQueue {
+                guard let current = self.listener, ObjectIdentifier(current) == listenerID else { return }
+                self.acceptingRequests = false
+                self.setRunning(false)
+                current.cancel()
+                self.listener = nil
+            }
+        }
+
+        /// Starts the waiting clock for a listener that is still the server's, on the queue that owns that
+        /// answer. A wait reported before the ready publication lands is recorded all the same and costs
+        /// nothing: `SpacesDeviceAPIListenerHealth` reads it only once the listener counts as started, and
+        /// the ready publication's `setRunning(true)` clears it.
+        private func publishListenerWaiting(_ listener: NWListener) {
+            let listenerID = ObjectIdentifier(listener)
+            performOnQueue {
+                guard let current = self.listener, ObjectIdentifier(current) == listenerID else { return }
+                self.markListenerWaiting()
+            }
+        }
+
+        /// Drops a listener that never reached a serving state `start` could return on. Clearing the
+        /// handlers first stops any further callback from this listener, and the identity guard means a
+        /// listener some other publication already dropped, or that a later `start` has already replaced,
+        /// is left alone.
+        private func tearDownStartupListener(_ listener: NWListener) {
+            let listenerID = ObjectIdentifier(listener)
+            listener.stateUpdateHandler = nil
+            listener.newConnectionHandler = nil
+            listener.cancel()
+            performOnQueue {
+                guard let current = self.listener, ObjectIdentifier(current) == listenerID else { return }
+                self.listener = nil
+            }
+        }
+    #endif
 
     public func start(timeout: TimeInterval = 5) throws {
         #if canImport(Network) && canImport(Security)
@@ -1107,38 +1385,90 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
                 self.trace("request_connection_accept peer=\(String(describing: connection.endpoint))")
                 let requestConnection = RequestConnection(connection: connection, server: self)
-                self.requestConnections[ObjectIdentifier(connection)] = requestConnection
-                requestConnection.start(on: self.queue)
+                // Started before it is registered, and on its own queue, so a connection is accepted and
+                // read while the shared queue is busy — the corroboration `.ping` arrives on a fresh
+                // one-shot connection, and an accept that queued behind inline `.overview` work would
+                // defeat answering the ping off that queue. The registry entry, which `stopOnQueue` and
+                // the pairing-revoke path read, is still recorded on the shared queue; re-checking
+                // `acceptingRequests` there closes the window where a stop lands in between and would
+                // otherwise leave this connection unregistered and never cancelled.
+                requestConnection.start()
+                self.performOnQueue {
+                    // Registering a connection whose teardown already ran would leave an entry nothing
+                    // removes (see `didTearDownOnDeviceAPIQueue`); registering one that a stop landed on
+                    // would leave it outside the sweep `stopOnQueue` already performed. Both checks read
+                    // state this queue owns, so the two orderings commute.
+                    guard self.acceptingRequests, !requestConnection.didTearDownOnDeviceAPIQueue else {
+                        connection.cancel()
+                        return
+                    }
+                    self.requestConnections[ObjectIdentifier(connection)] = requestConnection
+                }
             }
+            // This handler runs on `listenerQueue`, which is not serialized against `stopOnQueue`, so it
+            // publishes no lifecycle state directly: a callback that wrote the flags from here would race
+            // a teardown and could leave a stopped server reporting itself running — which the supervisor's
+            // health check then never rebuilds — or, after a pairing reset, turn admission back on. Every
+            // state instead hops to the Device API queue under a listener-identity guard. Ordering is the
+            // point: `listenerQueue` is serial and `performOnQueue` async-enqueues from it (its inline fast
+            // path applies only to work already on the Device API queue, which this never is), so the hops
+            // land in the order the listener reported them, and `.ready` submits its hop before it signals
+            // startup. `start` then fences on that queue before its barrier, so every state emitted up to
+            // that point has submitted its hop and the barrier is enqueued behind all of them, which is
+            // what lets it read the ordered truth rather than a snapshot. A failure emitted after the fence
+            // is genuinely post-startup: it publishes as one, and the supervisor's health loop is what
+            // rebuilds on it. Clearing
+            // `stateUpdateHandler` in `stopOnQueue` cannot recall a callback the listener queue has already
+            // dispatched; nilling `listener` there is what makes such a callback a no-op.
             createdListener.stateUpdateHandler = { [weak self, weak createdListener] state in
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    self.listeningPort = Int(createdListener?.port?.rawValue ?? UInt16(self.port))
-                    self.acceptingRequests = true
-                    self.setRunning(true)
+                    guard let createdListener else { return }
+                    // Published before the signal so this hop is enqueued ahead of `start`'s barrier. The
+                    // port is read here, on the queue the listener reports from, rather than back in
+                    // `start`, so that what the barrier validates is what this state actually carried.
+                    self.publishListenerReady(createdListener, port: Int(createdListener.port?.rawValue ?? UInt16(self.port)))
                     startup.signal(.success(()))
                 case .failed(let error):
-                    self.acceptingRequests = false
-                    self.setRunning(false)
+                    if let createdListener { self.publishListenerStopped(createdListener) }
                     startup.signal(.failure(error))
-                case .cancelled:
-                    self.acceptingRequests = false
-                    self.setRunning(false)
+                case .cancelled: if let createdListener { self.publishListenerStopped(createdListener) }
                 case .waiting(let error):
                     self.trace("listener_waiting error=\(error)")
-                    self.markListenerWaiting()
+                    if let createdListener { self.publishListenerWaiting(createdListener) }
                 default: break
                 }
             }
-            listener = createdListener
-            createdListener.start(queue: queue)
+            // Recorded on the Device API queue before the listener can call back, so `stopOnQueue` can
+            // cancel a listener that is still starting up and so the identity guard above has something
+            // to match against from the first callback.
+            try syncOnQueue { self.listener = createdListener }
+            // The listener runs on a queue of its own for the same reason each request connection does:
+            // accepting a connection must not wait on the shared request queue's inline work.
+            createdListener.start(queue: listenerQueue)
 
             if case .failure(let error) = startup.wait(timeout: timeout) ?? .failure(POSIXError(.ETIMEDOUT)) {
-                createdListener.stateUpdateHandler = nil
-                createdListener.newConnectionHandler = nil
-                createdListener.cancel()
+                tearDownStartupListener(createdListener)
                 throw error
+            }
+            // Drains `listenerQueue` so every state this listener has already emitted has submitted its
+            // hop before the barrier below is enqueued. Without it a `.failed` sitting behind the `.ready`
+            // could publish after the barrier passed, and `start` would return success on a listener that
+            // is already dead. This cannot deadlock: the state callbacks publish through `performOnQueue`,
+            // which async-enqueues from that queue and never waits on this thread.
+            listenerQueue.sync {}
+            // The barrier. It publishes nothing — every publication already happened on the Device API
+            // queue, in the order the listener reported it — and only reads whether this listener is still
+            // the server's and still accepting. A `.failed` or `.cancelled` that followed the `.ready` was
+            // enqueued ahead of this and dropped the listener; so did a `stop()` or `resetPairingsAndStop()`
+            // that landed in the same window. Either way `start` must fail rather than return a success
+            // that buries a terminal state, since nothing reports that listener's state again and the
+            // supervisor would keep a dead listener alive forever on the strength of this return.
+            let isServing = try syncOnQueue { self.listener === createdListener && self.acceptingRequests }
+            guard isServing else {
+                tearDownStartupListener(createdListener)
+                throw POSIXError(.ECANCELED)
             }
         #elseif os(Linux) && canImport(OpenSSL)
             let createdServer = LinuxServer(host: host, port: port, identity: identity, server: self, queue: queue)
@@ -1231,7 +1561,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    public func stop() { queue.async { self.stopOnQueue() } }
+    /// Stops accepting and tears the transport down on the Device API queue. Uses `performOnQueue` rather
+    /// than a bare `async` so a stop requested from that queue takes effect at that point instead of
+    /// behind everything already queued ahead of it — the same inline-if-already-there rule the rest of
+    /// this class's queue entry points follow.
+    public func stop() { performOnQueue { self.stopOnQueue() } }
 
     func listPairedDevices() throws -> [SpacesDevicePairedClient] { try syncOnQueue { try self.pairingStore.listDevices() } }
 
@@ -1336,7 +1670,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let issuedToken = try pairingStore.issueToken(for: clientApp, presentedToken: nil)
             onPairingSucceeded?(clientApp)
             return SpacesDeviceAPIResponse(ok: true, message: "Paired iOS client.", result: .issuedAuthToken(.init(authToken: issuedToken)))
-        case .ping: return SpacesDeviceAPIResponse(ok: true, message: "pong")
+        // Both transports answer `.ping` before it reaches this queue (see `isPingCommand`), so this
+        // case only keeps the switch exhaustive.
+        case .ping: return Self.pongResponse
         case .daemonStatus: return SpacesDeviceAPIResponse(ok: true, message: "Loaded daemon status.", result: .daemonStatus(try loadDaemonStatus()))
         case .requestDaemonRestart:
             guard let onRestartRequested else {
@@ -1380,9 +1716,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
-        // Both transports divert engine-blocking terminal commands to `terminalControlQueue` before they
-        // reach here (see `runsOnTerminalControlQueue`), so this case only keeps the switch exhaustive.
-        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: return try handleTerminalControlQueueRequest(request)
+        // Both transports divert engine-blocking terminal commands to their session's lane before they
+        // reach here (see `runsOnTerminalControlLane`), so this case only keeps the switch exhaustive.
+        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: return try handleTerminalControlLaneRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
@@ -1539,18 +1875,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     #endif
 
-    /// Runs one engine-blocking terminal command (see `runsOnTerminalControlQueue`).
+    /// Runs one engine-blocking terminal command (see `runsOnTerminalControlLane`).
     ///
     /// These handlers read session files and talk to the session's control socket, and `.state` reads the
     /// live core through the immutable provider closure and emits a metric; they touch none of the server
     /// state the Device API queue confines, so they need nothing hoisted out before the hop.
-    private func handleTerminalControlQueueRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleTerminalControlLaneRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
         switch request.command {
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
         case .state(let payload): return try handleStateRequest(payload)
-        default: preconditionFailure("Only engine-blocking terminal commands run on the terminal-control queue.")
+        default: preconditionFailure("Only engine-blocking terminal commands run on a session's terminal-control lane.")
         }
     }
 
@@ -1558,9 +1894,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func handleTerminalControlRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            terminalControlQueue.async { [weak self] in
+            let sessionID = request.sessionID
+            let lane = terminalControlLanes.retain(forSessionID: sessionID)
+            let enqueuedAt = Self.laneWaitClock()
+            lane.async { [weak self, terminalControlLanes] in
+                // Released before anything can throw or return early, so a lane can never be stranded
+                // holding a count for a request that already finished.
+                defer { terminalControlLanes.release(forSessionID: sessionID) }
                 guard let self else { return }
-                let result = Result { try self.handleTerminalControlQueueRequest(request) }
+                self.logTerminalControlLaneWait(request, enqueuedAt: enqueuedAt)
+                let result = Result { try self.handleTerminalControlLaneRequest(request) }
                 self.queue.async { completion(result) }
             }
         }
@@ -1568,9 +1911,36 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     #if os(Linux) && canImport(OpenSSL)
         private func handleTerminalControlRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try terminalControlQueue.sync { try handleTerminalControlQueueRequest(request) }
+            let sessionID = request.sessionID
+            let lane = terminalControlLanes.retain(forSessionID: sessionID)
+            defer { terminalControlLanes.release(forSessionID: sessionID) }
+            let enqueuedAt = Self.laneWaitClock()
+            return try lane.sync {
+                logTerminalControlLaneWait(request, enqueuedAt: enqueuedAt)
+                return try handleTerminalControlLaneRequest(request)
+            }
         }
     #endif
+
+    /// The enqueue instant a lane-wait metric is measured from, and zero when the perf log is off. Reading
+    /// the clock is the only cost this metric would impose on a normal build, and it sits on the path every
+    /// keystroke takes, so a build that will never emit the metric does not pay for it.
+    private static func laneWaitClock() -> UInt64 { TerminalPerformance.isEnabled ? DispatchTime.now().uptimeNanoseconds : 0 }
+
+    /// How long this request waited for its session's control lane, measured enqueue-to-dequeue.
+    ///
+    /// Handler duration alone cannot tell a slow engine from a queued keystroke, and the queueing is what
+    /// the per-session lanes exist to remove, so the wait is what has to be measurable to attribute a
+    /// before/after. DEBUG-gated through `TerminalPerformance` like every other perf metric; the wait is
+    /// routinely sub-millisecond, so the microsecond figure rides in `detail` where the millisecond field
+    /// would round it to zero.
+    private func logTerminalControlLaneWait(_ request: SpacesDeviceAPIRequest, enqueuedAt: UInt64) {
+        guard TerminalPerformance.isEnabled else { return }
+        let waitNanoseconds = DispatchTime.now().uptimeNanoseconds &- enqueuedAt
+        TerminalPerformance.logMetric(
+            "device_api_control_lane_wait", target: request.sessionID ?? "-", elapsedMS: Int(waitNanoseconds / 1_000_000), success: true,
+            detail: "command=\(request.commandName) wait_us=\(waitNanoseconds / 1000)")
+    }
 
     /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
     /// directory, then returns fresh status for every supported agent. Rejects an empty request.
@@ -1588,6 +1958,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             ? "Installed agent hooks." : "Installed agent hooks, except: \(outcome.failures.map(\.message).joined(separator: " "))"
         return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
     }
+
+    /// Refuses a request that reached its dispatch point after the server stopped. Must be called on the
+    /// Device API queue, in the same critical section as the work it guards — `stop()` and
+    /// `resetPairingsAndStop()` publish `acceptingRequests` there, so a check taken on any other queue,
+    /// or in a separate hop, is only a snapshot of a state that can change before the work runs.
+    ///
+    /// The refusal reaches the client as a coded failure rather than a bare socket close: both transports
+    /// already flatten a thrown error into `(ok: false, message:)` and then drop the connection, so this
+    /// closes the connection exactly as the pre-dispatch admission check does while telling the client
+    /// why. It maps through `errorCode(for:)`'s default to `.internalError`, which is the right shape: the
+    /// request was well formed and the client should redial, not correct it.
+    func admitOnQueue() throws { guard acceptingRequests else { throw AdmissionRefused() } }
+
+    /// Thrown by `admitOnQueue`. A named type rather than a coded `NSError` because one transport has to
+    /// recognize it: on Linux a plain request socket is never registered with the stop sweep, so its own
+    /// thread must close it when admission is refused (see `LinuxServer.handleClient`). Everywhere else it
+    /// is just another thrown error that the flatten points turn into a failure response.
+    struct AdmissionRefused: LocalizedError { var errorDescription: String? { "The Spaces Device API stopped accepting requests." } }
 
     private func authorize(_ request: SpacesDeviceAPIRequest) throws {
         guard !request.command.isPairingCommand else { return }
@@ -3736,12 +4124,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     #if canImport(Network) && canImport(Security)
-        private func sendResponse(_ response: SpacesDeviceAPIResponse, to connection: NWConnection, completion: @escaping @Sendable (Error?) -> Void)
-        {
+        /// `sendQueue` is where the shaper paces its chunks and where the completion is delivered when it
+        /// does; it defaults to the Device API queue, and a request connection passes its own so the read
+        /// loop resumes on the queue that owns its buffer.
+        private func sendResponse(
+            _ response: SpacesDeviceAPIResponse, to connection: NWConnection, on sendQueue: DispatchQueue? = nil,
+            completion: @escaping @Sendable (Error?) -> Void
+        ) {
             do {
                 var data = try SpacesDeviceAPICodec.encodeResponse(response)
                 data.append(0x0A)
-                networkShaper.send(content: data, to: connection, on: queue, completion: completion)
+                networkShaper.send(content: data, to: connection, on: sendQueue ?? queue, completion: completion)
             } catch { completion(error) }
         }
     #endif

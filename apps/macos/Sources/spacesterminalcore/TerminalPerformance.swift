@@ -58,9 +58,20 @@ public enum TerminalPerformance {
         return formatter
     }()
 
+    /// Serializes perf-log appends. Each writer opens its own handle and does seek-to-end then write,
+    /// which is not atomic against another handle on the same file: the Device API's per-session control
+    /// lanes, the terminal engine queue, and the request queue all log concurrently, so two appends can
+    /// resolve the same end offset and overwrite each other's rows. A lost or truncated row silently
+    /// biases any distribution read back out of the log, which is what the log exists for. Only reached
+    /// after the `isEnabled` guard every entry point takes, so a process without the perf log on never
+    /// touches it.
+    private static let perfLogLock = NSLock()
+
     private static func appendToPerfLog(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
         let fileManager = FileManager.default
+        perfLogLock.lock()
+        defer { perfLogLock.unlock() }
         do {
             let directoryURL = try perfLogDirectory(fileManager: fileManager)
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)

@@ -27,6 +27,7 @@
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
 - When making breaking changes, explicitly ask whether backwards compatibility is needed. Do not make the decision on supporting or not supporting backwards compatibility without explicit approval.
+- A performance change must be measured: capture the metric on the unmodified baseline, capture it again after the change with the identical procedure, and put the before/after numbers in the PR body.
 - Tests should validate product behavior, not database schema shape. Do not add schema-only tests for table or column ownership. Code and behavior tests should cover the contract.
 - Before committing, go through uncommitted changes to identify and act on:
     - wrong paths we went down and any code leftover from those that should be removed
