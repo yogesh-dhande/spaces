@@ -37,6 +37,17 @@ vi.mock("@pierre/diffs/edit", () => ({
   Editor: class {},
 }));
 
+// jsdom has no ResizeObserver; mountRoot's file-list divider observes the pane with one
+// (fileListDivider.ts). These tests don't exercise resize behavior — see fileListDivider.test.ts.
+vi.stubGlobal(
+  "ResizeObserver",
+  class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  },
+);
+
 // Mutable (not `const`) so Fix 1's describe block below can substitute a payload carrying a dirty
 // `editorState` for its one test, then restore the default afterward — the bridge mock's
 // `notifyReady` reads this binding at call time, not at module-evaluation time, so reassigning it

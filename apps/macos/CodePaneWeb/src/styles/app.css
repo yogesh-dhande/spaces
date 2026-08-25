@@ -172,13 +172,32 @@
 }
 
 .file-list {
+  /* `flex: 0 0 auto` (not a fixed flex-basis) so `width` below is what determines the box size —
+     fileListDivider.ts resizes this element by setting `style.width` directly, which a fixed
+     flex-basis would otherwise override. This default matches `DEFAULT_FILE_LIST_WIDTH` in
+     fileListDivider.ts; root.ts overwrites it with the restored/persisted width on mount. */
   width: 212px;
-  flex: 0 0 212px;
+  flex: 0 0 auto;
   background: var(--surface2);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+}
+
+/* The divider between the file list and the diff area (docs mockup "D — Drag divider"). A few px
+   wide so the col-resize hit area is comfortable without visually widening the seam — the visible
+   line is a 1px inset gradient, not the full hit area. */
+.file-list-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  touch-action: none;
+  background: linear-gradient(90deg, transparent 0 2px, var(--line) 2px 3px, transparent 3px);
+}
+
+.file-list-divider:hover,
+.file-list-divider.active {
+  background: linear-gradient(90deg, transparent 0 1px, var(--accent) 1px 4px, transparent 4px);
 }
 
 .file-list .row {
@@ -188,6 +207,61 @@
   padding: 5px 10px;
   font-size: 12px;
   color: var(--fg2);
+}
+
+.file-list .dirrow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg2);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.file-list .row,
+.file-list .dirrow {
+  /* `--depth` is set inline per row/dirrow by fileList.ts, one nesting level of the compacted tree
+     at a time (see docs mockup "G — Tree with compacted chains"). Placed after the blocks above:
+     their `padding` shorthand expands to a `padding-left` that would win on source order otherwise
+     and flatten the tree indent. */
+  padding-left: calc(10px + var(--depth, 0) * 14px);
+}
+
+.file-list .dirrow:hover {
+  background: var(--row-hover);
+}
+
+/* Rows are keyboard-operable (role=button + tabindex in fileList.ts), so the tab stop needs a
+   visible focus state; :focus-visible keeps pointer clicks outline-free. */
+.file-list .row:focus-visible,
+.file-list .dirrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Same rationale for the divider's tab stop (role=separator + arrow-key resize in
+   fileListDivider.ts). */
+.file-list-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.file-list .dirrow .tri {
+  flex: 0 0 10px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--fg3);
+}
+
+.file-list .dirrow .dirlabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
 }
 
 .file-list .row.on {

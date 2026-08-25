@@ -1,4 +1,5 @@
 import { DiffFileEntry, FileChangeStatus } from "../bridge/types";
+import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "./fileTree";
 
 /**
  * Diff-mode file list sidebar. Not part of the picked Variant A mockup's own
@@ -6,6 +7,14 @@ import { DiffFileEntry, FileChangeStatus } from "../bridge/types";
  * required by Phase 3's functional scope: a way to see every changed file at
  * a glance and jump to one. Borrows the mockup's Variant B `.rail` metrics
  * and tokens since that is the mockup's only other file-list treatment.
+ *
+ * Renders `files` as a directory tree (docs mockup "G — Tree with compacted
+ * chains" — see `buildFileTree`), rather than one flat row per file: a
+ * directory row shows its (possibly chain-compacted) path once, and every
+ * file under it shows only its own basename. Collapse state is per-render,
+ * local to the DOM this call builds (see the per-directory closures below) —
+ * it deliberately does not survive a later `renderFileList` call, since the
+ * product spec for this view doesn't require it to.
  */
 
 const STATUS_LABEL: Record<FileChangeStatus, string> = {
@@ -21,9 +30,11 @@ export interface FileListCallbacks {
 }
 
 /**
- * Renders the sidebar into `container`. Row order matches `files` exactly
- * (the same order the diff view lays its `CodeView` items out in), so a
- * row's index doubles as its diff item's scroll target.
+ * Renders the sidebar into `container`. A file row's `data-path` always
+ * carries its full workspace-relative path (its `title` tooltip too, for
+ * when the basename itself truncates) even though its visible text is only
+ * the basename — this is also what lets `container.querySelector` find one
+ * row by path in tests, independent of how deep the tree nests it.
  */
 export function renderFileList(
   container: HTMLElement,
@@ -41,39 +52,127 @@ export function renderFileList(
     return;
   }
 
-  for (const file of files) {
-    const row = document.createElement("div");
-    row.className = "row" + (file.path === selectedPath ? " on" : "");
-    row.addEventListener("click", () => callbacks.onSelect(file.path));
-
-    const status = document.createElement("span");
-    status.className = `status ${file.status}`;
-    status.textContent = STATUS_LABEL[file.status];
-    row.appendChild(status);
-
-    const fn = document.createElement("span");
-    fn.className = "fn";
-    fn.textContent = file.path;
-    fn.title = file.path;
-    row.appendChild(fn);
-
-    if (!file.isBinary && !file.truncated) {
-      const stat = document.createElement("span");
-      stat.className = "st";
-      const counts = countChanges(file);
-      const p = document.createElement("span");
-      p.className = "p";
-      p.textContent = `+${counts.additions}`;
-      const m = document.createElement("span");
-      m.className = "m";
-      m.textContent = ` -${counts.deletions}`;
-      stat.appendChild(p);
-      stat.appendChild(m);
-      row.appendChild(stat);
-    }
-
-    container.appendChild(row);
+  for (const node of buildFileTree(files)) {
+    container.appendChild(renderNode(node, 0, selectedPath, callbacks));
   }
+}
+
+function renderNode(
+  node: FileTreeNode,
+  depth: number,
+  selectedPath: string | undefined,
+  callbacks: FileListCallbacks,
+): HTMLElement {
+  return node.kind === "dir"
+    ? renderDirNode(node, depth, selectedPath, callbacks)
+    : renderFileNode(node, depth, selectedPath, callbacks);
+}
+
+function renderDirNode(
+  node: FileTreeDirNode,
+  depth: number,
+  selectedPath: string | undefined,
+  callbacks: FileListCallbacks,
+): HTMLElement {
+  const group = document.createElement("div");
+  group.className = "dir-group";
+
+  const dirrow = document.createElement("div");
+  dirrow.className = "dirrow";
+  dirrow.style.setProperty("--depth", String(depth));
+  // The rows are divs for layout reasons, so button semantics + a tab stop + Enter/Space are added
+  // by hand — without them the disclosure is pointer-only for keyboard and VoiceOver users.
+  dirrow.setAttribute("role", "button");
+  dirrow.tabIndex = 0;
+  dirrow.setAttribute("aria-expanded", "true");
+
+  const tri = document.createElement("span");
+  tri.className = "tri";
+  tri.textContent = "▾";
+  dirrow.appendChild(tri);
+
+  const label = document.createElement("span");
+  label.className = "dirlabel";
+  label.textContent = node.label;
+  label.title = node.label;
+  dirrow.appendChild(label);
+
+  const childrenEl = document.createElement("div");
+  childrenEl.className = "dir-children";
+  for (const child of node.children) {
+    childrenEl.appendChild(renderNode(child, depth + 1, selectedPath, callbacks));
+  }
+
+  let collapsed = false;
+  const toggle = (): void => {
+    collapsed = !collapsed;
+    childrenEl.style.display = collapsed ? "none" : "";
+    tri.textContent = collapsed ? "▸" : "▾";
+    dirrow.setAttribute("aria-expanded", String(!collapsed));
+  };
+  dirrow.addEventListener("click", toggle);
+  dirrow.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault(); // Space would otherwise scroll the list
+    if (event.repeat) return; // a held key would oscillate the disclosure
+    toggle();
+  });
+
+  group.appendChild(dirrow);
+  group.appendChild(childrenEl);
+  return group;
+}
+
+function renderFileNode(
+  node: FileTreeFileNode,
+  depth: number,
+  selectedPath: string | undefined,
+  callbacks: FileListCallbacks,
+): HTMLElement {
+  const file = node.file;
+  const row = document.createElement("div");
+  row.className = "row" + (file.path === selectedPath ? " on" : "");
+  row.style.setProperty("--depth", String(depth));
+  row.dataset.path = file.path;
+  // Same hand-rolled button semantics as the directory rows above, so file selection is
+  // keyboard-operable too.
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.addEventListener("click", () => callbacks.onSelect(file.path));
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    if (event.repeat) return;
+    callbacks.onSelect(file.path);
+  });
+
+  const status = document.createElement("span");
+  status.className = `status ${file.status}`;
+  status.textContent = STATUS_LABEL[file.status];
+  row.appendChild(status);
+
+  const fn = document.createElement("span");
+  fn.className = "fn";
+  fn.textContent = node.name;
+  fn.title = file.path;
+  row.appendChild(fn);
+
+  if (!file.isBinary && !file.truncated) {
+    const stat = document.createElement("span");
+    stat.className = "st";
+    const counts = countChanges(file);
+    const p = document.createElement("span");
+    p.className = "p";
+    p.textContent = `+${counts.additions}`;
+    const m = document.createElement("span");
+    m.className = "m";
+    m.textContent = ` -${counts.deletions}`;
+    stat.appendChild(p);
+    stat.appendChild(m);
+    row.appendChild(stat);
+  }
+
+  return row;
 }
 
 /**

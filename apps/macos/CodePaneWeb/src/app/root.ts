@@ -12,6 +12,7 @@ import { CommentsController, CommentsToolbarState } from "./commentsController";
 import { DiffView } from "./diffView";
 import { EditorView } from "./editorView";
 import { renderFileList } from "./fileList";
+import { attachFileListDivider } from "./fileListDivider";
 import { selectDefaultAgentId } from "./reviewComments";
 import { CodePaneAction, CodePaneState, codePaneReducer, initialState } from "./state";
 import { renderToolbar } from "./toolbar";
@@ -88,6 +89,9 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   const fileListEl = document.createElement("div");
   fileListEl.className = "file-list";
+
+  const fileListDividerEl = document.createElement("div");
+  fileListDividerEl.className = "file-list-divider";
 
   const diffAreaEl = document.createElement("div");
   diffAreaEl.className = "diff-area";
@@ -191,10 +195,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // a non-empty one.
   comments.restorePendingState(initPayload.pendingReviewComments ?? []);
 
+  // Wired once against `body` (the flex row both panels live in), independent of `renderBody`'s
+  // repeated `replaceChildren()` calls — `attachFileListDivider` only ever touches
+  // `fileListDividerEl`/`fileListEl`'s own listeners/inline style, not `body`'s children, so it
+  // stays correctly wired across every diff<->editor mode switch. It owns the file list's width
+  // end to end: restore-on-attach, drag, persist, and re-clamp on pane resize.
+  attachFileListDivider(fileListDividerEl, fileListEl, body);
+
   function renderBody(): void {
     body.replaceChildren();
     if (state.mode === "diff") {
       body.appendChild(fileListEl);
+      body.appendChild(fileListDividerEl);
       body.appendChild(diffAreaEl);
     } else {
       body.appendChild(editorContainerEl);
