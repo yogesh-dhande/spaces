@@ -1138,3 +1138,196 @@ enum SpacesDeviceWorkspaceDiffEngine {
         }
     }
 }
+
+/// Enumerates every path inside a workspace's checkout the user would consider part of the workspace.
+/// Backs the `workspaceFileList` Device API command (the Editor pane's file tree and quick-open), which
+/// — unlike `workspaceDiff` — must serve BOTH product workspace types (see docs/spec.md on non-git
+/// projects): a non-git workspace's Editor has no other way to open a file now that the old direct-path
+/// input is gone, so this engine picks one of two listing strategies per call rather than refusing the
+/// non-git case:
+///  - Git checkout: tracked files plus untracked, non-ignored files, excluding a tracked file that has
+///    been deleted on disk (`listGitFiles`).
+///  - Plain directory: every regular file on disk, recursively (`listFilesystemFiles`), since there is no
+///    index to consult.
+///
+/// Both strategies enforce one shared contract, via `isOpenableFile`: every entry this engine returns is
+/// openable through `workspaceFileRead`, and every file `workspaceFileRead` can open is listed. A symlink
+/// is the one entry kind where those two directions are not simply the same lstat check — it is openable
+/// exactly when `workspaceFileRead`'s own path resolver would resolve it to a regular file inside the
+/// workspace, never merely by its own on-disk type. A regular file (or a symlink resolving to one) larger
+/// than `SpacesDeviceAPIServer.workspaceFileMaxBytes` is excluded too: `workspaceFileRead` rejects it with
+/// `.payloadTooLarge`, so listing it would offer a file this engine already knows can never be opened.
+enum SpacesDeviceWorkspaceFileListEngine {
+    /// Bounds the `git ls-files` subprocesses this engine spawns — mirrors
+    /// `SpacesDeviceWorkspaceDiffEngine.gitCommandTimeout`'s reasoning (a wedged repository must not
+    /// permanently occupy the workspace's serial git queue).
+    private static let gitCommandTimeout: TimeInterval = 30
+
+    /// Hard cap on the number of paths returned; `SpacesDeviceWorkspaceFileListResult.truncated` is
+    /// `true` when the workspace has more paths than this, and `paths` holds only the first (sorted)
+    /// slice up to the cap. A ceiling on response size and client-side memory, not a limit the product
+    /// otherwise tunes around.
+    static let maxPaths = 50_000
+
+    /// Picks the listing strategy for `workspaceDir`. `isRepoStrict` (not `isRepo`) so an execution
+    /// failure (spawn failure, timeout, a wedged process) propagates as a thrown, retryable error instead
+    /// of being silently misread as "not a repo" and falling through to the filesystem walk — the same
+    /// distinction `SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository` draws for the same probe.
+    ///
+    /// Deliberately probes the directory's on-disk state rather than reading the owning project's
+    /// persisted git/non-git kind: the listing must describe what is on disk NOW. The divergent case is
+    /// a non-git project whose directory later becomes a repository (an agent running `git init` there,
+    /// say) — the persisted kind would keep selecting the filesystem walk, which would then enumerate
+    /// `.git`'s thousands of internal files into the listing, while the probe switches to the git
+    /// strategy and lists exactly the tracked and untracked-non-ignored files the user means. The
+    /// reverse direction cannot silently degrade: a repository that stops answering the probe with a
+    /// clean "not a repo" (rather than an execution failure, which throws per the above) has genuinely
+    /// lost its git metadata, at which point the plain-directory walk IS the honest listing.
+    ///
+    /// The probe's ancestor search (`--is-inside-work-tree` answers true anywhere inside a repository,
+    /// not just at its root) cannot create a disagreement with the persisted kind either: registration
+    /// computes `isGitRepo` with this same probe (`Orchestrator.normalizeDir` via `GitClient.isRepo`),
+    /// so a directory nested inside another repository registers as a git project in the first place.
+    /// The two can only diverge when the on-disk state changes after registration, which is exactly the
+    /// case above, where the probe is the honest answer.
+    static func listFiles(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceFileListResult {
+        guard try gitClient.isRepoStrict(path: workspaceDir) else {
+            return listFilesystemFiles(workspaceDir: workspaceDir)
+        }
+        return try listGitFiles(workspaceDir: workspaceDir, gitClient: gitClient)
+    }
+
+    /// Lists every path a git checkout owns, sorted ascending and capped at `maxPaths`. Two `ls-files`
+    /// calls, both scoped to `workspaceDir` via `-C`:
+    ///  - `--cached --others --exclude-standard`: every tracked path, plus every untracked path that
+    ///    isn't gitignored.
+    ///  - `--deleted`: tracked paths git still knows about but that are missing on disk right now.
+    /// The result is the first set minus the second — a tracked-but-deleted file is never something the
+    /// user would consider "in" the workspace, even though git's index still names it.
+    ///
+    /// Unlike `git status --porcelain`/`git diff` (see `SpacesDeviceWorkspaceDiffEngine.subtreeScoped`'s
+    /// doc comment), `git -C <dir> ls-files` already reports paths relative to `<dir>` rather than the
+    /// repository root — confirmed empirically against real git — so a workspace rooted below its
+    /// repository root (a monorepo subpackage) needs no separate prefix-stripping step here.
+    ///
+    /// `paths` is captured and sorted in full up front (streaming the two `ls-files` subprocesses into a
+    /// bounded walk is deliberately out of scope), but `isOpenableFile` then walks that already-sorted
+    /// list one path at a time and stops as soon as it has collected `maxPaths` openable entries plus
+    /// found one more past them — it never stats the whole set first and caps afterward. A workspace with
+    /// hundreds of thousands of entries would otherwise pay one lstat per path (and, for every tracked
+    /// symlink among them, a second resolution through `SpacesDeviceWorkspacePathResolver`) before this
+    /// function could return anything, holding this workspace's serial git queue — shared with every
+    /// other `workspaceFileRead`/`Write`/`Diff` request against it — for seconds. Stopping early is
+    /// behaviorally IDENTICAL to filtering the entire sorted list and capping afterward: both produce the
+    /// same first-`maxPaths`-openable-paths prefix in the same order (a submodule gitlink or any other
+    /// unopenable path sorting inside that prefix is skipped in place, never replacing a later real file
+    /// with a gap), and `truncated` is `true` under exactly the same condition — at least one more
+    /// openable path exists beyond that prefix. The only difference is how much of the tail this function
+    /// ever bothers to stat.
+    private static func listGitFiles(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceFileListResult {
+        let presentOutput = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], timeout: gitCommandTimeout)
+        let deletedOutput = try gitClient.runGitAndCapture(["-C", workspaceDir, "ls-files", "--deleted", "-z"], timeout: gitCommandTimeout)
+        let deleted = Set(splitNULDelimited(deletedOutput))
+        let paths = splitNULDelimited(presentOutput).filter { !deleted.contains($0) }.sorted()
+
+        var openablePaths: [String] = []
+        openablePaths.reserveCapacity(min(paths.count, maxPaths))
+        var truncated = false
+        for path in paths {
+            guard isOpenableFile(path: path, workspaceDir: workspaceDir) else { continue }
+            guard openablePaths.count < maxPaths else {
+                truncated = true
+                break
+            }
+            openablePaths.append(path)
+        }
+        return SpacesDeviceWorkspaceFileListResult(paths: openablePaths, truncated: truncated)
+    }
+
+    /// Whether `path` (workspace-relative) is safely openable through `workspaceFileRead` — the one
+    /// predicate both listing strategies below share, so the module's two-way contract (every listed
+    /// entry opens; every openable file is listed) holds identically for both. `attributesOfItem(atPath:)`
+    /// reports the path's own lstat-style type — never a symlink's target, see
+    /// `SpacesDeviceWorkspacePathResolver`'s doc comment for the same distinction — which alone settles
+    /// every non-symlink case: `.typeRegular` (and, per the size check below, not too large) is openable;
+    /// `.typeDirectory` is not (a submodule gitlink, mode 160000, is a directory on disk that `ls-files`
+    /// still reports as an ordinary tracked path); a stat failure is not (a sparse-checkout
+    /// `skip-worktree` entry with nothing on disk, or an ordinary file deleted in the window between the
+    /// caller's enumeration and this check).
+    ///
+    /// A symlink is the one type that lstat alone cannot settle, so this defers to
+    /// `SpacesDeviceWorkspacePathResolver.resolveContainedPath` — the exact same resolution/containment
+    /// logic `workspaceFileRead`'s handler runs against a client-supplied path — to ask whether `path`
+    /// resolves anywhere at all: a thrown `escapesWorkspace` (the target is outside the workspace) means
+    /// not openable. When it does resolve, a second lstat on the RESOLVED path (already symlink-free, so
+    /// this stat needs no further resolution) decides the rest exactly as `workspaceFileRead` itself
+    /// would when it later stats that same resolved path: `.typeRegular` and within the size cap is
+    /// openable, anything else (a directory, a stat failure for a dangling target, or an oversized target)
+    /// is not.
+    ///
+    /// Both regular-file branches also enforce `SpacesDeviceAPIServer.workspaceFileMaxBytes`: a file over
+    /// that cap is stat-openable but `workspaceFileRead`'s handler rejects it with `.payloadTooLarge`, so
+    /// listing it here would offer something ⌘P and the Files tree could never actually open. Referencing
+    /// the handler's own constant (rather than a second literal) keeps the cap defined once.
+    private static func isOpenableFile(path: String, workspaceDir: String) -> Bool {
+        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fullPath) else { return false }
+        switch attributes[.type] as? FileAttributeType {
+        case .typeRegular:
+            return isWithinMaxBytes(attributes)
+        case .typeSymbolicLink:
+            guard let resolvedPath = try? SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: path, workspaceDir: workspaceDir),
+                let resolvedAttributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
+            else { return false }
+            return resolvedAttributes[.type] as? FileAttributeType == .typeRegular && isWithinMaxBytes(resolvedAttributes)
+        default:  // A directory, or a non-regular special file (fifo, socket, ...).
+            return false
+        }
+    }
+
+    /// Whether a regular file's `attributesOfItem` result is within `workspaceFileRead`'s read cap. A
+    /// missing/non-numeric `.size` (which `attributesOfItem` should never produce for a regular file) is
+    /// treated as not openable rather than assumed small, matching this predicate's fail-closed stance
+    /// elsewhere (a stat failure or unresolved symlink is likewise "not openable").
+    private static func isWithinMaxBytes(_ attributes: [FileAttributeKey: Any]) -> Bool {
+        guard let size = attributes[.size] as? Int else { return false }
+        return size <= SpacesDeviceAPIServer.workspaceFileMaxBytes
+    }
+
+    /// Lists every openable file under a plain (non-git) workspace directory: recursive, workspace-relative
+    /// paths, sorted ascending, capped at `maxPaths`. `FileManager`'s enumerator already matches the git
+    /// path's semantics closely enough to keep the two strategies at parity: it includes dotfiles (git
+    /// tracks dotfiles too, so the git branch above lists them the same way) and does not itself descend
+    /// into a symlinked directory. `isOpenableFile` then decides each entry exactly as the git branch
+    /// does: a symlink to a regular file inside the workspace is listed (it is openable through
+    /// `workspaceFileRead`, so it is no longer excluded merely for being a symlink), while a symlink to a
+    /// directory or to anywhere outside the workspace is not.
+    ///
+    /// Unlike `listGitFiles`, this cannot stop early once it has `maxPaths` openable entries: the
+    /// enumerator's traversal order is not sorted, and the sorted-first-`maxPaths` contract needs the
+    /// full path set in hand before it can be sorted at all. A plain-directory workspace large enough for
+    /// that ordering cost to matter is the rarer of the two product shapes (a workspace at that scale is
+    /// almost always a git checkout, which takes the bounded path above), and the enumerator already pays
+    /// one stat per entry for the type check regardless of where the cap ultimately lands, so there is no
+    /// cheaper walk available here to fall back to.
+    private static func listFilesystemFiles(workspaceDir: String) -> SpacesDeviceWorkspaceFileListResult {
+        guard let enumerator = FileManager.default.enumerator(atPath: workspaceDir) else {
+            return SpacesDeviceWorkspaceFileListResult(paths: [], truncated: false)
+        }
+        var paths: [String] = []
+        while let relativePath = enumerator.nextObject() as? String {
+            guard isOpenableFile(path: relativePath, workspaceDir: workspaceDir) else { continue }
+            paths.append(relativePath)
+        }
+        paths.sort()
+        guard paths.count > maxPaths else { return SpacesDeviceWorkspaceFileListResult(paths: paths, truncated: false) }
+        return SpacesDeviceWorkspaceFileListResult(paths: Array(paths.prefix(maxPaths)), truncated: true)
+    }
+
+    /// Splits `-z` (NUL-delimited) `ls-files` output into individual paths, dropping the empty trailing
+    /// token a terminal NUL produces.
+    private static func splitNULDelimited(_ output: String) -> [String] {
+        output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+    }
+}

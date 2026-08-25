@@ -1,5 +1,6 @@
 import {
   CodePaneEditorState,
+  CodePaneEditorUIState,
   CodePaneMode,
   DiffScope,
   DiffSignatureEvent,
@@ -57,7 +58,9 @@ import {
  *     tells the host the editor's current open-file snapshot so it survives
  *     this pane's next hibernation cycle (see README.md "Editor state
  *     survives hibernation"); `{ method: "modeChanged", params: { mode } }`
- *     tells the host which mode (Diff/Editor) is live, for the same reason.
+ *     tells the host which mode (Diff/Editor) is live, for the same reason;
+ *     `{ method: "editorUIStateChanged", params: state }` tells the host
+ *     Editor mode's sidebar toggle and recent-files list.
  */
 
 type PendingCall = {
@@ -158,6 +161,14 @@ class RealSpacesBridge implements SpacesBridge {
     handler?.postMessage({ method: "modeChanged", params: { mode } });
   }
 
+  /** Fire-and-forget state push; see class doc comment. Unlike `notifyEditorStateChanged`, `state`
+   *  always has real defaults (see `CodePaneEditorUIState`'s doc comment), so there is no
+   *  `undefined` case here to normalize to `null`. */
+  notifyEditorUIStateChanged(state: CodePaneEditorUIState): void {
+    const handler = window.webkit?.messageHandlers?.spacesBridge;
+    handler?.postMessage({ method: "editorUIStateChanged", params: state });
+  }
+
   async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {
     return (await this.post("workspaceDiff", { scope })) as WorkspaceDiffResult;
   }
@@ -182,8 +193,8 @@ class RealSpacesBridge implements SpacesBridge {
     })) as WorkspaceFileWriteResult;
   }
 
-  async workspaceFileList(query: string): Promise<WorkspaceFileListResult> {
-    return (await this.post("workspaceFileList", { query })) as WorkspaceFileListResult;
+  async workspaceFileList(): Promise<WorkspaceFileListResult> {
+    return (await this.post("workspaceFileList", {})) as WorkspaceFileListResult;
   }
 
   async reviewCommentList(): Promise<SpacesReviewComment[]> {

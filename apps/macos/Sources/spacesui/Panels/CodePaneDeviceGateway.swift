@@ -32,6 +32,8 @@ protocol CodePaneDeviceGateway: Sendable {
     func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
         -> SpacesDeviceWorkspaceFileReadResult
 
+    func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult
+
     func workspaceFileWrite(
         workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
     ) async throws -> SpacesDeviceWorkspaceFileWriteResult
@@ -77,6 +79,12 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileRead(workspaceID: workspaceID, relativePath: relativePath, device: device)
+        }.value
+    }
+
+    func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceFileList(workspaceID: workspaceID, device: device)
         }.value
     }
 

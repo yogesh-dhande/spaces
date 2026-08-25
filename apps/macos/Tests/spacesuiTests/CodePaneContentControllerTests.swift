@@ -330,6 +330,24 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         }
     }
 
+    // MARK: - File list
+    //
+    // Simple record-and-answer stub, mirroring the review-comment stubs below: nothing in
+    // `CodePaneContentController` races `workspaceFileList` against hibernation or a resubscribe, so a
+    // canned `Result` answered synchronously is enough to dispatch-test RPC -> gateway-args wiring and
+    // the reply shape.
+
+    private(set) var fileListCalls: [String] = []
+    private var fileListResult: Result<SpacesDeviceWorkspaceFileListResult, any Error> = .success(
+        SpacesDeviceWorkspaceFileListResult(paths: [], truncated: false))
+
+    func setFileListResult(_ result: Result<SpacesDeviceWorkspaceFileListResult, any Error>) { fileListResult = result }
+
+    func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult {
+        fileListCalls.append(workspaceID)
+        return try fileListResult.get()
+    }
+
     func subscribeWorkspaceFileSignature(
         workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
@@ -2098,9 +2116,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
         teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: teardownWebView() also flushes review-comment state now — this test isn't
-        // about that surface, so answer its collect call with "nothing pending" to let both flushes
-        // settle.
+        // round-16 Fix 1a / this feature's editorUIState channel: teardownWebView() also flushes
+        // review-comment and editor-UI-state now — this test isn't about either surface, so answer
+        // both collect calls with "nothing pending" to let all three flushes settle.
+        teardownEvaluator.enqueueCollectResult("__none__")
         teardownEvaluator.enqueueCollectResult("__none__")
 
         // Hibernate for real, like the round-2 stale-generation tests above.
@@ -2146,7 +2165,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
         teardownEvaluator.enqueueCollectResult(#"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
         teardownEvaluator.enqueueCollectResult("__none__")
 
         content.close()
@@ -2181,7 +2202,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
         teardownEvaluator.enqueueCollectResult(nil)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
         teardownEvaluator.enqueueCollectResult("__none__")
 
         content.deactivate()
@@ -2219,7 +2242,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
         teardownEvaluator.enqueueCollectResult(nil)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        teardownEvaluator.enqueueCollectResult("__none__")
         teardownEvaluator.enqueueCollectResult("__none__")
 
         content.close()
@@ -2261,6 +2286,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let teardownEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = teardownEvaluator
         teardownEvaluator.enqueueCollectResult(nil)
+        teardownEvaluator.enqueueCollectResult("__none__")
         teardownEvaluator.enqueueCollectResult("__none__")
         content.deactivate()
         content.activate(focus: false)
@@ -2411,7 +2437,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // issues the flush's collect script against `evaluator`, left pending
 
         evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
         evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
@@ -2442,7 +2470,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // The stale flush from generation 1 answers late, with different content than the live push.
         firstEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        firstEvaluator.completeOldestPending(with: "__none__")
         firstEvaluator.completeOldestPending(with: "__none__")
 
         let evaluator = RecordingCodePaneScriptEvaluator()
@@ -2472,7 +2502,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // flush reads the same generation's page, now reporting no open file
 
         evaluator.completeOldestPending(with: "__no_file__")
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
         evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
@@ -2516,7 +2548,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // leave the seeded snapshot alone; `__uninstalled__` is what the real collect script emits for
         // a page that hasn't bootstrapped far enough to define the collector global yet.
         staleEvaluator.completeOldestPending(with: "__uninstalled__")
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
         staleEvaluator.completeOldestPending(with: "__none__")
 
         #expect(
@@ -2543,7 +2577,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.handleReady() // defers: the teardown flush above is still outstanding
 
         staleEvaluator.completeOldestPending(with: nil)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
         staleEvaluator.completeOldestPending(with: "__none__")
 
         #expect(
@@ -2566,7 +2602,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // The flush from before close() answers late, with the very state close() just discarded.
         evaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        evaluator.completeOldestPending(with: "__none__")
         evaluator.completeOldestPending(with: "__none__")
 
         content.activate(focus: false)
@@ -2604,7 +2642,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             "handleReady must not send spaces:init while a flush from the torn-down page is still outstanding")
 
         staleEvaluator.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: see the comment in `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        // round-16 Fix 1a / editorUIState channel: see the comment in
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`.
+        staleEvaluator.completeOldestPending(with: "__none__")
         staleEvaluator.completeOldestPending(with: "__none__")
 
         #expect(
@@ -2637,12 +2677,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let evaluator3 = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = evaluator3
 
-        // Generation 1's flush finally answers: one of two outstanding flushes settles, but generation
-        // 2's flush is still outstanding, so nothing may fire yet.
+        // Generation 1's flush finally answers: one of two outstanding generations' flushes settle, but
+        // generation 2's flushes are still outstanding, so nothing may fire yet.
         evaluator1.completeOldestPending(with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"let x = 1;","dirty":true}"#)
-        // round-16 Fix 1a: each deactivate() now also starts a comment-state flush against the same
-        // evaluator; resolve generation 1's before checking anything, so this assertion is really about
-        // generation 2's flushes (not a leftover generation-1 comment flush) still being outstanding.
+        // round-16 Fix 1a / editorUIState channel: each deactivate() now also starts comment-state and
+        // editor-UI-state flushes against the same evaluator; resolve all three of generation 1's before
+        // checking anything, so this assertion is really about generation 2's flushes (not a leftover
+        // generation-1 flush) still being outstanding.
+        evaluator1.completeOldestPending(with: "__none__")
         evaluator1.completeOldestPending(with: "__none__")
         #expect(!evaluator3.evaluatedScripts.contains { $0.contains("spaces:init") }, "generation 2's own flush is still outstanding")
 
@@ -2650,9 +2692,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // deferred ready was waiting for (generation 2) is no longer current (generation 3 is) — this
         // must resolve to nothing, not a stale init for a page that's gone.
         evaluator2.completeOldestPending(with: #"{"path":"bar.ts","baseSHA256":"sha-abc","baseContent":"let y = 2;","content":"let y = 2;","dirty":true}"#)
-        // round-16 Fix 1a: resolve generation 2's comment flush too — only once BOTH of generation 2's
-        // flushes are settled does `outstandingTeardownFlushCount` reach zero and the deferred ready
-        // actually re-check `generation == pageGeneration` (which fails, since generation 3 is current).
+        // round-16 Fix 1a / editorUIState channel: resolve generation 2's remaining flushes too — only
+        // once ALL THREE of generation 2's flushes are settled does `outstandingTeardownFlushCount` reach
+        // zero and the deferred ready actually re-check `generation == pageGeneration` (which fails,
+        // since generation 3 is current).
+        evaluator2.completeOldestPending(with: "__none__")
         evaluator2.completeOldestPending(with: "__none__")
 
         for evaluator in [evaluator1, evaluator2, evaluator3] {
@@ -2675,6 +2719,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         evaluator.completeOldestPending(with: "__none__") // editor-state flush: nothing pending
         evaluator.completeOldestPending(
             with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush: nothing pending
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2696,6 +2741,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
         firstEvaluator.completeOldestPending(
             with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let secondEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2704,6 +2750,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // second teardown: the page's comment surface never installed the collector
         secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
         secondEvaluator.completeOldestPending(with: "__uninstalled__") // comment-state flush: not reported
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2725,6 +2772,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
         firstEvaluator.completeOldestPending(
             with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let secondEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2733,6 +2781,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // second teardown: the draft was withdrawn, nothing pending anymore
         secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
         secondEvaluator.completeOldestPending(with: "__none__") // comment-state flush: nothing pending
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2759,6 +2808,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         seedEvaluator.completeOldestPending(with: "__none__") // editor-state flush: nothing pending
         seedEvaluator.completeOldestPending(
             with: #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+        seedEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush: nothing pending
 
         content.activate(focus: false)
 
@@ -2771,6 +2821,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         teardownEvaluator.enqueueCollectResult("__none__") // editor-state flush: nothing pending
         teardownEvaluator.enqueueCollectResult(
             #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#)
+        teardownEvaluator.enqueueCollectResult("__none__") // editor-UI-state flush: nothing pending
 
         content.close()
         content.activate(focus: false)
@@ -2799,31 +2850,205 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             "with no teardown flush having ever captured anything, the init payload must omit the key entirely rather than send an empty array")
     }
 
-    @Test func deferredReadyWaitsForBothTheEditorAndCommentTeardownFlushesBeforeFiring() {
+    // MARK: - Editor UI-state push and teardown flush and rehydrate
+
+    /// Fabricates a `CodePaneBridge.EditorUIState` for tests, mirroring `fakeEditorState` above.
+    private func fakeEditorUIState(sidebarMode: String = "changes", recentPaths: [String] = ["a.swift", "b.swift"]) -> CodePaneBridge.EditorUIState {
+        CodePaneBridge.EditorUIState(sidebarMode: sidebarMode, recentPaths: recentPaths)
+    }
+
+    @Test func editorUIStateChangedPushIsStoredAndReturnedInTheNextInitPayload() {
+        let content = makeController()
+        content.activate(focus: false)
+        let webView = liveWebView(content)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleEditorUIStateChanged(fakeEditorUIState(), senderWebView: webView)
+        content.handleReady()
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains(#""sidebarMode":"changes""#) && $0.contains(#""recentPaths":["a.swift","b.swift"]"#) },
+            "the stored snapshot must be handed back through spaces:init's editorUIState field")
+    }
+
+    @Test func anEditorUIStatePushFromAStaleWebViewIsIgnored() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        // Stands in for a torn-down page's own WKWebView instance still delivering a push after a
+        // reactivate has already installed a fresh one — mirrors `aPushFromAStaleWebViewIsIgnored`.
+        let staleWebView = WKWebView()
+        content.handleEditorUIStateChanged(fakeEditorUIState(), senderWebView: staleWebView)
+        content.handleReady()
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("editorUIState") },
+            "a push whose senderWebView isn't the live page must not be stored")
+    }
+
+    @Test func editorUIStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload() {
+        let content = makeController()
+        content.activate(focus: false)
+        content.handleEditorUIStateChanged(fakeEditorUIState(), senderWebView: liveWebView(content))
+
+        // A recording double, answering synchronously, stands in for the real WKWebView here so the
+        // teardown flush settles within this synchronous test body — mirrors
+        // `editorStateSurvivesDeactivateReactivateAndAppearsInTheNextInitPayload`. The editor-UI-state
+        // flush echoes back the same snapshot just pushed, standing in for the web app's own collect
+        // script reporting its still-current live state.
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult("__none__") // editor-state flush: nothing pending
+        teardownEvaluator.enqueueCollectResult("__none__") // comment-state flush: nothing pending
+        teardownEvaluator.enqueueCollectResult(#"{"sidebarMode":"changes","recentPaths":["a.swift","b.swift"]}"#)
+
+        content.deactivate()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains(#""sidebarMode":"changes""#) },
+            "the snapshot pushed before hibernation must still rehydrate through the next spaces:init")
+    }
+
+    @Test func closeClearsTheStoredEditorUIState() {
+        let content = makeController()
+        content.activate(focus: false)
+        content.handleEditorUIStateChanged(fakeEditorUIState(), senderWebView: liveWebView(content))
+
+        // See `closeClearsTheStoredEditorState` above for why a synchronous double is needed here.
+        let teardownEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = teardownEvaluator
+        teardownEvaluator.enqueueCollectResult("__none__") // editor-state flush
+        teardownEvaluator.enqueueCollectResult("__none__") // comment-state flush
+        teardownEvaluator.enqueueCollectResult(#"{"sidebarMode":"changes","recentPaths":["a.swift","b.swift"]}"#)
+
+        content.close()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("editorUIState") },
+            "close() must discard the in-memory snapshot, not just hibernate it like deactivate()")
+    }
+
+    @Test func aNotReportedEditorUIStateFlushResultLeavesAnExistingSnapshotUntouched() {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = firstEvaluator
+
+        content.deactivate() // first teardown: seed a snapshot
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        firstEvaluator.completeOldestPending(with: "__none__") // comment-state flush
+        firstEvaluator.completeOldestPending(with: #"{"sidebarMode":"changes","recentPaths":["a.swift"]}"#)
+
+        content.activate(focus: false)
+        let secondEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = secondEvaluator
+
+        content.deactivate() // second teardown: the page's sidebar never installed the collector
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        secondEvaluator.completeOldestPending(with: "__none__") // comment-state flush
+        secondEvaluator.completeOldestPending(with: "__uninstalled__") // editor-UI-state flush: not reported
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            nextEvaluator.evaluatedScripts.contains { $0.contains(#""sidebarMode":"changes""#) },
+            "a .notReported editor-UI-state flush must not clear the prior snapshot")
+    }
+
+    @Test func aNoneSentinelEditorUIStateFlushClearsAnExistingSnapshot() {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = firstEvaluator
+
+        content.deactivate() // first teardown: seed a snapshot
+        firstEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        firstEvaluator.completeOldestPending(with: "__none__") // comment-state flush
+        firstEvaluator.completeOldestPending(with: #"{"sidebarMode":"changes","recentPaths":["a.swift"]}"#)
+
+        content.activate(focus: false)
+        let secondEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = secondEvaluator
+
+        content.deactivate() // second teardown: the sidebar has nothing worth remembering anymore
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-state flush
+        secondEvaluator.completeOldestPending(with: "__none__") // comment-state flush
+        secondEvaluator.completeOldestPending(with: "__none__") // editor-UI-state flush: nothing pending
+
+        content.activate(focus: false)
+        let nextEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = nextEvaluator
+        content.handleReady()
+
+        #expect(
+            !nextEvaluator.evaluatedScripts.contains { $0.contains("editorUIState") },
+            "a '__none__' editor-UI-state flush from a newer generation must clear the prior snapshot")
+    }
+
+    @Test func initPayloadOmitsEditorUIStateKeyWhenNoSnapshotExists() {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must send spaces:init immediately when no flush is outstanding")
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("editorUIState") },
+            "with no teardown flush having ever captured anything, the init payload must omit the key entirely rather than send an empty object")
+    }
+
+    @Test func deferredReadyWaitsForAllThreeTeardownFlushesBeforeFiring() {
         let content = makeController()
         content.activate(focus: false)
         let staleEvaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = staleEvaluator
 
-        content.deactivate() // issues both flushes' collect scripts against `staleEvaluator`, left pending
+        content.deactivate() // issues all three flushes' collect scripts against `staleEvaluator`, left pending
 
         content.activate(focus: false)
         let evaluator = RecordingCodePaneScriptEvaluator()
         content.scriptEvaluator = evaluator
 
-        content.handleReady() // defers: both teardown flushes above are still outstanding
+        content.handleReady() // defers: all three teardown flushes above are still outstanding
 
         staleEvaluator.completeOldestPending(with: "__none__") // only the editor-state flush settles
 
         #expect(
             !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
-            "handleReady must stay deferred while the comment-state flush is still outstanding, even once the editor-state flush has settled")
+            "handleReady must stay deferred while the comment-state and editor-UI-state flushes are still outstanding, even once the editor-state flush has settled"
+        )
 
         staleEvaluator.completeOldestPending(with: "__none__") // the comment-state flush now settles too
 
         #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
+            "handleReady must stay deferred while the editor-UI-state flush is still outstanding, even once the editor-state and comment-state flushes have both settled"
+        )
+
+        staleEvaluator.completeOldestPending(with: "__none__") // the editor-UI-state flush now settles too
+
+        #expect(
             evaluator.evaluatedScripts.contains { $0.contains("spaces:init") },
-            "once both outstanding flushes settle, the deferred handleReady must proceed")
+            "once all three outstanding flushes settle, the deferred handleReady must proceed")
     }
 
     /// Round-16 Fix 1b's counter guards `ready` against an in-flight review-comment mutation RPC, not
@@ -2852,6 +3077,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.deactivate() // teardown flushes settle immediately; the upsert RPC above stays outstanding
         evaluator.completeOldestPending(with: "__none__") // editor-state flush
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2905,6 +3131,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         evaluator.completeOldestPending(with: "__none__") // editor-state flush
         evaluator.completeOldestPending(
             with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2953,6 +3180,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with:
                 #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi, typed more"}]"#
         )
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3001,6 +3229,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         evaluator.completeOldestPending(with: "__none__") // editor-state flush
         evaluator.completeOldestPending(
             with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3043,6 +3272,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         evaluator.completeOldestPending(with: "__none__") // editor-state flush
         evaluator.completeOldestPending(
             with: #"[{"id":"provisional-1","provisional":true,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"hi"}]"#)
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3092,12 +3322,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             try? await Task.sleep(for: .milliseconds(5))
         }
 
-        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending — the delete RPC stays outstanding
+        content.deactivate() // issues all three flushes' collect scripts against `evaluator`, left pending — the delete RPC stays outstanding
         evaluator.completeOldestPending(with: "__none__") // editor-state flush
         evaluator.completeOldestPending(
             with:
                 #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"}]"#
         ) // comment-state flush: still lists the entry the in-flight delete is about to remove server-side
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3137,6 +3368,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with:
                 #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"}]"#
         )
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3176,6 +3408,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with:
                 #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":1,"lineText":"x","body":"diverged text"},{"id":"c2","provisional":false,"filePath":"b.ts","side":"new","lineNumber":2,"lineText":"y","body":"unrelated"}]"#
         ) // comment-state flush: two non-provisional entries, only "c1" is being deleted
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3229,12 +3462,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             try? await Task.sleep(for: .milliseconds(5))
         }
 
-        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending
+        content.deactivate() // issues all three flushes' collect scripts against `evaluator`, left pending
         evaluator.completeOldestPending(
             with:
                 #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
         ) // editor-state flush: OLD baseSHA256, content diverges from what the write saved
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3284,6 +3518,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"saved content","dirty":true}"#
         ) // editor-state flush: content matches exactly what the write saved
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3325,7 +3560,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             try? await Task.sleep(for: .milliseconds(5))
         }
 
-        content.deactivate() // issues both flushes' collect scripts against `evaluator`, left pending — neither answered yet
+        content.deactivate() // issues all three flushes' collect scripts against `evaluator`, left pending — none answered yet
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3347,6 +3582,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
                 #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
         ) // editor-state flush
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         await waitUntil { nextEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
 
@@ -3388,6 +3624,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with: #"{"path":"foo.ts","baseSHA256":"sha-abc","baseContent":"let x = 1;","content":"typed more after save","dirty":true}"#
         ) // editor-state flush
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3432,6 +3669,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             with: #"{"path":"foo.ts","baseSHA256":"sha-different","baseContent":"let y = 2;","content":"typed more after save","dirty":true}"#
         ) // editor-state flush: baseSHA256 does NOT match the write's expectedSHA256 ("sha-abc")
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()
@@ -3504,6 +3742,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
                 #"{"path":"foo.ts","baseSHA256":"H0","baseContent":"whatever original","content":"dirty edit at H0","dirty":true}"#
         ) // editor-state flush: an ABA snapshot — baseSHA256 coincidentally back at "H0", the old write's expectedBase
         evaluator.completeOldestPending(with: "__none__") // comment-state flush
+        evaluator.completeOldestPending(with: "__none__") // editor-UI-state flush
 
         content.activate(focus: false)
         let nextEvaluator = RecordingCodePaneScriptEvaluator()

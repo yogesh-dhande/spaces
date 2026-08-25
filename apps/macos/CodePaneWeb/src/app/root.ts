@@ -1,6 +1,7 @@
 import { createBridge } from "../bridge";
 import {
   CodePaneAgentsChangedEvent,
+  CodePaneEditorUIState,
   CodePaneInitPayload,
   CodePaneSetModeEvent,
   CodePaneThemeChangedEvent,
@@ -10,12 +11,20 @@ import {
 } from "../bridge/types";
 import { CommentsController, CommentsToolbarState } from "./commentsController";
 import { DiffView } from "./diffView";
+import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
 import { renderFileList } from "./fileList";
 import { attachFileListDivider } from "./fileListDivider";
+import { QuickOpen } from "./quickOpen";
 import { selectDefaultAgentId } from "./reviewComments";
 import { CodePaneAction, CodePaneState, codePaneReducer, initialState } from "./state";
 import { renderToolbar } from "./toolbar";
+import { WorkspaceFileListCache } from "./workspaceFileListCache";
+
+/** Most-recently-opened first, deduped, capped here — see `CodePaneEditorUIState.recentPaths`'s
+ *  doc comment for the contract every successful open (⌘P overlay, Files tree, Changes list in
+ *  editor mode) must satisfy. */
+const RECENT_PATHS_CAP = 12;
 
 const INIT_EVENT = "spaces:init";
 const THEME_EVENT = "spaces:theme";
@@ -57,6 +66,9 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let state: CodePaneState = initialState(initPayload.initialMode, initPayload.initialScope);
   let files: DiffFileEntry[] = [];
   let diffLoaded = false;
+  // Editor mode's sidebar-toggle/recent-files snapshot (Design K/O) — see notifyEditorUIStateChanged's
+  // doc comment in bridge/types.ts for why root.ts, not EditorView, owns this state.
+  let editorUIState: CodePaneEditorUIState = initPayload.editorUIState ?? { sidebarMode: "files", recentPaths: [] };
   let unsubscribeSignature: (() => void) | undefined;
   // Bumped at the start of every refreshDiff call; a call only applies its result (or lets its
   // error propagate) if its token is still the current one once the awaited call settles. This
@@ -90,6 +102,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const fileListEl = document.createElement("div");
   fileListEl.className = "file-list";
 
+  // Diff mode's changed-files list — the sole target of every `renderFileList` call below,
+  // regardless of which mode is live (a diff-signature push fires in either mode). Diff mode
+  // parents it directly under `fileListEl`; Editor mode's Changes tab reparents this SAME node
+  // into `editorSidebar`'s list host instead of re-rendering it — see `EditorSidebar`'s doc
+  // comment for why reparenting (not re-rendering) is what keeps its rows' click behavior intact
+  // across a mode switch.
+  const changesListEl = document.createElement("div");
+
   const fileListDividerEl = document.createElement("div");
   fileListDividerEl.className = "file-list-divider";
 
@@ -119,7 +139,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const diffView = new DiffView(diffAreaEl, state.layout, comments.hooks);
   comments.attachDiffView(diffView);
   comments.mount(diffAreaEl);
-  const editorView = new EditorView(editorContainerEl, bridge);
+  const editorView = new EditorView(editorContainerEl, bridge, {
+    // The success-only seam (see `EditorViewCallbacks.onFileOpened`'s doc comment): fires only once
+    // `loadFile()` actually replaces the buffer with `path`'s content, so a refused open (the
+    // discard-consent banner) or a failed read never records a recent or moves the Files tree's
+    // selection (Finding C) — `openInEditor` below stops doing either of those itself. Restoring a
+    // hibernated buffer never fires this either (see `EditorView.restoreState`'s doc comment), so a
+    // pane that reopens straight into its last file doesn't re-record it as a fresh open.
+    onFileOpened: (path) => {
+      recordRecentPath(path);
+      editorSidebar.setSelectedPath(path);
+    },
+  });
   // Wired here (not inside EditorView itself) so the global always reaches this exact instance's
   // live state — see Window.__spacesCollectEditorState's doc comment in bridge/types.ts and
   // EditorView.collectStateForFlush.
@@ -128,6 +159,100 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // Window.__spacesCollectReviewCommentState's doc comment in bridge/types.ts and
   // CommentsController.collectStateForFlush.
   window.__spacesCollectReviewCommentState = () => comments.collectStateForFlush();
+  // Root.ts's own state (editorUIState) is read synchronously — no debounce, no async teardown
+  // race to close (see __spacesCollectEditorUIState's doc comment in bridge/types.ts for why this
+  // is simpler than the two flush callbacks above).
+  window.__spacesCollectEditorUIState = () => JSON.stringify(editorUIState);
+
+  // Shared by Editor mode's Files tree (`editorSidebar`) and the ⌘P quick-open overlay
+  // (`quickOpen`) — see WorkspaceFileListCache's doc comment for why one lazily-fetched instance is
+  // shared rather than each owning its own.
+  const fileListCache = new WorkspaceFileListCache(bridge);
+
+  const editorSidebar = new EditorSidebar(
+    changesListEl,
+    fileListCache,
+    // `initPayload.editorState?.path` (not anything EditorView reports back) is the source for the
+    // initial selected row: it's available synchronously at construction time, before
+    // `editorView.restoreState` below has even run.
+    { sidebarMode: editorUIState.sidebarMode, selectedPath: initPayload.editorState?.path },
+    openInEditor,
+    {
+      onModeChange: (mode) => {
+        editorUIState = { ...editorUIState, sidebarMode: mode };
+        pushEditorUIState();
+        // The Changes tab can be reached without ever having visited Diff mode in this session
+        // (e.g. a pane that opens straight into Editor mode); make sure there's an actual diff to
+        // show rather than leaving the tab on the still-empty list `changesListEl` started with.
+        if (mode === "changes" && !diffLoaded) void refreshDiff(false);
+      },
+    },
+  );
+
+  const quickOpen = new QuickOpen(pane, fileListCache, () => editorUIState.recentPaths, {
+    getMode: () => state.mode,
+    isInDiff: (path) => files.some((file) => file.path === path),
+    openInDiff: (path) => {
+      diffView.scrollToFile(path);
+      // Recorded inline, unlike `openInEditor`'s success-callback seam (Finding C): a diff jump is
+      // synchronous and has no refusal/failure path to guard against, so there's nothing to wait on
+      // before it's safe to call this a successful open.
+      recordRecentPath(path);
+    },
+    openInEditor,
+  });
+
+  /** Records `path` as most-recently-opened (dedupe, cap `RECENT_PATHS_CAP`) and pushes the
+   *  updated `editorUIState` to the host. Called by every successful open, from any of the three
+   *  entry points (⌘P overlay, Files tree, Changes list in editor mode) — see `openInEditor`. */
+  function recordRecentPath(path: string): void {
+    const recentPaths = [path, ...editorUIState.recentPaths.filter((p) => p !== path)].slice(0, RECENT_PATHS_CAP);
+    editorUIState = { ...editorUIState, recentPaths };
+    pushEditorUIState();
+  }
+
+  function pushEditorUIState(): void {
+    bridge.notifyEditorUIStateChanged(editorUIState);
+  }
+
+  /** Opens `path` in Editor mode, switching modes first if the pane isn't already there — the
+   *  common landing point for all three entry points Design O/K define (see this file's imports'
+   *  doc comments): the ⌘P overlay (outside the diff), the Files tree, and the Changes list's own
+   *  click handler while already in Editor mode (`changesOnSelect` below). */
+  function openInEditor(path: string): void {
+    // `editorView.open` can refuse (a dirty buffer's discard-consent banner) or fail (an async read
+    // error) instead of actually opening `path` — recording the recent / moving the tree selection
+    // here unconditionally would do so even then. Both are handled by `EditorView`'s `onFileOpened`
+    // success callback instead (see this file's `EditorView` construction above), which only fires
+    // once the open has actually completed (Finding C).
+    //
+    // Called BEFORE the `setMode` dispatch below, not after: `open()` starts (at most) one
+    // `workspaceFileRead` and returns synchronously — the read itself only awaits — while dispatching
+    // "editor" mode first would, for a pane not already in editor mode, run `editorSidebar.reattach()`
+    // synchronously inside `dispatch`, which fires a `workspaceFileList` revalidation. Both requests
+    // share the daemon's per-workspace SERIAL git queue, so whichever call is MADE first is served
+    // first; queuing a full-workspace listing ahead of the one file the user just picked (often via
+    // ⌘P, which already has a fresh listing — that's how the user found this path) makes the pick
+    // wait behind it for no benefit. `open()` has no dependency on the pane already being in editor
+    // mode — it only touches `editorContainerEl`'s children, and does so after its `await`, by which
+    // point the synchronous `dispatch` call below has already mounted it.
+    editorView.open(path);
+    if (state.mode !== "editor") dispatch({ type: "setMode", mode: "editor" });
+  }
+
+  /** Shared `onSelect` for every `renderFileList(changesListEl, ...)` call below: reads `state.mode`
+   *  LIVE, at click time, not at render time — `changesListEl`'s rows are rendered once and then
+   *  reparented (not re-rendered) between Diff mode's direct placement and Editor mode's Changes
+   *  tab (see `changesListEl`'s own doc comment), so this is what makes the same row correctly
+   *  jump-scroll in Diff mode but open in the editor in Editor mode, without needing a re-render on
+   *  every mode toggle. */
+  function changesOnSelect(path: string): void {
+    if (state.mode === "diff") {
+      diffView.scrollToFile(path);
+    } else {
+      openInEditor(path);
+    }
+  }
 
   // A running agent set changes independently of any diff refresh or user action in this pane
   // (an agent can start or exit from elsewhere in the app), so this listens for the whole
@@ -202,15 +327,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // end to end: restore-on-attach, drag, persist, and re-clamp on pane resize.
   attachFileListDivider(fileListDividerEl, fileListEl, body);
 
+  /** Both modes share one physical `fileListEl`/`fileListDividerEl` pair (Design K: "same left tree
+   *  area as diff mode"), so the resizable divider stays wired in either mode — only `fileListEl`'s
+   *  single child and the main content pane change. Diff mode's child is `changesListEl` directly
+   *  (no header, unchanged from before Design K); Editor mode's is `editorSidebar.el`, whose own
+   *  Files/Changes toggle either shows the full workspace listing or reparents this same
+   *  `changesListEl` node into its own list host (see `EditorSidebar`'s doc comment). */
   function renderBody(): void {
     body.replaceChildren();
-    if (state.mode === "diff") {
-      body.appendChild(fileListEl);
-      body.appendChild(fileListDividerEl);
-      body.appendChild(diffAreaEl);
-    } else {
-      body.appendChild(editorContainerEl);
-    }
+    fileListEl.replaceChildren(state.mode === "diff" ? changesListEl : editorSidebar.el);
+    body.appendChild(fileListEl);
+    body.appendChild(fileListDividerEl);
+    body.appendChild(state.mode === "diff" ? diffAreaEl : editorContainerEl);
   }
 
   /**
@@ -273,9 +401,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       if (SpacesBridgeError.isSpacesBridgeError(err)) {
         if (err.code === "unavailable" || err.code === "internalError") {
           files = [];
-          renderFileList(fileListEl, files, undefined, {
-            onSelect: (path) => diffView.scrollToFile(path),
-          });
+          renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
           diffView.setError(err.message);
           // The comments controller re-anchors drafts against whatever file list it was last
           // given; since the rendered diff is being cleared for this typed error, its anchor
@@ -292,9 +418,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         // floor instead of inheriting whatever count this permanently-failing run left behind.
         diffRetryFailures = 0;
         files = [];
-        renderFileList(fileListEl, files, undefined, {
-          onSelect: (path) => diffView.scrollToFile(path),
-        });
+        renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
         diffView.setError(err.message);
         // Same re-anchor reasoning as the retryable branch above: this is a durable rejection
         // (e.g. a bad ref), so the diff stays cleared indefinitely and comments' anchor state
@@ -309,9 +433,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     diffRetryFailures = 0;
     files = result.files;
     diffLoaded = true;
-    renderFileList(fileListEl, files, undefined, {
-      onSelect: (path) => diffView.scrollToFile(path),
-    });
+    renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
     diffView.setFiles(files, preserveScroll);
     comments.setFiles(files);
   }
@@ -384,6 +506,25 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     unsubscribeSignature?.();
     unsubscribeSignature = bridge.subscribeDiffSignature(state.scope, () => {
       void refreshDiff(true);
+      // A push that changed the diff may equally have added or removed files elsewhere in the
+      // workspace — the same underlying git/agent activity both the diff and the full listing
+      // reflect. Invalidate the shared cache unconditionally so the Files tree and ⌘P overlay pick
+      // up the change instead of only the Changes list doing so — but only ask the sidebar to
+      // re-fetch RIGHT NOW when the PANE itself is in editor mode. The sidebar's own default mode
+      // is "files" while the pane's default top-level mode is "diff", so an ungated call here would
+      // fire a full `workspaceFileList` RPC (up to 50,000 paths, serialized on the daemon's
+      // per-workspace git queue) on every diff-signature push even while the sidebar isn't in the
+      // DOM. A pane that later returns to editor mode re-renders the sidebar's current tab against
+      // the already-invalidated cache (see `dispatch`'s `setMode` branch, which calls
+      // `editorSidebar.reattach()`), and the Files tab's own `renderList()` re-fetches on demand
+      // whenever it's shown regardless.
+      fileListCache.invalidate();
+      // Unlike the sidebar refresh above, NOT gated on `state.mode`: the ⌘P overlay is reachable
+      // from both Diff and Editor mode, and (unlike the sidebar) `refreshListing()` is a no-op
+      // unless the overlay is actually open, so there's no equivalent DOM-visibility cost to gate
+      // against.
+      quickOpen.refreshListing();
+      if (state.mode === "editor") editorSidebar.refreshFilesListing();
     });
   }
 
@@ -408,9 +549,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       // diff area never shows files from a scope other than the toolbar's current pick — a stale
       // diff labeled as the new scope is worse than a loading gap while the fetch is in flight.
       files = [];
-      renderFileList(fileListEl, files, undefined, {
-        onSelect: (path) => diffView.scrollToFile(path),
-      });
+      renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
       diffView.setLoading();
       comments.setFiles([]);
       void refreshDiff(false);
@@ -422,6 +561,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       bridge.notifyModeChanged(state.mode);
       if (state.mode === "diff" && !diffLoaded) {
         void refreshDiff(false);
+      } else if (state.mode === "editor") {
+        // Diff mode's own `renderBody()` reparents `changesListEl` OUT of the sidebar's list host
+        // (`fileListEl.replaceChildren(changesListEl)`) for as long as the pane is in diff mode —
+        // the sidebar itself never re-renders on that reparent (it isn't even attached to the DOM
+        // meanwhile), so a pane that leaves the Changes tab showing, switches to diff, then back to
+        // editor would show a blank Changes tab until the user manually toggled tabs. Re-running the
+        // sidebar's current-mode render on every transition INTO editor mode fixes that, and also
+        // picks up a fresh Files listing if the shared cache was invalidated while the sidebar was
+        // off-screen (see `resubscribeDiffSignature`'s gating above). This dispatch is reached both
+        // by a toolbar click and by the host's `spaces:setMode` push, so it covers every diff→editor
+        // transition, not just a live user click.
+        editorSidebar.reattach();
       }
     }
   }
@@ -442,8 +593,28 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // has already loaded back into Editor mode above; this call is what puts its buffer back too,
   // regardless of which mode ends up on screen.
   await editorView.restoreState(initPayload.editorState);
+  // Every OTHER path into editor mode reaches `editorSidebar.reattach()` through dispatch's
+  // "setMode" branch, which is what makes the Files tab's first listing fetch happen lazily on
+  // "show" rather than in EditorSidebar's own constructor (see its doc comment: a diff-only pane
+  // must not pay for a hidden `workspaceFileList` on the daemon's shared per-workspace git queue).
+  // A pane that starts, or is rehydrated, directly into editor mode never goes through that
+  // dispatch — `renderBody()` above already mounted the sidebar straight from `state.mode`, not via
+  // a `setMode` action — so this is the one call site that has to trigger that first fetch itself.
+  // This runs AFTER `restoreState` above so the restored buffer's `workspaceFileRead` enters the
+  // daemon's serial per-workspace git queue ahead of the sidebar's potentially 50,000-path listing
+  // scan, keeping external-change reconciliation of the open file from stalling behind it — the
+  // same serial-queue ordering rule `openInEditor` applies (read before the mode dispatch that
+  // triggers the listing).
+  if (state.mode === "editor") editorSidebar.reattach();
   if (state.mode === "diff") {
     await refreshDiff(false);
+  } else if (editorUIState.sidebarMode === "changes") {
+    // Mirrors `EditorSidebar`'s own `onModeChange` handling: a pane that hibernated straight into
+    // Editor mode with the Changes tab active needs the same catch-up fetch a live toggle-to-Changes
+    // gets, or that tab would sit on the still-empty list `changesListEl` started with. Not awaited,
+    // for the same reason `onModeChange`'s isn't: this only feeds a sidebar list, not the visible
+    // main content this startup sequence is otherwise ordering around.
+    void refreshDiff(false);
   }
   resubscribeDiffSignature();
   // Workspace-scoped, independent of `state.scope`: fetched once here regardless of which scope

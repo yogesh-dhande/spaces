@@ -225,7 +225,9 @@ export const NEW_FEATURE_FLAG = "new-feature-enabled";
 `,
 };
 
-/** Broader path universe for the `workspaceFileList` picker mock, beyond just the files that already have diffs or open content. */
+/** The mock's full workspace listing (`workspaceFileList`'s `paths`), backing Editor mode's Files
+ *  tree and the ⌘P quick-open overlay — broader than just the files that already have diffs or
+ *  open content above. */
 export const FIXTURE_ALL_PATHS: string[] = [
   ...Object.keys(FIXTURE_FILE_CONTENTS),
   "src/app/editorView.ts",

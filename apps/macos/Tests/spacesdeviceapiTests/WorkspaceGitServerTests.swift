@@ -75,6 +75,276 @@
             }
         }
 
+        func testWorkspaceFileListReturnsTrackedAndUntrackedFilesSortedAscendingExcludingIgnored() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // README.md is already tracked by the fixture's initial commit.
+                try FileManager.default.createDirectory(
+                    at: repo.appendingPathComponent("src/nested", isDirectory: true), withIntermediateDirectories: true)
+                try "tracked nested".write(to: repo.appendingPathComponent("src/nested/tracked.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "src/nested/tracked.txt"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add nested tracked file"],
+                    cwd: repo.path)
+
+                try "untracked".write(to: repo.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+                try "*.log\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+                try "ignored".write(to: repo.appendingPathComponent("ignored.log"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths, [".gitignore", "README.md", "src/nested/tracked.txt", "untracked.txt"])
+                XCTAssertFalse(result.truncated)
+            }
+        }
+
+        func testWorkspaceFileListExcludesATrackedFileDeletedOnDisk() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "will be deleted".write(to: repo.appendingPathComponent("gone.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "gone.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add gone.txt"], cwd: repo.path)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("gone.txt"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("gone.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// A submodule gitlink (mode 160000) is a directory on disk that `git ls-files` still reports as an
+        /// ordinary tracked path; `workspaceFileRead` can never read a directory, so it must be filtered out
+        /// of the listing rather than surfaced in the tree only to fail on selection. Fabricates a gitlink
+        /// without a real submodule via `git update-index --add --cacheinfo 160000`, matching how a real
+        /// submodule's index entry looks without the setup cost of `git submodule add`.
+        func testWorkspaceFileListExcludesASubmoduleGitlink() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try FileManager.default.createDirectory(at: repo.appendingPathComponent("vendor/sub", isDirectory: true), withIntermediateDirectories: true)
+                try runGit(
+                    ["update-index", "--add", "--cacheinfo", "160000,\(String(repeating: "a", count: 40)),vendor/sub"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("vendor/sub"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// A `skip-worktree` entry (sparse checkout's mechanism for hiding a tracked file the working
+        /// tree doesn't materialize) stays in `git ls-files --cached` but never shows up in
+        /// `git ls-files --deleted`, which only reports paths git itself removed — so the listing's
+        /// tracked-minus-deleted set still names a path with nothing on disk. `workspaceFileRead` would
+        /// fail with notFound if it were surfaced, so the stat-failure filter (`filterToOpenableFiles`)
+        /// must drop it rather than keep it.
+        func testWorkspaceFileListExcludesASparseCheckoutAbsentFile() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "sparse".write(to: repo.appendingPathComponent("sparse.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "sparse.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add sparse.txt"], cwd: repo.path)
+                try runGit(["update-index", "--skip-worktree", "sparse.txt"], cwd: repo.path)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("sparse.txt"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("sparse.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// Fix A regression: the prior `filterToOpenableFiles` kept any non-directory lstat type, so a
+        /// tracked symlink pointing at a directory or at somewhere outside the workspace was listed even
+        /// though `workspaceFileRead` can never open it (a dead row in the Editor's file tree — opening it
+        /// always fails, since the reader resolves symlinks and rejects a non-file/an escape). `isOpenableFile`
+        /// must instead decide a symlink exactly the way `workspaceFileRead`'s own path resolver would: a
+        /// symlink to a regular file inside the workspace is listed, a symlink to a directory or to outside
+        /// the workspace is not.
+        func testWorkspaceFileListDecidesATrackedSymlinkByWhereItResolvesRatherThanItsOwnLstatType() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "linked content".write(to: repo.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("link-to-file").path, withDestinationPath: "linked-file.txt")
+
+                try FileManager.default.createDirectory(at: repo.appendingPathComponent("some-dir", isDirectory: true), withIntermediateDirectories: true)
+                try "inside dir".write(to: repo.appendingPathComponent("some-dir/inside.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("link-to-dir").path, withDestinationPath: "some-dir")
+
+                let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-file-list-outside-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: outside) }
+                try "outside content".write(to: outside.appendingPathComponent("outside.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    at: repo.appendingPathComponent("link-to-outside"), withDestinationURL: outside.appendingPathComponent("outside.txt"))
+
+                try runGit(["add", "linked-file.txt", "some-dir/inside.txt", "link-to-file", "link-to-dir", "link-to-outside"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add symlinks"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertTrue(result.paths.contains("link-to-file"), "a symlink to a regular file inside the workspace must be listed")
+                XCTAssertFalse(result.paths.contains("link-to-dir"), "a symlink to a directory must not be listed")
+                XCTAssertFalse(result.paths.contains("link-to-outside"), "a symlink resolving outside the workspace must not be listed")
+                XCTAssertTrue(result.paths.contains("linked-file.txt"))
+            }
+        }
+
+        /// A tracked file over `workspaceFileMaxBytes` (10 MiB) is stat-openable but `workspaceFileRead`
+        /// rejects it with `.payloadTooLarge`, so the listing must exclude it too or the Files tree/⌘P would
+        /// offer a file that can never actually be opened. A small tracked sibling stays listed to prove the
+        /// exclusion is size-specific rather than a wholesale failure of the listing.
+        func testWorkspaceFileListExcludesATrackedFileOverTheReadSizeCap() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: repo.appendingPathComponent("HUGE.bin"))
+                try "small sibling".write(to: repo.appendingPathComponent("small.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "HUGE.bin", "small.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add huge and small files"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("HUGE.bin"), "a file over the read cap must never be listed as openable")
+                XCTAssertTrue(result.paths.contains("small.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// Unlike `workspaceDiff`, `workspaceFileList` deliberately serves a non-git workspace instead of
+        /// rejecting it: a non-git project's Editor pane has no direct-path input, so the file tree and
+        /// ⌘P quick-open are the only way to open a file there (docs/spec.md's non-git project rows still
+        /// offer Open in Editor). This falls back to a plain filesystem walk — sorted, recursive, including
+        /// a dotfile and a nested subdirectory's file, at parity with what the git branch would list for
+        /// the same tree.
+        func testWorkspaceFileListOnANonGitWorkspaceListsFilesFromDisk() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                try "hello".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try ".env-example".write(to: dir.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
+                try FileManager.default.createDirectory(at: dir.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
+                try "nested".write(to: dir.appendingPathComponent("src/nested.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths, [".env", "README.md", "src/nested.txt"])
+                XCTAssertFalse(result.truncated)
+            }
+        }
+
+        /// Fix A regression on the non-git branch: `listFilesystemFiles` used to keep only `.typeRegular`,
+        /// dropping a symlink to a regular file inside the workspace even though `workspaceFileRead` can open
+        /// it fine (unreachable in practice before this fix, since the Editor has no direct-path input other
+        /// than this listing — but wrong once `isOpenableFile` is the shared predicate both branches use). A
+        /// symlink to a directory must still be excluded, since there is no git index here to say what kind of
+        /// entry it is meant to be and `workspaceFileRead` could never open a directory either way.
+        func testWorkspaceFileListOnANonGitWorkspaceListsASymlinkToARegularFileButNotToADirectory() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                try "linked content".write(to: dir.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    atPath: dir.appendingPathComponent("link-to-file").path, withDestinationPath: "linked-file.txt")
+
+                try FileManager.default.createDirectory(at: dir.appendingPathComponent("some-dir", isDirectory: true), withIntermediateDirectories: true)
+                try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("link-to-dir").path, withDestinationPath: "some-dir")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertTrue(result.paths.contains("link-to-file"), "a symlink to a regular file inside the workspace must be listed")
+                XCTAssertFalse(result.paths.contains("link-to-dir"), "a symlink to a directory must not be listed")
+            }
+        }
+
+        /// Same exclusion as the git-repo case, exercised on the plain-filesystem-walk strategy: a regular
+        /// file over `workspaceFileMaxBytes` is excluded while a small sibling stays listed.
+        func testWorkspaceFileListOnANonGitWorkspaceExcludesAFileOverTheReadSizeCap() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: dir.appendingPathComponent("HUGE.bin"))
+                try "small sibling".write(to: dir.appendingPathComponent("small.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("HUGE.bin"), "a file over the read cap must never be listed as openable")
+                XCTAssertTrue(result.paths.contains("small.txt"))
+            }
+        }
+
+        /// A symlink resolving to a regular file over the read cap must be excluded exactly like the
+        /// oversized regular-file case above: `isOpenableFile`'s symlink branch stats the RESOLVED target,
+        /// not the symlink itself (which is tiny), so this exercises the size check on that second lstat.
+        func testWorkspaceFileListOnANonGitWorkspaceExcludesASymlinkResolvingToAFileOverTheReadSizeCap() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: dir.appendingPathComponent("huge-target.bin"))
+                try FileManager.default.createSymbolicLink(
+                    atPath: dir.appendingPathComponent("link-to-huge").path, withDestinationPath: "huge-target.bin")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(
+                    result.paths.contains("link-to-huge"), "a symlink resolving to a file over the read cap must never be listed as openable")
+            }
+        }
+
+        func testWorkspaceFileListOnAnUnknownWorkspaceReturnsNotFound() throws {
+            try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: "no-such-workspace")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+                // Mirrors `testWorkspaceFileReadOnAnUnknownWorkspaceReturnsNotFound`'s queue-registry check.
+                XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
+            }
+        }
+
         func testWorkspaceFileWriteCreatesANewFileWhenExpectedSHAIsNil() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 let content = Data("brand new file".utf8)

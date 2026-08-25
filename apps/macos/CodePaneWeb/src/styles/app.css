@@ -8,6 +8,7 @@
  */
 
 .pane {
+  position: relative; /* anchors the ⌘P quick-open overlay's absolutely-positioned backdrop */
   flex: 1;
   min-height: 0;
   display: flex;
@@ -320,6 +321,40 @@
   font-size: 12px;
 }
 
+/* Editor mode's Files/Changes sidebar (Design K) — the sole child `.file-list` shows in Editor
+   mode, in place of the plain changed-files list (`.file-list`'s own `overflow-y: auto` is
+   harmless here: this fills its exact-fit flex parent, so it never actually overflows). Reuses
+   `.file-list .row`/`.dirrow`/etc above for its own rows — both the Files tree (filesTree.ts) and
+   the reparented Changes list (fileList.ts) are plain descendants of `.file-list`, so no new row
+   selectors are needed here, only this wrapper's own chrome. */
+.editor-sidebar {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-sidebar-hdr {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.editor-sidebar-note {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg3);
+  font-size: 11px;
+}
+
 .diff-area {
   flex: 1;
   min-width: 0;
@@ -366,60 +401,121 @@
   background: var(--surface2);
 }
 
-.editor-open-bar input {
+/* The open file's path (Design O) — plain text, not an input: there is nothing to type into it,
+   only to read. Opening happens exclusively through the ⌘P overlay (`.quick-open` below), the
+   Files tree, or the Changes list. */
+.editor-open-bar .editor-path {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
   font-size: 12px;
-  padding: 0 8px;
+  color: var(--fg);
+}
+
+.editor-open-bar .editor-path.hint {
+  font-family: inherit;
+  color: var(--fg3);
+}
+
+/* ⌘P quick-open overlay (Design O) — a centered floating panel over the whole pane, available in
+   both Diff and Editor mode. See quickOpen.ts's doc comment for the open semantics; this only
+   covers layout/paint. */
+.quick-open-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.quick-open {
+  width: 480px;
+  max-width: calc(100% - 32px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.quick-open input {
+  flex: 0 0 auto;
+  appearance: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
   outline: none;
 }
 
-.editor-results {
-  position: relative;
-}
-
-.editor-results .list {
-  position: absolute;
-  top: 2px;
-  left: 0;
-  right: 0;
-  z-index: 4;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
-  max-height: 220px;
+.quick-open .list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  padding: 4px 0;
 }
 
-.editor-results .list .opt {
-  padding: 6px 9px;
+.quick-open .list .section-label {
+  padding: 5px 12px 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.quick-open .list .row {
+  padding: 6px 12px;
   font-size: 12px;
+}
+
+.quick-open .list .row .path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: ui-monospace, Menlo, monospace;
   color: var(--fg2);
 }
 
-.editor-results .list .opt:hover {
-  background: var(--row-hover);
+.quick-open .list .row.sel {
+  background: var(--row-sel);
+}
+
+.quick-open .list .row.sel .path {
   color: var(--fg);
 }
 
-.editor-results .list .msg {
-  padding: 6px 9px;
+.quick-open .list .row .path mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.quick-open .list .empty {
+  padding: 10px 12px;
+  color: var(--fg3);
   font-size: 12px;
 }
 
-.editor-results .list .msg.hint {
+.quick-open .note {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
   color: var(--fg3);
-}
-
-.editor-results .list .msg.error {
-  color: var(--orange);
+  font-size: 11px;
 }
 
 /* Non-blocking conflict/status banner, per docs/design.md's rule: a

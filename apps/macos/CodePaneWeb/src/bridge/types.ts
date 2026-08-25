@@ -91,7 +91,12 @@ export interface WorkspaceFileWriteConflict {
 export type WorkspaceFileWriteResult = WorkspaceFileWriteOk | WorkspaceFileWriteConflict;
 
 export interface WorkspaceFileListResult {
+  /** Every file in the workspace, relative to the workspace root, sorted. Backs both Editor mode's
+   *  Files tree and the ⌘P quick-open overlay's full-listing fuzzy search. */
   paths: string[];
+  /** True when the daemon capped the listing before enumerating the whole tree. Callers surface a
+   *  subtle note ("File list truncated") rather than presenting the list as complete. */
+  truncated: boolean;
 }
 
 export interface DiffSignatureEvent {
@@ -213,12 +218,13 @@ export interface SpacesBridge {
   workspaceFileRead(path: string): Promise<WorkspaceFileReadResult>;
   workspaceFileWrite(path: string, content: string, options: WorkspaceFileWriteOptions): Promise<WorkspaceFileWriteResult>;
   /**
-   * Pending: the daemon endpoint behind this does not exist yet (see
-   * README.md open items). Real usage today goes through the mock only; the
-   * shape is defined here so the Editor mode file picker has a stable
-   * contract to build against ahead of the daemon side landing.
+   * The full workspace file listing, backing Editor mode's Files tree and the ⌘P quick-open
+   * overlay. Callers fetch this lazily (first use), cache it in memory, and refetch on a
+   * diff-signature push (the same signal that refreshes the diff) so files added or removed
+   * outside the pane reappear without a manual refresh — see `root.ts`'s
+   * `resubscribeDiffSignature`.
    */
-  workspaceFileList(query: string): Promise<WorkspaceFileListResult>;
+  workspaceFileList(): Promise<WorkspaceFileListResult>;
   /**
    * Subscribe to diff-signature-changed push events for a scope. The
    * returned function unsubscribes. Only one scope is observed at a time in
@@ -249,6 +255,16 @@ export interface SpacesBridge {
    * value.
    */
   notifyModeChanged(mode: CodePaneMode): void;
+  /**
+   * Fire-and-forget push telling the host Editor mode's sidebar toggle and recent-files list, so a
+   * hibernated pane restores to them. Unlike `notifyEditorStateChanged`, this state always has
+   * real defaults (`{sidebarMode: "files", recentPaths: []}`), so there is no `undefined` case to
+   * normalize. Owned by `root.ts` (not `EditorView`): every event that changes this state — the
+   * Files/Changes toggle, a successful open from any of the three entry points — is already routed
+   * through root.ts, which is also the one place tracking `CodePaneMode`, so it needs no separate
+   * push discipline of its own the way `EditorView`'s heavier, edit-driven `editorStateChanged` does.
+   */
+  notifyEditorUIStateChanged(state: CodePaneEditorUIState): void;
   /** All of this workspace's draft comments, ordered by `createdAt` (server-enforced). Called once
    *  on mount to rehydrate the comment surface — see `root.ts` and `reviewComments.ts`'s doc
    *  comments for why this is not re-fetched on every diff refresh. */
@@ -306,6 +322,18 @@ export interface CodePaneEditorState {
   conflict: boolean;
 }
 
+/** Editor mode's UI-state snapshot (distinct from `CodePaneEditorState`'s open-file snapshot
+ *  above): which sidebar list is showing, and the recently opened files. Pushed fire-and-forget via
+ *  `notifyEditorUIStateChanged` and rehydrated through `spaces:init`'s `editorUIState` field, same
+ *  discipline as `CodePaneEditorState` — see `EditorView`'s doc comment. Absent at init defaults to
+ *  `{sidebarMode: "files", recentPaths: []}`. */
+export interface CodePaneEditorUIState {
+  sidebarMode: "files" | "changes";
+  /** Most-recently-opened first, deduped, capped at 12 — every successful open (⌘P overlay, Files
+   *  tree, or Changes list in editor mode) records into this list. */
+  recentPaths: string[];
+}
+
 /**
  * Payload the Swift host delivers once, at startup, via the `spaces:init`
  * event (see README.md). Nothing in the plugin renders before this arrives.
@@ -324,6 +352,10 @@ export interface CodePaneInitPayload {
    *  absent when there is none (a pane's first-ever load, or one whose editor never opened a
    *  file). See `EditorView.restoreState`'s doc comment for the rehydration rules. */
   editorState?: CodePaneEditorState;
+  /** The host-held Editor mode UI-state snapshot (sidebar toggle, recent files) from before this
+   *  pane's most recent hibernation cycle, absent when there is none — same rehydration discipline
+   *  as `editorState` above. Defaults to `{sidebarMode: "files", recentPaths: []}` when absent. */
+  editorUIState?: CodePaneEditorUIState;
   /** round-16 Fix 1a: the host-held snapshot of comment text typed but not yet persisted before this
    *  pane's most recent teardown, absent when there is none. See
    *  `CommentsController.restorePendingState`'s doc comment for the rehydration rules — mirrors
@@ -370,6 +402,16 @@ declare global {
      * survives hibernation".
      */
     __spacesCollectEditorState?: () => string | null;
+    /** Host-pulled counterpart to `notifyEditorUIStateChanged`'s push — mirrors
+     *  `__spacesCollectEditorState` above, but for Editor mode's sidebar-toggle/recent-files
+     *  snapshot. Returns the exact `editorUIStateChanged` payload shape (`CodePaneEditorUIState`)
+     *  JSON-stringified — never `null`, since this state always has real defaults (see
+     *  `CodePaneEditorUIState`'s doc comment). Wired in `root.ts`, which owns this state directly
+     *  (see `notifyEditorUIStateChanged`'s doc comment for why this lives in root.ts rather than
+     *  `EditorView`), so there is no async teardown race to close the way
+     *  `__spacesCollectEditorState` closes one for the debounced `editorStateChanged` push — this
+     *  simply reads root.ts's own in-memory value synchronously. */
+    __spacesCollectEditorUIState?: () => string | null;
     /** round-16 Fix 1a: mirrors `__spacesCollectEditorState` above, but for the comment surface —
      *  see `CommentsController.collectStateForFlush`'s doc comment. Returns the exact
      *  `PendingReviewCommentEntry[]` JSON-stringified, or `null` when nothing is pending. Wired in

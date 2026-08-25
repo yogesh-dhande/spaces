@@ -185,6 +185,44 @@ enum CodePaneBridge {
         return .entries(entries)
     }
 
+    /// The Editor pane's sidebar UI state (which tab is showing, and the quick-open recency list),
+    /// persisted across pane hibernation exactly like `EditorState`. Mirrors
+    /// `CodePaneWeb/src/bridge/types.ts`'s `CodePaneEditorUIState`. Deliberately dumb: the web app
+    /// owns what values `sidebarMode` takes on and what `recentPaths` means, so this only needs to
+    /// decode, not validate, either field.
+    struct EditorUIState: Codable, Equatable {
+        let sidebarMode: String
+        let recentPaths: [String]
+    }
+
+    /// Evaluated by `CodePaneContentController.flushPendingEditorUIState()` at teardown — mirrors
+    /// `collectReviewCommentStateScript` exactly (see `collectEditorStateScript`'s doc comment for the
+    /// `typeof`/sentinel reasoning): `'__none__'` is this method's "nothing to report" sentinel.
+    static let collectEditorUIStateScript =
+        "typeof window.__spacesCollectEditorUIState === 'function' ? (window.__spacesCollectEditorUIState() ?? '__none__') : '__uninstalled__'"
+
+    /// Result of decoding a teardown flush's UI-state collect-script return value — mirrors
+    /// `CollectedReviewCommentState` exactly (see `CollectedEditorState`'s doc comment for the
+    /// three-way discipline this enforces), with `.state` standing in for `.entries`.
+    enum CollectedEditorUIState: Equatable {
+        case notReported
+        case none
+        case state(EditorUIState)
+    }
+
+    /// Decodes a teardown flush's UI-state collect-script return value into `CollectedEditorUIState`
+    /// — mirrors `decodeCollectedReviewCommentState` exactly, substituting a single JSON object for a
+    /// JSON array.
+    static func decodeCollectedEditorUIState(_ result: Any?) -> CollectedEditorUIState {
+        guard let jsonString = result as? String else { return .notReported }
+        if jsonString == "__uninstalled__" { return .notReported }
+        if jsonString == "__none__" { return .none }
+        guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(EditorUIState.self, from: data) else {
+            return .notReported
+        }
+        return .state(state)
+    }
+
     /// Result of decoding a message body as the fire-and-forget `editorStateChanged` notification
     /// (see `CodePaneWeb/README.md`'s wire protocol).
     enum EditorStateChangedMessage: Equatable {
@@ -218,6 +256,20 @@ enum CodePaneBridge {
             let params = dict["params"] as? [String: Any], let mode = params["mode"] as? String, mode == "diff" || mode == "editor"
         else { return nil }
         return mode
+    }
+
+    /// Decodes a `{method:"editorUIStateChanged", params}` notification body: the web app's push
+    /// whenever the sidebar mode or quick-open recency list changes, so the host can hold the live
+    /// state across hibernation the same way `editorStateChanged` does for the open file. Unlike
+    /// `EditorState`, there is no "nothing open" case here — `params` is always the full snapshot —
+    /// so `nil` covers both "not this message" and a malformed/absent `params`, matching
+    /// `decodeModeChanged`'s two-way shape rather than `decodeEditorStateChanged`'s three-way one.
+    static func decodeEditorUIStateChanged(body: Any) -> EditorUIState? {
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editorUIStateChanged",
+            let params = dict["params"] as? [String: Any], let sidebarMode = params["sidebarMode"] as? String,
+            let recentPaths = params["recentPaths"] as? [String]
+        else { return nil }
+        return EditorUIState(sidebarMode: sidebarMode, recentPaths: recentPaths)
     }
 
     // MARK: - Diff scope
@@ -282,8 +334,8 @@ enum CodePaneBridge {
         /// missing (see `FileWritePayload`'s `fileMissing` case) instead of being unable to ever write
         /// past that state.
         case workspaceFileWrite(path: String, content: String, baseSHA256: String?)
-        /// Decodes successfully (the params are well-formed) but has no daemon endpoint yet; the
-        /// controller always replies `unavailable` for this rather than attempting a client call.
+        /// Lists every path in the workspace's checkout, for the Editor pane's file tree and
+        /// quick-open. No params.
         case workspaceFileList
         case reviewCommentList
         /// `commentID` is `nil` for a new draft — the daemon mints its id — or names an existing
@@ -531,6 +583,10 @@ enum CodePaneBridge {
         /// `CodePaneContentController.pendingReviewCommentState`'s doc comment for the persistence
         /// model this rehydrates — mirrors `editorState` above but for the comment surface.
         let pendingReviewComments: [ReviewCommentEntryPayload]?
+        /// The host-held sidebar UI-state snapshot from before this pane's most recent hibernation
+        /// cycle, nil-omitted when there is none. See `CodePaneContentController.editorUIState`'s doc
+        /// comment for the persistence model this rehydrates — mirrors `editorState` above.
+        let editorUIState: EditorUIState?
         /// Coding agents running in this workspace right now, for the toolbar's assigned-agent
         /// dropdown (auto-default when exactly one, disabled sending with a reason when empty). Kept
         /// in sync after startup by `spaces:agents` (see `AgentsPayload` below).

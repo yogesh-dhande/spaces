@@ -244,21 +244,32 @@ enum CodePaneMode: Equatable {
     /// let an editor-only (or comment-only) flush incorrectly block the other's apply.
     private var pendingReviewCommentStateGeneration = 0
 
-    /// Count of teardown flushes (`flushPendingEditorState` AND, since round-16 Fix 1a,
-    /// `flushPendingReviewCommentState`) started but not yet answered. Bumped when a flush actually
-    /// kicks off, decremented once its completion applies (or discards) its result. `handleReady()`
-    /// reads this to know whether a flush from the just-torn-down page could still overwrite
-    /// `editorState`/`pendingReviewCommentState` with fresher content than whatever is on hand right
-    /// now — see `deferredReadyGeneration` below for why that matters. A counter, not a flag, because a
-    /// pane can in principle rack up more than one outstanding flush (teardown → reactivate → teardown
-    /// again, all before the first flush's `evaluateJavaScript` round trip returns, or the editor and
-    /// comment-state flushes from the very same teardown both still in flight); `handleReady()` must
-    /// wait for all of them, not just the most recent. `evaluateJavaScript` (what `evaluateCodePaneScript`
-    /// wraps) always calls its completion, success or failure, so this is guaranteed to return to zero
-    /// and never strands a deferred `ready` forever. Folded into one counter (renamed from
-    /// `outstandingEditorFlushCount`) rather than tracked separately per flush kind: both flushes gate
-    /// the exact same `ready` decision, so one shared count is the cleaner mirror and there is nothing
-    /// either flush kind needs to know about the other's count.
+    /// The web app's last-known sidebar UI-state snapshot (see `CodePaneBridge.EditorUIState`) —
+    /// mirrors `pendingReviewCommentState` above exactly, including its lifecycle (survives
+    /// `deactivate()`, discarded by `close()`) and its rehydration via `spaces:init`'s `editorUIState`
+    /// field. `nil` means "nothing to report", the same meaning as the `'__none__'` sentinel on the
+    /// wire.
+    private var editorUIState: CodePaneBridge.EditorUIState?
+    /// The page generation that most recently wrote `editorUIState` — mirrors
+    /// `pendingReviewCommentStateGeneration` exactly, kept as its own independent counter for the same
+    /// reason.
+    private var editorUIStateGeneration = 0
+
+    /// Count of teardown flushes (`flushPendingEditorState`, `flushPendingReviewCommentState` since
+    /// round-16 Fix 1a, and `flushPendingEditorUIState`) started but not yet answered. Bumped when a
+    /// flush actually kicks off, decremented once its completion applies (or discards) its result.
+    /// `handleReady()` reads this to know whether a flush from the just-torn-down page could still
+    /// overwrite `editorState`/`pendingReviewCommentState`/`editorUIState` with fresher content than
+    /// whatever is on hand right now — see `deferredReadyGeneration` below for why that matters. A
+    /// counter, not a flag, because a pane can in principle rack up more than one outstanding flush
+    /// (teardown → reactivate → teardown again, all before the first flush's `evaluateJavaScript` round
+    /// trip returns, or all three flushes from the very same teardown still in flight); `handleReady()`
+    /// must wait for all of them, not just the most recent. `evaluateJavaScript` (what
+    /// `evaluateCodePaneScript` wraps) always calls its completion, success or failure, so this is
+    /// guaranteed to return to zero and never strands a deferred `ready` forever. Folded into one
+    /// counter (renamed from `outstandingEditorFlushCount`) rather than tracked separately per flush
+    /// kind: every flush gates the exact same `ready` decision, so one shared count is the cleaner
+    /// mirror and there is nothing any one flush kind needs to know about another's count.
     private var outstandingTeardownFlushCount = 0
     /// round-16 Fix 1b: count of in-flight review-comment mutation RPCs (`reviewCommentUpsert`/
     /// `reviewCommentDelete`/`reviewCommentsSend`) — kept separate from `outstandingTeardownFlushCount`
@@ -367,6 +378,11 @@ enum CodePaneMode: Equatable {
         // snapshot after close() just discarded it.
         pendingReviewCommentState = nil
         pendingReviewCommentStateGeneration += 1
+        // Mirrors the pendingReviewCommentState treatment immediately above, for the same reason — a
+        // UI-state flush already in flight from the teardown just above must not resurrect this
+        // snapshot after close() just discarded it.
+        editorUIState = nil
+        editorUIStateGeneration += 1
         currentMode = initialMode
     }
 
@@ -493,6 +509,10 @@ enum CodePaneMode: Equatable {
         // same `outstandingTeardownFlushCount` (see its doc comment), so `handleReady()` waits for
         // whichever of the two is slower to answer.
         flushPendingReviewCommentState()
+        // Mirrors the two flushes immediately above — all three are counted by the same
+        // `outstandingTeardownFlushCount` (see its doc comment), so `handleReady()` waits for whichever
+        // is slowest to answer.
+        flushPendingEditorUIState()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageHandlerName)
         webView?.removeFromSuperview()
         webView = nil
@@ -578,6 +598,23 @@ enum CodePaneMode: Equatable {
         }
     }
 
+    /// Mirrors `flushPendingReviewCommentState` exactly (see `flushPendingEditorState`'s doc comment
+    /// for the return-value-vs-message-channel reasoning), but pulls the web app's live sidebar
+    /// UI-state snapshot instead.
+    private func flushPendingEditorUIState() {
+        guard let webView, let scriptEvaluator else { return }
+        let flushGeneration = pageGeneration
+        outstandingTeardownFlushCount += 1
+        scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectEditorUIStateScript) { [weak self] result in
+            withExtendedLifetime(webView) {
+                self?.storeFlushedEditorUIState(CodePaneBridge.decodeCollectedEditorUIState(result), generation: flushGeneration)
+                self?.outstandingTeardownFlushCount -= 1
+                self?.clearCommittedFileWriteIfSettled()
+                self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
     /// Applies a teardown flush's result under the same ordering rule `handleEditorStateChanged`
     /// writes under — see `editorStateGeneration`'s doc comment for the `>=` rule this enforces.
     /// `.notReported` returns immediately without touching `editorState` or `editorStateGeneration`:
@@ -653,6 +690,20 @@ enum CodePaneMode: Equatable {
         pendingReviewCommentStateGeneration = generation
     }
 
+    /// Mirrors `storeFlushedReviewCommentState` exactly, against the independent
+    /// `editorUIStateGeneration` guard (see its doc comment for why it is not shared with the other
+    /// two). `.none` (the `'__none__'` sentinel) clears the stored snapshot, the same way `.none`
+    /// clears `pendingReviewCommentState` above.
+    private func storeFlushedEditorUIState(_ collected: CodePaneBridge.CollectedEditorUIState, generation: Int) {
+        guard generation >= editorUIStateGeneration else { return }
+        switch collected {
+        case .notReported: return
+        case .none: editorUIState = nil
+        case .state(let state): editorUIState = state
+        }
+        editorUIStateGeneration = generation
+    }
+
     // MARK: - Bridge dispatch
 
     /// The actual body of `WKScriptMessageHandler.userContentController(_:didReceive:)`, split out
@@ -695,6 +746,10 @@ enum CodePaneMode: Equatable {
         }
         if let mode = CodePaneBridge.decodeModeChanged(body: body) {
             handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: senderWebView)
+            return
+        }
+        if let state = CodePaneBridge.decodeEditorUIStateChanged(body: body) {
+            handleEditorUIStateChanged(state, senderWebView: senderWebView)
             return
         }
         guard let request = CodePaneBridge.decodeRequest(body: body) else { return }
@@ -780,6 +835,9 @@ enum CodePaneMode: Equatable {
             // `editorState`'s own nil-when-empty handling above) — `InitPayload`'s doc comment on this
             // field explains why an omitted key, not an empty array, is the "nothing pending" wire shape.
             pendingReviewComments: pendingReviewCommentState,
+            // Only present when a teardown flush (or a live push) actually captured something —
+            // mirrors `pendingReviewComments`'s own nil-when-empty handling above.
+            editorUIState: editorUIState,
             agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
@@ -813,6 +871,15 @@ enum CodePaneMode: Equatable {
         currentMode = mode
     }
 
+    /// Stores the web app's latest sidebar UI-state push (see `editorUIState`'s doc comment). Not
+    /// `private`, and guarded identically to `handleEditorStateChanged`/`handleModeChanged` above —
+    /// same staleness concern, same fix.
+    func handleEditorUIStateChanged(_ state: CodePaneBridge.EditorUIState, senderWebView: WKWebView?) {
+        guard senderWebView != nil, senderWebView === webView else { return }
+        editorUIState = state
+        editorUIStateGeneration = pageGeneration
+    }
+
     /// Not `private`: a test drives this directly (bypassing `WKScriptMessageHandler`, which can't be
     /// fed a real `WKScriptMessage` from test code) to simulate an RPC arriving.
     func dispatch(_ request: CodePaneBridge.Request) {
@@ -834,9 +901,7 @@ enum CodePaneMode: Equatable {
         }
         switch plan {
         case .workspaceFileList:
-            // No daemon endpoint yet (see CodePaneWeb/README.md "Open items"); the web app already
-            // tolerates this rejection.
-            reply(id: id, generation: generation, error: CodePaneBridge.BridgeError(code: .unavailable, message: "File search is not available yet."))
+            performFileList(id: id, generation: generation, hosting: hosting)
         case .workspaceDiff(let scope):
             performWorkspaceDiff(scope: scope, id: id, generation: generation, hosting: hosting)
         case .workspaceFileRead(let path):
@@ -1196,6 +1261,31 @@ enum CodePaneMode: Equatable {
                 self?.outstandingFileWriteCount -= 1
                 self?.clearCommittedFileWriteIfSettled()
                 self?.resumeDeferredReadyIfNeeded()
+            }
+        }
+    }
+
+    /// Lists every path in the workspace's checkout for the Editor pane's file tree and quick-open —
+    /// mirrors `performReviewCommentList`'s shape exactly (no subscription-token tracking, unlike
+    /// `performFileRead`/`performWorkspaceDiff`, since this has no live-signature stream to repoint).
+    /// `SpacesDeviceWorkspaceFileListResult`'s own `{paths, truncated}` shape already matches the wire
+    /// contract the web app expects, so the daemon result is replied directly with no bridge-owned
+    /// payload struct in between.
+    private func performFileList(id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceFileList(workspaceID: workspaceID, device: device)
+                self?.reply(id: id, generation: generation, result: result)
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
             }
         }
     }

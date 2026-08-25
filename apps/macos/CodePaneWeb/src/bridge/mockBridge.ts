@@ -9,6 +9,7 @@ import {
 import {
   CodePaneAgentsChangedEvent,
   CodePaneEditorState,
+  CodePaneEditorUIState,
   CodePaneMode,
   DiffScope,
   DiffSignatureListener,
@@ -135,10 +136,8 @@ export class MockSpacesBridge implements SpacesBridge {
     return delay({ ok: true, sha256 });
   }
 
-  async workspaceFileList(query: string): Promise<WorkspaceFileListResult> {
-    const q = query.trim().toLowerCase();
-    const paths = q.length === 0 ? FIXTURE_ALL_PATHS : FIXTURE_ALL_PATHS.filter((p) => p.toLowerCase().includes(q));
-    return delay({ paths });
+  async workspaceFileList(): Promise<WorkspaceFileListResult> {
+    return delay({ paths: FIXTURE_ALL_PATHS, truncated: false });
   }
 
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {
@@ -254,6 +253,8 @@ export class MockSpacesBridge implements SpacesBridge {
   notifyEditorStateChanged(_state: CodePaneEditorState | undefined): void {}
 
   notifyModeChanged(_mode: CodePaneMode): void {}
+
+  notifyEditorUIStateChanged(_state: CodePaneEditorUIState): void {}
 }
 
 let lastInstance: MockSpacesBridge | undefined;

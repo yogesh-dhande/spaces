@@ -967,6 +967,29 @@ public struct SpacesDeviceWorkspaceFileReadResult: Codable, Sendable, Equatable 
     }
 }
 
+/// Lists every path inside a workspace's checkout the user would consider part of the workspace: tracked
+/// files plus untracked, non-ignored files, excluding a tracked file that has been deleted on disk (git
+/// still tracks it, but there is nothing left to show). Read-only. Powers the Editor pane's file tree and
+/// quick-open.
+public struct SpacesDeviceWorkspaceFileListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+/// Result of `workspaceFileList`. `paths` are workspace-relative and sorted ascending. `truncated` is
+/// `true` when the workspace has more paths than `SpacesDeviceWorkspaceFileListEngine.maxPaths`, in
+/// which case `paths` holds only the first (sorted) slice up to that cap.
+public struct SpacesDeviceWorkspaceFileListResult: Codable, Sendable, Equatable {
+    public let paths: [String]
+    public let truncated: Bool
+
+    public init(paths: [String], truncated: Bool) {
+        self.paths = paths
+        self.truncated = truncated
+    }
+}
+
 /// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` is the hash of the
 /// disk content the client last read (from `workspaceFileRead`); `nil` asserts the file must not exist yet
 /// (create). When the disk content does not match `expectedSHA256`, the daemon does not write — it reports
@@ -1965,6 +1988,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Compare-and-swap write to one file inside a workspace's checkout; see
     /// `SpacesDeviceWorkspaceFileWriteRequest`.
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteRequest)
+    /// Lists every path inside a workspace's checkout the user would consider part of the workspace; see
+    /// `SpacesDeviceWorkspaceFileListRequest`. Read-only.
+    case workspaceFileList(SpacesDeviceWorkspaceFileListRequest)
     /// Structured uncommitted-or-vs-ref diff for a workspace's checkout, for the code pane's review view.
     case workspaceDiff(SpacesDeviceWorkspaceDiffRequest)
     /// Long-lived subscription that streams a workspace/ref scope's `scopeSignature` whenever it changes
@@ -2049,6 +2075,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .endAutomationAgents: "endAutomationAgents"
         case .workspaceFileRead: "workspaceFileRead"
         case .workspaceFileWrite: "workspaceFileWrite"
+        case .workspaceFileList: "workspaceFileList"
         case .workspaceDiff: "workspaceDiff"
         case .subscribeWorkspaceDiffSignature: "subscribeWorkspaceDiffSignature"
         case .subscribeWorkspaceFileSignature: "subscribeWorkspaceFileSignature"
@@ -2157,7 +2184,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceDiff, .workspaceReviewCommentList:
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceFileList, .workspaceDiff, .workspaceReviewCommentList:
             true
         default: false
         }
@@ -2226,6 +2253,7 @@ extension SpacesDeviceAPICommand: Codable {
         case endAutomationAgents
         case workspaceFileRead
         case workspaceFileWrite
+        case workspaceFileList
         case workspaceDiff
         case subscribeWorkspaceDiffSignature
         case subscribeWorkspaceFileSignature
@@ -2320,6 +2348,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .endAutomationAgents: self = .endAutomationAgents(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadRequest.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteRequest.self, forKey: key))
+        case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListRequest.self, forKey: key))
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
         case .subscribeWorkspaceDiffSignature:
             self = .subscribeWorkspaceDiffSignature(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
@@ -2399,6 +2428,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .endAutomationAgents(let payload): try container.encode(payload, forKey: .endAutomationAgents)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
+        case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .subscribeWorkspaceDiffSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceDiffSignature)
         case .subscribeWorkspaceFileSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceFileSignature)
@@ -2485,6 +2515,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case automationRuns(SpacesDeviceAutomationRunsResult)
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteResult)
+    case workspaceFileList(SpacesDeviceWorkspaceFileListResult)
     case workspaceDiff(SpacesDeviceWorkspaceDiffResult)
     case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
@@ -2513,6 +2544,7 @@ extension SpacesDeviceAPIResult: Codable {
         case automationRuns
         case workspaceFileRead
         case workspaceFileWrite
+        case workspaceFileList
         case workspaceDiff
         case workspaceReviewCommentList
         case workspaceReviewCommentUpsert
@@ -2546,6 +2578,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
+        case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListResult.self, forKey: key))
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffResult.self, forKey: key))
         case .workspaceReviewCommentList:
             self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListResult.self, forKey: key))
@@ -2578,6 +2611,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .automationRuns(let payload): try container.encode(payload, forKey: .automationRuns)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
+        case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
@@ -2667,6 +2701,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var workspaceFileWrite: SpacesDeviceWorkspaceFileWriteResult? {
         if case .workspaceFileWrite(let payload) = result { payload } else { nil }
     }
+
+    public var workspaceFileList: SpacesDeviceWorkspaceFileListResult? { if case .workspaceFileList(let payload) = result { payload } else { nil } }
 
     public var workspaceDiff: SpacesDeviceWorkspaceDiffResult? { if case .workspaceDiff(let payload) = result { payload } else { nil } }
 

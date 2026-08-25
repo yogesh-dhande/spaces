@@ -12,7 +12,6 @@ import {
 } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
 
-const SEARCH_DEBOUNCE_MS = 150;
 /** Trailing debounce for the editorStateChanged push on buffer edits (see `scheduleEditorStatePush`'s doc comment). */
 const EDITOR_STATE_DEBOUNCE_MS = 500;
 /** Bounded-backoff floor/cap for `handleExternalChange`'s execution-failure retry (see
@@ -21,6 +20,19 @@ const EDITOR_STATE_DEBOUNCE_MS = 500;
  *  that retry state as private closures inside `mountRoot` with no exported reusable helper. */
 const EXTERNAL_CHANGE_RETRY_FLOOR_MS = 1000;
 const EXTERNAL_CHANGE_RETRY_CAP_MS = 30000;
+
+export interface EditorViewCallbacks {
+  /** Fired exactly when `loadFile()` completes a load that actually replaces the buffer with
+   *  `path`'s content — the one seam every real open funnels through, whether it arrived via a
+   *  direct `open()` call or via the discard-consent banner's own `loadFile(path, {
+   *  discardConsentEditGeneration })` re-invocation. Deliberately NOT fired for: a refused open
+   *  (`open()`'s dirty-buffer gate, which returns before ever calling `loadFile()`), a failed read
+   *  (the catch branch), a re-raised discard banner (a stale consent), or a superseded load (an
+   *  `openGeneration` bump already won) — see `loadFile`'s own branches for each. root.ts uses this
+   *  to record `path` into recents and move the Files-tree selection (see its `openInEditor`),
+   *  which is what keeps a refused or failed open from polluting either. */
+  onFileOpened?(path: string): void;
+}
 
 /**
  * Runs a 3-way line merge via `node-diff3`'s `diff3Merge` — never `merge`/`mergeDiff3`/
@@ -49,17 +61,13 @@ function diff3MergeLines(mine: string, base: string, theirs: string): { merged: 
 }
 
 /**
- * Editor mode: an open-file picker feeding a single-file `@pierre/diffs`
- * `CodeView` in edit mode, saved through the CAS `workspaceFileWrite` call.
- *
- * Two ways to open a file, both funneling into the same `open()`:
- *   - Typing an exact path into the input and pressing Return, which reads
- *     it directly through `workspaceFileRead`. This always works.
- *   - Picking a result from `workspaceFileList`-backed search. That RPC has
- *     no daemon endpoint yet (see `SpacesBridge.workspaceFileList`'s doc
- *     comment) and always rejects `unavailable` today, so `search()`
- *     degrades to a quiet "type a path" hint instead of a scary error —
- *     this becomes a real progressive enhancement once the endpoint lands.
+ * Editor mode: a single-file `@pierre/diffs` `CodeView` in edit mode, saved through the CAS
+ * `workspaceFileWrite` call. This class owns no file-picking UI of its own — every file this view
+ * shows arrives via its public `open()`, called by root.ts from the ⌘P quick-open overlay, Editor
+ * mode's Files tree, or the Changes list (see quickOpen.ts/editorSidebar.ts/README.md's "Editor
+ * mode" section for the three entry points and how root.ts routes between them). The top bar this
+ * view renders is just the open file's path (or a "⌘P to open a file" hint when none is open) and
+ * the Save button.
  *
  * External-change handling (disk changing under an open file) is a single shared path,
  * `handleExternalChange`, driven by two triggers — a `spaces:fileSignature` push event and a
@@ -79,8 +87,10 @@ function diff3MergeLines(mine: string, base: string, theirs: string): { merged: 
  */
 export class EditorView {
   private readonly bridge: SpacesBridge;
-  private readonly input: HTMLInputElement;
-  private readonly resultsList: HTMLElement;
+  /** The top bar's path display — the open file's path, or the "⌘P to open a file" hint when none
+   *  is open (Design O; see this class's doc comment). Not an input: there is nothing to type into
+   *  it, only to read. */
+  private readonly pathLabel: HTMLElement;
   private readonly saveBtn: HTMLButtonElement;
   private readonly codeHost: HTMLElement;
   private readonly banner: HTMLElement;
@@ -113,27 +123,26 @@ export class EditorView {
   private pendingMergeUndo: string | undefined;
   /** Monotonic count of buffer edits, bumped once per `onItemEditChange` firing. Used only to
    *  detect whether an edit landed between a discard consent (the "Discard edits and open" button
-   *  click) and that discard's `open()` call completing — see `showDiscardBanner`'s click handler
-   *  and `open()`'s completion check. Not persisted, not part of `CodePaneEditorState`: it only
-   *  ever needs to compare two values captured within the same live session. */
+   *  click) and that discard's `loadFile()` call completing — see `showDiscardBanner`'s click
+   *  handler and `loadFile()`'s completion check. Not persisted, not part of `CodePaneEditorState`:
+   *  it only ever needs to compare two values captured within the same live session. */
   private bufferEditGeneration = 0;
   private editGeneration = 0;
-  private searchToken = 0;
-  /** Bumped at the start of every `open()` call; a call whose token has been superseded by a later
-   *  `open()` drops its result (success or failure) instead of clobbering whatever that later call
-   *  already loaded. Same latest-wins shape as `root.ts`'s `diffRequestToken`. */
+  /** Bumped at the start of every `loadFile()` call; a call whose token has been superseded by a
+   *  later `loadFile()` drops its result (success or failure) instead of clobbering whatever that
+   *  later call already loaded. Same latest-wins shape as `root.ts`'s `diffRequestToken`. */
   private openGeneration = 0;
   /** Bumped at the start of every `handleExternalChange` fetch; a fetch superseded by a later one
    *  (two external-change triggers arriving close together) drops its result — same latest-wins
    *  shape as `openGeneration`, but scoped to this one flow since it must survive within a single
-   *  `open()` generation (a save-conflict retry and a live signature event can race each other
+   *  `loadFile()` generation (a save-conflict retry and a live signature event can race each other
    *  without either implying a new file was opened). */
   private externalChangeFetchToken = 0;
   /** Consecutive-failure counter and pending-timer handle for `handleExternalChange`'s
    *  execution-failure retry (see its catch branch and `scheduleExternalChangeRetry`) — same
    *  floor/doubling/cap backoff shape as root.ts's `diffRetryFailures`/`diffRetryTimer`. Reset to 0
    *  whenever a `handleExternalChange` run reaches a decoded outcome (a successful read or an
-   *  authoritative `notFound`) or by a successful `open()`; the pending timer is
+   *  authoritative `notFound`) or by a successful `loadFile()`; the pending timer is
    *  additionally cleared at the very top of every `handleExternalChange` call (see its doc
    *  comment), so a fresh trigger — a live signature event or `save()`'s CAS-conflict arm —
    *  supersedes whatever retry was pending without needing a separate reset path. */
@@ -169,50 +178,30 @@ export class EditorView {
    *  now-readable file heals through the normal decoded-outcome path either way, so nothing is lost
    *  by not carrying this flag across the snapshot.
    *
-   *  Round-24 Fix 3 (P2): also cleared by `open()`'s own success arm — a switch to a different file
-   *  must not carry this flag forward into that file's first `handleExternalChange` reconcile, which
-   *  would otherwise clear it AND hide whatever unrelated banner (discard consent, merge indicator)
-   *  that file has put up in the meantime. */
+   *  Round-24 Fix 3 (P2): also cleared by `loadFile()`'s own success arm — a switch to a different
+   *  file must not carry this flag forward into that file's first `handleExternalChange` reconcile,
+   *  which would otherwise clear it AND hide whatever unrelated banner (discard consent, merge
+   *  indicator) that file has put up in the meantime. */
   private unreadableBannerVisible = false;
-  private searchTimer: ReturnType<typeof setTimeout> | undefined;
   private editorStatePushTimer: ReturnType<typeof setTimeout> | undefined;
   /** Unsubscribes the previous `subscribeFileSignature` listener; replaced (not layered) every time
    *  a new path becomes "the currently open file" — see `subscribeToFileSignature`. */
   private fileSignatureUnsubscribe: Unsubscribe | undefined;
 
-  constructor(container: HTMLElement, bridge: SpacesBridge) {
+  constructor(
+    container: HTMLElement,
+    bridge: SpacesBridge,
+    private readonly callbacks: EditorViewCallbacks = {},
+  ) {
     this.bridge = bridge;
 
     const openBar = document.createElement("div");
     openBar.className = "editor-open-bar";
 
-    const resultsHost = document.createElement("div");
-    resultsHost.className = "editor-results";
-
-    this.input = document.createElement("input");
-    this.input.type = "text";
-    this.input.placeholder = "Open file…";
-    this.input.addEventListener("input", () => this.scheduleSearch());
-    this.input.addEventListener("focus", () => this.scheduleSearch());
-    this.input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      // round-14 Comment B (accepted, no behavior change): the trim is deliberate paste-hygiene —
-      // a path copied out of a terminal often carries trailing whitespace/newlines — and it does
-      // make a filename with genuine leading/trailing whitespace unopenable via manual Return-entry.
-      // Accepted: the search-suggestion click path (`search()`'s result rows) passes the exact
-      // untrimmed path and will cover such files once `workspaceFileList` gets its real daemon
-      // endpoint (see this file's doc comment).
-      const path = this.input.value.trim();
-      if (!path) return;
-      event.preventDefault();
-      this.openGated(path);
-    });
-    resultsHost.appendChild(this.input);
-
-    this.resultsList = document.createElement("div");
-    this.resultsList.className = "list";
-    this.resultsList.style.display = "none";
-    resultsHost.appendChild(this.resultsList);
+    this.pathLabel = document.createElement("span");
+    this.pathLabel.className = "editor-path";
+    this.setPathLabel(undefined);
+    openBar.appendChild(this.pathLabel);
 
     this.saveBtn = document.createElement("button");
     this.saveBtn.type = "button";
@@ -221,7 +210,6 @@ export class EditorView {
     this.saveBtn.disabled = true;
     this.saveBtn.addEventListener("click", () => void this.save());
 
-    openBar.appendChild(resultsHost);
     openBar.appendChild(this.saveBtn);
 
     const codeArea = document.createElement("div");
@@ -244,64 +232,13 @@ export class EditorView {
 
     container.appendChild(openBar);
     container.appendChild(codeArea);
-
-    document.addEventListener("click", (event) => {
-      if (!resultsHost.contains(event.target as Node)) {
-        this.resultsList.style.display = "none";
-      }
-    });
   }
 
-  private scheduleSearch(): void {
-    clearTimeout(this.searchTimer);
-    this.searchTimer = setTimeout(() => void this.search(), SEARCH_DEBOUNCE_MS);
-  }
-
-  private async search(): Promise<void> {
-    const token = ++this.searchToken;
-    let paths: string[];
-    try {
-      ({ paths } = await this.bridge.workspaceFileList(this.input.value));
-    } catch {
-      if (token !== this.searchToken) return; // a newer keystroke superseded this search
-      // No daemon endpoint behind workspaceFileList yet (see this file's doc
-      // comment): render the always-on alternative rather than a search
-      // failure the user can do nothing about.
-      this.renderMessage("Type a full path and press Return to open it.", "hint");
-      return;
-    }
-    if (token !== this.searchToken) return; // a newer keystroke superseded this search
-
-    if (paths.length === 0) {
-      this.resultsList.replaceChildren();
-      this.resultsList.style.display = "none";
-      return;
-    }
-    this.resultsList.replaceChildren();
-    for (const path of paths.slice(0, 50)) {
-      const opt = document.createElement("div");
-      opt.className = "opt";
-      opt.textContent = path;
-      opt.addEventListener("click", () => {
-        this.resultsList.style.display = "none";
-        this.input.value = path;
-        this.openGated(path);
-      });
-      this.resultsList.appendChild(opt);
-    }
-    this.resultsList.style.display = "block";
-  }
-
-  /** Renders a single non-clickable status row into the results dropdown: a quiet
-   * "how to open a file" hint when search is unavailable, or a factual error when
-   * an opened path failed to read — leaving the input as-is so it can be corrected. */
-  private renderMessage(text: string, kind: "hint" | "error"): void {
-    this.resultsList.replaceChildren();
-    const row = document.createElement("div");
-    row.className = `msg ${kind}`;
-    row.textContent = text;
-    this.resultsList.appendChild(row);
-    this.resultsList.style.display = "block";
+  /** Sets the top bar's path display: the open file's path, or the "⌘P to open a file" hint when
+   *  none is open (Design O). */
+  private setPathLabel(path: string | undefined): void {
+    this.pathLabel.textContent = path ?? "⌘P to open a file";
+    this.pathLabel.classList.toggle("hint", path === undefined);
   }
 
   /** Builds (once) or returns the shared `CodeView` instance backing both this view's edit-mode
@@ -336,7 +273,7 @@ export class EditorView {
     return this.codeView;
   }
 
-  /** Builds a fresh single-file edit-mode item into the shared `CodeView`. Shared by `open()` (disk
+  /** Builds a fresh single-file edit-mode item into the shared `CodeView`. Shared by `loadFile()` (disk
    *  content), `restoreState()`'s dirty branch (a rehydrated buffer that must NOT be re-read from
    *  disk), and `handleExternalChange`'s reload/auto-merge branches, so none of those paths can
    *  drift apart on how the buffer is (re)loaded. */
@@ -389,44 +326,52 @@ export class EditorView {
   }
 
   /**
-   * Gate in front of the two user-initiated ways to open a file (Return in the path input, a
-   * search-suggestion click) — `open()` itself stays ungated, since `restoreState`'s clean branch
-   * calls it directly with nothing at risk (that path only ever follows a fresh restore, never an
+   * Public entry point for every way a file can be opened in Editor mode — the ⌘P quick-open
+   * overlay, the Files tree, and the Changes list (see this class's doc comment) all call this and
+   * nothing else. `loadFile()` itself stays ungated, since `restoreState`'s clean branch calls it
+   * directly with nothing at risk (that path only ever follows a fresh restore, never an
    * in-progress edit).
    *
    * round-13 Fix 1: silently replacing the buffer here would violate the spec's unsaved-edit
    * promise (README.md: "only quitting and reopening the app loses an unsaved edit") — a save-in-
-   * progress buffer must not vanish just because the user typed a different path or clicked a
-   * search result. A modal confirmation is out per this codebase's design rules (no new modal
-   * surfaces), so the existing non-blocking banner carries the explicit discard consent instead:
-   * clicking its action is the one deliberate way to abandon the current edit, distinct from the
-   * silent replace this gate refuses to do on its own.
+   * progress buffer must not vanish just because a different file was opened. A modal confirmation
+   * is out per this codebase's design rules (no new modal surfaces), so the existing non-blocking
+   * banner carries the explicit discard consent instead: clicking its action is the one deliberate
+   * way to abandon the current edit, distinct from the silent replace this gate refuses to do on
+   * its own.
    *
    * round-15 Fix (Bugs A+B): this upfront check is a fast path only, not the whole contract. It
    * runs before the read starts, so it cannot see dirty state that arises WHILE that read is in
-   * flight (the user typing into the currently-open file during a slow remote read) — `open()`
-   * itself re-checks dirty at completion and raises the identical banner if the race occurred (see
-   * the completion-check comment inside `open()`). And the banner's discard button no longer clears
-   * `dirty` at click time: it commits the discard only once `open()` actually succeeds, via
-   * `open(path, { discardConsentEditGeneration })`, so a read that fails after a discard click
-   * leaves the old buffer correctly marked dirty rather than lying about it having been abandoned.
-   * The generation carried by that option additionally scopes the consent to the buffer as it stood
-   * at the click, not whatever the buffer becomes while the read is still in flight — see `open()`'s
-   * completion check.
+   * flight (the user typing into the currently-open file during a slow remote read) —
+   * `loadFile()` itself re-checks dirty at completion and raises the identical banner if the race
+   * occurred (see the completion-check comment inside `loadFile()`). And the banner's discard
+   * button no longer clears `dirty` at click time: it commits the discard only once `loadFile()`
+   * actually succeeds, via `loadFile(path, { discardConsentEditGeneration })`, so a read that fails
+   * after a discard click leaves the old buffer correctly marked dirty rather than lying about it
+   * having been abandoned. The generation carried by that option additionally scopes the consent to
+   * the buffer as it stood at the click, not whatever the buffer becomes while the read is still in
+   * flight — see `loadFile()`'s completion check.
    *
    * A standing conflict is dirty by construction (`this.dirty` stays true throughout), so it falls
    * through the same gate as any other unsaved buffer — opening a different file is one of the
    * ways to leave a conflict, alongside the compare view's own "Keep mine"/"Take disk" actions.
    */
-  private openGated(path: string): void {
+  open(path: string): void {
+    // Re-picking the file already open (its own row in Files/Changes, or ⌘P again) must not fall
+    // into the discard gate below: the file is already on screen, so there is nothing to open that
+    // isn't already showing, and accepting the banner would reread disk and destroy the very edits
+    // it claims to be protecting. A standing conflict is dirty by construction and never clears
+    // `currentPath` (see this method's doc comment), so re-picking the same path mid-conflict also
+    // lands here and just stays put, same as any other dirty same-path reopen.
+    if (path === this.currentPath && this.dirty) return;
     if (this.dirty && this.currentPath !== undefined) {
       this.showDiscardBanner(path);
       return;
     }
-    void this.open(path);
+    void this.loadFile(path);
   }
 
-  /** Renders the non-blocking discard-consent banner used by `openGated`'s gate and by `open()`'s
+  /** Renders the non-blocking discard-consent banner used by `open`'s gate and by `loadFile()`'s
    *  own completion-time recheck (see both call sites' comments). Only ever called when
    *  `this.currentPath !== undefined` already holds, so reading it directly here is safe. */
   private showDiscardBanner(targetPath: string): void {
@@ -441,24 +386,26 @@ export class EditorView {
       // Captured here, inside the listener, not hoisted out to banner-render time: the consent this
       // click gives only covers the buffer AS IT STANDS RIGHT NOW. Reading `bufferEditGeneration` at
       // click time (rather than whatever value it happened to have when the banner was first shown)
-      // is what lets `open()`'s completion check detect an edit that lands during this call's own
+      // is what lets `loadFile()`'s completion check detect an edit that lands during this call's own
       // read — see that check's comment.
-      void this.open(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration });
+      void this.loadFile(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration });
     });
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, discardBtn);
     this.banner.style.display = "flex";
   }
 
-  private async open(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
+  private async loadFile(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
     const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
     try {
       result = await this.bridge.workspaceFileRead(path);
     } catch (err) {
-      if (generation !== this.openGeneration) return; // a later open() already won
+      if (generation !== this.openGeneration) return; // a later loadFile() already won
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
-      this.renderMessage(message, "error");
+      this.banner.className = "banner error";
+      this.banner.textContent = message;
+      this.banner.style.display = "flex";
       // A failed open leaves the previously-open file (if any) fully displayed but its own pending
       // external-change reconcile — if one was in flight — was just discarded by the `openGeneration`
       // bump above. Fire a fresh one for it: `handleExternalChange` captures the CURRENT generation and
@@ -468,13 +415,13 @@ export class EditorView {
       // `CodePaneContentController.swift`'s `restoreFileSignatureMonitoringAfterFailedOpen` doc comment
       // for the paired Swift-side reasoning).
       if (this.currentPath !== undefined) void this.handleExternalChange();
-      return; // leave the input editable so the user can correct the path
+      return; // leave the previous file's path label as-is; the failed target was never adopted
     }
-    if (generation !== this.openGeneration) return; // a later open() already won
+    if (generation !== this.openGeneration) return; // a later loadFile() already won
     const isStaleConsent =
       opts?.discardConsentEditGeneration === undefined || opts.discardConsentEditGeneration !== this.bufferEditGeneration;
     if (isStaleConsent && this.dirty && this.currentPath !== undefined) {
-      // Bug A fix (round-15): a DIFFERENT open (openGated's own upfront check, which ran before
+      // Bug A fix (round-15): a DIFFERENT open (`open`'s own upfront check, which ran before
       // this read started) cannot see dirty state that arises WHILE this read is in flight — the
       // user may type into the currently-open file during the seconds a remote read can take.
       // Rechecking here, at completion, is what actually closes that race, showing the identical
@@ -504,9 +451,7 @@ export class EditorView {
       void this.handleExternalChange();
       return;
     }
-    this.resultsList.replaceChildren();
-    this.resultsList.style.display = "none";
-    this.input.value = path;
+    this.setPathLabel(path);
     this.currentPath = path;
     this.baseSHA256 = result.sha256;
     this.baseContent = result.content;
@@ -535,6 +480,11 @@ export class EditorView {
     this.subscribeToFileSignature(path);
     // Immediate, not debounced: a file open is a discrete transition, not a buffer edit.
     this.pushEditorStateNow();
+    // The one place a load actually completes (see `EditorViewCallbacks.onFileOpened`'s doc
+    // comment) — every earlier return in this method (the catch branch, the stale-consent
+    // re-raise, the generation checks) skips this line, which is what keeps a refused or failed
+    // open from firing it.
+    this.callbacks.onFileOpened?.(path);
   }
 
   /** (Re)points the one live `spaces:fileSignature` stream at `path`, replacing rather than
@@ -583,7 +533,7 @@ export class EditorView {
       const result = await this.bridge.workspaceFileRead(path);
       disk = { content: result.content, sha256: result.sha256 };
     } catch (err) {
-      // Superseded before this failure even landed (a newer open() or a newer external-change fetch
+      // Superseded before this failure even landed (a newer loadFile() or a newer external-change fetch
       // already started) — nothing below would matter, including scheduling a retry for content
       // nobody is looking at anymore. Mirrors root.ts's identical early bail at the top of
       // `refreshDiff`'s own catch block.
@@ -629,7 +579,7 @@ export class EditorView {
     // inheriting whatever count this run left behind — mirrors root.ts's identical reset on a
     // durable outcome in `refreshDiff`.
     this.externalChangeRetryFailures = 0;
-    if (generation !== this.openGeneration) return; // a later open() already won
+    if (generation !== this.openGeneration) return; // a later loadFile() already won
     if (fetchToken !== this.externalChangeFetchToken) return; // a later external-change fetch already won
     if (path !== this.currentPath) return;
 
@@ -781,7 +731,7 @@ export class EditorView {
    *     call, OR `save()`'s CAS-conflict arm doing the same — either one bumps
    *     `externalChangeFetchToken` the same way this retry's own re-invocation would, since both
    *     routes funnel through this same function.
-   *   - `generation`: a newer `open()` moving this pane on to a different file entirely, independent
+   *   - `generation`: a newer `loadFile()` moving this pane on to a different file entirely, independent
    *     of whether anything about the external-change flow itself has fired again.
    * Either makes this fire a no-op instead of re-fetching for content nobody is looking at anymore.
    */
@@ -919,7 +869,7 @@ export class EditorView {
     const path = this.currentPath;
     if (!path) return;
     const generation = this.openGeneration;
-    // Fix 2 (round-5): `generation` alone only guards against a NEWER open() — it says nothing about
+    // Fix 2 (round-5): `generation` alone only guards against a NEWER loadFile() — it says nothing about
     // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
     // flight. `handleExternalChange` runs unchanged while already in conflict (see its doc comment),
     // so an external writer changing the file again before this write's response arrives can push a
@@ -934,7 +884,7 @@ export class EditorView {
     try {
       result = await this.bridge.workspaceFileWrite(path, content, { baseSHA256 });
     } catch (err) {
-      if (generation !== this.openGeneration) return; // a later open() already won
+      if (generation !== this.openGeneration) return; // a later loadFile() already won
       // Fix 2 (round-5): a `handleExternalChange` reconcile for this same file completed while this
       // write was in flight and already decided this file's UI state — this failure is for a write
       // now superseded by that decision, so it must not repaint the compare view over whatever the
@@ -944,7 +894,7 @@ export class EditorView {
       this.renderConflictCompareView(message);
       return;
     }
-    if (generation !== this.openGeneration) return; // a later open() already won
+    if (generation !== this.openGeneration) return; // a later loadFile() already won
     if ("conflict" in result) {
       // Deliberately NOT guarded by `fetchToken` (mirrors `save()`'s equivalent arm): this only
       // re-invokes `handleExternalChange()`, which is idempotent against whatever an already-in-flight
@@ -999,7 +949,7 @@ export class EditorView {
    *  disappears (`handleExternalChange`'s not-dirty+missing branch) and when the conflict compare
    *  view's "Close without saving" is clicked on a missing file. Resets to a no-open-file state
    *  internally (there is nothing left to save or diff against) while leaving the path visible in
-   *  the open-file input, per the locked UX ("path stays in box"). `collectEditorState` returns
+   *  the top bar's path label, per the locked UX ("path stays in box"). `collectEditorState` returns
    *  `undefined` for this state (same as never having opened a file) — an accepted simplification,
    *  since there is nothing meaningful left to survive a hibernation cycle here beyond the path
    *  itself, which isn't part of the persisted snapshot's contract.
@@ -1021,7 +971,7 @@ export class EditorView {
     this.pendingMergeUndo = undefined;
     this.saveBtn.disabled = true;
     this.banner.style.display = "none";
-    this.input.value = path;
+    this.setPathLabel(path);
 
     const codeView = this.ensureCodeView();
     this.editGeneration += 1;
@@ -1051,11 +1001,11 @@ export class EditorView {
    *   the more common "changed" wording until `handleExternalChange` (below) corrects it.
    * - not dirty: the buffer matched disk when it was pushed, so the snapshot's own content is
    *   restored directly, the same shape the dirty branches use, rather than re-read through
-   *   `open()` (round-16 Fix 1). `open()`'s catch renders a bare error and returns on a read
+   *   `loadFile()` (round-16 Fix 1). `loadFile()`'s catch renders a bare error and returns on a read
    *   failure, leaving no path in the box and no subscription installed — strictly worse than the
    *   "File deleted on disk" placeholder a visible pane shows for the same deletion. Restoring the
    *   snapshot first and reconciling through `handleExternalChange` gives the clean case every
-   *   outcome `open()` had (disk unchanged is a same-hash no-op, disk changed silently reloads) plus
+   *   outcome `loadFile()` had (disk unchanged is a same-hash no-op, disk changed silently reloads) plus
    *   the ones it didn't (disk deleted shows the placeholder instead of an error; a transport-shaped
    *   read failure gets `handleExternalChange`'s own bounded-backoff retry instead of giving up) —
    *   at no extra read cost, since `handleExternalChange` always does its own fresh read regardless
@@ -1070,11 +1020,15 @@ export class EditorView {
    * matches `baseSHA256`, silent-reload/diff3/conflict when it changed, or the deleted branches
    * when the file is gone — without ever clobbering the restored buffer, by the same rules it
    * already applies to a live external-change event.
+   *
+   * Never fires `onFileOpened`: every branch below restores the buffer via `loadIntoCodeView`
+   * directly, not `loadFile()` — re-opening a hibernated pane's last file isn't a user-initiated
+   * open, so it must not re-record that path as a new recent.
    */
   async restoreState(state: CodePaneEditorState | undefined): Promise<void> {
     if (!state) return;
     if (!state.dirty) {
-      this.input.value = state.path;
+      this.setPathLabel(state.path);
       this.currentPath = state.path;
       this.baseSHA256 = state.baseSHA256;
       this.baseContent = state.baseContent;
@@ -1096,7 +1050,7 @@ export class EditorView {
       void this.handleExternalChange();
       return;
     }
-    this.input.value = state.path;
+    this.setPathLabel(state.path);
     this.currentPath = state.path;
     this.baseSHA256 = state.baseSHA256;
     this.baseContent = state.baseContent;
@@ -1198,7 +1152,7 @@ export class EditorView {
     // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner/
     // `saveBtn` — all of those now describe the newly opened file, not this one.
     const generation = this.openGeneration;
-    // Fix 2 (round-2): `generation` alone only guards against a NEWER open() — it says nothing about
+    // Fix 2 (round-2): `generation` alone only guards against a NEWER loadFile() — it says nothing about
     // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
     // flight (e.g. a live `spaces:fileSignature` push for this pane's own write landing on disk,
     // racing this call's own success/failure response). That reconcile can set `pendingMergeUndo`,
@@ -1220,7 +1174,7 @@ export class EditorView {
           baseSHA256: this.baseSHA256,
         });
       } catch (err) {
-        if (generation !== this.openGeneration) return; // a later open() already won; this failure is moot
+        if (generation !== this.openGeneration) return; // a later loadFile() already won; this failure is moot
         // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
         // write was in flight and already decided this file's UI state (merge indicator, conflict
         // compare, or a silent clean reload) — this failure is for a write that's now superseded by
@@ -1247,7 +1201,7 @@ export class EditorView {
         return;
       }
       if (generation !== this.openGeneration) {
-        // A newer open() already moved this pane on to a different file. The write above was still
+        // A newer loadFile() already moved this pane on to a different file. The write above was still
         // a valid CAS write for the superseded file's own content against its own baseline, so
         // disk is correct either way; there is just no in-memory editor state left for it to update.
         return;

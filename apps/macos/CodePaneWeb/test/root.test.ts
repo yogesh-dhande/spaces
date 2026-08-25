@@ -9,6 +9,16 @@ import {
   SpacesBridgeError,
 } from "../src/bridge/types";
 
+// Captures the options the most recently constructed (fake) CodeView was built with — DiffView and
+// EditorView share the same `CodeView` class, but only EditorView's instance ever exercises
+// `onItemEditChange` (Finding C's tests dirty the editor buffer this way, the same technique
+// editorView.test.ts's own `capturedCodeViewOptions` uses). EditorView constructs its CodeView
+// lazily, on the first successful open (see `ensureCodeView`), which is always after DiffView's own
+// construction at mount — so by the time a test needs it, `.current` is the editor's instance.
+const capturedCodeViewOptions = vi.hoisted(() => ({
+  current: undefined as undefined | { onItemEditChange: (item: unknown, file: { contents: string }) => void },
+}));
+
 // mountRoot pulls in DiffView and EditorView, both of which construct a real
 // `@pierre/diffs` CodeView on non-empty content — replaced with a no-op fake
 // here since these tests are about root.ts's own stale-response guard (Fix
@@ -16,6 +26,9 @@ import {
 vi.mock("@pierre/diffs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@pierre/diffs")>();
   class FakeCodeView {
+    constructor(options: { onItemEditChange: (item: unknown, file: { contents: string }) => void }) {
+      capturedCodeViewOptions.current = options;
+    }
     setup(): void {}
     setItems(): void {}
     setOptions(): void {}
@@ -48,6 +61,10 @@ vi.stubGlobal(
   },
 );
 
+// jsdom has no scrollIntoView; the Files tree's FilesTreeHandle.setSelected calls it on every
+// selection change (opening a file via the Files tree, or via ⌘P quick-open, in Editor mode).
+Element.prototype.scrollIntoView = function scrollIntoView(): void {};
+
 // Mutable (not `const`) so Fix 1's describe block below can substitute a payload carrying a dirty
 // `editorState` for its one test, then restore the default afterward — the bridge mock's
 // `notifyReady` reads this binding at call time, not at module-evaluation time, so reassigning it
@@ -79,6 +96,19 @@ const hoisted = vi.hoisted(() => {
   }> = [];
   const workspaceDiff = vi.fn(() => new Promise((resolve, reject) => pendingDiffCalls.push({ resolve, reject })));
   const notifyModeChanged = vi.fn();
+  // Controllable the same way `workspaceDiff` above is: defaults to the same permanent rejection
+  // every other not-under-test bridge method uses, but a test that exercises the Files tab or the
+  // ⌘P overlay's full-listing search can `mockResolvedValueOnce` a real listing on top of that
+  // default without leaking it into any other test (see the Files/Changes sidebar describe block).
+  const workspaceFileList = vi.fn().mockRejectedValue(new Error("not used"));
+  // Controllable the same way: defaults to the same permanent rejection every other
+  // not-under-test bridge method uses, but the Files/Changes sidebar describe block's recent-files
+  // tests (Finding C) need a real open to actually complete, so they configure a per-test resolution
+  // instead of relying on the default.
+  const workspaceFileRead = vi.fn().mockRejectedValue(new Error("not used"));
+  // Captures every push so a test can assert on the exact `CodePaneEditorUIState` sent — see the
+  // Files/Changes sidebar describe block's recent-files and sidebarMode-toggle coverage.
+  const notifyEditorUIStateChanged = vi.fn();
   // round-16 Fix 1: captures every `subscribeDiffSignature` callback root.ts registers, in order,
   // so a test can simulate a diff-signature push event by invoking one directly — mirroring
   // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
@@ -89,7 +119,16 @@ const hoisted = vi.hoisted(() => {
     diffSignatureCallbacks.push(callback);
     return () => {};
   });
-  return { pendingDiffCalls, workspaceDiff, notifyModeChanged, diffSignatureCallbacks, subscribeDiffSignature };
+  return {
+    pendingDiffCalls,
+    workspaceDiff,
+    workspaceFileList,
+    workspaceFileRead,
+    notifyModeChanged,
+    notifyEditorUIStateChanged,
+    diffSignatureCallbacks,
+    subscribeDiffSignature,
+  };
 });
 
 vi.mock("../src/bridge", () => ({
@@ -100,12 +139,13 @@ vi.mock("../src/bridge", () => ({
       });
     },
     workspaceDiff: hoisted.workspaceDiff,
-    workspaceFileRead: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileRead: hoisted.workspaceFileRead,
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
-    workspaceFileList: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileList: hoisted.workspaceFileList,
     subscribeDiffSignature: hoisted.subscribeDiffSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyEditorStateChanged: vi.fn(),
+    notifyEditorUIStateChanged: hoisted.notifyEditorUIStateChanged,
     notifyModeChanged: hoisted.notifyModeChanged,
     reviewCommentList: vi.fn().mockResolvedValue([]),
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
@@ -985,7 +1025,9 @@ describe("mountRoot's spaces:setMode wiring", () => {
 
     expect(hoisted.notifyModeChanged).toHaveBeenCalled();
     expect(hoisted.notifyModeChanged.mock.calls.at(-1)).toEqual(["editor"]);
-    expect(container.querySelector(".file-list")).toBeNull(); // diff body swapped out for editor
+    // `.file-list` is shared across both modes (Design K); what swaps is its single child — Editor
+    // mode's Files/Changes sidebar (`.editor-sidebar`) replaces Diff mode's bare changed-files list.
+    expect(container.querySelector(".editor-sidebar")).not.toBeNull();
 
     // The dirty snapshot restored at startup is still live in EditorView, untouched by the mode
     // switch — collectStateForFlush would return null/empty if the switch had reset it.
@@ -1106,5 +1148,464 @@ describe("mountRoot's init ordering — the seeded pending comment state is rest
 
     resolveDiff(0, [], "sig-a");
     await mounted;
+  });
+});
+
+describe("mountRoot's diff-signature push — sidebar refresh gated to Editor mode (Finding A)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    container = document.createElement("div");
+  });
+
+  it("a push while in Diff mode invalidates the cache without fetching; switching to Editor mode afterward fetches fresh", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+    // EditorSidebar's constructor never fires a listing fetch on its own (Finding 1): a pane
+    // mounted (and, here, still sitting) in Diff mode must not pay for a hidden `workspaceFileList`
+    // RPC merely for the sidebar existing, unattached, off-screen.
+    expect(hoisted.workspaceFileList).not.toHaveBeenCalled();
+
+    // The pane is still in its default initial mode (Diff) here.
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2)); // refreshDiff(true) still runs
+    resolveDiff(1, [], "sig-b");
+
+    // Give a (wrongly) triggered fetch a couple of microtask turns to happen before asserting it
+    // didn't — the bug this closes was an unconditional `editorSidebar.refreshFilesListing()` call
+    // on every push, firing a full `workspaceFileList` RPC even while the sidebar isn't in the DOM.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(hoisted.workspaceFileList).not.toHaveBeenCalled();
+
+    clickButton(container, "Editor");
+    // The cache was invalidated by the push above, so returning to Editor mode re-fetches instead of
+    // reusing a stale (possibly now-wrong) cached listing.
+    await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("mountRoot's diff-signature push — ⌘P overlay refresh is not mode-gated", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    container = document.createElement("div");
+  });
+
+  it("a push while the overlay is open still refetches the listing even though the pane is in Diff mode", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    // Opening ⌘P (pane stays in its default initial mode, Diff) starts the overlay's own listing
+    // fetch via QuickOpen.show()'s getFresh() call through the shared cache. QuickOpen's ⌘P listener
+    // is global (window-level, by design — see its own doc comment), so earlier tests' still-mounted
+    // overlays react to this same keydown too; wait on this test's own container instead of an
+    // absolute `workspaceFileList` call count, which cross-test leakage would make unreliable.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    // Typing narrows to a fuzzy-match result (an empty query shows "recents", which is empty here —
+    // nothing has been opened yet) — the same technique Finding E's test above uses to get a row.
+    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    input.value = "a.ts";
+    input.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => expect(container.querySelector('.quick-open .row[data-path="a.ts"]')).not.toBeNull());
+
+    // `fireDiffSignature` (unlike the keydown above) only invokes THIS mount's own subscription —
+    // `hoisted.diffSignatureCallbacks` was reset in `beforeEach` — so exactly one more call here is
+    // attributable to this pane alone. The sidebar's own refresh is gated to Editor mode (Finding A,
+    // previous describe block) and must not fire; but the ⌘P overlay works in both modes, so
+    // `quickOpen.refreshListing()` must still fire, ungated, with the pane still in Diff mode.
+    hoisted.workspaceFileList.mockClear();
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("mountRoot's editor-mode-only startup triggers the sidebar's first fetch (Finding 1)", () => {
+  let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  it("a pane starting (or rehydrating) directly into editor mode fetches the Files tab's listing without ever going through a dispatch", async () => {
+    INIT_PAYLOAD = { ...defaultInitPayload, initialMode: "editor" };
+
+    const mounted = mountRoot(container);
+    await mounted;
+
+    // This path never touches dispatch's "setMode" branch (renderBody() mounted the sidebar
+    // straight from the initial `state.mode`, with no action ever dispatched) — root.ts's own
+    // explicit `editorSidebar.reattach()` call right after the initial render is what has to
+    // trigger this fetch, since EditorSidebar's constructor no longer starts one on its own.
+    await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="a.ts"]')).not.toBeNull());
+  });
+});
+
+describe("mountRoot's init ordering — rehydrating into editor mode reads the restored buffer before the sidebar's Files listing (review fix)", () => {
+  let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileRead.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "let x = 0;\n", sha256: "deadbeef", size: 11 });
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  it("issues the restored file's workspaceFileRead before the reattach-triggered workspaceFileList scan", async () => {
+    const cleanEditorState: CodePaneEditorState = {
+      path: "/repo/src/foo.ts",
+      baseSHA256: "deadbeef",
+      baseContent: "let x = 0;\n",
+      content: "let x = 0;\n",
+      dirty: false,
+      conflict: false,
+    };
+    // No `editorUIState` in the payload — absent defaults to the Files tab (see
+    // `CodePaneInitPayload.editorUIState`'s doc comment), the tab whose `reattach()` fires the
+    // listing scan this ordering is about.
+    INIT_PAYLOAD = { ...defaultInitPayload, initialMode: "editor", editorState: cleanEditorState };
+
+    const mounted = mountRoot(container);
+    await mounted;
+
+    // `restoreState`'s clean-restoration branch (state.dirty === false) fires `handleExternalChange`,
+    // whose own `workspaceFileRead` call is that method's first statement — invoked synchronously,
+    // before root.ts's own `await editorView.restoreState(...)` line even returns. The relocated
+    // `editorSidebar.reattach()` call now runs after that await, so its `workspaceFileList` scan is
+    // queued on the daemon's serial per-workspace git queue strictly after the restored file's read,
+    // not ahead of it (the bug this fix closes). `invocationCallOrder` is what proves the ordering,
+    // the same technique the Diff-mode ⌘P out-of-diff-jump test above uses for `openInEditor`.
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(cleanEditorState.path));
+    await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
+    const readOrder = hoisted.workspaceFileRead.mock.invocationCallOrder[0]!;
+    const listOrder = hoisted.workspaceFileList.mock.invocationCallOrder[0]!;
+    expect(readOrder).toBeLessThan(listOrder);
+  });
+});
+
+describe("mountRoot's Diff→Editor round trip re-attaches the sidebar's current list (Finding B)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    container = document.createElement("div");
+  });
+
+  it("the Changes tab survives a round trip through Diff mode instead of coming back blank", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
+
+    clickButton(container, "Editor");
+    clickButton(container, "Changes");
+    await vi.waitFor(() => expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("a.ts"));
+
+    // Diff mode's own renderBody reparents `changesListEl` out of the sidebar's list host — without
+    // Finding B's fix, coming back to Editor mode on the Changes tab would show a blank list until
+    // the user manually toggled tabs, since the sidebar never re-renders on that reparent.
+    clickButton(container, "Diff");
+    clickButton(container, "Editor");
+
+    expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("a.ts");
+  });
+});
+
+describe("mountRoot's Diff-mode ⌘P jump records into recents (Finding E)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.notifyEditorUIStateChanged.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    container = document.createElement("div");
+  });
+
+  it("jumping to an in-diff file via the ⌘P overlay records it, unlike a plain scrollToFile call which has no seam of its own", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
+
+    // The pane is in its default initial mode (Diff); "a.ts" is already part of the current diff, so
+    // this jump stays in Diff mode instead of switching to Editor (see QuickOpen's own doc comment).
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    input.value = "a.ts";
+    input.dispatchEvent(new Event("input"));
+
+    const row = await vi.waitFor(() => {
+      const el = container.querySelector('.quick-open .row[data-path="a.ts"]') as HTMLElement | null;
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    row.click();
+
+    await vi.waitFor(() => expect(hoisted.notifyEditorUIStateChanged).toHaveBeenCalled());
+    const calls = hoisted.notifyEditorUIStateChanged.mock.calls;
+    expect(calls[calls.length - 1]![0]).toEqual({ sidebarMode: "files", recentPaths: ["a.ts"] });
+  });
+});
+
+describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before the mode switch's sidebar revalidation (Fix 2)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileRead.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts", "b.ts"], truncated: false });
+    hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "b content", sha256: "sha-b", size: 9 });
+    container = document.createElement("div");
+  });
+
+  it("issues workspaceFileRead for the picked file before the workspaceFileList call the resulting editor-mode switch triggers", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
+
+    // "b.ts" is outside the current diff, so — unlike Finding E's in-diff jump, which stays in Diff
+    // mode — picking it goes through `openInEditor` and switches the pane to Editor mode. Opening
+    // the overlay itself issues its own listing fetch via `QuickOpen.show()`; wait for that to
+    // settle (the row only renders once it has) and clear both mocks so only the calls the click
+    // below triggers are being measured.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    input.value = "b.ts";
+    input.dispatchEvent(new Event("input"));
+    const row = await vi.waitFor(() => {
+      const el = container.querySelector('.quick-open .row[data-path="b.ts"]') as HTMLElement | null;
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileRead.mockClear();
+
+    row.click();
+
+    // Both calls fire synchronously within the click: `editorView.open` issues its
+    // `workspaceFileRead` call before returning (its `await` is inside `loadFile`, past this point),
+    // and the `setMode` dispatch that follows it runs `editorSidebar.reattach()` synchronously too
+    // (the sidebar defaults to the Files tab, so reattach always revalidates it). Their relative
+    // `invocationCallOrder` is what proves the reorder — without it, the mode dispatch's listing
+    // scan would be queued on the daemon's serial git queue ahead of the file the user just picked.
+    expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("b.ts");
+    expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1);
+    const readOrder = hoisted.workspaceFileRead.mock.invocationCallOrder[0]!;
+    const listOrder = hoisted.workspaceFileList.mock.invocationCallOrder[0]!;
+    expect(readOrder).toBeLessThan(listOrder);
+  });
+});
+
+describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files recording (Design K/O)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.notifyEditorUIStateChanged.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileRead.mockReset();
+    // A successful open is now the norm for this block (Finding C's recording only fires once
+    // `workspaceFileRead` actually resolves) — individual tests override with a rejection or a
+    // controllable pending promise where they need to exercise the refused/failed paths instead.
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 1 }),
+    );
+    capturedCodeViewOptions.current = undefined;
+    container = document.createElement("div");
+  });
+
+  /** Mounts (in the default Diff mode, so `EditorSidebar`'s constructor fires no fetch of its own —
+   *  see its doc comment), seeds the Files tab's listing with `paths`, settles the initial diff pull
+   *  (empty — these tests don't care about diff content) so `mountRoot`'s own promise resolves, then
+   *  switches to Editor mode and waits for the Files tree to actually render. Entering Editor mode is
+   *  what triggers the sidebar's first-ever listing fetch here, via dispatch's `setMode` branch
+   *  calling `editorSidebar.reattach()`. `mockResolvedValue` (not `-Once`) since a later reattach in
+   *  the same test (e.g. a Diff→Editor round trip) would otherwise starve on an exhausted `-Once`
+   *  queue — these tests want the same listing back every time, not to count individual calls. */
+  async function mountWithFiles(paths: readonly string[]): Promise<void> {
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false });
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+    clickButton(container, "Editor");
+    await vi.waitFor(() => expect(container.querySelector(`.row[data-path="${paths[0]}"]`)).not.toBeNull());
+  }
+
+  function clickFileRow(path: string): void {
+    const row = container.querySelector(`.row[data-path="${path}"]`);
+    if (!row) throw new Error(`no Files-tree row for "${path}"`);
+    (row as HTMLElement).click();
+  }
+
+  function lastPushedState(): { sidebarMode: string; recentPaths: string[] } {
+    const calls = hoisted.notifyEditorUIStateChanged.mock.calls;
+    return calls[calls.length - 1]![0] as { sidebarMode: string; recentPaths: string[] };
+  }
+
+  /** Opens `path` via the Files tree and waits for the resulting recording push to land — recording
+   *  now happens asynchronously, after `workspaceFileRead` resolves (Finding C), rather than
+   *  synchronously on click. */
+  async function openFileRowAndWait(path: string): Promise<void> {
+    clickFileRow(path);
+    await vi.waitFor(() => expect(lastPushedState().recentPaths[0]).toBe(path));
+  }
+
+  it("opening a file via the Files tree records it as the sole recent path and pushes the update", async () => {
+    await mountWithFiles(["a.ts", "b.ts"]);
+
+    await openFileRowAndWait("a.ts");
+
+    expect(hoisted.notifyEditorUIStateChanged).toHaveBeenCalled();
+    expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: ["a.ts"] });
+  });
+
+  it("opening a second, different file puts it first without dropping the one already recorded", async () => {
+    await mountWithFiles(["a.ts", "b.ts"]);
+
+    await openFileRowAndWait("a.ts");
+    await openFileRowAndWait("b.ts");
+
+    expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: ["b.ts", "a.ts"] });
+  });
+
+  it("re-opening an already-recent path moves it to the front instead of duplicating it", async () => {
+    await mountWithFiles(["a.ts", "b.ts"]);
+
+    await openFileRowAndWait("a.ts");
+    await openFileRowAndWait("b.ts");
+    await openFileRowAndWait("a.ts");
+
+    expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: ["a.ts", "b.ts"] });
+  });
+
+  it("caps the recent-files list at 12, dropping the oldest", async () => {
+    const paths = Array.from({ length: 13 }, (_, i) => `file${i}.ts`);
+    await mountWithFiles(paths);
+
+    for (const path of paths) await openFileRowAndWait(path);
+
+    const { recentPaths } = lastPushedState();
+    expect(recentPaths).toHaveLength(12);
+    // Most-recently-opened first; file0.ts (opened first, so the 13th-oldest once file12.ts opens)
+    // is the one that falls out of the cap.
+    expect(recentPaths[0]).toBe("file12.ts");
+    expect(recentPaths).not.toContain("file0.ts");
+  });
+
+  it("toggling Files/Changes pushes the updated sidebarMode, independent of the recent-files list", async () => {
+    await mountWithFiles(["a.ts"]);
+    hoisted.notifyEditorUIStateChanged.mockClear(); // drop mountWithFiles' own setup noise, if any
+
+    clickButton(container, "Changes");
+    expect(lastPushedState()).toEqual({ sidebarMode: "changes", recentPaths: [] });
+
+    clickButton(container, "Files");
+    expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: [] });
+  });
+
+  // Finding C: `openInEditor` no longer records unconditionally — only `EditorView`'s `onFileOpened`
+  // success callback does, so a refused (dirty-buffer) or failed open must not pollute `recentPaths`
+  // or move the Files tree's selection.
+  describe("Finding C — recording only follows a successful open", () => {
+    /** Opens `path`, then dirties its buffer via the fake CodeView's captured `onItemEditChange` —
+     *  the same technique editorView.test.ts uses to simulate an edit without a real `@pierre/diffs`
+     *  editor. `ensureCodeView` (and so this capture) only happens on the first successful open. */
+    async function openAndDirty(path: string): Promise<void> {
+      await openFileRowAndWait(path);
+      capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: `${path} content edited` });
+    }
+
+    it("a refused open (dirty buffer) records nothing and leaves the discard banner up", async () => {
+      await mountWithFiles(["a.ts", "b.ts"]);
+      await openAndDirty("a.ts");
+      hoisted.notifyEditorUIStateChanged.mockClear();
+
+      clickFileRow("b.ts");
+
+      // The discard-consent banner appears instead of a silent open.
+      await vi.waitFor(() => expect(container.querySelector(".banner.conflict")!.textContent).toContain("b.ts"));
+      expect(hoisted.notifyEditorUIStateChanged).not.toHaveBeenCalled();
+    });
+
+    it("a failed read records nothing", async () => {
+      await mountWithFiles(["a.ts", "b.ts"]);
+      hoisted.notifyEditorUIStateChanged.mockClear();
+      hoisted.workspaceFileRead.mockImplementationOnce(() => Promise.reject(new Error("read failed")));
+
+      clickFileRow("a.ts");
+
+      await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+      // Give the rejected promise's microtask a turn to (not) call back before asserting.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(hoisted.notifyEditorUIStateChanged).not.toHaveBeenCalled();
+    });
+
+    it("clicking 'Discard edits and open' records the target only once that open actually succeeds", async () => {
+      await mountWithFiles(["a.ts", "b.ts"]);
+      await openAndDirty("a.ts");
+      hoisted.notifyEditorUIStateChanged.mockClear();
+
+      clickFileRow("b.ts");
+      const discardBtn = await vi.waitFor(() => {
+        const btn = container.querySelector(".banner.conflict button") as HTMLButtonElement | null;
+        expect(btn).not.toBeNull();
+        return btn!;
+      });
+      expect(hoisted.notifyEditorUIStateChanged).not.toHaveBeenCalled(); // not yet — only the click below commits it
+
+      discardBtn.click();
+
+      await vi.waitFor(() => expect(lastPushedState().recentPaths[0]).toBe("b.ts"));
+      expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: ["b.ts", "a.ts"] });
+    });
   });
 });

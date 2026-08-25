@@ -80,6 +80,7 @@ function makeBridge(): SpacesBridge & {
     subscribeDiffSignature: () => () => {},
     subscribeFileSignature: () => () => {},
     notifyEditorStateChanged: () => {},
+    notifyEditorUIStateChanged: () => {},
     notifyModeChanged: () => {},
     notifyReady: () => {},
     async reviewCommentList() {

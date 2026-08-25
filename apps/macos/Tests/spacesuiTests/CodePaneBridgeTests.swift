@@ -119,7 +119,7 @@ import spacesterminalcore
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
             initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: "main", editorState: nil,
-            pendingReviewComments: nil, agents: [])
+            pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -132,7 +132,7 @@ import spacesterminalcore
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
             initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, agents: [])
+            pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -147,7 +147,7 @@ import spacesterminalcore
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
             initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, agents: [])
+            pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -159,7 +159,7 @@ import spacesterminalcore
         let payload = CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
             initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: state,
-            pendingReviewComments: nil, agents: [])
+            pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -170,6 +170,36 @@ import spacesterminalcore
         #expect(editorState["content"] as? String == "let x = 1")
         #expect(editorState["dirty"] as? Bool == true)
         #expect(editorState["conflict"] as? Bool == false)
+    }
+
+    // MARK: - InitPayload editorUIState encoding
+
+    /// Mirrors `initPayloadOmitsEditorStateKeyWhenAbsent`: a pane's first-ever load (or one whose
+    /// sidebar state was never reported) must omit the `editorUIState` key entirely rather than
+    /// sending `null`, since the web side uses key presence to decide whether to restore anything.
+    @Test func initPayloadOmitsEditorUIStateKeyWhenAbsent() throws {
+        let payload = CodePaneBridge.InitPayload(
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
+            pendingReviewComments: nil, editorUIState: nil, agents: [])
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["editorUIState"] == nil)
+    }
+
+    @Test func initPayloadEncodesEditorUIStateWhenPresent() throws {
+        let state = CodePaneBridge.EditorUIState(sidebarMode: "changes", recentPaths: ["a.swift", "b.swift"])
+        let payload = CodePaneBridge.InitPayload(
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
+            pendingReviewComments: nil, editorUIState: state, agents: [])
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let editorUIState = try #require(json["editorUIState"] as? [String: Any])
+        #expect(editorUIState["sidebarMode"] as? String == "changes")
+        #expect(editorUIState["recentPaths"] as? [String] == ["a.swift", "b.swift"])
     }
 
     // MARK: - editorStateChanged decode (round-5 hibernation fix)
@@ -261,6 +291,35 @@ import spacesterminalcore
         #expect(CodePaneBridge.decodeModeChanged(body: ["id": "1", "method": "modeChanged", "params": ["mode": "editor"]]) == nil)
     }
 
+    // MARK: - editorUIStateChanged push decode
+
+    @Test func decodeEditorUIStateChangedParsesASnapshot() {
+        let message = CodePaneBridge.decodeEditorUIStateChanged(
+            body: ["method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": ["a.ts", "b.ts"]]])
+
+        #expect(message == CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"]))
+    }
+
+    @Test func decodeEditorUIStateChangedRejectsAnythingWithAnId() {
+        #expect(
+            CodePaneBridge.decodeEditorUIStateChanged(
+                body: ["id": "1", "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]]) == nil)
+    }
+
+    @Test func decodeEditorUIStateChangedRejectsOtherMethods() {
+        #expect(
+            CodePaneBridge.decodeEditorUIStateChanged(
+                body: ["method": "modeChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]]) == nil)
+    }
+
+    @Test func decodeEditorUIStateChangedRejectsMissingParams() {
+        #expect(CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "editorUIStateChanged"]) == nil)
+    }
+
+    @Test func decodeEditorUIStateChangedRejectsIncompleteParams() {
+        #expect(CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "editorUIStateChanged", "params": ["sidebarMode": "files"]]) == nil)
+    }
+
     // MARK: - RPC-to-client-call mapping
 
     @Test func planForWorkspaceDiffDecodesItsScope() {
@@ -273,6 +332,15 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "bogus"]])
 
         #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    /// Unlike every other RPC method here, `workspaceFileList` carries no per-request params at all —
+    /// the workspace is implied by the pane's own `workspaceID`, so decoding must succeed regardless
+    /// of what `params` holds.
+    @Test func planForWorkspaceFileListRequiresNoParams() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileList", params: [:])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileList))
     }
 
     @Test func planForWorkspaceFileRead() {
@@ -688,6 +756,43 @@ import spacesterminalcore
         // Mirrors `decodeCollectedEditorStateTreatsANonStringResultAsNotReported`: anything other than
         // a sentinel or a JSON array string is treated the same defensive way a malformed string is.
         #expect(CodePaneBridge.decodeCollectedReviewCommentState(42) == .notReported)
+    }
+
+    // MARK: - Collected editor-UI-state flush decode
+
+    /// Mirrors `decodeCollectedEditorStateParsesAJSONSnapshot` exactly, for the sidebar-UI-state
+    /// surface's single-object shape.
+    @Test func decodeCollectedEditorUIStateParsesAJSONSnapshot() {
+        let json = #"{"sidebarMode":"files","recentPaths":["a.ts","b.ts"]}"#
+
+        #expect(CodePaneBridge.decodeCollectedEditorUIState(json) == .state(CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"])))
+    }
+
+    @Test func decodeCollectedEditorUIStateTreatsTheNoneSentinelAsNone() {
+        // `'__none__'` is an installed collector's own explicit "nothing to report" answer — the only
+        // case that should clear a stored snapshot. Mirrors `'__none__'` for the comment surface.
+        #expect(CodePaneBridge.decodeCollectedEditorUIState("__none__") == .none)
+    }
+
+    @Test func decodeCollectedEditorUIStateTreatsTheUninstalledSentinelAsNotReported() {
+        // Mirrors `decodeCollectedReviewCommentStateTreatsTheUninstalledSentinelAsNotReported`: this
+        // must NOT be treated as "nothing to report", or a teardown flush racing a reactivate-then-
+        // hibernate cycle would wipe a real stored snapshot.
+        #expect(CodePaneBridge.decodeCollectedEditorUIState("__uninstalled__") == .notReported)
+    }
+
+    @Test func decodeCollectedEditorUIStateTreatsNilAsNotReported() {
+        // A nil result is what a genuine `evaluateJavaScript` error folds into — indistinguishable
+        // from "didn't answer", so it must leave the stored snapshot untouched.
+        #expect(CodePaneBridge.decodeCollectedEditorUIState(nil) == .notReported)
+    }
+
+    @Test func decodeCollectedEditorUIStateTreatsAMalformedStringAsNotReported() {
+        #expect(CodePaneBridge.decodeCollectedEditorUIState("not json") == .notReported)
+    }
+
+    @Test func decodeCollectedEditorUIStateTreatsANonStringResultAsNotReported() {
+        #expect(CodePaneBridge.decodeCollectedEditorUIState(42) == .notReported)
     }
 }
 

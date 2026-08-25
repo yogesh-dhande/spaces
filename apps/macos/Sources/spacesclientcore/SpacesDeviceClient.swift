@@ -669,6 +669,19 @@ public enum SpacesDeviceClient {
         return result
     }
 
+    /// Lists every path in a workspace's checkout on a paired device, for the Editor pane's file tree and
+    /// quick-open (see `SpacesDeviceWorkspaceFileListRequest`).
+    public static func workspaceFileList(
+        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceFileListResult {
+        let response = try request(
+            .init(command: .workspaceFileList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceFileList else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
     /// Draft review comments for a workspace's code pane, on a paired device. Sent-and-archived comments
     /// are never included — v1 has no archive-browsing UI (see docs/spec.md).
     public static func workspaceReviewCommentList(
@@ -1191,7 +1204,7 @@ public enum SpacesDeviceClient {
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: largePayloadRequestTimeoutSeconds
+        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,

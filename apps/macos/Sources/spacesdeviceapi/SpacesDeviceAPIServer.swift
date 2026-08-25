@@ -164,7 +164,7 @@ extension SpacesDeviceAPICommand {
     /// check, so neither ever needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: true
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: true
         default: false
         }
     }
@@ -1038,15 +1038,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         NSError(domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
     }
 
-    /// The workspace id a workspace file-read/write/diff request targets, used to route it to its
+    /// The workspace id a workspace file-read/write/diff/file-list request targets, used to route it to its
     /// per-workspace serial queue (`workspaceGitQueue(for:)`). `preconditionFailure`s mirror
-    /// `handleWorkspaceGitRequest`'s: only these three commands ever reach this accessor.
+    /// `handleWorkspaceGitRequest`'s: only these four commands ever reach this accessor.
     private func workspaceGitQueueWorkspaceID(for request: SpacesDeviceAPIRequest) -> String {
         switch request.command {
         case .workspaceFileRead(let payload): return payload.workspaceID
         case .workspaceFileWrite(let payload): return payload.workspaceID
         case .workspaceDiff(let payload): return payload.workspaceID
-        default: preconditionFailure("Only workspace file-read/write/diff commands run on a workspace-git queue.")
+        case .workspaceFileList(let payload): return payload.workspaceID
+        default: preconditionFailure("Only workspace file-read/write/diff/file-list commands run on a workspace-git queue.")
         }
     }
     /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
@@ -1975,9 +1976,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert `.runWorkspaceSetup` to `workspaceSetupQueue` before they reach here (see
         // `runsOnWorkspaceSetupQueue`), so this case only keeps the switch exhaustive.
         case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
-        // Both transports divert workspace file-read/write/diff commands to `workspaceGitQueue` before they
-        // reach here (see `runsOnWorkspaceGitQueue`), so this case only keeps the switch exhaustive.
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff: return try handleWorkspaceGitRequest(request)
+        // Both transports divert workspace file-read/write/diff/file-list commands to `workspaceGitQueue`
+        // before they reach here (see `runsOnWorkspaceGitQueue`), so this case only keeps the switch
+        // exhaustive.
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
@@ -2104,7 +2106,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs one workspace file-read/write/diff command (see `runsOnWorkspaceGitQueue`) on
+    /// Runs one workspace file-read/write/diff/file-list command (see `runsOnWorkspaceGitQueue`) on
     /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
     /// a request handled on one queue must not touch a `SQLiteStore` opened on another.
     private func handleWorkspaceGitRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -2113,7 +2115,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceFileRead(let payload): return try handleWorkspaceFileReadRequest(payload, context: context)
         case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
         case .workspaceDiff(let payload): return try handleWorkspaceDiffRequest(payload, context: context)
-        default: preconditionFailure("Only workspace file-read/write/diff commands run on the workspace-git queue.")
+        case .workspaceFileList(let payload): return try handleWorkspaceFileListRequest(payload, context: context)
+        default: preconditionFailure("Only workspace file-read/write/diff/file-list commands run on the workspace-git queue.")
         }
     }
 
@@ -3359,6 +3362,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 .init(
                     base64Data: data.base64EncodedString(), sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(data), size: data.count,
                     isBinaryGuess: SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(data))))
+    }
+
+    /// Lists every path in a workspace's checkout for the Editor pane's file tree/quick-open; see
+    /// `SpacesDeviceWorkspaceFileListEngine.listFiles`. Read-only, so unlike the CAS file read/write handlers
+    /// above there is no path-escape or size guard to apply, and unlike `handleWorkspaceDiffRequest` there is
+    /// no `assertIsGitRepository` gate here either: this endpoint deliberately serves both git and non-git
+    /// workspaces, because a non-git workspace's Editor (docs/spec.md's non-git project rows still offer Open
+    /// in Editor) has no other way to open a file — the tree and ⌘P quick-open ARE the file picker for it.
+    /// `listFiles` itself picks the git-vs-filesystem listing strategy per call.
+    private func handleWorkspaceFileListRequest(_ request: SpacesDeviceWorkspaceFileListRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+        return SpacesDeviceAPIResponse(ok: true, message: "Listed workspace files.", result: .workspaceFileList(result))
     }
 
     /// Compare-and-swap write. `expectedSHA256` is compared against the current disk content's hash
