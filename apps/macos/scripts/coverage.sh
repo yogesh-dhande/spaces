@@ -170,6 +170,7 @@ set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path
     --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests \
     --skip GhosttyMirrorSelectionAcrossFramesTests --skip GhosttyMirrorSurfaceMRUTests \
     --skip GhosttyMirrorSurfacePresentationTests \
+    --skip AgentHookSubprocessTests \
     --skip AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut \
     --skip AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled \
     --skip AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting \
@@ -246,7 +247,7 @@ stage_profiles main
 # shared run below.
 echo "Running process-lifecycle coverage tests serially..."
 run_filtered_coverage_pass process-group-escalation \
-    "AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
+    "AgentHookSubprocessTests|AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
 stage_profiles process-group
 
 # The mirror-surface suites skipped above, in a process of their own so the mirror service is the
