@@ -224,17 +224,26 @@ export class EditorView {
     openBar.appendChild(resultsHost);
     openBar.appendChild(this.saveBtn);
 
+    const codeArea = document.createElement("div");
+    codeArea.className = "diff-area";
+    codeArea.style.position = "relative";
+
+    // The CodeView mounts on this inner child, not on `.diff-area` itself, for the same
+    // reason diffView.ts mounts on its own `.diff-view-root`: the element handed to
+    // `CodeView.setup()` must be a bounded-height scroll container (see that class's CSS
+    // comment in app.css), and making the outer `.diff-area` scroll would carry the
+    // absolutely-positioned `.banner` away with the content instead of keeping it docked.
     this.codeHost = document.createElement("div");
-    this.codeHost.className = "diff-area";
-    this.codeHost.style.position = "relative";
+    this.codeHost.className = "diff-view-root";
+    codeArea.appendChild(this.codeHost);
 
     this.banner = document.createElement("div");
     this.banner.className = "banner conflict";
     this.banner.style.display = "none";
-    this.codeHost.appendChild(this.banner);
+    codeArea.appendChild(this.banner);
 
     container.appendChild(openBar);
-    container.appendChild(this.codeHost);
+    container.appendChild(codeArea);
 
     document.addEventListener("click", (event) => {
       if (!resultsHost.contains(event.target as Node)) {
@@ -344,6 +353,39 @@ export class EditorView {
       version: this.editGeneration,
     };
     codeView.setItems([item]);
+    this.completeEditorAttach(codeView, item);
+  }
+
+  /**
+   * Works around an attach-order gap in `@pierre/diffs` for items born with `edit: true`: the
+   * render loop renders the item first (editor still null, so `File.render` skips its
+   * `syncRenderViewToEditor` call) and only then attaches the editor — whose own attach path
+   * (`File.attachEditor`) syncs immediately only when `editorRenderReady()` already holds, which
+   * it never does on that first pass (the highlight result hasn't landed, and once the edit
+   * session is active `onHighlightSuccess` drops it without triggering a re-render). Nothing
+   * re-renders a single always-visible item after that, so the editor never takes over the DOM:
+   * the file stays a static, non-editable `PRE` forever.
+   *
+   * The escape is one forced full re-render AFTER the editor has attached: a version-bumped
+   * `updateItem` marks the item render-dirty, and that render's `File.render` sees a non-null
+   * editor and runs `syncRenderViewToEditor`, completing the takeover (contenteditable, caret,
+   * key handling). Attach completion has no callback, so poll `getEditor` across frames, guarded
+   * by `editGeneration` so a newer load (or the conflict compare view) supersedes the poll.
+   * For reloads of an already-attached editor the poll resolves on the first frame and the extra
+   * re-render is a cheap no-op on top of the sync the forced render already performs.
+   */
+  private completeEditorAttach(codeView: CodeView, item: CodeViewItem): void {
+    const generation = this.editGeneration;
+    const poll = () => {
+      if (generation !== this.editGeneration) return; // a newer load owns the CodeView now
+      if (codeView.getEditor(item.id) === undefined) {
+        requestAnimationFrame(poll);
+        return;
+      }
+      this.editGeneration += 1;
+      codeView.updateItem({ ...item, version: this.editGeneration });
+    };
+    requestAnimationFrame(poll);
   }
 
   /**

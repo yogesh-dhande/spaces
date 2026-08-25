@@ -255,12 +255,17 @@
   background: var(--bg);
 }
 
-/* Host for @pierre/diffs' CodeView: it owns its own internal scroll and
-   virtualization, so it needs a bounded-height flex child rather than an
-   auto-growing element inside a taller scrolling ancestor. */
+/* Host for @pierre/diffs' CodeView. The library treats the element passed to
+   `CodeView.setup()` as the scroll container — it listens for `scroll` on it and
+   derives the virtualized window from its `scrollTop` — but never styles it, so
+   the embedding app must make it a bounded-height scroll container itself.
+   Without `overflow-y` the native scroll range is zero: wheel/trackpad scrolling
+   is dead while programmatic `scrollTo` still appears to move (the virtualizer
+   repositions content), which is exactly the trap to avoid reintroducing. */
 .diff-view-root {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .empty-state {

@@ -1,9 +1,11 @@
 import "./styles/tokens.css";
 import "./styles/app.css";
 import { mountRoot } from "./app/root";
+import { installGetComposedRangesCompat } from "./compat/getComposedRanges";
 import { preloadCodePaneHighlighter } from "./theme";
 
 async function main(): Promise<void> {
+  installGetComposedRangesCompat();
   await preloadCodePaneHighlighter();
   const root = document.getElementById("root");
   if (!root) throw new Error("#root element is missing from index.html");

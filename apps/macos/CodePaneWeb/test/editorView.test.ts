@@ -17,6 +17,14 @@ import {
 // Captures the options EditorView last constructed a (fake) CodeView with, so tests can invoke
 // `onItemEditChange` directly to simulate a buffer edit without a real @pierre/diffs editor.
 const capturedCodeViewOptions = vi.hoisted(() => ({ current: undefined as undefined | { onItemEditChange: (item: unknown, file: { contents: string }) => void } }));
+// Controls FakeCodeView's editor-attach surface so the attach-heal poll (completeEditorAttach)
+// can be tested: `editor` is what getEditor returns (undefined = attach still pending; the
+// default `{}` = attach done, resolving the poll on its first frame), and `updateItemCalls`
+// records every forced re-render the poll issues.
+const fakeCodeViewControl = vi.hoisted(() => ({
+  editor: {} as object | undefined,
+  updateItemCalls: [] as Array<{ id: string; version: number }>,
+}));
 
 vi.mock("@pierre/diffs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@pierre/diffs")>();
@@ -27,6 +35,12 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     setup(): void {}
     setItems(): void {}
     cleanUp(): void {}
+    getEditor(): object | undefined {
+      return fakeCodeViewControl.editor;
+    }
+    updateItem(item: { id: string; version: number }): void {
+      fakeCodeViewControl.updateItemCalls.push({ id: item.id, version: item.version });
+    }
   }
   return { ...actual, CodeView: FakeCodeView };
 });
@@ -3121,5 +3135,64 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
         conflict: false,
       }),
     );
+  });
+});
+
+describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
+  let container: HTMLElement;
+
+  beforeEach(async () => {
+    container = document.createElement("div");
+    // A prior test's poll whose first frame hasn't fired yet would otherwise spin into this
+    // test and heal alongside its own poll; let such strays resolve under the instant-attach
+    // default before switching the fake to attach-pending mode.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    fakeCodeViewControl.editor = undefined;
+    fakeCodeViewControl.updateItemCalls = [];
+  });
+
+  afterEach(() => {
+    // Restore the instant-attach default the rest of this file relies on.
+    fakeCodeViewControl.editor = {};
+  });
+
+  async function openFile(bridge: SpacesBridge, path: string): Promise<void> {
+    const input = container.querySelector("input") as HTMLInputElement;
+    pressEnter(input, path);
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path));
+  }
+
+  it("polls until the editor attaches, then forces exactly one version-bumped re-render", async () => {
+    const result: WorkspaceFileReadResult = { content: "a\n", sha256: "sha-1", size: 2 };
+    const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
+    new EditorView(container, bridge);
+    await openFile(bridge, "src/a.ts");
+
+    // Attach still pending: the poll must keep waiting without forcing a render.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(fakeCodeViewControl.updateItemCalls).toEqual([]);
+
+    fakeCodeViewControl.editor = {};
+    await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
+    expect(fakeCodeViewControl.updateItemCalls[0]?.id).toBe("src/a.ts");
+
+    // One heal per load: no further renders arrive after the poll resolved.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(fakeCodeViewControl.updateItemCalls.length).toBe(1);
+  });
+
+  it("a poll superseded by a newer open stands down; only the newest load heals", async () => {
+    const result: WorkspaceFileReadResult = { content: "a\n", sha256: "sha-1", size: 2 };
+    const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
+    new EditorView(container, bridge);
+    await openFile(bridge, "src/a.ts");
+    await openFile(bridge, "src/b.ts");
+
+    fakeCodeViewControl.editor = {};
+    await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
+    expect(fakeCodeViewControl.updateItemCalls[0]?.id).toBe("src/b.ts");
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(fakeCodeViewControl.updateItemCalls.length).toBe(1);
   });
 });

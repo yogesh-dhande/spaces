@@ -24,6 +24,12 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     }
     scrollTo(): void {}
     cleanUp(): void {}
+    // Models an attach that completed instantly so `completeEditorAttach`'s poll resolves
+    // on its first frame (see the matching fake in editorView.test.ts).
+    getEditor(): object {
+      return {};
+    }
+    updateItem(): void {}
   }
   return { ...actual, CodeView: FakeCodeView };
 });
