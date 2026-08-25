@@ -90,7 +90,10 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     /// own fallback (`title ?? launchConfiguration.title`), and a reader showing what the session is
     /// doing (`TerminalSessionCatalogEntry.liveTitle`) shows nothing. Folding the launch title in here
     /// would make those two indistinguishable and print every untitled shell's name twice.
-    public let title: String?
+    /// `var` so a reader that holds a fresher title than the durable row can overlay it without rebuilding
+    /// every field (see `TerminalSessionCatalog.mergingLiveInMemorySessions`). Nothing mutates it in place
+    /// on the write path; the owning core always computes a whole new state value.
+    public var title: String?
     public let workingDirectory: String?
     public let columns: Int?
     public let rows: Int?
