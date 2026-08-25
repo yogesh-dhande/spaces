@@ -1,4 +1,3 @@
-import Dispatch
 import Foundation
 
 /// Uses Codex's own feature commands to manage the flag that activates `~/.codex/hooks.json`.
@@ -55,13 +54,8 @@ enum AgentHookCodexFeatureToggle {
         let output: String
     }
 
-    private struct CommandTimeoutError: LocalizedError { var errorDescription: String? { "Codex feature command timed out" } }
-
     private static func run(executablePath: String, arguments: [String], codexHome: URL, timeoutSeconds: TimeInterval) throws -> CommandResult {
         #if os(macOS) || os(Linux)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executablePath)
-            process.arguments = arguments
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_HOME"] = codexHome.path
             // Version-manager launchers commonly use `#!/usr/bin/env node`; resolving the launcher
@@ -69,40 +63,10 @@ enum AgentHookCodexFeatureToggle {
             let executableDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
             let currentPathDirectories = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
             environment["PATH"] = ([executableDirectory] + currentPathDirectories.filter { $0 != executableDirectory }).joined(separator: ":")
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-
-            let outputPipe = Pipe()
-            let outputBuffer = AgentHookPipeOutputBuffer()
-            let endOfOutput = DispatchSemaphore(value: 0)
-            outputPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else {
-                    handle.readabilityHandler = nil
-                    endOfOutput.signal()
-                    return
-                }
-                outputBuffer.append(data)
-            }
-            process.standardOutput = outputPipe
-            process.standardError = outputPipe
-
-            let completion = DispatchSemaphore(value: 0)
-            process.terminationHandler = { _ in completion.signal() }
-            do { try process.run() } catch {
-                outputPipe.fileHandleForReading.readabilityHandler = nil
-                throw error
-            }
-
-            let timedOut = completion.wait(timeout: .now() + timeoutSeconds) == .timedOut
-            if timedOut { AgentHookProcessTree.terminate(rootProcessID: process.processIdentifier, completion: completion) }
-            if !process.isRunning { process.waitUntilExit() }
-            _ = endOfOutput.wait(timeout: .now() + 1)
-            outputPipe.fileHandleForReading.readabilityHandler = nil
-
-            if timedOut { throw CommandTimeoutError() }
-            let output = String(decoding: outputBuffer.snapshot(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return CommandResult(terminationStatus: process.terminationStatus, output: output)
+            let result = try AgentHookSubprocess.run(
+                executablePath: executablePath, arguments: arguments, environment: environment, timeoutSeconds: timeoutSeconds)
+            let output = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return CommandResult(terminationStatus: result.terminationStatus, output: output)
         #else
             throw CommandError(action: "run", detail: "feature commands are unavailable on this platform")
         #endif

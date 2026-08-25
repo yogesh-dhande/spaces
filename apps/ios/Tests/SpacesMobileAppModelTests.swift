@@ -666,21 +666,20 @@
             model.overview = overview
 
             let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            await waitUntil("workspace-feature's delete to become pending") { model.isWorkspacePendingDeletion("workspace-feature") }
             // Confirms workspace-feature's request is actually parked on the gate (its chain entry is a
             // still-unresolved task) before switching, so the test proves independence rather than luck.
-            while await recorder.snapshot().isEmpty { await Task.yield() }
+            await waitUntil("workspace-feature's delete request to be recorded") { !(await recorder.snapshot()).isEmpty }
 
             // Stands in for switching to a different paired device: bumps `overviewIdentity`, the value
             // `pendingDeleteChains` keys on, the same way `SpacesMobileAppModel.selectDevice` does.
             model.handleAuthenticationFailure(message: "Switched devices.")
 
             let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
-
             // workspace-docs's request reaches the daemon without waiting for workspace-feature's gate to
-            // open: different `overviewIdentity` at call time means a different chain entry.
-            while await recorder.snapshot().count < 2 { await Task.yield() }
+            // open: the second recorded request proves the different `overviewIdentity` created a different
+            // chain entry, without relying on its transient pending mark still being observable.
+            await waitUntil("workspace-docs's delete request to be recorded") { (await recorder.snapshot()).count >= 2 }
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
             XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "still unresolved, untouched by the device switch")
