@@ -133,6 +133,143 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         }
     }
 
+    /// An agent TUI animates a spinner in its terminal title, setting a new one several times a second for
+    /// as long as it runs. Each set used to force a durable write, so a spinning agent committed a SQLite
+    /// transaction per animation frame; on a machine running a few agents that was megabytes per second of
+    /// WAL. The title is served to clients from the core's in-memory state, so the stored row does not have
+    /// to track it.
+    func testSpinnerTitleFramesDoNotRewriteTheStoredRuntimeState() async throws {
+        try useIsolatedSpacesProfile()
+        let root = try Self.makeSessionRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = Self.makeLaunchConfiguration(sessionID: "spinner-title-session")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = try Self.makeSteadySession(launchConfiguration, paths: paths)
+            host.debugPersistRuntimeState()
+            host.debugDrainPersistenceQueue()
+            return Box(host)
+        }
+        try await TerminalEngineActor.run { try Self.stampStoredRuntimeStateWithSentinel(paths: paths) }
+
+        for frame in ["\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}"] {
+            await TerminalEngineActor.run {
+                hostBox.value.debugApplyTitleActionEvent("\(frame) spider")
+                hostBox.value.debugDrainPersistenceQueue()
+            }
+        }
+
+        try await TerminalEngineActor.run {
+            let host = hostBox.value
+            XCTAssertEqual(host.debugCurrentTitle, "\u{2827} spider", "the core still tracks the latest reported title in memory")
+            XCTAssertEqual(
+                try TerminalSessionPersistence.readRuntimeState(paths: paths).updatedAt, Self.sentinelTimestamp,
+                "no spinner frame may reach the durable row")
+        }
+    }
+
+    /// Overview pushes used to ride the durable runtime-state write, so dropping `title` from the persist
+    /// signature would have left the sidebar showing a stale title indefinitely. The signal is owed on every
+    /// title change but coalesced onto the 1 Hz tick, so a spinning agent costs one overview rebuild per
+    /// second rather than one per animation frame.
+    func testTitleFramesOweExactlyOneCoalescedOverviewSignal() async throws {
+        try useIsolatedSpacesProfile()
+        let root = try Self.makeSessionRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = Self.makeLaunchConfiguration(sessionID: "overview-signal-session")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = try Self.makeSteadySession(launchConfiguration, paths: paths)
+            host.debugPersistRuntimeState()
+            host.debugDrainPersistenceQueue()
+            return Box(host)
+        }
+
+        // Let the setup write's `onPersisted` hop land first. It posts a runtime-state overview signal of
+        // its own, which would otherwise be counted below as if a title frame had produced it.
+        await TerminalEngineActor.run {}
+        await TerminalEngineActor.run {}
+
+        let counter = SignalCounter()
+        let token = NotificationCenter.default.addObserver(forName: TerminalOverviewSignal.name, object: nil, queue: nil) { _ in counter.increment() }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        for frame in ["\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}"] {
+            await TerminalEngineActor.run {
+                hostBox.value.debugApplyTitleActionEvent("\(frame) spider")
+                hostBox.value.debugDrainPersistenceQueue()
+            }
+        }
+        // The owed flag is the deterministic half of this assertion: the notification count can only show
+        // that nothing was posted, while the flag shows the burst was recorded rather than dropped.
+        await TerminalEngineActor.run {
+            XCTAssertTrue(hostBox.value.debugOwesOverviewSignalForMetadata, "the burst leaves exactly one signal owed")
+        }
+        XCTAssertEqual(counter.value, 0, "no title frame posts an overview signal on its own")
+
+        await TerminalEngineActor.run { hostBox.value.debugFlushPendingOverviewSignalForMetadata() }
+        XCTAssertEqual(counter.value, 1, "the tick posts exactly one signal for the whole burst")
+
+        // Nothing further is owed, so a tick with no title change since is silent.
+        await TerminalEngineActor.run {
+            XCTAssertFalse(hostBox.value.debugOwesOverviewSignalForMetadata)
+            hostBox.value.debugFlushPendingOverviewSignalForMetadata()
+        }
+        XCTAssertEqual(counter.value, 1, "an idle tick posts nothing")
+    }
+
+    /// Counts overview signals across the engine hops the test makes.
+    private final class SignalCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+
+    /// The title still has to reach the row when something else about the session moves, so a row written
+    /// for any other reason carries the current title rather than a stale one.
+    func testAWriteTriggeredByAnotherFieldCarriesTheCurrentTitle() async throws {
+        try useIsolatedSpacesProfile()
+        let root = try Self.makeSessionRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = Self.makeLaunchConfiguration(sessionID: "title-ride-along-session")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = try Self.makeSteadySession(launchConfiguration, paths: paths)
+            host.debugPersistRuntimeState()
+            host.debugDrainPersistenceQueue()
+            return Box(host)
+        }
+        try await TerminalEngineActor.run { try Self.stampStoredRuntimeStateWithSentinel(paths: paths) }
+
+        try await TerminalEngineActor.run {
+            let host = hostBox.value
+            host.debugApplyTitleActionEvent("claude - editing")
+            host.debugDrainPersistenceQueue()
+            XCTAssertEqual(
+                try TerminalSessionPersistence.readRuntimeState(paths: paths).updatedAt, Self.sentinelTimestamp,
+                "the title alone still does not write")
+
+            // The foreground process changing is in the signature, so this write happens for that reason.
+            host.debugSetForegroundProcessResolverForTesting { pid in
+                TerminalForegroundProcessSnapshot(
+                    pid: pid, executablePath: "/opt/homebrew/bin/claude", executableName: "claude", argv: ["claude"])
+            }
+            host.debugPersistRuntimeState(force: false)
+            host.debugDrainPersistenceQueue()
+
+            let stored = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+            XCTAssertNotEqual(stored.updatedAt, Self.sentinelTimestamp)
+            XCTAssertEqual(stored.title, "claude - editing", "the write carries the title the core currently holds")
+        }
+    }
+
     /// The sweep skips a session with nothing a lease could expire. A viewer that attaches afterwards has
     /// to be expired on the first sweep after its lease lapses all the same — the ticks before it arrived
     /// must not leave the sweep believing the session is still empty.

@@ -1043,6 +1043,10 @@
         /// caller terminates the session normally.
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             handoffTranscriptReplayOffset = nil
+            // Force the durable row current before the exec. `title` is out of the persist signature, so the
+            // stored title can be arbitrarily stale by now; the adopting core seeds itself from this row, and
+            // the persistence drain later in this function is what makes the write land before `execv`.
+            refreshRuntimeState(force: true)
             suppressBroadcastsForHandoff = true
             runtimeStateTimer?.cancel()
             runtimeStateTimer = nil
@@ -1162,9 +1166,15 @@
             // carry the BEL. The coalescing window is restored with it, so a bell moments after the
             // handoff — including one the replayed transcript re-rings through the live action handler —
             // is absorbed into the alert the user already has instead of minting a second one.
-            let persistedBellAt = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt
+            let persistedRuntimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let persistedBellAt = persistedRuntimeState?.bellAt
             currentBellAt = persistedBellAt
             bellCoalescer.seedLastAdvanced(at: persistedBellAt.flatMap(TerminalSessionTimestamp.date(from:)))
+            // Seed the reported title from the row the quiescing daemon forced before `execv`. The adopted
+            // session's program is mid-run and may not report a title again for a long time (a spinner does
+            // so within a frame, an editor showing a filename may never), and this core is the authority the
+            // overview now reads that title from, so starting at nil would blank a live pane's title.
+            currentTitle = persistedRuntimeState?.title
 
             // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
             // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
@@ -2024,6 +2034,7 @@
                     guard let self, self.started else { return }
                     self.expireStaleRemoteClientsIfNeeded()
                     self.refreshRuntimeState(force: false)
+                    self.flushPendingOverviewSignalForMetadata()
                 }
             }
             timer.resume()
@@ -2355,7 +2366,16 @@
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
-            case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
+            case .setTitle(let title):
+                // The reported title advances the in-memory state — the authority live subscribers and the
+                // overview read — but does not force the durable mirror. An agent TUI animating a spinner in
+                // its title sets one here several times a second, and forcing a write per set committed a
+                // SQLite transaction per animation frame. `title` is out of `runtimeStateSignature`, so this
+                // unforced refresh writes only if some other field moved too. See `shouldPersistRuntimeState`.
+                currentTitle = Self.normalizedSessionMetadataValue(title)
+                postSessionMetadataDidChange()
+                refreshRuntimeState(force: false)
+                return
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
             case .ringBell:
                 // A bell changes no metadata a title is derived from, so it skips the metadata
@@ -2418,13 +2438,14 @@
                     name: "state_change", attributes: ["revision": String(change.revision), "flags": String(change.flags.rawValue)])
                 scheduleScreenStateChangeBroadcast(revision: change.revision)
             }
-            var metadataChanged = false
+            var titleChanged = false
+            var workingDirectoryChanged = false
 
             if change.flags.contains(.title) {
                 let nextTitle = Self.normalizedSessionMetadataValue(change.title)
                 if currentTitle != nextTitle {
                     currentTitle = nextTitle
-                    metadataChanged = true
+                    titleChanged = true
                 }
             }
 
@@ -2432,16 +2453,26 @@
                 let nextWorkingDirectory = Self.normalizedSessionMetadataValue(change.workingDirectory)
                 if currentWorkingDirectory != nextWorkingDirectory {
                     currentWorkingDirectory = nextWorkingDirectory
-                    metadataChanged = true
+                    workingDirectoryChanged = true
                 }
             }
 
-            if metadataChanged { postSessionMetadataDidChange() }
+            if titleChanged || workingDirectoryChanged { postSessionMetadataDidChange() }
 
             if change.flags.contains(.foregroundProcess) { _ = observedChildPID() }
             if change.flags.contains(.size), let size = rendererHostStorage.surfaceCellSize() { lastKnownSurfaceSize = size }
 
-            if metadataChanged || !change.flags.intersection(.runtimeState).isEmpty { refreshRuntimeState(force: true) }
+            // A title-only change refreshes the in-memory state (which is what live subscribers and the
+            // overview read) but does not force the durable mirror: agent TUIs animate a spinner in their
+            // title several times a second, and forcing a write per frame committed a SQLite transaction per
+            // frame. `title` is out of `runtimeStateSignature`, so the unforced refresh persists only if some
+            // other field also moved, and the row still picks the title up on the next write for any reason
+            // and on the exited-state write at termination.
+            if workingDirectoryChanged || !change.flags.intersection(.runtimeState).isEmpty {
+                refreshRuntimeState(force: true)
+            } else if titleChanged {
+                refreshRuntimeState(force: false)
+            }
         }
 
         private func observedChildPID() -> Int32? {
@@ -2477,13 +2508,35 @@
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
         }
 
+        /// Set when a metadata change (title, working directory) still owes overview subscribers a rebuild,
+        /// cleared by the 1 Hz tick that posts it. Overview pushes used to ride the durable runtime-state
+        /// write, so dropping `title` from the persist signature would otherwise leave the sidebar showing a
+        /// stale title until some unrelated field changed. Posting per change instead would push an overview
+        /// rebuild — and a cross-process distributed notification — per spinner frame, which is the cost this
+        /// whole change exists to remove, so the signal is coalesced onto the tick every live session already
+        /// runs. Subscribers converge within a second; live subscribers are unaffected either way, since
+        /// `broadcastCurrentState` below still goes out on every change.
+        private var owesOverviewSignalForMetadata = false
+
         private func postSessionMetadataDidChange() {
             TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
+            owesOverviewSignalForMetadata = true
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+        }
+
+        /// Posts the coalesced metadata overview signal, if one is owed. Driven by the 1 Hz tick. A session
+        /// that ends with a change still owed needs nothing here: termination posts an unconditional
+        /// `TerminalOverviewSignal` of its own once its exited-state write commits.
+        private func flushPendingOverviewSignalForMetadata() {
+            guard owesOverviewSignalForMetadata else { return }
+            owesOverviewSignalForMetadata = false
+            TerminalOverviewSignal.post()
         }
 
         private func postRuntimeStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
+            // This post covers any metadata change still owed, so the tick does not send a second one.
+            owesOverviewSignalForMetadata = false
             TerminalOverviewSignal.post()
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.runtimeState)
         }
@@ -2726,7 +2779,16 @@
         }
 
         /// A runtime state is persisted when it says something the stored row does not: the signature covers
-        /// every field of the row except `updated_at`, which is derived from the write itself.
+        /// every field of the row except `updated_at`, which is derived from the write itself, and `title`.
+        ///
+        /// `title` is excluded because it is not a durable fact about the session, it is whatever the program
+        /// is printing right now, and agent TUIs animate a spinner in it several times a second. Including it
+        /// meant a SQLite transaction per animation frame. The authority for a live session's title is the
+        /// core's in-memory `latestRuntimeState`, which advances on every report and is what live subscribers
+        /// and the device overview read (`TerminalSessionCatalog.mergingLiveInMemorySessions` overlays it onto
+        /// the DB-derived entry). The stored column still converges: any write triggered by another field
+        /// carries the current title, the handoff quiesce forces one before `execv`, and the exited-state
+        /// write records the final title an ended pane is shown under.
         ///
         /// There is deliberately no periodic rewrite of an unchanged row. The 1 Hz refresh runs per session
         /// for as long as the session lives, so rewriting on a timer meant every idle terminal committed a
@@ -2742,7 +2804,7 @@
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
         }
 
         private static func isProcessAlive(pid: Int32) -> Bool {
@@ -3085,6 +3147,11 @@
         }
 
         var debugCurrentTitle: String? { currentTitle }
+        /// Drives the real OSC-title path so a test exercises the same decision a program's title set makes.
+        func debugApplyTitleActionEvent(_ title: String) { applyActionEvent(.setTitle(title)) }
+        /// Runs the coalesced overview-signal flush the 1 Hz tick performs.
+        func debugFlushPendingOverviewSignalForMetadata() { flushPendingOverviewSignalForMetadata() }
+        var debugOwesOverviewSignalForMetadata: Bool { owesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { _ = incomingOutputBuffer.append(data, interactive: false) }
@@ -3281,6 +3348,9 @@
         }
 
         var debugCurrentTitle: String? { core.debugCurrentTitle }
+        func debugApplyTitleActionEvent(_ title: String) { core.debugApplyTitleActionEvent(title) }
+        func debugFlushPendingOverviewSignalForMetadata() { core.debugFlushPendingOverviewSignalForMetadata() }
+        var debugOwesOverviewSignalForMetadata: Bool { core.debugOwesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { core.debugBufferIncomingOutputForStateExport(data) }

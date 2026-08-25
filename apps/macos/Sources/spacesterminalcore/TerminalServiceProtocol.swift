@@ -612,7 +612,10 @@ public struct TerminalServiceTerminalLinkChunk: Codable, Sendable, Equatable {
 
 public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
-    public let title: String
+    /// `var` so a listing that holds a fresher title than the durable row can overlay it (see
+    /// `SpacesdMain.listSessionsOffMain`). The producers always build a whole summary; nothing mutates
+    /// this in place on the way out.
+    public var title: String
     public let workingDirectory: String
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
@@ -622,7 +625,9 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
     public let controlSocketPath: String
     public let outputPath: String
     public let launchConfiguration: TerminalSessionLaunchConfiguration?
-    public let runtimeState: TerminalSessionRuntimeState?
+    /// `var` for the same reason as `title`: the live-title overlay has to move both, or the summary
+    /// contradicts itself and a consumer reading the nested runtime state gets the stale value.
+    public var runtimeState: TerminalSessionRuntimeState?
     public let attachmentSnapshot: TerminalSessionAttachmentSnapshot?
     public let hasFinalRender: Bool
 

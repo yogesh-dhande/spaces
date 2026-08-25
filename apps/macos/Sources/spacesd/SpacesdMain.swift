@@ -1652,6 +1652,10 @@ enum SpacesDaemonErrorClassification {
             var sessions = try knownSessions.compactMap { knownSession in try summaryIfLive(for: knownSession) }
             let knownSessionIDs = Set(sessions.map(\.id))
             let inMemorySummaries = TerminalEngineActor.runSynchronously { self.sessionCores.values.compactMap { $0.inMemorySessionSummary() } }
+            // The stored row does not track title changes, so a session this daemon hosts takes its title
+            // from the live core. Without it the CLI and MCP terminal listings would report whatever title
+            // the row last happened to be written with.
+            sessions = TerminalSessionCatalog.overlayingLiveTitles(sessions, liveInMemory: inMemorySummaries)
             for summary in inMemorySummaries where summary.state.isInteractive && !knownSessionIDs.contains(summary.id) { sessions.append(summary) }
             return TerminalServiceResponse(ok: true, message: "Listed terminal sessions.", sessions: sessions)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
