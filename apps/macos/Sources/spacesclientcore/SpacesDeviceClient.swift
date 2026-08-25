@@ -123,7 +123,15 @@ public enum SpacesDeviceClient {
                 certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp,
                 lastSelectedAt: timestamp)
             try database.upsert(device: record)
-            try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
+            // Skip the credential write when the daemon kept the token we presented, which is the
+            // overwhelmingly common case: this runs on every sidebar reload, and `saveToken` is an atomic
+            // file replace (temp write, rename, chmod) that dirties a page every time even when the bytes
+            // are identical. Guarded on the device id too, because the value comparison is only meaningful
+            // when the token would be written back to the same file it was read from.
+            let tokenIsUnchanged = bootstrap.deviceID == SpacesPairedDeviceRecord.localDeviceID && bootstrap.authToken == presentedToken
+            if !tokenIsUnchanged {
+                try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
+            }
             return record
         }
     }
