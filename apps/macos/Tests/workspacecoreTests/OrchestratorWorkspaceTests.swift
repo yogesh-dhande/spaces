@@ -1016,6 +1016,40 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path), "the user's checkout is untouched")
     }
 
+    /// A corrupt administrative `gitdir` link makes `git worktree list` omit an otherwise present checkout
+    /// while still exiting successfully. Absence from that listing is therefore not enough to retire the
+    /// workspace: the directory on disk is live user work even though git can no longer classify it.
+    func testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList() throws {
+        let repo = try makeTempGitRepo(name: "corrupt-gitdir-keeps-workspace")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-present", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-present")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        let gitFile = try String(contentsOf: worktree.appendingPathComponent(".git"), encoding: .utf8)
+        let gitdirPrefix = "gitdir: "
+        guard gitFile.hasPrefix(gitdirPrefix) else { return XCTFail("linked worktree .git file does not contain a gitdir pointer") }
+        let administrativeDirectory = URL(
+            fileURLWithPath: String(gitFile.dropFirst(gitdirPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines),
+            isDirectory: true)
+        try "".write(to: administrativeDirectory.appendingPathComponent("gitdir"), atomically: false, encoding: .utf8)
+
+        let worktreeListOutput = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertFalse(worktreeListOutput.contains(worktree.path), "git omits a worktree whose administrative gitdir link is corrupt")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNotNil(try store.workspace(id: workspace.id), "a present checkout is not evidence of a removed worktree")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path), "the user's checkout is untouched")
+    }
+
     /// The counterpart to the timeout case above: when the probe runs to completion and git answers, in the
     /// negative (the linked worktree's `.git` file is gone even though the directory remains, so `git -C
     /// <path> rev-parse --git-common-dir` exits nonzero), that is a definitive negative the scan is meant to
