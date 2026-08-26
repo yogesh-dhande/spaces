@@ -763,9 +763,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Reloads the sidebar when a terminal session's overview-affecting state changes (a bell, an exit,
     /// a title or runtime-state change). Terminal runtime state lives outside the database and so raises
-    /// no `databaseDidChange`; this signal is its equivalent, and it takes the same reload path so the
-    /// mid-edit deferral and reload coalescing are identical. The app and the daemon hosting the session
-    /// are separate processes, so the signal arrives here through its distributed half.
+    /// no `databaseDidChange`; this signal refreshes only This Mac's overview while sharing the full
+    /// reload path's mid-edit deferral and coalescing. The app and the daemon hosting the session are
+    /// separate processes, so the signal arrives here through its distributed half.
     @objc private nonisolated func handleTerminalOverviewSignalIPC(_ notification: Notification) {
         let object = notification.object as? String
         Task { @MainActor [weak self, object] in
@@ -774,7 +774,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object, profileObject: self.ipcNotificationObject
                 )
             else { return }
-            self.sidebar.handleDatabaseDidChange()
+            self.sidebar.handleTerminalOverviewDidChange()
         }
     }
 
@@ -2677,8 +2677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let replaceExistingManagedDirectory: Bool
     }
 
-    struct SidebarDataSnapshot: Sendable {
-        let config: AppConfig
+    struct LocalDeviceSidebarSnapshot: Sendable {
         let projects: [ProjectSummary]
         let workspacesByProject: [String: [WorkspaceSummary]]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
@@ -2693,6 +2692,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // reason so the sidebar can render the local device as offline (mirroring remote devices)
         // instead of failing the whole snapshot. The overview falls back to an empty payload.
         let localOfflineMessage: String?
+    }
+
+    struct SidebarDataSnapshot: Sendable {
+        let config: AppConfig
+        let local: LocalDeviceSidebarSnapshot
+    }
+
+    enum SidebarReloadPayload: Sendable {
+        case terminalOverview(LocalDeviceSidebarSnapshot)
+        case fullSnapshot(SidebarDataSnapshot)
     }
 
     enum SidebarDeviceLoadState: Sendable, Hashable {
@@ -3364,96 +3373,130 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return dismissedAttentionItemIDs.contains(entry.attentionID)
     }
 
+    private enum LocalDeviceSnapshotPurpose: Sendable {
+        case launch
+        case refresh
+    }
+
+    /// The cold launch owns the one unconditional identity bootstrap for this app run. Later full
+    /// snapshots use the stored local device and bootstrap only when credentials or endpoint recovery
+    /// genuinely require it.
     nonisolated static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
+        await sidebarDataSnapshot(purpose: .launch)
+    }
+
+    nonisolated static func refreshedSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
+        await sidebarDataSnapshot(purpose: .refresh)
+    }
+
+    /// The terminal signal's narrow loader: the same authoritative local-device payload a full snapshot
+    /// applies, without reading app config or touching any remote section.
+    nonisolated static func localDeviceOverviewSnapshot() async -> Result<LocalDeviceSidebarSnapshot, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let database = try SpacesClientDatabase.defaultDatabase()
+                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                return .success(try loadLocalDeviceSidebarSnapshot(database: database, clientApp: clientApp, purpose: .refresh))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func sidebarDataSnapshot(purpose: LocalDeviceSnapshotPurpose) async -> Result<SidebarDataSnapshot, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let snapshotStartedAt = ProcessInfo.processInfo.systemUptime
                 let config = try clientAppConfig()
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
-                // The sidebar shows every paired device at once; the initial snapshot
-                // always loads the local device first, then remote sections stream in
-                // independently (see loadRemoteDeviceSections).
-                let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let database = try SpacesClientDatabase.defaultDatabase()
-                // The local daemon being unreachable is an offline state, not a snapshot failure: degrade to
-                // an empty overview tagged with the reason so the sidebar shows "This Mac" offline the same
-                // way remote devices do, while the rest of the snapshot (config and the paired-device record,
-                // both read from the local database) still loads. This covers both failure points — the
-                // bootstrap call (the daemon never came up) and the overview round-trip (the daemon answered
-                // but its overview failed). A bootstrap failure falls back to the last stored local device
-                // record so "This Mac" still has an identity to render; with no stored record (a first launch
-                // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
-                // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
-                // fails writing the paired-device record or saving stored credentials is a real error, not
-                // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
-                let localDevice: SpacesPairedDeviceRecord
-                let bootstrapOfflineMessage: String?
-                do {
-                    localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: deviceClientApp)
-                    bootstrapOfflineMessage = nil
-                } catch {
-                    guard SpacesDeviceClient.isLocalDaemonUnreachableError(error),
-                        let storedLocalDevice = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)
-                    else { throw error }
-                    localDevice = storedLocalDevice
-                    bootstrapOfflineMessage = error.localizedDescription
-                }
-                // Read compatibility from the overview's inline frozen-core status: the compatible steady
-                // state costs a single round-trip, and only an incompatible/too-old daemon falls back to the
-                // standalone handshake (which stays decodable when the overview would not), so the local
-                // device can show the restart/update block instead of a generic load error.
-                let localDaemonStatus: TerminalServiceDaemonStatus?
-                let localCompatibility: SpacesWireCompatibility?
-                let localOverview: SpacesDeviceOverviewPayload
-                let localOfflineMessage: String?
-                if let bootstrapOfflineMessage {
-                    // Bootstrap already failed; skip the overview round-trip (it would only fail too) and
-                    // render offline directly from the stored device record.
-                    localDaemonStatus = nil
-                    localCompatibility = nil
-                    localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
-                    localOfflineMessage = bootstrapOfflineMessage
-                } else {
-                    do {
-                        let localResolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: deviceClientApp)
-                        localDaemonStatus = localResolution.daemonStatus
-                        localCompatibility = localResolution.compatibility
-                        // A blocked (incompatible) device has no decodable overview to show; render the block
-                        // from an empty snapshot instead.
-                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload.offlinePlaceholder
-                        localOfflineMessage = nil
-                    } catch {
-                        // Only a reachability failure degrades to offline. An error from a reachable daemon
-                        // (a database/migration failure, an authorization rejection, a malformed overview)
-                        // must surface through the snapshot's failure path, not be hidden behind the offline
-                        // sidebar/restart flow.
-                        guard SpacesDeviceClient.isLocalDaemonUnreachableError(error) else { throw error }
-                        localDaemonStatus = nil
-                        localCompatibility = nil
-                        localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
-                        localOfflineMessage = error.localizedDescription
-                    }
-                }
-                let collapseStates = (try? database.projectCollapseStates(deviceID: localDevice.id)) ?? [:]
-                let mapped = deviceSidebarData(from: localOverview, deviceID: localDevice.id, projectCollapseStates: collapseStates)
-                let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
-                logStartupSnapshotProfile(
-                    "sidebar_snapshot_local_device_ready",
-                    details: "device=\(localDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id, deviceName: localDevice.name)
-                logStartupSnapshotProfile(
-                    "sidebar_snapshot_alerts_ready",
-                    details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
+                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                let local = try loadLocalDeviceSidebarSnapshot(database: database, clientApp: clientApp, purpose: purpose)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_complete", details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
-                return .success(
-                    .init(
-                        config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
-                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: localDevice.id,
-                        localDeviceName: localDevice.name, localPairedDevice: localDevice, localDeviceOverview: localOverview,
-                        localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility, localOfflineMessage: localOfflineMessage))
+                return .success(.init(config: config, local: local))
             } catch { return .failure(error) }
         }.value
+    }
+
+    /// Builds the local device slice shared by cold launch, ordinary full refreshes, and the terminal-only
+    /// refresh lane. Only reachability failures become an offline placeholder; reachable authorization,
+    /// persistence, migration, and decode errors remain load failures.
+    nonisolated private static func loadLocalDeviceSidebarSnapshot(
+        database: SpacesClientDatabase, clientApp: SpacesDeviceClientApp, purpose: LocalDeviceSnapshotPurpose
+    ) throws -> LocalDeviceSidebarSnapshot {
+        let localDevice: SpacesPairedDeviceRecord
+        let bootstrapOfflineMessage: String?
+        do {
+            switch purpose {
+            case .launch:
+                localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: clientApp)
+            case .refresh:
+                localDevice = try SpacesDeviceClient.localDeviceForSidebarRefresh(database: database, clientApp: clientApp)
+            }
+            bootstrapOfflineMessage = nil
+        } catch {
+            guard SpacesDeviceClient.isLocalDaemonUnreachableError(error),
+                let storedLocalDevice = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)
+            else { throw error }
+            localDevice = storedLocalDevice
+            bootstrapOfflineMessage = error.localizedDescription
+        }
+
+        let resolvedDevice: SpacesPairedDeviceRecord
+        let localDaemonStatus: TerminalServiceDaemonStatus?
+        let localCompatibility: SpacesWireCompatibility?
+        let localOverview: SpacesDeviceOverviewPayload
+        let localOfflineMessage: String?
+        if let bootstrapOfflineMessage {
+            resolvedDevice = localDevice
+            localDaemonStatus = nil
+            localCompatibility = nil
+            localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
+            localOfflineMessage = bootstrapOfflineMessage
+        } else {
+            do {
+                let resolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: clientApp)
+                // Endpoint recovery can bootstrap a different live port. Carry that refreshed record into
+                // the UI so later actions do not keep dialing the stale address that provoked recovery.
+                if let device = resolution.overview?.device {
+                    resolvedDevice = device
+                } else {
+                    // Endpoint recovery persists the refreshed record even when a wire-incompatible
+                    // daemon cannot return a decodable overview. Adopt that live identity so the
+                    // compatibility block's remedy does not keep dialing the stale pre-recovery port.
+                    guard let storedDevice = try database.pairedDevice(id: localDevice.id) else {
+                        throw SpacesDeviceClientError.missingLocalBootstrap
+                    }
+                    resolvedDevice = storedDevice
+                }
+                localDaemonStatus = resolution.daemonStatus
+                localCompatibility = resolution.compatibility
+                localOverview = resolution.overview?.overview ?? SpacesDeviceOverviewPayload.offlinePlaceholder
+                localOfflineMessage = nil
+            } catch {
+                guard SpacesDeviceClient.isLocalDaemonUnreachableError(error) else { throw error }
+                resolvedDevice = localDevice
+                localDaemonStatus = nil
+                localCompatibility = nil
+                localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
+                localOfflineMessage = error.localizedDescription
+            }
+        }
+
+        let collapseStates = (try? database.projectCollapseStates(deviceID: resolvedDevice.id)) ?? [:]
+        let mapped = deviceSidebarData(from: localOverview, deviceID: resolvedDevice.id, projectCollapseStates: collapseStates)
+        let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
+        logStartupSnapshotProfile(
+            "sidebar_snapshot_local_device_ready",
+            details: "device=\(resolvedDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
+        let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
+        logStartupSnapshotProfile(
+            "sidebar_snapshot_alerts_ready",
+            details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
+        return LocalDeviceSidebarSnapshot(
+            projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
+            workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: resolvedDevice.id,
+            localDeviceName: resolvedDevice.name, localPairedDevice: resolvedDevice, localDeviceOverview: localOverview,
+            localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility, localOfflineMessage: localOfflineMessage)
     }
 
     nonisolated static func deviceSidebarData(

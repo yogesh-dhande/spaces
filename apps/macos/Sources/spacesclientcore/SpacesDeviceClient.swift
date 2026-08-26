@@ -107,9 +107,9 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesPairedDeviceRecord {
         let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
         return try localBootstrapLock.withLock {
-            // Present the token we already hold so the daemon keeps it instead of rotating it: the local
-            // device re-bootstraps on every sidebar reload, and a rotated token would invalidate the
-            // tokens held by live Device API connections (terminal streams and control requests).
+            // Present the token we already hold so the daemon keeps it instead of rotating it: launch
+            // and genuine recovery bootstraps can overlap live Device API connections, and a rotated
+            // token would invalidate the credentials those connections already hold.
             let presentedToken = (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: profile)) ?? nil
             let response = try bootstrap(clientApp, presentedToken)
             // The local control socket's response carries no error code; pairing-related rejections
@@ -123,11 +123,11 @@ public enum SpacesDeviceClient {
                 certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp,
                 lastSelectedAt: timestamp)
             try database.upsert(device: record)
-            // Skip the credential write when the daemon kept the token we presented, which is the
-            // overwhelmingly common case: this runs on every sidebar reload, and `saveToken` is an atomic
-            // file replace (temp write, rename, chmod) that dirties a page every time even when the bytes
-            // are identical. Guarded on the device id too, because the value comparison is only meaningful
-            // when the token would be written back to the same file it was read from.
+            // Skip the credential write when the daemon kept the token we presented. `saveToken` is an
+            // atomic file replace (temp write, rename, chmod), so rewriting identical credentials during
+            // launch or recovery would dirty a page for no state change. Guarded on the device id too,
+            // because the value comparison is only meaningful when the token would be written back to the
+            // same file it was read from.
             let tokenIsUnchanged = bootstrap.deviceID == SpacesPairedDeviceRecord.localDeviceID && bootstrap.authToken == presentedToken
             if !tokenIsUnchanged {
                 try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
@@ -150,6 +150,27 @@ public enum SpacesDeviceClient {
         let hasCredentials = (try? SpacesDeviceCredentialStore.hasToken(deviceID: localDeviceID, profile: profile)) ?? false
         if hasCredentials { return nil }
         return try bootstrapLocalDevice(database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+    }
+
+    /// Resolves This Mac for a routine sidebar refresh without re-establishing identity on every load.
+    /// The paired-device row and token written by launch are the steady-state source; only a genuine
+    /// credential miss takes the bootstrap recovery path. A present token with no paired-device row is
+    /// inconsistent local state rather than permission to invent another recovery route, so it fails
+    /// loudly and lets the caller surface the load failure.
+    public static func localDeviceForSidebarRefresh(
+        database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
+    ) throws -> SpacesPairedDeviceRecord {
+        let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
+        if let recovered = try ensureLocalDeviceCredentials(
+            database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+        {
+            return recovered
+        }
+        guard let stored = try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) else {
+            throw SpacesDeviceClientError.missingLocalBootstrap
+        }
+        return stored
     }
 
     /// True when a local-device failure is a daemon-reachability problem rather than an error from a
@@ -345,7 +366,8 @@ public enum SpacesDeviceClient {
     /// handshake is issued only as a fallback when the overview itself fails to decode — a
     /// wire-incompatible daemon (a separate macOS/Linux install pair, not this build). For the local
     /// device a transport failure re-resolves the daemon's current endpoint and retries once, since a
-    /// stored local port is not durable. This is the per-refresh hot path; see
+    /// stored local port is not durable. A pinned-identity failure or unauthorized response similarly
+    /// refreshes the stored certificate or token and retries once. This is the per-refresh hot path; see
     /// `docs/implementation.md` (device compatibility handshake).
     public static func resolveOverview(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -373,28 +395,48 @@ public enum SpacesDeviceClient {
             // is gone". Only the local device needs that step: a remote device's candidate addresses are
             // already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`), so a transport
             // failure there means every address it knows was tried and none answered.
-            guard device.id == SpacesPairedDeviceRecord.localDeviceID, isDeviceAPITransportFailure(error) else {
+            guard device.id == SpacesPairedDeviceRecord.localDeviceID else {
                 return try resolutionFromHandshake(
                     device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
             }
-            return try recoveredLocalResolution(
-                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
-                bootstrap: bootstrap)
+            if isDeviceAPITransportFailure(error) {
+                return try recoveredLocalResolution(
+                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
+                    bootstrap: bootstrap, metricName: "terminal_device_local_endpoint_recovery")
+            }
+            // The daemon can retain its port while rotating its TLS identity. A local bootstrap is the
+            // trusted authority for that identity, so refresh the stored fingerprint and retry once.
+            // This remains local-only: a remote device with the same failure must be re-paired.
+            if SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) {
+                return try recoveredLocalResolution(
+                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
+                    bootstrap: bootstrap, metricName: "terminal_device_local_identity_recovery")
+            }
+            // Routine sidebar refreshes trust the stored token so their steady state has no bootstrap
+            // round-trip. If the daemon reset its pairing state while remaining reachable, the overview
+            // is the first place that stale token can be detected; recover it once and retry rather than
+            // turning the optimization into a permanent authorization failure.
+            if case SpacesDeviceClientError.requestRejected(_, .unauthorized) = error {
+                return try recoveredLocalResolution(
+                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
+                    bootstrap: bootstrap, metricName: "terminal_device_local_authorization_recovery")
+            }
+            return try resolutionFromHandshake(
+                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
         }
     }
 
-    /// The local device's bounded endpoint recovery: re-resolve this Mac's daemon and resolve once more
-    /// against it. Two steps, each taken at most once — a bootstrap that starts the daemon if it is down
-    /// and waits out a Device API listener still coming up (`defaultLocalRecoveryBootstrapProvider`), then
-    /// a single overview retry against the refreshed record. There is no loop here: a recovery that does
-    /// not succeed reports the failure rather than trying again.
+    /// The local device's bounded identity recovery: re-bootstrap This Mac and resolve once more against
+    /// the returned record. Two steps, each taken at most once — a bootstrap that refreshes the endpoint
+    /// and credentials, then a single overview retry. There is no loop here: a recovery that does not
+    /// succeed reports the failure rather than trying again.
     ///
-    /// Both outcomes are logged as `terminal_device_local_endpoint_recovery`, because a recovery that
-    /// silently fails to produce an overview is indistinguishable — from the app log alone — from a
-    /// session that was never resolvable, which is what makes this failure mode expensive to diagnose.
+    /// Both outcomes use the recovery-kind-specific metric supplied by the caller, because a recovery
+    /// that silently fails to produce an overview is otherwise indistinguishable in the app log from a
+    /// session that was never resolvable.
     private static func recoveredLocalResolution(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
-        database providedDatabase: SpacesClientDatabase?, bootstrap: LocalBootstrapProvider
+        database providedDatabase: SpacesClientDatabase?, bootstrap: LocalBootstrapProvider, metricName: String
     ) throws -> SpacesDeviceOverviewResolution {
         let startedAt = Date()
         let refreshed: SpacesPairedDeviceRecord
@@ -405,26 +447,29 @@ public enum SpacesDeviceClient {
             // The daemon could not be started or would not answer its control socket, so there is no
             // current endpoint to retry against. `isLocalDaemonUnreachableError` classifies this for the
             // caller, which degrades to an offline local section.
-            logLocalEndpointRecoveryMetric(device: device, refreshedPort: nil, startedAt: startedAt, success: false, stage: "bootstrap")
+            logLocalRecoveryMetric(
+                metricName: metricName, device: device, refreshedPort: nil, startedAt: startedAt, success: false, stage: "bootstrap")
             throw error
         }
         do {
             let resolution = try resolutionFromInlineStatus(
                 device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
-            logLocalEndpointRecoveryMetric(device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
+            logLocalRecoveryMetric(
+                metricName: metricName, device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
             return resolution
         } catch {
-            logLocalEndpointRecoveryMetric(device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
+            logLocalRecoveryMetric(
+                metricName: metricName, device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
             return try resolutionFromHandshake(
                 device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
         }
     }
 
-    private static func logLocalEndpointRecoveryMetric(
-        device: SpacesPairedDeviceRecord, refreshedPort: Int?, startedAt: Date, success: Bool, stage: String
+    private static func logLocalRecoveryMetric(
+        metricName: String, device: SpacesPairedDeviceRecord, refreshedPort: Int?, startedAt: Date, success: Bool, stage: String
     ) {
         TerminalPerformance.logMetric(
-            "terminal_device_local_endpoint_recovery", target: "device=\(device.id)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            metricName, target: "device=\(device.id)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: success, detail: "stage=\(stage) stale_port=\(device.port) live_port=\(refreshedPort.map(String.init) ?? "nil")")
     }
 

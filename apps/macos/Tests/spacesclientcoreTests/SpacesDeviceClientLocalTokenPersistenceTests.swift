@@ -5,12 +5,10 @@ import spacesdeviceapi
 
 @testable import spacesclientcore
 
-/// `bootstrapLocalDevice` runs on every sidebar reload, and the daemon keeps the token the client presents
-/// rather than rotating it, so almost every run ends up holding the token it already had on disk. Writing
-/// it back regardless made each reload replace the secret file atomically (temp write, rename, chmod),
-/// dirtying a page for identical bytes; macOS filed disk-writes resource reports against the app with this
-/// as the dominant stack. These tests pin the resulting contract: persist a token that actually changed,
-/// leave the file alone when it did not.
+/// A local bootstrap presents any token the client already holds so launch or recovery never rotates live
+/// credentials unnecessarily. Writing an unchanged token back would replace the secret file atomically
+/// (temp write, rename, chmod) and dirty a page for identical bytes. These tests pin both contracts:
+/// persist a token that actually changed, and keep routine sidebar refreshes off the bootstrap path.
 final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
     private var secretDirectory: URL!
     private var databasePath: String!
@@ -54,15 +52,15 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
             database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
         let afterFirstWrite = try fileIdentity()
 
-        // The daemon keeps the presented token, which is what it does for every reload of a client whose
-        // credentials are already valid. The stored value is already correct, so nothing should be rewritten.
+        // The daemon keeps the presented token for a client whose credentials are already valid. The
+        // stored value is already correct, so recovery bootstraps should not rewrite it.
         let recorder = PresentedTokenRecorder()
         for _ in 0..<5 {
             _ = try SpacesDeviceClient.bootstrapLocalDevice(
                 database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
         }
 
-        XCTAssertEqual(recorder.recorded, Array(repeating: "token-1", count: 5), "Each reload presents the token it already holds.")
+        XCTAssertEqual(recorder.recorded, Array(repeating: "token-1", count: 5), "Each recovery presents the token it already holds.")
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID), "token-1")
         XCTAssertEqual(
             try fileIdentity(), afterFirstWrite,
@@ -96,6 +94,53 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
             database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
 
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID), "token-1")
+    }
+
+    func testSidebarRefreshUsesTheStoredLocalDeviceWithoutBootstrappingAgain() throws {
+        let database = try SpacesClientDatabase(path: databasePath)
+        let original = try SpacesDeviceClient.bootstrapLocalDevice(
+            database: database, clientApp: Self.clientApp, now: Date(timeIntervalSince1970: 1_700_000_000),
+            bootstrap: Self.provider(issuing: "token-1"))
+        let recorder = PresentedTokenRecorder()
+
+        let refreshed = try SpacesDeviceClient.localDeviceForSidebarRefresh(
+            database: database, clientApp: Self.clientApp,
+            bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
+
+        XCTAssertEqual(recorder.recorded, [], "A routine sidebar refresh must not make a bootstrap control-socket round trip.")
+        XCTAssertEqual(refreshed, original)
+        XCTAssertEqual(try database.pairedDevice(id: original.id), original, "A refresh must not rewrite timestamps on the paired-device row.")
+    }
+
+    func testSidebarRefreshBootstrapsWhenTheStoredCredentialsAreMissing() throws {
+        let database = try SpacesClientDatabase(path: databasePath)
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(
+            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        try SpacesDeviceCredentialStore.deleteToken(deviceID: SpacesPairedDeviceRecord.localDeviceID)
+        let recorder = PresentedTokenRecorder()
+
+        let refreshed = try SpacesDeviceClient.localDeviceForSidebarRefresh(
+            database: database, clientApp: Self.clientApp,
+            bootstrap: Self.provider(issuing: "token-2", recordingPresentedInto: recorder))
+
+        XCTAssertEqual(recorder.recorded, [nil], "A genuine credential miss must retain the bootstrap recovery path.")
+        XCTAssertEqual(refreshed.id, SpacesPairedDeviceRecord.localDeviceID)
+        XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: refreshed.id), "token-2")
+    }
+
+    func testSidebarRefreshRejectsAStoredTokenWithoutALocalDeviceRow() throws {
+        let database = try SpacesClientDatabase(path: databasePath)
+        try SpacesDeviceCredentialStore.saveToken("token-1", deviceID: SpacesPairedDeviceRecord.localDeviceID)
+        let recorder = PresentedTokenRecorder()
+
+        XCTAssertThrowsError(
+            try SpacesDeviceClient.localDeviceForSidebarRefresh(
+                database: database, clientApp: Self.clientApp,
+                bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
+        ) { error in
+            XCTAssertEqual(error as? SpacesDeviceClientError, .missingLocalBootstrap)
+        }
+        XCTAssertEqual(recorder.recorded, [], "Inconsistent stored state must surface instead of adding another bootstrap path.")
     }
 
     // MARK: - Helpers

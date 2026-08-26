@@ -115,9 +115,9 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
     ///
     /// When `presentedToken` still matches the stored pairing for this installation, it is kept
     /// and returned unchanged. This keeps an already-paired client's token stable across repeated
-    /// bootstraps — the local first-party client re-bootstraps on every sidebar reload, and minting
-    /// a new token each time silently invalidated the token held by every live Device API connection
-    /// (terminal state streams and control requests), which surfaced as terminal input being dropped
+    /// bootstraps — the local first-party client bootstraps at launch and during endpoint or credential
+    /// recovery, and minting a new token each time silently invalidated the token held by every live
+    /// Device API connection (terminal state streams and control requests), which surfaced as terminal input being dropped
     /// and "terminal session is no longer available" errors. A missing or stale presented token mints
     /// a fresh token, which is the first-pair and re-pair path.
     public func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken: String? = nil) throws -> String {

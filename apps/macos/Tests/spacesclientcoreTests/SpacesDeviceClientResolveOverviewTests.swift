@@ -84,6 +84,22 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, Self.livePort)
     }
 
+    func testStaleLocalPortRecoveryPersistsTheCurrentRecordWhenTheDaemonIsIncompatible() throws {
+        let root = try makeTemporaryRoot()
+        let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+        try database.upsert(device: Self.localDevice(port: Self.stalePort))
+        let probe = LocalEndpointProbe(livePort: Self.livePort, protocolVersion: SpacesWireProtocol.version + 1)
+
+        let resolution = try SpacesDeviceClient.resolveOverview(
+            device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
+
+        XCTAssertEqual(resolution.compatibility, .clientTooOld)
+        XCTAssertNil(resolution.overview)
+        XCTAssertEqual(probe.bootstrapCount, 1)
+        XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, Self.livePort)
+    }
+
     /// The harder case, and the one the ended-session-scroll E2E exercises: the local daemon is not
     /// running at all when the resolve starts, so nothing answers on any port and the request burns its
     /// whole timeout. The recovery has to bring the daemon back — `defaultLocalRecoveryBootstrapProvider`
@@ -107,6 +123,43 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         XCTAssertEqual(probe.bootstrapCount, 1)
         XCTAssertEqual(probe.dialedPorts, [Self.stalePort, Self.livePort])
         XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, Self.livePort)
+    }
+
+    func testRevokedLocalTokenReBootstrapsAndRetriesTheOverviewOnce() throws {
+        let root = try makeTemporaryRoot()
+        let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+        try database.upsert(device: Self.localDevice(port: Self.livePort))
+        let probe = LocalEndpointProbe(livePort: Self.livePort)
+        probe.rejectsFirstOverviewAsUnauthorized = true
+
+        let resolution = try SpacesDeviceClient.resolveOverview(
+            device: Self.localDevice(port: Self.livePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
+
+        XCTAssertEqual(resolution.compatibility, .compatible)
+        XCTAssertEqual(probe.bootstrapCount, 1)
+        XCTAssertEqual(probe.dialedPorts, [Self.livePort, Self.livePort], "Authorization recovery retries exactly once against the refreshed identity.")
+    }
+
+    func testRotatedLocalCertificateOnTheSamePortReBootstrapsAndRetriesWithTheCurrentIdentity() throws {
+        let root = try makeTemporaryRoot()
+        let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+        let staleDevice = Self.localDevice(port: Self.livePort, certificateFingerprint: "SHA256:stale-local")
+        try database.upsert(device: staleDevice)
+        let probe = LocalEndpointProbe(livePort: Self.livePort)
+
+        let resolution = try SpacesDeviceClient.resolveOverview(
+            device: staleDevice, clientApp: Self.clientApp, profile: Self.profile(root: root), requestProvider: probe.requestProvider,
+            database: database, bootstrap: probe.bootstrapProvider)
+
+        XCTAssertEqual(resolution.compatibility, .compatible)
+        XCTAssertEqual(resolution.overview?.device.certificateFingerprint, "SHA256:local")
+        XCTAssertEqual(probe.bootstrapCount, 1)
+        XCTAssertEqual(probe.dialedPorts, [Self.livePort, Self.livePort], "Identity recovery keeps the daemon's unchanged port.")
+        XCTAssertEqual(probe.dialedFingerprints, ["SHA256:stale-local", "SHA256:local"])
+        XCTAssertEqual(
+            try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.certificateFingerprint, "SHA256:local",
+            "The trusted local bootstrap persists the daemon's current identity.")
     }
 
     /// A recovery that cannot bring the daemon back reports it instead of retrying: the error it surfaces
@@ -158,10 +211,10 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
     private static let stalePort = 60839
     private static let livePort = 47925
 
-    private static func localDevice(port: Int) -> SpacesPairedDeviceRecord {
+    private static func localDevice(port: Int, certificateFingerprint: String = "SHA256:local") -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", platform: "macos", hosts: ["127.0.0.1"], port: port,
-            certificateFingerprint: "SHA256:local", createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
+            certificateFingerprint: certificateFingerprint, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
     }
 
@@ -231,17 +284,23 @@ private final class RequestProbe: @unchecked Sendable {
 private final class LocalEndpointProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let livePort: Int
+    private let protocolVersion: Int
     private var daemonRunning: Bool
     private var ports: [Int] = []
+    private var fingerprints: [String] = []
     private var names: [String] = []
     private var bootstraps = 0
 
     /// Set to model a daemon that cannot be started at all — the local control socket answers nothing.
     var failsBootstrap = false
+    /// Set to model a reachable daemon whose pairing state was reset while the client retained its token.
+    var rejectsFirstOverviewAsUnauthorized = false
+    private var didRejectOverviewAsUnauthorized = false
 
-    init(livePort: Int, daemonRunning: Bool = true) {
+    init(livePort: Int, daemonRunning: Bool = true, protocolVersion: Int = SpacesWireProtocol.version) {
         self.livePort = livePort
         self.daemonRunning = daemonRunning
+        self.protocolVersion = protocolVersion
     }
 
     var dialedPorts: [Int] {
@@ -256,6 +315,12 @@ private final class LocalEndpointProbe: @unchecked Sendable {
         return names
     }
 
+    var dialedFingerprints: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return fingerprints
+    }
+
     var bootstrapCount: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -266,15 +331,26 @@ private final class LocalEndpointProbe: @unchecked Sendable {
         { request, device, _, _ in
             self.lock.lock()
             self.ports.append(device.port)
+            self.fingerprints.append(device.certificateFingerprint)
             self.names.append(request.command.name)
             let livePort = self.livePort
+            let protocolVersion = self.protocolVersion
             let daemonRunning = self.daemonRunning
+            let rejectsAsUnauthorized = self.rejectsFirstOverviewAsUnauthorized && !self.didRejectOverviewAsUnauthorized
+            if rejectsAsUnauthorized { self.didRejectOverviewAsUnauthorized = true }
             self.lock.unlock()
             // Nothing is listening, so the dial hangs until the request's own timeout — the shape the
             // failing E2E run recorded (a full 10s spent before the resolve reported nothing).
             guard daemonRunning else { throw POSIXError(.ETIMEDOUT) }
             guard device.port == livePort else { throw POSIXError(.ECONNREFUSED) }
+            guard device.certificateFingerprint == "SHA256:local" else {
+                throw TerminalServiceTLSError.certificatePinMismatch(
+                    expected: device.certificateFingerprint, actual: "SHA256:local")
+            }
             guard request.command.name == "overview" else { throw POSIXError(.EINVAL) }
+            if rejectsAsUnauthorized {
+                throw SpacesDeviceClientError.requestRejected(message: "Unauthorized", code: .unauthorized)
+            }
             return SpacesDeviceAPIResponse(
                 ok: true, message: "ok",
                 result: .overview(
@@ -282,7 +358,7 @@ private final class LocalEndpointProbe: @unchecked Sendable {
                         workspaces: [], sessions: [],
                         daemonStatus: TerminalServiceDaemonStatus(
                             version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
-                            protocolVersion: SpacesWireProtocol.version))))
+                            protocolVersion: protocolVersion))))
         }
     }
 

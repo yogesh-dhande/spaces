@@ -37,19 +37,38 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         remoteOverviewSubscriptions = RemoteOverviewSubscriptionCoordinator(requestReconcile: { [weak self] in
             self?.refreshRemoteOverviewSubscriptions()
         })
-        reloadCoordinator = SidebarReloadCoordinator<SidebarDataSnapshot>(
-            loadSnapshot: { [weak self] in
+        reloadCoordinator = SidebarReloadCoordinator<SidebarReloadPayload>(
+            loadSnapshot: { [weak self] scope in
                 // Captured before the (off-main) DB read below, at the moment this reload's data starts
                 // being gathered: see `capturedLocalReloadEpoch`. `SidebarReloadCoordinator` runs at most
                 // one load at a time and applies before starting the next, so a plain instance field
                 // carries this safely from here to the apply site.
                 self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
-                if let override = self?.loadSnapshotOverrideForTesting { return await override() }
-                return await AppKitController.initialSidebarDataSnapshot()
+                switch scope {
+                case .terminalOverview:
+                    let result = if let override = self?.localOverviewLoadOverrideForTesting {
+                        await override()
+                    } else {
+                        await AppKitController.localDeviceOverviewSnapshot()
+                    }
+                    return result.map(SidebarReloadPayload.terminalOverview)
+                case .fullSnapshot:
+                    let result = if let override = self?.loadSnapshotOverrideForTesting {
+                        await override()
+                    } else {
+                        await AppKitController.refreshedSidebarDataSnapshot()
+                    }
+                    return result.map(SidebarReloadPayload.fullSnapshot)
+                }
             },
-            applySnapshot: { [weak self] snapshot, forceRemoteRefresh, bypassesBackoff in
-                self?.applySidebarDataSnapshot(
-                    snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+            applySnapshot: { [weak self] payload, forceRemoteRefresh, bypassesBackoff in
+                switch payload {
+                case .terminalOverview(let snapshot):
+                    self?.applyLocalDeviceSidebarSnapshot(snapshot, preserveDetailPane: true)
+                case .fullSnapshot(let snapshot):
+                    self?.applySidebarDataSnapshot(
+                        snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+                }
             },
             handleFailure: { [weak self] error, failurePlaceholderMessage in
                 guard let self else { return }
@@ -66,7 +85,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     typealias OutlineItemRef = AppKitController.OutlineItemRef
     typealias DeviceSection = AppKitController.DeviceSection
     typealias SidebarDeviceLoadState = AppKitController.SidebarDeviceLoadState
+    typealias LocalDeviceSidebarSnapshot = AppKitController.LocalDeviceSidebarSnapshot
     typealias SidebarDataSnapshot = AppKitController.SidebarDataSnapshot
+    typealias SidebarReloadPayload = AppKitController.SidebarReloadPayload
+    typealias ReloadScope = SidebarReloadCoordinator<SidebarReloadPayload>.ReloadScope
     typealias AlertsGroup = AppKitController.AlertsGroup
     typealias SidebarArrowSelectionTarget = AppKitController.SidebarArrowSelectionTarget
 
@@ -136,18 +158,24 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// connects, the stops, and the sidebar painting; the coordinator decides what each connect
     /// result and disconnect means.
     private var remoteOverviewSubscriptions: RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIOverviewStreamClient>!
-    private var reloadCoordinator: SidebarReloadCoordinator<SidebarDataSnapshot>!
+    private var reloadCoordinator: SidebarReloadCoordinator<SidebarReloadPayload>!
     /// Stands in for the daemon read a reload performs, so a test can drive an apply with a snapshot of
     /// its own choosing and assert what the app does once it lands.
     var loadSnapshotOverrideForTesting: (@MainActor () async -> Result<SidebarDataSnapshot, any Error>)?
+    /// Stands in for the narrow local-overview read used by terminal runtime signals.
+    var localOverviewLoadOverrideForTesting: (@MainActor () async -> Result<LocalDeviceSidebarSnapshot, any Error>)?
     /// `PanelCoordinator.paneReplacementEpoch` as of the moment the in-flight local reload's `loadSnapshot`
     /// began gathering data. Read at apply time to tell a snapshot whose DB read predates a pane
     /// replacement from one that postdates it: see `PanelCoordinator.paneReplacementEpoch` and the guard
     /// around the retarget/prune block in `applySidebarDataSnapshot`.
     private var capturedLocalReloadEpoch = 0
-    /// Set when a database-change signal arrives while the user is mid-edit;
-    /// flushed at idle points so a deferred change is not lost.
-    private var pendingDatabaseReload = false
+    /// The strongest reload scope requested while the user is mid-edit; flushed at idle points so a
+    /// deferred database or terminal-runtime change is not lost.
+    private var pendingReloadScope: ReloadScope?
+    /// A narrow terminal refresh cannot complete cold-start recovery because it intentionally carries
+    /// no config or remote-device work. Until one full snapshot applies, terminal signals therefore
+    /// retain full scope instead of leaving a successful local overview behind the launch placeholder.
+    private var hasAppliedFullSidebarSnapshot = false
     /// The signed outline rows the next applied change is diffed against, and the baseline every
     /// wholesale rebuild refreshes. `nil` until the first apply, which therefore rebuilds everything.
     ///
@@ -237,7 +265,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Cancels in-flight reload state. Called from the host's background-service
     /// teardown and termination paths.
     func stopSidebarTasks() {
-        pendingDatabaseReload = false
+        pendingReloadScope = nil
         reloadCoordinator.stop()
         stopRemoteOverviewSubscriptions()
     }
@@ -246,22 +274,31 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     /// Reloads sidebar metadata after a database write, signaled by whichever
     /// process committed it (`IPCNotification.databaseDidChange`). Catches external
-    /// CLI/daemon edits (for example title changes) that no other event-driven
-    /// reload would observe. Driven by the writer, so there is no polling and no
+    /// CLI/daemon database edits that no other event-driven reload would observe.
+    /// Driven by the writer, so there is no polling and no
     /// file-watch feedback loop from the app's own reads.
     func handleDatabaseDidChange() {
-        guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
-            pendingDatabaseReload = true
-            return
-        }
-        requestSidebarReload()
+        requestOrDeferReload(scope: .fullSnapshot)
     }
 
-    /// Flushes a database-driven reload deferred while the user was mid-edit.
+    /// Refreshes only This Mac's overview after terminal runtime state changes outside the database.
+    func handleTerminalOverviewDidChange() {
+        requestOrDeferReload(scope: hasAppliedFullSidebarSnapshot ? .terminalOverview : .fullSnapshot)
+    }
+
+    private func requestOrDeferReload(scope: ReloadScope) {
+        guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
+            pendingReloadScope = pendingReloadScope.map { ReloadScope.merged($0, scope) } ?? scope
+            return
+        }
+        reloadCoordinator.request(scope: scope)
+    }
+
+    /// Flushes a signal-driven reload deferred while the user was mid-edit.
     func flushPendingDatabaseReloadIfNeeded() {
-        guard pendingDatabaseReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
-        pendingDatabaseReload = false
-        requestSidebarReload()
+        guard let scope = pendingReloadScope, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingReloadScope = nil
+        reloadCoordinator.request(scope: scope)
     }
 
     func canPreserveDetailPaneAfterSidebarReload() -> Bool {
@@ -339,7 +376,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// for a specific device again. See `startRemoteOverviewPull`.
     func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
         reloadCoordinator.request(
-            failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+            scope: .fullSnapshot, failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh,
+            bypassesBackoff: bypassesBackoff)
     }
 
     /// Requests a reload and returns once the snapshot it starts has been applied, for a caller whose
@@ -359,15 +397,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         await reloadCoordinator.requestAndAwaitNextRun()
     }
 
+    func drainSidebarRefreshForTesting() async {
+        await reloadCoordinator.drainCurrentReloadForTesting()
+    }
+
     func applySidebarDataSnapshot(
         _ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool = false
     ) {
         host.logStartupProfile("apply_snapshot_start")
-        let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        pendingDatabaseReload = false
-        host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
         host.loadShortcutSpecs()
+        applyLocalDeviceSidebarSnapshot(snapshot.local, preserveDetailPane: preserveDetailPane)
+        performOwedLaunchLandingIfNeeded()
+        loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+        hasAppliedFullSidebarSnapshot = true
+    }
+
+    func applyLocalDeviceSidebarSnapshot(_ snapshot: LocalDeviceSidebarSnapshot, preserveDetailPane: Bool = false) {
+        let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
+        host.commandPalette.invalidateCommandPaletteCache()
         // Update the local device's section in place and keep already-loaded remote
         // sections, so a periodic refresh never makes remote devices vanish and
         // reload. Skip the full outline reload entirely when the local overview is
@@ -523,9 +571,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
-        performOwedLaunchLandingIfNeeded()
         host.reopenPersistedPanelWindowsIfPossible()
-        loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
 
     /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no

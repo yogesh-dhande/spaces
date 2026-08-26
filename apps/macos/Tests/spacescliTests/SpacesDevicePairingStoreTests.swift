@@ -41,8 +41,8 @@ final class SpacesDevicePairingStoreTests: XCTestCase {
                 deviceName: "MacBook Pro", appVersion: "1.0")
 
             let token = try store.issueToken(for: clientApp)
-            // Re-bootstrapping while presenting the current token keeps it, so the local
-            // first-party client (which re-bootstraps on every sidebar reload) stays authorized
+            // Re-bootstrapping while presenting the current token keeps the local first-party client
+            // authorized during endpoint or credential recovery
             // instead of invalidating the tokens held by its live Device API connections.
             let reissued = try store.issueToken(for: clientApp, presentedToken: token)
             XCTAssertEqual(reissued, token)
