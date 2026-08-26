@@ -310,8 +310,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 ### Discovery
 - Spaces should periodically discover valid git worktrees for registered projects.
 - Newly discovered worktrees should become workspaces automatically.
-- A non-default workspace whose worktree is gone is removed automatically, the same way the Delete action removes one; there is nothing left to run it in.
-- Discovery imports whatever worktrees stand on disk, so a workspace whose worktree is still there is always listed. Deleting a workspace removes its worktree with its record, which is what keeps it from coming back; a worktree left at that path — one the delete could not remove, or one made there afterwards — is live work and is imported as a new workspace. Hiding is how an existing worktree is kept out of view: a hidden workspace keeps its record, so discovery leaves it alone rather than re-importing it.
+- A non-default workspace whose worktree is gone is removed automatically, the same way the Delete action removes one; there is nothing left to run it in. A workspace checkout directory that remains on disk keeps its existing record when Git omits it from the worktree listing, since the listing alone is not proof that the user's checkout is gone.
+- Discovery imports valid worktrees reported by Git. Deleting a workspace removes its worktree with its record, which is what keeps it from coming back; a valid worktree left at that path — one the delete could not remove, or one made there afterwards — is live work and is imported as a new workspace. Hiding is how an existing worktree is kept out of view: a hidden workspace keeps its record, so discovery leaves it alone rather than re-importing it.
 
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and captures the resulting windows. It starts no coding agents: an agent exists only when an agent command runs in a terminal.
