@@ -783,6 +783,32 @@
             }
         }
 
+        /// A ref can resolve to a commit while still having no common history with the workspace's
+        /// `HEAD` (for example, an orphan branch). That is a durable invalid scope, not a daemon failure:
+        /// the web Editor must stop retrying it instead of receiving `.internalError` forever after the
+        /// up-front `rev-parse` check accepts the ref.
+        func testWorkspaceDiffWithAResolvableUnrelatedRefReturnsInvalidArgument() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["checkout", "--orphan", "unrelated-base"], cwd: repo.path)
+                try runGit(["rm", "-rf", "."], cwd: repo.path)
+                try "unrelated history".write(to: repo.appendingPathComponent("UNRELATED.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "UNRELATED.md"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "unrelated history"], cwd: repo.path)
+                try runGit(["checkout", "main"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiff(
+                            SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "unrelated-base")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Refs 'unrelated-base' and HEAD have no common history.")
+            }
+        }
+
         /// `lastCommit` diffs `HEAD`'s parent against `HEAD` only — committed changes, with no working-tree
         /// or untracked involvement at all. An uncommitted edit and an untracked file sitting alongside a
         /// real committed change must both be absent from the result.

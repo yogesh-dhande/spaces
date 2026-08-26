@@ -90,6 +90,12 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let trailingDiffRefreshQueued = false;
   let trailingPreserveScroll = true;
   let trailingDiffTrigger: DiffRenderTrigger = "workspaceChange";
+  // A configured base is stored as a short branch name, while a workspace may only have its
+  // remote-tracking counterpart (for example `origin/main`). The preset resolves that spelling
+  // lazily on activation so a diff-only pane does not pay for a ref listing at startup. This token
+  // also prevents a slow listing reply from overriding a later user-selected scope.
+  let configuredBaseSelectionToken = 0;
+  let configuredBaseRefName: string | undefined;
 
   const pane = document.createElement("div");
   pane.className = "pane";
@@ -236,6 +242,26 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     bridge.notifyEditorUIStateChanged(editorUIState);
   }
 
+  function selectConfiguredBaseBranch(baseBranch: string): void {
+    const token = ++configuredBaseSelectionToken;
+    void bridge
+      .workspaceRefList()
+      .then((refs) => {
+        if (token !== configuredBaseSelectionToken) return;
+        const remoteOnlyName = `origin/${baseBranch}`;
+        const refName = refs.branches.includes(baseBranch)
+          ? baseBranch
+          : refs.branches.includes(remoteOnlyName)
+            ? remoteOnlyName
+            : baseBranch;
+        dispatch({ type: "setScope", scope: { kind: "ref", refName } }, refName);
+      })
+      .catch(() => {
+        // Leave the current scope unchanged when the lazy listing cannot be read; activating the
+        // preset again retries the same single lookup, just like the ref-search overlay does.
+      });
+  }
+
   /** Opens `path` in Editor mode, switching modes first if the pane isn't already there — the
    *  common landing point for all three entry points Design O/K define (see this file's imports'
    *  doc comments): the ⌘P overlay (outside the diff), the Files tree, and the Changes list's own
@@ -302,6 +328,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       scope: state.scope,
       layout: state.layout,
       baseBranch: initPayload.baseBranch,
+      baseBranchRefName: configuredBaseRefName,
       agents: lastCommentsToolbarState.agents,
       selectedAgentId: lastCommentsToolbarState.selectedAgentId,
       draftCount: lastCommentsToolbarState.draftCount,
@@ -311,6 +338,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const toolbar = renderToolbar(toolbarHost, buildToolbarState(), {
     onModeChange: (mode) => dispatch({ type: "setMode", mode }),
     onScopeChange: (scope) => dispatch({ type: "setScope", scope }),
+    onBaseBranchSelect: selectConfiguredBaseBranch,
     onOpenRefSearch: (mode) => refSearchDialog.show(mode),
     onLayoutChange: (layout) => dispatch({ type: "setLayout", layout }),
     onAgentSelect: (id) => comments.onAgentSelected(id),
@@ -567,7 +595,11 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     });
   }
 
-  function dispatch(action: CodePaneAction): void {
+  function dispatch(action: CodePaneAction, configuredBaseScopeRefName?: string): void {
+    if (action.type === "setScope") {
+      configuredBaseSelectionToken += 1;
+      configuredBaseRefName = configuredBaseScopeRefName;
+    }
     state = codePaneReducer(state, action);
     toolbar.update(buildToolbarState());
     renderBody();

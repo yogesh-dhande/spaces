@@ -12,6 +12,10 @@ import { DiffLayout } from "./state";
 export interface ToolbarCallbacks {
   onModeChange(mode: CodePaneMode): void;
   onScopeChange(scope: DiffScope): void;
+  /** The configured-base preset was picked. The owner resolves its stored short name against the
+   *  workspace's current refs before dispatching the scope (remote-only branches are listed as
+   *  `origin/<name>`). */
+  onBaseBranchSelect(baseBranch: string): void;
   /** "Branch…" or "Commit or ref…" was picked from the compare menu — the caller opens
    *  `refSearchDialog.ts` in the corresponding mode. Unlike `onScopeChange`, this never changes
    *  `ToolbarState` itself (the dialog's own eventual pick does, via `onScopeChange`), so the
@@ -30,6 +34,10 @@ export interface ToolbarState {
    *  `CodePaneInitPayload.baseBranch` (fixed for the pane's lifetime). Drives the compare menu's
    *  "vs <baseBranch>" preset, which is omitted entirely (not disabled) when this is absent. */
   baseBranch?: string;
+  /** The exact ref selected by the configured-base preset, if that preset owns the current scope.
+   *  This is separate from `baseBranch` because a manually selected `origin/<baseBranch>` is not
+   *  the preset when a local base ref is also available. */
+  baseBranchRefName?: string;
   /** Agents running in this workspace, for the assigned-agent picker. */
   agents: CodePaneAgentSummary[];
   /** `undefined` when zero agents run, or when more than one runs and none has been picked yet
@@ -238,10 +246,14 @@ export function renderToolbar(
         if (state.baseBranch !== undefined) {
           const baseBranch = state.baseBranch;
           menu.appendChild(
-            menuItem(`vs ${baseBranch}`, kind === "ref" && state.scope.refName === baseBranch, () => {
-              closeCompareMenu();
-              callbacks.onScopeChange({ kind: "ref", refName: baseBranch });
-            }),
+            menuItem(
+              `vs ${baseBranch}`,
+              kind === "ref" && state.scope.refName === state.baseBranchRefName,
+              () => {
+                closeCompareMenu();
+                callbacks.onBaseBranchSelect(baseBranch);
+              },
+            ),
           );
         }
         menu.appendChild(

@@ -94,7 +94,7 @@ const hoisted = vi.hoisted(() => {
     resolve: (result: { scopeSignature: string; files: unknown[] }) => void;
     reject: (error: unknown) => void;
   }> = [];
-  const workspaceDiff = vi.fn(() => new Promise((resolve, reject) => pendingDiffCalls.push({ resolve, reject })));
+  const workspaceDiff = vi.fn((_scope: unknown) => new Promise((resolve, reject) => pendingDiffCalls.push({ resolve, reject })));
   const notifyModeChanged = vi.fn();
   // Controllable the same way `workspaceDiff` above is: defaults to the same permanent rejection
   // every other not-under-test bridge method uses, but a test that exercises the Files tab or the
@@ -106,6 +106,12 @@ const hoisted = vi.hoisted(() => {
   // tests (Finding C) need a real open to actually complete, so they configure a per-test resolution
   // instead of relying on the default.
   const workspaceFileRead = vi.fn().mockRejectedValue(new Error("not used"));
+  const workspaceRefList = vi.fn().mockResolvedValue({
+    branches: ["main"],
+    branchesTruncated: false,
+    commits: [],
+    commitsTruncated: false,
+  });
   // Captures every push so a test can assert on the exact `CodePaneEditorUIState` sent — see the
   // Files/Changes sidebar describe block's recent-files and sidebarMode-toggle coverage.
   const notifyEditorUIStateChanged = vi.fn();
@@ -125,6 +131,7 @@ const hoisted = vi.hoisted(() => {
     workspaceDiff,
     workspaceFileList,
     workspaceFileRead,
+    workspaceRefList,
     notifyModeChanged,
     notifyEditorUIStateChanged,
     notifyRenderMetric,
@@ -142,6 +149,7 @@ vi.mock("../src/bridge", () => ({
     },
     workspaceDiff: hoisted.workspaceDiff,
     workspaceFileRead: hoisted.workspaceFileRead,
+    workspaceRefList: hoisted.workspaceRefList,
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: hoisted.workspaceFileList,
     subscribeDiffSignature: hoisted.subscribeDiffSignature,
@@ -231,6 +239,42 @@ describe("mountRoot's diff render metrics", () => {
     // This file intentionally retains mounted panes between tests; restore this pane so its global
     // mode listener cannot perturb the later setMode no-op coverage.
     window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
+  });
+});
+
+describe("mountRoot's configured base preset", () => {
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceRefList.mockClear();
+  });
+
+  it("uses the origin-prefixed ref when the configured base is remote-only", async () => {
+    hoisted.workspaceRefList.mockResolvedValueOnce({
+      branches: ["origin/main"],
+      branchesTruncated: false,
+      commits: [],
+      commitsTruncated: false,
+    });
+    const container = document.createElement("div");
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-initial");
+    await mounted;
+
+    const compareButton = container.querySelector<HTMLButtonElement>(".compare-btn");
+    expect(compareButton).not.toBeNull();
+    compareButton!.click();
+    const preset = [...container.querySelectorAll<HTMLButtonElement>(".compare-menu .item")].find(
+      (item) => item.textContent === "vs main",
+    );
+    expect(preset).not.toBeUndefined();
+    preset!.click();
+
+    await vi.waitFor(() => expect(hoisted.workspaceRefList).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    expect(hoisted.workspaceDiff.mock.calls[1]![0]).toEqual({ kind: "ref", refName: "origin/main" });
+    resolveDiff(1, [], "sig-origin-main");
   });
 });
 

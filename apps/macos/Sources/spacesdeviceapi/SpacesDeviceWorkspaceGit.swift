@@ -589,9 +589,15 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // here is left to fail honestly with `merge-base`'s own typed git error rather than being
             // papered over — unlike the nil-`refName` path below, which treats an unborn `HEAD` as a
             // supported "changes in a repo with no commits yet" case.
-            compareRef = try gitClient.runGitAndCapture(
-                ["-C", workspaceDir, "merge-base", normalizedRef, "HEAD"], timeout: try remainingTimeout(start: start)
+            let mergeBase = try gitClient.runGitAndCapture(
+                ["-C", workspaceDir, "merge-base", normalizedRef, "HEAD"], timeout: try remainingTimeout(start: start), allowedExitCodes: [0, 1]
             ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !mergeBase.isEmpty else {
+                throw NSError(
+                    domain: "SpacesDeviceAPIServer", code: 400,
+                    userInfo: [NSLocalizedDescriptionKey: "Refs '\(normalizedRef)' and HEAD have no common history."])
+            }
+            compareRef = mergeBase
         } else {
             // `scopeSnapshot` already distinguished an unborn HEAD from an execution failure while building
             // the signature, so reuse that exact answer rather than immediately paying for the same probe.

@@ -1035,6 +1035,8 @@ Non-obvious constraints that shaped the code. Each names a trap and the conseque
 ### Editor
 
 - **`open -b <id> --args …` never reaches a running app.** macOS drops `--args` when the target application is already running, so a remote URI silently fails to open. Launches go through the editor's own CLI tool instead.
+- **The configured-base preset resolves lazily.** On activation, the web app queries `workspaceRefList` and uses `origin/<base>` when that is the only resolvable counterpart, while keeping the configured branch name in the toolbar label; deferring this lookup avoids startup work for panes that remain in another scope or mode.
+- **A resolvable ref without a merge base is a durable scope error.** The daemon maps an empty `git merge-base` result to `.invalidArgument`, so the Editor does not retry a ref whose history is unrelated to `HEAD` as though the daemon were unavailable.
 - **Pin `TMPDIR` when launching an editor.** Going through the CLI makes the detached editor inherit the Spaces process environment. Under a harness-scoped ephemeral `TMPDIR`, the editor writes its SSH askpass script into a directory that is later torn down, and the connection fails.
 - **Devin Desktop keeps the Windsurf bundle identifier** (`com.exafunction.windsurf`) after the rebrand. Locating editors by bundle identifier rather than display name survives renames like this.
 - **Stock VS Code bundles no SSH-remote extension.** The Devin fork ships `codeium.windsurf-remote-openssh`; stock VS Code ships nothing, so a `vscode-remote://` open fails unless the client checks for a provider and offers to install one.

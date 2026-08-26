@@ -9,6 +9,7 @@ function makeCallbacks(): ToolbarCallbacks {
   return {
     onModeChange: vi.fn(),
     onScopeChange: vi.fn(),
+    onBaseBranchSelect: vi.fn(),
     onOpenRefSearch: vi.fn(),
     onLayoutChange: vi.fn(),
     onAgentSelect: vi.fn(),
@@ -128,13 +129,18 @@ describe("Toolbar — compare menu", () => {
 
     menuItems(container).find((el) => el.textContent === "vs main")!.click();
 
-    expect(callbacks.onScopeChange).toHaveBeenCalledWith({ kind: "ref", refName: "main" });
+    expect(callbacks.onBaseBranchSelect).toHaveBeenCalledWith("main");
+    expect(callbacks.onScopeChange).not.toHaveBeenCalled();
     expect(container.querySelector(".compare-menu")).toBeNull();
   });
 
   it("marks the 'vs <baseBranch>' preset 'on' only when the current scope is a ref matching the base branch", () => {
     const container = document.createElement("div");
-    renderToolbar(container, baseState({ baseBranch: "main", scope: { kind: "ref", refName: "main" } }), makeCallbacks());
+    renderToolbar(
+      container,
+      baseState({ baseBranch: "main", baseBranchRefName: "main", scope: { kind: "ref", refName: "main" } }),
+      makeCallbacks(),
+    );
     compareBtn(container).click();
     expect(menuItems(container).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(true);
 
@@ -146,6 +152,30 @@ describe("Toolbar — compare menu", () => {
     );
     compareBtn(container2).click();
     expect(menuItems(container2).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(false);
+  });
+
+  it("uses the explicit configured-base identity instead of treating every origin ref as the preset", () => {
+    const manuallySelectedRemote = document.createElement("div");
+    renderToolbar(
+      manuallySelectedRemote,
+      baseState({ baseBranch: "main", scope: { kind: "ref", refName: "origin/main" } }),
+      makeCallbacks(),
+    );
+    compareBtn(manuallySelectedRemote).click();
+    expect(menuItems(manuallySelectedRemote).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(false);
+
+    const presetSelectedRemote = document.createElement("div");
+    renderToolbar(
+      presetSelectedRemote,
+      baseState({
+        baseBranch: "main",
+        baseBranchRefName: "origin/main",
+        scope: { kind: "ref", refName: "origin/main" },
+      }),
+      makeCallbacks(),
+    );
+    compareBtn(presetSelectedRemote).click();
+    expect(menuItems(presetSelectedRemote).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(true);
   });
 
   it("omits the 'vs <baseBranch>' preset entirely when no base branch is configured", () => {
