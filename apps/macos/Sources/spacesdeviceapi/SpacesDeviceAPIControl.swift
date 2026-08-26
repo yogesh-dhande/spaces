@@ -41,8 +41,8 @@ struct SpacesDeviceAPIControlBootstrapLocalClientRequest: Codable, Equatable, Se
     let clientApp: SpacesDeviceClientApp
     /// The auth token the client already holds for the local device, if any. When it still
     /// matches the daemon's stored pairing, the daemon keeps it instead of minting a new one,
-    /// so re-bootstrapping (which happens on every sidebar reload) does not invalidate the
-    /// tokens held by live Device API connections. `nil` on first launch or after the token
+    /// so recovery bootstraps do not invalidate the tokens held by live Device API connections.
+    /// `nil` on first launch or after the token
     /// was lost, which mints a fresh token.
     let presentedToken: String?
 
