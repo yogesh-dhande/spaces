@@ -83,6 +83,7 @@ function makeBridge(): SpacesBridge & {
     notifyEditorStateChanged: () => {},
     notifyEditorUIStateChanged: () => {},
     notifyModeChanged: () => {},
+    notifyRenderMetric: () => {},
     notifyReady: () => {},
     async reviewCommentList() {
       if (bridge.failNextList) {

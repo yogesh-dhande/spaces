@@ -120,6 +120,15 @@ private struct E2EScenarioDescriptor: Sendable {
             kind: .script(
                 scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-small"],
                 environment: { $0.appProfileEnvironment(remoteEnabled: true) })),
+        E2EScenarioDescriptor(
+            name: "code-pane",
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane"], environment: { $0.codePaneEnvironment() })),
+        E2EScenarioDescriptor(
+            name: "code-pane-churn",
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane-churn"], environment: { $0.codePaneEnvironment() })),
+        E2EScenarioDescriptor(
+            name: "code-pane-soak",
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane-soak"], environment: { $0.codePaneEnvironment(soak: true) })),
     ]
 
     fileprivate static let terminal: [E2EScenarioDescriptor] = [
@@ -428,6 +437,14 @@ private struct E2ERunner {
     fileprivate func appProfileEnvironment(remoteEnabled: Bool = false) -> [String: String] {
         var environment = remoteEnvironment(enabled: remoteEnabled)
         if let samples = command.samples { environment["REAL_SYSTEM_PROFILE_REPETITIONS"] = String(samples) }
+        return environment
+    }
+
+    fileprivate func codePaneEnvironment(soak: Bool = false) -> [String: String] {
+        var environment = appProfileEnvironment(remoteEnabled: true)
+        environment["REAL_SYSTEM_PROFILE_WARMUPS"] = "1"
+        if let samples = command.samples { environment["SPACES_CODE_PANE_CHURN_ITERATIONS"] = String(samples) }
+        if soak { environment["SPACES_CODE_PANE_SOAK_SECONDS"] = String(command.durationSeconds ?? 1800) }
         return environment
     }
 

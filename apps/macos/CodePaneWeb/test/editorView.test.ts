@@ -62,6 +62,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     notifyEditorStateChanged: vi.fn(),
     notifyEditorUIStateChanged: vi.fn(),
     notifyModeChanged: vi.fn(),
+    notifyRenderMetric: vi.fn(),
     // Not used by EditorView (comments are diff-mode only) — stubbed so this satisfies
     // `SpacesBridge` without any of these tests needing to care about the comment surface.
     reviewCommentList: vi.fn().mockRejectedValue(new Error("not used")),
@@ -3220,5 +3221,23 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(fakeCodeViewControl.updateItemCalls.length).toBe(1);
+  });
+
+  it("a same-file signature reconcile during the paint wait does not cancel the file-open render milestone", async () => {
+    fakeCodeViewControl.editor = {};
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "a\n", sha256: "sha-1", size: 2 })
+      .mockResolvedValueOnce({ content: "changed\n", sha256: "sha-2", size: 8 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const onFileRendered = vi.fn();
+    const view = new EditorView(container, bridge, { onFileRendered });
+    await openFile(view, bridge, "src/a.ts");
+    await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
+
+    fireFileSignature({ path: "src/a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(onFileRendered).toHaveBeenCalledTimes(1));
+    expect(onFileRendered).toHaveBeenCalledWith("src/a.ts", expect.any(Number), 2);
   });
 });

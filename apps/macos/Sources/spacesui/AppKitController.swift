@@ -380,6 +380,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.dumpFocusableWindowNames, #selector(handleDumpFocusableWindowNamesIPC(_:))),
         (IPCNotification.selectWorkspaceDetail, #selector(handleSelectWorkspaceDetailIPC(_:))),
         (IPCNotification.openWorkspaceTerminal, #selector(handleOpenWorkspaceTerminalIPC(_:))),
+        (IPCNotification.openWorkspaceEditor, #selector(handleOpenWorkspaceEditorIPC(_:))),
         (IPCNotification.runWorkspaceProcess, #selector(handleRunWorkspaceProcessIPC(_:))),
         (IPCNotification.stopWorkspaceProcess, #selector(handleStopWorkspaceProcessIPC(_:))),
         (IPCNotification.restartWorkspaceProcess, #selector(handleRestartWorkspaceProcessIPC(_:))),
@@ -1503,6 +1504,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self, object, workspaceID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
+        }
+    }
+
+    @objc private nonisolated func handleOpenWorkspaceEditorIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.openWorkspaceEditor(workspaceID: workspaceID)
         }
     }
 
@@ -3875,7 +3885,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         var title: String {
             switch self {
-            case .openEditor: "Open editor"
+            case .openEditor: "Open Editor"
             case .revealInFinder: "Reveal in Finder"
             }
         }

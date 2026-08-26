@@ -1582,7 +1582,7 @@ import spacesterminalcore
     private func contentTitle(for pane: Pane) -> String {
         switch pane.content {
         case .terminalSession(_, let sessionID): return contentTitle(forSessionID: sessionID)
-        case .codePane: return codePaneControllers[pane.id]?.displayTitle ?? "Code"
+        case .codePane: return codePaneControllers[pane.id]?.displayTitle ?? "Editor"
         }
     }
 

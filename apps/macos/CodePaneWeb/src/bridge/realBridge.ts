@@ -1,6 +1,7 @@
 import {
   CodePaneEditorState,
   CodePaneEditorUIState,
+  CodePaneRenderMetric,
   CodePaneMode,
   DiffScope,
   DiffSignatureEvent,
@@ -168,6 +169,12 @@ class RealSpacesBridge implements SpacesBridge {
   notifyEditorUIStateChanged(state: CodePaneEditorUIState): void {
     const handler = window.webkit?.messageHandlers?.spacesBridge;
     handler?.postMessage({ method: "editorUIStateChanged", params: state });
+  }
+
+  /** Fire-and-forget browser render milestone; the host writes it to the existing DEBUG perf log. */
+  notifyRenderMetric(metric: CodePaneRenderMetric): void {
+    const handler = window.webkit?.messageHandlers?.spacesBridge;
+    handler?.postMessage({ method: "renderMetric", params: metric });
   }
 
   async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {

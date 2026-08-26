@@ -455,6 +455,31 @@ import spacesruntimecore
         #expect(file.truncated)
     }
 
+    @Test func concurrentTrackedPatchWavesPreserveOrderAndTheAggregateCap() throws {
+        let repo = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let names = (0..<10).map { String(format: "wave-%02d.txt", $0) }
+
+        for name in names {
+            try "baseline\n".write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try runGit(["add"] + names, cwd: repo.path)
+        try runGit(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "add wave files"], cwd: repo.path)
+        for (index, name) in names.enumerated() {
+            let payload = "file \(index)\n" + String(repeating: "x", count: 900 * 1024) + "\n"
+            try payload.write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+
+        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+
+        #expect(result.files.map(\.path) == names)
+        #expect(result.files.prefix(9).allSatisfy { !$0.truncated && $0.patch != nil })
+        #expect(result.files.last?.truncated == true)
+        #expect(result.files.last?.patch == nil)
+        #expect(result.files.compactMap(\.patch).reduce(0) { $0 + $1.utf8.count } <= SpacesDeviceWorkspaceDiffEngine.totalPatchByteCap)
+    }
+
     @Test func anOverCapUntrackedFileIsTruncatedWithoutReadingTheWholeFile() throws {
         let repo = try makeRepo()
         defer { try? FileManager.default.removeItem(at: repo) }
@@ -776,6 +801,39 @@ import spacesruntimecore
         let patch = try #require(entry.patch)
         #expect(patch.contains("-content A"))
         #expect(patch.contains("+content B"))
+    }
+
+    // The signature/status snapshot is intentionally reused by buildDiff. Model an agent staging an
+    // untracked file immediately before the later name-status command: the newer enumeration reports the
+    // file as tracked while the older snapshot still says `??`, but the response must keep one identity.
+    @Test func aFileStagedBetweenStatusAndNameStatusIsNotReturnedTwice() throws {
+        let repo = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try "raced content\n".write(to: repo.appendingPathComponent("raced.txt"), atomically: true, encoding: .utf8)
+
+        let shim = repo.appendingPathComponent("git-race-shim.sh")
+        let marker = repo.appendingPathComponent(".race-staged")
+        try """
+            #!/bin/sh
+            case " $* " in
+              *" --name-status "*)
+                if [ ! -e "$SPACES_RACE_MARKER" ]; then
+                  git -C "$SPACES_RACE_REPO" add raced.txt
+                  : > "$SPACES_RACE_MARKER"
+                fi
+                ;;
+            esac
+            exec git "$@"
+            """.write(to: shim, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+        let client = RemoteWorkspaceGitClient(
+            gitExecutable: shim.path,
+            environmentOverrides: ["SPACES_RACE_REPO": repo.path, "SPACES_RACE_MARKER": marker.path])
+
+        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+
+        #expect(result.files.map(\.path).filter { $0 == "raced.txt" } == ["raced.txt"])
+        #expect(result.files.first { $0.path == "raced.txt" }?.status == .added)
     }
 
     // Same collision, but under a `refName` scope: the base branch has `f.txt`, the working branch commits

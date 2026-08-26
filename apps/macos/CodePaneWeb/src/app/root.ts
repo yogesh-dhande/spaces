@@ -17,6 +17,7 @@ import { renderFileList } from "./fileList";
 import { attachFileListDivider } from "./fileListDivider";
 import { QuickOpen } from "./quickOpen";
 import { RefSearchDialog } from "./refSearchDialog";
+import { afterBrowserPaint, aggregateContentUnits } from "./renderMetrics";
 import { selectDefaultAgentId } from "./reviewComments";
 import { CodePaneAction, CodePaneState, codePaneReducer, initialState } from "./state";
 import { renderToolbar } from "./toolbar";
@@ -88,6 +89,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let diffPullInFlight = false;
   let trailingDiffRefreshQueued = false;
   let trailingPreserveScroll = true;
+  let trailingDiffTrigger: DiffRenderTrigger = "workspaceChange";
 
   const pane = document.createElement("div");
   pane.className = "pane";
@@ -151,6 +153,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       recordRecentPath(path);
       editorSidebar.setSelectedPath(path);
     },
+    onFileRendered: (_path, elapsedMs, contentUnits) => {
+      bridge.notifyRenderMetric({
+        kind: "editor",
+        trigger: "fileOpen",
+        elapsedMs: Math.round(elapsedMs),
+        fileCount: 1,
+        contentBytes: contentUnits,
+      });
+    },
   });
   // Wired here (not inside EditorView itself) so the global always reaches this exact instance's
   // live state — see Window.__spacesCollectEditorState's doc comment in bridge/types.ts and
@@ -185,7 +196,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         // The Changes tab can be reached without ever having visited Diff mode in this session
         // (e.g. a pane that opens straight into Editor mode); make sure there's an actual diff to
         // show rather than leaving the tab on the still-empty list `changesListEl` started with.
-        if (mode === "changes" && !diffLoaded) void refreshDiff(false);
+        if (mode === "changes" && !diffLoaded) void refreshDiff(false, "initial");
       },
     },
   );
@@ -368,12 +379,17 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    * `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable`'s doc comment (Swift host) for the
    * daemon-side split this depends on.
    */
-  async function doRefreshDiff(preserveScroll: boolean): Promise<void> {
+  type DiffRenderTrigger = "initial" | "scope" | "workspaceChange";
+
+  async function doRefreshDiff(preserveScroll: boolean, trigger: DiffRenderTrigger): Promise<void> {
+    const renderStartedAt = performance.now();
     const token = ++diffRequestToken;
     clearTimeout(diffRetryTimer);
     let result: WorkspaceDiffResult;
+    let fetchElapsedMs: number;
     try {
       result = await bridge.workspaceDiff(state.scope);
+      fetchElapsedMs = Math.round(Math.max(performance.now() - renderStartedAt, 0));
     } catch (err) {
       if (token !== diffRequestToken) return; // superseded: a newer refresh already won, so this failure is moot
       // A typed `SpacesBridgeError` means the daemon decoded the request and rejected it for a
@@ -415,7 +431,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           // deliberately does NOT do this — it keeps the old diff rendered while it silently
           // retries, so the old anchors are still correct.)
           comments.setFiles([]);
-          scheduleDiffRetry(preserveScroll, token);
+          scheduleDiffRetry(preserveScroll, token, trigger);
           return;
         }
         // Reset here (not just on a normal success) so a later transient failure — once this
@@ -431,7 +447,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         comments.setFiles([]);
         return;
       }
-      scheduleDiffRetry(preserveScroll, token);
+      scheduleDiffRetry(preserveScroll, token, trigger);
       return;
     }
     if (token !== diffRequestToken) return; // superseded: a newer refresh already applied its result
@@ -441,6 +457,21 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
     diffView.setFiles(files, preserveScroll);
     comments.setFiles(files);
+    afterBrowserPaint(() => {
+      if (token !== diffRequestToken) return;
+      // Editor mode keeps the diff model warm for its Changes sidebar, but `renderBody()` detaches
+      // `diffAreaEl`. Reporting that background refresh as a render would make agent churn look as
+      // though an invisible diff was painted and would invalidate visible-vs-hidden profiling.
+      if (state.mode !== "diff") return;
+      bridge.notifyRenderMetric({
+        kind: "diff",
+        trigger,
+        elapsedMs: Math.round(Math.max(performance.now() - renderStartedAt, 0)),
+        fetchElapsedMs,
+        fileCount: files.length,
+        contentBytes: aggregateContentUnits(files.map((file) => file.patch)),
+      });
+    });
   }
 
   /**
@@ -465,11 +496,12 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    * immediately (e.g. `setScope`'s synchronous `files = []` / `diffView.setLoading()`) still runs
    * before this gate is even called, so a deferred pull never leaves the user looking at stale UI.
    */
-  async function refreshDiff(preserveScroll: boolean): Promise<void> {
+  async function refreshDiff(preserveScroll: boolean, trigger: DiffRenderTrigger): Promise<void> {
     if (diffPullInFlight) {
       diffRequestToken += 1;
       clearTimeout(diffRetryTimer);
       trailingDiffRefreshQueued = true;
+      trailingDiffTrigger = trigger;
       // A single non-preserving caller (a scope switch) must win over any number of
       // scroll-preserving signature events coalesced into the same trailing pull.
       trailingPreserveScroll = trailingPreserveScroll && preserveScroll;
@@ -477,14 +509,16 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     }
     diffPullInFlight = true;
     try {
-      await doRefreshDiff(preserveScroll);
+      await doRefreshDiff(preserveScroll, trigger);
     } finally {
       diffPullInFlight = false;
       if (trailingDiffRefreshQueued) {
         trailingDiffRefreshQueued = false;
         const preserve = trailingPreserveScroll;
+        const trailingTrigger = trailingDiffTrigger;
         trailingPreserveScroll = true;
-        void refreshDiff(preserve);
+        trailingDiffTrigger = "workspaceChange";
+        void refreshDiff(preserve, trailingTrigger);
       }
     }
   }
@@ -495,13 +529,13 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    *  timer is pending makes it a no-op instead of retrying a pull for a scope nobody is viewing
    *  anymore — the scope switch's own `refreshDiff` call already starts a fresh attempt (and a
    *  fresh retry loop of its own, if that one also fails). */
-  function scheduleDiffRetry(preserveScroll: boolean, token: number): void {
+  function scheduleDiffRetry(preserveScroll: boolean, token: number, trigger: DiffRenderTrigger): void {
     const delay = Math.min(DIFF_RETRY_FLOOR_MS * 2 ** diffRetryFailures, DIFF_RETRY_CAP_MS);
     diffRetryFailures += 1;
     clearTimeout(diffRetryTimer);
     diffRetryTimer = setTimeout(() => {
       if (token !== diffRequestToken) return; // superseded while this retry was pending
-      void refreshDiff(preserveScroll);
+      void refreshDiff(preserveScroll, trigger);
     }, delay);
   }
 
@@ -510,7 +544,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     // doc comment): replace the previous subscription rather than layering another.
     unsubscribeSignature?.();
     unsubscribeSignature = bridge.subscribeDiffSignature(state.scope, () => {
-      void refreshDiff(true);
+      void refreshDiff(true, "workspaceChange");
       // A push that changed the diff may equally have added or removed files elsewhere in the
       // workspace — the same underlying git/agent activity both the diff and the full listing
       // reflect. Invalidate the shared cache unconditionally so the Files tree and ⌘P overlay pick
@@ -557,7 +591,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       renderFileList(changesListEl, files, undefined, { onSelect: changesOnSelect });
       diffView.setLoading();
       comments.setFiles([]);
-      void refreshDiff(false);
+      void refreshDiff(false, "scope");
       resubscribeDiffSignature();
     } else if (action.type === "setMode") {
       // Pushed so a hibernated pane comes back in whichever mode the user last left it in,
@@ -565,7 +599,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       // sibling `notifyModeChanged` doc comment in bridge/types.ts.
       bridge.notifyModeChanged(state.mode);
       if (state.mode === "diff" && !diffLoaded) {
-        void refreshDiff(false);
+        void refreshDiff(false, "initial");
       } else if (state.mode === "editor") {
         // Diff mode's own `renderBody()` reparents `changesListEl` OUT of the sidebar's list host
         // (`fileListEl.replaceChildren(changesListEl)`) for as long as the pane is in diff mode —
@@ -612,14 +646,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // triggers the listing).
   if (state.mode === "editor") editorSidebar.reattach();
   if (state.mode === "diff") {
-    await refreshDiff(false);
+    await refreshDiff(false, "initial");
   } else if (editorUIState.sidebarMode === "changes") {
     // Mirrors `EditorSidebar`'s own `onModeChange` handling: a pane that hibernated straight into
     // Editor mode with the Changes tab active needs the same catch-up fetch a live toggle-to-Changes
     // gets, or that tab would sit on the still-empty list `changesListEl` started with. Not awaited,
     // for the same reason `onModeChange`'s isn't: this only feeds a sidebar list, not the visible
     // main content this startup sequence is otherwise ordering around.
-    void refreshDiff(false);
+    void refreshDiff(false, "initial");
   }
   resubscribeDiffSignature();
   // Workspace-scoped, independent of `state.scope`: fetched once here regardless of which scope

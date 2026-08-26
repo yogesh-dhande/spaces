@@ -11,6 +11,7 @@ import {
   WorkspaceFileWriteResult,
 } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
+import { afterBrowserPaint } from "./renderMetrics";
 
 /** Trailing debounce for the editorStateChanged push on buffer edits (see `scheduleEditorStatePush`'s doc comment). */
 const EDITOR_STATE_DEBOUNCE_MS = 500;
@@ -32,6 +33,10 @@ export interface EditorViewCallbacks {
    *  to record `path` into recents and move the Files-tree selection (see its `openInEditor`),
    *  which is what keeps a refused or failed open from polluting either. */
   onFileOpened?(path: string): void;
+  /** Fires only after CodeView has received the file and the browser has crossed two paint frames,
+   *  making it the real-system visible-render endpoint rather than the earlier read completion.
+   *  A same-file signature reconcile does not cancel this milestone; only a newer file open does. */
+  onFileRendered?(path: string, elapsedMs: number, contentUnits: number): void;
 }
 
 /**
@@ -396,6 +401,7 @@ export class EditorView {
   }
 
   private async loadFile(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
+    const renderStartedAt = performance.now();
     const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
     try {
@@ -477,6 +483,10 @@ export class EditorView {
     this.externalChangeRetryFailures = 0;
 
     this.loadIntoCodeView(path, result.content);
+    afterBrowserPaint(() => {
+      if (generation !== this.openGeneration || this.currentPath !== path) return;
+      this.callbacks.onFileRendered?.(path, Math.max(performance.now() - renderStartedAt, 0), result.content.length);
+    });
     this.subscribeToFileSignature(path);
     // Immediate, not debounced: a file open is a discrete transition, not a buffer edit.
     this.pushEditorStateNow();

@@ -391,7 +391,7 @@ PY
 }
 
 remote_device_parity() {
-  local project_dir parity_json parity_stdout parity_log project_id default_workspace_id workspace_id session_id remote_web_service_port remote_web_service_url remote_web_browser_url
+  local project_dir parity_json parity_stdout parity_log project_id default_workspace_id workspace_id workspace_dir session_id remote_web_service_port remote_web_service_url remote_web_browser_url
   project_dir="$(create_remote_fixture_project)"
   parity_json="$TMP_ROOT/remote-device-api-parity.json"
   parity_stdout="$TMP_ROOT/remote-device-api-parity.stdout"
@@ -413,13 +413,14 @@ remote_device_parity() {
   project_id="$(json_file_field "$parity_json" "projectID")"
   default_workspace_id="$(json_file_field "$parity_json" "defaultWorkspaceID")"
   workspace_id="$(json_file_field "$parity_json" "workspaceID")"
+  workspace_dir="$(json_file_field "$parity_json" "workspaceDir")"
   session_id="$(json_file_field "$parity_json" "terminalSessionID")"
   remote_web_service_port="$(json_file_field "$parity_json" "remoteWebServicePort")"
   remote_web_service_url="$(json_file_field "$parity_json" "remoteWebServiceURL")"
   remote_web_browser_url="$(json_file_field "$parity_json" "remoteWebBrowserURL")"
   verify_remote_ssh_forward "$project_dir"
   verify_service_tunnel "$workspace_id"
-  write_result_json "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url"
+  write_result_json "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$workspace_dir" "$session_id" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url"
 }
 
 allocate_local_port() {
@@ -582,10 +583,11 @@ write_result_json() {
   local project_id="$2"
   local default_workspace_id="$3"
   local workspace_id="$4"
-  local session_id="$5"
-  local remote_web_service_port="$6"
-  local remote_web_service_url="$7"
-  local remote_web_browser_url="$8"
+  local workspace_dir="$5"
+  local session_id="$6"
+  local remote_web_service_port="$7"
+  local remote_web_service_url="$8"
+  local remote_web_browser_url="$9"
   local device_id
   device_id="$(
     python3 - "$CERTIFICATE_FINGERPRINT" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY'
@@ -598,7 +600,7 @@ print("device-" + slug[:48])
 PY
   )"
   mkdir -p "$(dirname "$RESULT_JSON")"
-  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url" <<'PY'
+  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$workspace_dir" "$session_id" "$device_id" "$AUTH_TOKEN" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url" <<'PY'
 import json
 import sys
 (
@@ -609,6 +611,7 @@ import sys
     project_id,
     default_workspace_id,
     workspace_id,
+    workspace_dir,
     session_id,
     device_id,
     auth_token,
@@ -634,6 +637,7 @@ payload = {
     "projectID": project_id,
     "defaultWorkspaceID": default_workspace_id,
     "workspaceID": workspace_id,
+    "workspaceDir": workspace_dir,
     "terminalSessionID": session_id,
     "remoteWebServicePort": int(remote_web_service_port),
     "remoteWebServiceURL": remote_web_service_url,

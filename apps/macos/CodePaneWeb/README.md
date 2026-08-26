@@ -129,6 +129,12 @@ branch on `.code`.
     from any of the three entry points (⌘P overlay, Files tree, Changes list) — is already routed
     through there. Sent immediately, with no debounce, since this state changes only on discrete
     user actions rather than continuous typing.
+  - `{method:"renderMetric", params}` — a validated diagnostic milestone after the diff or editor
+    has committed DOM work and crossed two animation frames. `params` is `{kind, trigger,
+    elapsedMs, fileCount, contentBytes}`; the native host records it only in the existing DEBUG
+    performance log. `contentBytes` is exact for the ASCII E2E scale fixtures and an intentionally
+    constant-time JavaScript string-unit approximation for arbitrary Unicode patches, avoiding an
+    up-to-8 MiB re-encode on the UI thread merely for observability.
 
   The host holds only the latest of each in memory on the pane's controller (which survives
   hibernation, unlike the `WKWebView`), and hands all three back through the next `spaces:init`

@@ -109,6 +109,7 @@ const hoisted = vi.hoisted(() => {
   // Captures every push so a test can assert on the exact `CodePaneEditorUIState` sent — see the
   // Files/Changes sidebar describe block's recent-files and sidebarMode-toggle coverage.
   const notifyEditorUIStateChanged = vi.fn();
+  const notifyRenderMetric = vi.fn();
   // round-16 Fix 1: captures every `subscribeDiffSignature` callback root.ts registers, in order,
   // so a test can simulate a diff-signature push event by invoking one directly — mirroring
   // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
@@ -126,6 +127,7 @@ const hoisted = vi.hoisted(() => {
     workspaceFileRead,
     notifyModeChanged,
     notifyEditorUIStateChanged,
+    notifyRenderMetric,
     diffSignatureCallbacks,
     subscribeDiffSignature,
   };
@@ -147,6 +149,7 @@ vi.mock("../src/bridge", () => ({
     notifyEditorStateChanged: vi.fn(),
     notifyEditorUIStateChanged: hoisted.notifyEditorUIStateChanged,
     notifyModeChanged: hoisted.notifyModeChanged,
+    notifyRenderMetric: hoisted.notifyRenderMetric,
     reviewCommentList: vi.fn().mockResolvedValue([]),
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),
@@ -199,6 +202,37 @@ function fireDiffSignature(): void {
   if (callbacks.length === 0) throw new Error("no diff-signature subscription registered yet");
   callbacks[callbacks.length - 1]!();
 }
+
+describe("mountRoot's diff render metrics", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyRenderMetric.mockClear();
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  it("does not report the background diff refresh while the diff view is detached in Editor mode", async () => {
+    const container = document.createElement("div");
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "editor" } }));
+    resolveDiff(0, [makeFile("background.ts")], "sig-background");
+    await mounted;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+
+    expect(hoisted.notifyRenderMetric).not.toHaveBeenCalled();
+    // This file intentionally retains mounted panes between tests; restore this pane so its global
+    // mode listener cannot perturb the later setMode no-op coverage.
+    window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
+  });
+});
 
 describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
   let container: HTMLElement;

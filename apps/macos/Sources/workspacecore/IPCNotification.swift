@@ -21,6 +21,9 @@ public enum IPCNotification {
     /// The app owns the ordering, so harnesses read it from the app rather than recomputing.
     public static let dumpFocusableWindowNames = Notification.Name("spaces.ipc.dump-focusable-window-names")
     public static let openWorkspaceTerminal = Notification.Name("spaces.ipc.open-workspace-terminal")
+    /// Open/focus the built-in global Editor for a workspace. Used by the real-system harness to
+    /// enter through the same AppKit funnel as the hotkey/sidebar without synthesizing a global hotkey.
+    public static let openWorkspaceEditor = Notification.Name("spaces.ipc.open-workspace-editor")
     public static let runWorkspaceProcess = Notification.Name("spaces.ipc.run-workspace-process")
     public static let stopWorkspaceProcess = Notification.Name("spaces.ipc.stop-workspace-process")
     public static let restartWorkspaceProcess = Notification.Name("spaces.ipc.restart-workspace-process")

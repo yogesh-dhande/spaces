@@ -641,7 +641,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 /// Covers `CodePaneContentController`'s hibernation seam: `contentView` is a stable container that
 /// survives the controller's whole lifetime, while the `WKWebView` itself is created by `activate()` and
 /// torn down by `deactivate()` — the expensive resource a hidden tab must not keep alive.
-@MainActor @Suite struct CodePaneContentControllerTests {
+@MainActor @Suite(.serialized) struct CodePaneContentControllerTests {
     // Held by the suite instance (Swift Testing gives each test its own), not created inline as a
     // call-site temporary: `CodePaneContentController.hosting` is `weak`, so a temporary with no
     // other strong reference would be deallocated the instant `init` returns.
@@ -827,7 +827,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForDiffCallCount(1)
         await gateway.completeDiffCall(at: 0, result: SpacesDeviceWorkspaceDiffResult(scopeSignature: "sig", files: []))
 
-        await waitUntil { !evaluator.evaluatedScripts.isEmpty }
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") } }
 
         #expect(
             evaluator.evaluatedScripts.contains { $0.contains("req-1") },
@@ -2488,7 +2488,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         let callCount = await gateway.diffCallCount()
         #expect(callCount == 0, "a stale RPC must never reach the device gateway")
-        #expect(evaluator.evaluatedScripts.isEmpty, "a stale RPC must never receive a reply either")
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("req-1") },
+            "a stale RPC must never receive a reply; unrelated page-init scripts are allowed")
     }
 
     @Test func handleScriptMessageProcessesAllThreeKindsFromTheLiveWebView() async {
@@ -2515,6 +2517,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         // ready, from the live page: triggers spaces:init, which must reflect the push above.
         content.handleScriptMessage(name: "spacesBridge", body: ["method": "ready"], senderWebView: webView)
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#""path":"foo.ts""#) } }
         #expect(
             evaluator.evaluatedScripts.contains { $0.contains(#""path":"foo.ts""#) },
             "every kind of message from the live webView must still process normally")
@@ -2540,7 +2543,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
                     commits: [SpacesDeviceWorkspaceRefListCommit(sha: "abc123", subject: "Initial commit")], commitsTruncated: false)))
 
         content.dispatch(CodePaneBridge.Request(id: "req-1", method: "workspaceRefList", params: [:]))
-        await waitUntil { !evaluator.evaluatedScripts.isEmpty }
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") && $0.contains("abc123") } }
 
         #expect(await gateway.refListCalls == ["workspace-1"], "the request must reach the gateway with this pane's workspace id")
         #expect(evaluator.evaluatedScripts.contains { $0.contains("req-1") && $0.contains("abc123") }, "the gateway's result must be replied back")
@@ -3846,7 +3849,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // been recorded, `outstandingFileWriteCount` has already been decremented back to zero and
         // `clearCommittedFileWriteIfSettled()` has already cleared `lastCommittedFileWrite`, since no
         // `await` separates those statements from the reply call in `performFileWrite`'s completion.
-        while evaluator.evaluatedScripts.count < 1 {
+        while !evaluator.evaluatedScripts.contains(where: { $0.contains("req-1") }) {
             await Task.yield()
             try? await Task.sleep(for: .milliseconds(5))
         }

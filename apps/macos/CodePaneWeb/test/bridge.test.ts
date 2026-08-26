@@ -73,6 +73,22 @@ describe("RealSpacesBridge", () => {
     expect(postMessage).toHaveBeenCalledWith({ method: "ready" });
   });
 
+  it("sends a render milestone with no request id", () => {
+    const bridge = createRealBridge();
+    bridge.notifyRenderMetric({
+      kind: "diff",
+      trigger: "scope",
+      elapsedMs: 42,
+      fileCount: 3,
+      contentBytes: 8192,
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      method: "renderMetric",
+      params: { kind: "diff", trigger: "scope", elapsedMs: 42, fileCount: 3, contentBytes: 8192 },
+    });
+  });
+
   it("posts reviewCommentList with an id and no params, and resolves with the reply", async () => {
     const bridge = createRealBridge();
     const call = bridge.reviewCommentList();

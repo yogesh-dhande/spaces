@@ -121,6 +121,18 @@ export interface DiffSignatureEvent {
 
 export type DiffSignatureListener = (event: DiffSignatureEvent) => void;
 
+/** A browser-paint milestone reported to the native DEBUG performance log. Counts are aggregate
+ *  metadata only: source text and file paths never cross this fire-and-forget channel. */
+export interface CodePaneRenderMetric {
+  kind: "diff" | "editor";
+  trigger: "initial" | "scope" | "workspaceChange" | "fileOpen";
+  elapsedMs: number;
+  /** Time through the workspace data response, before DOM/model work. Present for diff metrics. */
+  fetchElapsedMs?: number;
+  fileCount: number;
+  contentBytes: number;
+}
+
 /**
  * One file's on-disk signature, pushed whenever the host detects it changed while the editor
  * has it open. `sha256` is `undefined` iff `missing` is `true` (the file was deleted on disk);
@@ -288,6 +300,9 @@ export interface SpacesBridge {
    * push discipline of its own the way `EditorView`'s heavier, edit-driven `editorStateChanged` does.
    */
   notifyEditorUIStateChanged(state: CodePaneEditorUIState): void;
+  /** Reports completion after browser layout/paint has had two animation frames to settle. The
+   *  native host validates and records this only when DEBUG performance logging is enabled. */
+  notifyRenderMetric(metric: CodePaneRenderMetric): void;
   /** All of this workspace's draft comments, ordered by `createdAt` (server-enforced). Called once
    *  on mount to rehydrate the comment surface — see `root.ts` and `reviewComments.ts`'s doc
    *  comments for why this is not re-fetched on every diff refresh. */

@@ -524,7 +524,7 @@ extension ProcessProfileEnvironmentSuites {
                 "retarget installs a fresh controller instance rather than mutating the old one in place")
             #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected workspace")
             #expect(retargetedContent.initialMode == .diff, "a retargeted monitor lands in diff mode")
-            #expect(retargetedContent.displayTitle == "Code — feature-2", "the title reflects the newly selected workspace's name")
+            #expect(retargetedContent.displayTitle == "Editor — feature-2", "the title reflects the newly selected workspace's name")
             let pane = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" })
             #expect(
                 pane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "the layout's pane descriptor moves to the new workspace")

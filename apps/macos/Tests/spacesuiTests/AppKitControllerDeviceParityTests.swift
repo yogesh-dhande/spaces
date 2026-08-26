@@ -213,7 +213,7 @@ import workspacecore
         let editorMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .openEditor, deviceName: "Build Host")
         let revealMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .revealInFinder, deviceName: "Build Host")
 
-        #expect(editorMessage.contains("Open editor"))
+        #expect(editorMessage.contains("Open Editor"))
         #expect(revealMessage.contains("Reveal in Finder"))
         #expect(editorMessage.contains("Build Host"))
         #expect(revealMessage.contains("SSH-capable workflow"))

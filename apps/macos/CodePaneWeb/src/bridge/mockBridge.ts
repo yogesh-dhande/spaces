@@ -11,6 +11,7 @@ import {
   CodePaneAgentsChangedEvent,
   CodePaneEditorState,
   CodePaneEditorUIState,
+  CodePaneRenderMetric,
   CodePaneMode,
   DiffScope,
   DiffSignatureListener,
@@ -256,6 +257,8 @@ export class MockSpacesBridge implements SpacesBridge {
   notifyModeChanged(_mode: CodePaneMode): void {}
 
   notifyEditorUIStateChanged(_state: CodePaneEditorUIState): void {}
+
+  notifyRenderMetric(_metric: CodePaneRenderMetric): void {}
 }
 
 let lastInstance: MockSpacesBridge | undefined;

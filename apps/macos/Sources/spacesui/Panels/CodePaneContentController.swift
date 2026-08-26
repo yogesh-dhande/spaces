@@ -332,7 +332,7 @@ enum CodePaneMode: Equatable {
     }
 
     var contentView: NSView { rootView }
-    /// "Code — <workspace name>" for every code pane, not only ones in a global panel window's
+    /// "Editor — <workspace name>" for every code pane, not only ones in a global panel window's
     /// retargeting monitor: a workspace panel's code pane already reads unambiguously from its tab
     /// bar's own workspace context, but a uniform title is simpler than a scope-conditional one and
     /// still correct there, and it is what a monitor's retarget needs to actually change when it
@@ -341,7 +341,7 @@ enum CodePaneMode: Equatable {
     /// before the workspace's overview data has loaded.
     var displayTitle: String {
         let workspaceName = hosting?.codePaneWorkspaceInfo(workspaceID: workspaceID)?.name ?? workspaceID
-        return "Code — \(workspaceName)"
+        return "Editor — \(workspaceName)"
     }
 
     func activate(focus: Bool) {
@@ -740,6 +740,14 @@ enum CodePaneMode: Equatable {
         }
         if let mode = CodePaneBridge.decodeModeChanged(body: body) {
             handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: senderWebView)
+            return
+        }
+        if let metric = CodePaneBridge.decodeRenderMetric(body: body) {
+            let fetchDetail = metric.fetchElapsedMS.map { " fetch_ms=\($0)" } ?? ""
+            TerminalPerformance.logWorkspaceMetric(
+                "code_pane_\(metric.kind.rawValue)_render", workspaceID: workspaceID, target: "trigger=\(metric.trigger.rawValue)",
+                elapsedMS: metric.elapsedMS, success: true,
+                detail: "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)")
             return
         }
         if let state = CodePaneBridge.decodeEditorUIStateChanged(body: body) {

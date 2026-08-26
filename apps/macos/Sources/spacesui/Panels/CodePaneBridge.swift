@@ -252,6 +252,34 @@ enum CodePaneBridge {
         return mode
     }
 
+    /// One browser-complete milestone from the bundled page. Values are intentionally bounded at
+    /// this trust boundary: this channel is diagnostic-only and must never become an unbounded log
+    /// or formatting surface if a stale/corrupt page sends malformed data.
+    struct RenderMetric: Equatable {
+        enum Kind: String { case diff, editor }
+        enum Trigger: String { case initial, scope, workspaceChange, fileOpen }
+
+        let kind: Kind
+        let trigger: Trigger
+        let elapsedMS: Int
+        let fetchElapsedMS: Int?
+        let fileCount: Int
+        let contentBytes: Int
+    }
+
+    static func decodeRenderMetric(body: Any) -> RenderMetric? {
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "renderMetric",
+            let params = dict["params"] as? [String: Any], let kindRaw = params["kind"] as? String, let kind = RenderMetric.Kind(rawValue: kindRaw),
+            let triggerRaw = params["trigger"] as? String, let trigger = RenderMetric.Trigger(rawValue: triggerRaw),
+            let elapsedMS = params["elapsedMs"] as? Int, (0...600_000).contains(elapsedMS), let fileCount = params["fileCount"] as? Int,
+            (0...10_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int, (0...(10 * 1024 * 1024)).contains(contentBytes)
+        else { return nil }
+        let fetchElapsedMS = params["fetchElapsedMs"] as? Int
+        guard (kind == .editor) == (trigger == .fileOpen), fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true else { return nil }
+        return RenderMetric(
+            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS, fileCount: fileCount, contentBytes: contentBytes)
+    }
+
     /// Decodes a `{method:"editorUIStateChanged", params}` notification body: the web app's push
     /// whenever the sidebar mode or quick-open recency list changes, so the host can hold the live
     /// state across hibernation the same way `editorStateChanged` does for the open file. Unlike

@@ -261,6 +261,51 @@ import spacesterminalcore
         #expect(CodePaneBridge.decodeModeChanged(body: ["id": "1", "method": "modeChanged", "params": ["mode": "editor"]]) == nil)
     }
 
+    // MARK: - renderMetric decode
+
+    @Test func decodeRenderMetricParsesABoundedMilestone() {
+        let metric = CodePaneBridge.decodeRenderMetric(body: [
+            "method": "renderMetric",
+            "params": ["kind": "diff", "trigger": "scope", "elapsedMs": 42, "fetchElapsedMs": 17, "fileCount": 3, "contentBytes": 8192],
+        ])
+
+        #expect(
+            metric
+                == CodePaneBridge.RenderMetric(
+                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17, fileCount: 3, contentBytes: 8192))
+    }
+
+    @Test func decodeRenderMetricRejectsUnknownKindsAndRequestMessages() {
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "method": "renderMetric", "params": ["kind": "other", "trigger": "initial", "elapsedMs": 1, "fileCount": 0, "contentBytes": 0],
+            ]) == nil)
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "method": "renderMetric",
+                "params": [
+                    "kind": "diff", "trigger": "initial", "elapsedMs": 1, "fetchElapsedMs": 2, "fileCount": 0, "contentBytes": 0,
+                ],
+            ]) == nil)
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "id": "1", "method": "renderMetric",
+                "params": ["kind": "diff", "trigger": "initial", "elapsedMs": 1, "fileCount": 0, "contentBytes": 0],
+            ]) == nil)
+    }
+
+    @Test func decodeRenderMetricRejectsNegativeOrExcessiveValues() {
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "method": "renderMetric", "params": ["kind": "editor", "trigger": "fileOpen", "elapsedMs": -1, "fileCount": 1, "contentBytes": 1],
+            ]) == nil)
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "method": "renderMetric",
+                "params": ["kind": "editor", "trigger": "fileOpen", "elapsedMs": 1, "fileCount": 1, "contentBytes": 11 * 1024 * 1024],
+            ]) == nil)
+    }
+
     // MARK: - editorUIStateChanged push decode
 
     @Test func decodeEditorUIStateChangedParsesASnapshot() {
