@@ -174,6 +174,7 @@ set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path
     --skip GhosttyMirrorSurfacePresentationTests \
     --skip GhosttyEmbeddedSubmitOrderingTests \
     --skip AgentHookSubprocessTests \
+    --skip AgentHookInstallerTests/codexFeatureCommandTimeoutKillsTheWrapperAndItsChild \
     --skip AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut \
     --skip AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled \
     --skip AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting \
@@ -246,11 +247,13 @@ stage_profiles main
 
 # These tests assert the lifecycle of real child process groups, including TERM-to-KILL escalation. Run them
 # serially in their own process: parallel macOS workers can starve the spawned shell groups and make a correct
-# termination look like a failure. The same coverage scratch is intentional so these profiles merge with the
-# shared run below.
+# termination look like a failure. The Codex installer timeout test belongs here too: it drives the same
+# wrapper-plus-child process tree through the installer boundary, and leaving it in the broad parallel pass
+# has hung the coverage worker on hosted macOS runners. The same coverage scratch is intentional so these
+# profiles merge with the shared run below.
 echo "Running process-lifecycle coverage tests serially..."
 run_filtered_coverage_pass process-group-escalation \
-    "AgentHookSubprocessTests|AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
+    "AgentHookSubprocessTests|AgentHookInstallerTests/codexFeatureCommandTimeoutKillsTheWrapperAndItsChild|AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
 stage_profiles process-group
 
 # These tests wait for an embedded terminal's write acknowledgement. They pass in an isolated process,
