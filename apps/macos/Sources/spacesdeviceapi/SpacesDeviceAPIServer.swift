@@ -4243,6 +4243,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 return SpacesDeviceAPIResponse(
                     ok: false, message: "Terminal session '\(request.sessionID)' is not available.", errorCode: .sessionNotAvailable)
             }
+            // The interactive runtime can outlive the agent process as a bare shell. Re-read the agent
+            // row immediately before writing so a session that has since exited cannot receive review text
+            // merely because its launch configuration and control socket are still present.
+            guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: request.sessionID),
+                agent.workspaceID == request.workspaceID, agent.status != .exited
+            else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Terminal session '\(request.sessionID)' is not an active coding agent.", errorCode: .invalidArgument)
+            }
 
             // `appendNewline: true` is what makes `handleSendTerminalInputRequest`'s underlying PTY write
             // submit a bracketed-paste write with a separate CR (0x0D) afterward (see

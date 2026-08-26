@@ -58,11 +58,12 @@ extension ProcessProfileEnvironmentSuites {
         /// disturbing the merged-sidebar row (an offline device keeps its rows, so `deviceID(forWorkspaceID:)`
         /// still resolves).
         private func section(
-            deviceID: String, sessionID: String, workspaceID: String = "workspace-1", loadState: AppKitController.SidebarDeviceLoadState = .loaded
+            deviceID: String, sessionID: String, workspaceID: String = "workspace-1", loadState: AppKitController.SidebarDeviceLoadState = .loaded,
+            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
         ) -> AppKitController.DeviceSection {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(workspaceID)",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [])
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [], codingAgentRows: codingAgentRows)
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace],
@@ -78,6 +79,27 @@ extension ProcessProfileEnvironmentSuites {
             return AppKitController.DeviceSection(
                 deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: loadState, device: nil, projects: mapped.projects,
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
+        /// An exited agent can retain an interactive shell session, so the terminal row's run state is
+        /// still `.running`. The Editor's review target list follows the agent lifecycle state instead:
+        /// an exited agent must never be offered as a destination for review text.
+        @Test func codePaneRunningAgentsExcludesExitedAgentsWithInteractiveSessions() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            let rows = [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:live", workspaceID: "workspace-1", name: "Live", command: "codex", agentID: "live", sessionID: "session-live",
+                    runState: .running, activityState: .waiting, canStop: true),
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:exited", workspaceID: "workspace-1", name: "Exited", command: "codex", agentID: "exited", sessionID: "session-exited",
+                    runState: .running, activityState: .exited, canStop: true),
+            ]
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "session-live", codingAgentRows: rows)]
+            controller.rebuildFlatSidebarData()
+
+            let agents = controller.codePaneRunningAgents(workspaceID: "workspace-1")
+            #expect(agents.map(\.id) == ["agent:live"])
         }
 
         /// Two live workspaces on one device, neither carrying a terminal session — the retarget tests

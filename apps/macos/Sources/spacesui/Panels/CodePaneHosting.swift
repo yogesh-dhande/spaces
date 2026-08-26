@@ -61,7 +61,7 @@ extension AppKitController: CodePaneHosting {
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] {
         guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else { return [] }
         return workspace.codingAgentRows.compactMap { row in
-            guard row.runState == .running, let sessionID = row.sessionID else { return nil }
+            guard row.runState == .running, row.activityState != .exited, let sessionID = row.sessionID else { return nil }
             return CodePaneRunningAgent(id: row.id, label: row.name, sessionID: sessionID)
         }
     }

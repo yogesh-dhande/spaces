@@ -326,6 +326,7 @@
         func testSendRejectsSessionNotBelongingToWorkspace() throws {
             try withTemporaryProfile { _ in
                 try seedWorkspace(id: "workspace-1")
+                try seedWorkspace(id: "other-workspace")
                 try seedDraftComment(id: "comment-1", workspaceID: "workspace-1", filePath: "a.swift")
                 try seedTerminalSession(sessionID: "agent-session", workspaceID: "other-workspace", state: .running)
                 let (server, client, clientApp, token) = try makeServerAndClient()
@@ -368,6 +369,49 @@
                 XCTAssertEqual(response.errorCode, .sessionNotRunning)
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 XCTAssertNil(try store.reviewComment(id: "comment-1")?.sentAt)
+            }
+        }
+
+        /// An exited agent may leave its interactive terminal open as a bare shell. Review text must not
+        /// be sent to that surviving shell: the persisted agent lifecycle row is the authority for whether
+        /// this session is still an agent target, independently of the terminal runtime state.
+        func testSendRejectsExitedAgentWithInteractiveSessionWithoutWritingOrArchiving() throws {
+            try withTemporaryProfile { _ in
+                try seedWorkspace(id: "workspace-1")
+                try seedDraftComment(id: "comment-1", workspaceID: "workspace-1", filePath: "a.swift")
+                try seedTerminalSession(sessionID: "agent-session", workspaceID: "workspace-1", state: .running, agentStatus: .exited)
+
+                let paths = try TerminalSessionPaths.forSession(id: "agent-session")
+                try paths.ensureDirectories()
+                let recorder = ReviewCommentTerminalControlRecorder()
+                let controlServer = TerminalControlServer(
+                    socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.review-comment.send.exited.test")
+                ) { request in
+                    recorder.record(request)
+                    return TerminalControlResponse(ok: true, message: "Sent input.")
+                }
+                try controlServer.start()
+                defer { controlServer.stop() }
+
+                let (server, client, clientApp, token) = try makeServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceReviewCommentsSend(
+                            .init(
+                                workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these",
+                                comments: sendEntries(["comment-1"]))), authToken: token, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(recorder.requests().isEmpty)
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let stillDraft = try XCTUnwrap(store.reviewComment(id: "comment-1"))
+                XCTAssertNil(stillDraft.sentAt)
             }
         }
 
@@ -719,7 +763,9 @@
             ids.map { SpacesDeviceReviewCommentSendEntry(id: $0, revision: revision) }
         }
 
-        private func seedTerminalSession(sessionID: String, workspaceID: String, state: TerminalSessionState) throws {
+        private func seedTerminalSession(
+            sessionID: String, workspaceID: String, state: TerminalSessionState, agentStatus: AgentWindowStatus = .idle
+        ) throws {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
@@ -730,6 +776,12 @@
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 1, childPID: 1, state: state, updatedAt: "2026-08-20T09:00:00Z"),
                 paths: paths)
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "agent-\(sessionID)", workspaceID: workspaceID, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
+                    sessionKey: nil, status: agentStatus,
+                    createdAt: "2026-08-20T09:00:00Z", updatedAt: "2026-08-20T09:00:00Z"))
         }
 
         private func makeServerAndClient() throws -> (
