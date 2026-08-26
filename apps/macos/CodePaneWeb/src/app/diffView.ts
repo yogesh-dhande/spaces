@@ -276,6 +276,17 @@ export class DiffView {
       extractDiffLines(patch).find((line) => line.side === canonical.side && line.lineNumber === canonical.lineNumber)
         ?.text ?? "";
     this.hooks.onRequestNewComment({ filePath, side: canonical.side, lineNumber: canonical.lineNumber, lineText });
+    // Left alone, the clicked line stays highlighted forever, the `+` affordance stops following
+    // the pointer, and the next gutter click re-anchors to this stale selection instead of the
+    // newly clicked line — so we must clear it. But we can't clear it synchronously from here:
+    // this hook (`onGutterUtilityClick`) runs in the middle of `InteractionManager`'s
+    // `handleDocumentPointerUp` "gutterSelecting" case, which — after calling us — goes on to call
+    // `notifySelectionEnd`/`notifySelectionCommitted`. `notifySelectionCommitted` fires
+    // `onLineSelected`, which `CodeView` wraps to call `applySelectedLines` and re-set the very
+    // selection we just cleared. That whole pointerup dispatch is one synchronous task, so
+    // queuing the clear as a microtask lets it run after the library's re-assert instead of
+    // before it.
+    queueMicrotask(() => this.codeView?.clearSelectedLines());
   }
 
   private buildItem(file: DiffFileEntry): CodeViewItem<AnchoredComment> {

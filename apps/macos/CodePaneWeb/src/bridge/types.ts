@@ -20,12 +20,15 @@ export type FileChangeStatus = "added" | "modified" | "deleted" | "renamed" | "u
  * sketched the wire shape as a loose `{ refName?: string }`; this bridge
  * models the three scope kinds explicitly as a discriminated union instead,
  * since an optional string can't unambiguously distinguish "uncommitted"
- * from "vs base branch" from "vs a specific ref". `refName` is present only
- * for `kind: "ref"`.
+ * from "vs the last commit" from "vs a specific ref". `refName` is present
+ * only for `kind: "ref"` — populated either from the compare menu's
+ * "Branch…"/"Commit or ref…" search dialog (`refSearchDialog.ts`) or typed
+ * there verbatim; a bad ref surfaces through the diff fetch's existing
+ * `invalidArgument` error rather than any client-side validation here.
  */
 export type DiffScope =
   | { kind: "uncommitted" }
-  | { kind: "baseBranch" }
+  | { kind: "lastCommit" }
   | { kind: "ref"; refName: string };
 
 /** One file entry in a `workspaceDiff` result. */
@@ -97,6 +100,19 @@ export interface WorkspaceFileListResult {
   /** True when the daemon capped the listing before enumerating the whole tree. Callers surface a
    *  subtle note ("File list truncated") rather than presenting the list as complete. */
   truncated: boolean;
+}
+
+/** Backs the compare menu's "Branch…" and "Commit or ref…" search dialog (`refSearchDialog.ts`).
+ *  `commits` is this workspace's recent commit history, newest first; `sha` is the full SHA-1 or
+ *  SHA-256 hex object id (the dialog's own commit rows display only its first 7 characters, and a
+ *  picked commit's scope carries the full sha so it never needs re-resolving). Both truncated flags mirror
+ *  `WorkspaceFileListResult.truncated`'s convention: true only when the daemon capped that half of
+ *  the listing before enumerating everything available. */
+export interface WorkspaceRefListResult {
+  branches: string[];
+  branchesTruncated: boolean;
+  commits: { sha: string; subject: string }[];
+  commitsTruncated: boolean;
 }
 
 export interface DiffSignatureEvent {
@@ -226,6 +242,13 @@ export interface SpacesBridge {
    */
   workspaceFileList(): Promise<WorkspaceFileListResult>;
   /**
+   * Branches and recent commit history for the compare menu's "Branch…" / "Commit or ref…" search
+   * dialog (`refSearchDialog.ts`). Unlike `workspaceFileList`, callers fetch this fresh every time
+   * the dialog opens rather than caching it — the branch/commit lists this backs are cheap to
+   * relist and go stale faster (any commit made from any surface changes them).
+   */
+  workspaceRefList(): Promise<WorkspaceRefListResult>;
+  /**
    * Subscribe to diff-signature-changed push events for a scope. The
    * returned function unsubscribes. Only one scope is observed at a time in
    * v1 (the code pane shows one scope at once), so a later call replaces the
@@ -344,9 +367,8 @@ export interface CodePaneInitPayload {
   initialMode: CodePaneMode;
   initialScope: DiffScope;
   theme: CodePaneTheme;
-  /** The workspace's configured base branch name, absent when it has none — lets the toolbar
-   *  disable (and label) the "vs base branch" scope instead of always offering an option the host
-   *  is guaranteed to reject. */
+  /** The workspace's configured base branch name, absent when it has none — drives the compare
+   *  menu's one-click preset and the "Branch…" search dialog's first-sort and "base" badge. */
   baseBranch?: string;
   /** The host-held editor-state snapshot from before this pane's most recent hibernation cycle,
    *  absent when there is none (a pane's first-ever load, or one whose editor never opened a

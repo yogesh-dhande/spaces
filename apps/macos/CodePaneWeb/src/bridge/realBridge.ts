@@ -19,6 +19,7 @@ import {
   WorkspaceFileReadResult,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
+  WorkspaceRefListResult,
 } from "./types";
 
 /**
@@ -195,6 +196,10 @@ class RealSpacesBridge implements SpacesBridge {
 
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
     return (await this.post("workspaceFileList", {})) as WorkspaceFileListResult;
+  }
+
+  async workspaceRefList(): Promise<WorkspaceRefListResult> {
+    return (await this.post("workspaceRefList", {})) as WorkspaceRefListResult;
   }
 
   async reviewCommentList(): Promise<SpacesReviewComment[]> {

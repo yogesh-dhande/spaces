@@ -768,8 +768,12 @@ extension ProcessProfileEnvironmentSuites {
         /// replacement could steal or close the pane that claim installed. A code pane has no session for
         /// a replacement race to protect, so its own liveness prune (`pruneOpenCodePanes`) must keep
         /// running against the very same stale-epoch overview rather than being caught by that same fence
-        /// — otherwise a workspace deletion this overview reports would never close its code pane, since
-        /// there is no follow-up prune the way a terminal pane's self-heals via a later fresh overview.
+        /// — otherwise a workspace deletion this overview reports would never be acted on, since there is
+        /// no follow-up prune the way a terminal pane's self-heals via a later fresh overview. This
+        /// overview's device carries no workspace at all, so `resolveOrphanedGlobalEditorPane`'s fallback
+        /// chain finds nowhere to retarget the orphaned pane and closes the window instead — the same
+        /// prune, with a live workspace elsewhere, would retarget rather than close (see
+        /// `CodePanePlumbingTests`).
         @Test func aStaleEpochStillPrunesACodePaneForAGoneWorkspace() throws {
             let controller = makeController()
             let layout = PanelLayoutEngine.appendTab(

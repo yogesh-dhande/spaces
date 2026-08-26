@@ -16,6 +16,7 @@ import { EditorView } from "./editorView";
 import { renderFileList } from "./fileList";
 import { attachFileListDivider } from "./fileListDivider";
 import { QuickOpen } from "./quickOpen";
+import { RefSearchDialog } from "./refSearchDialog";
 import { selectDefaultAgentId } from "./reviewComments";
 import { CodePaneAction, CodePaneState, codePaneReducer, initialState } from "./state";
 import { renderToolbar } from "./toolbar";
@@ -202,6 +203,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     openInEditor,
   });
 
+  const refSearchDialog = new RefSearchDialog(
+    pane,
+    () => bridge.workspaceRefList(),
+    initPayload.baseBranch,
+    {
+      onSelect: (refName) => dispatch({ type: "setScope", scope: { kind: "ref", refName } }),
+    },
+  );
+
   /** Records `path` as most-recently-opened (dedupe, cap `RECENT_PATHS_CAP`) and pushes the
    *  updated `editorUIState` to the host. Called by every successful open, from any of the three
    *  entry points (⌘P overlay, Files tree, Changes list in editor mode) — see `openInEditor`. */
@@ -289,13 +299,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   const toolbar = renderToolbar(toolbarHost, buildToolbarState(), {
     onModeChange: (mode) => dispatch({ type: "setMode", mode }),
-    onScopeChange: (scope) => {
-      // Belt-and-suspenders alongside the toolbar's own disabled control (see segButton's doc
-      // comment): a "vs base branch" scope is unreachable for a workspace with none, so refuse it
-      // here too rather than trusting every future caller of onScopeChange to check first.
-      if (scope.kind === "baseBranch" && initPayload.baseBranch === undefined) return;
-      dispatch({ type: "setScope", scope });
-    },
+    onScopeChange: (scope) => dispatch({ type: "setScope", scope }),
+    onOpenRefSearch: (mode) => refSearchDialog.show(mode),
     onLayoutChange: (layout) => dispatch({ type: "setLayout", layout }),
     onAgentSelect: (id) => comments.onAgentSelected(id),
     onSendBatch: () => void comments.sendBatch(),

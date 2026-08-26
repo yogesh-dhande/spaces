@@ -6,7 +6,14 @@ const AGENT_1: CodePaneAgentSummary = { id: "a1", label: "claude · main", sessi
 const AGENT_2: CodePaneAgentSummary = { id: "a2", label: "codex · fix-flaky-test", sessionId: "s2" };
 
 function makeCallbacks(): ToolbarCallbacks {
-  return { onModeChange: vi.fn(), onScopeChange: vi.fn(), onLayoutChange: vi.fn(), onAgentSelect: vi.fn(), onSendBatch: vi.fn() };
+  return {
+    onModeChange: vi.fn(),
+    onScopeChange: vi.fn(),
+    onOpenRefSearch: vi.fn(),
+    onLayoutChange: vi.fn(),
+    onAgentSelect: vi.fn(),
+    onSendBatch: vi.fn(),
+  };
 }
 
 function baseState(overrides: Partial<ToolbarState> = {}): ToolbarState {
@@ -14,7 +21,6 @@ function baseState(overrides: Partial<ToolbarState> = {}): ToolbarState {
     mode: "diff",
     scope: { kind: "uncommitted" },
     layout: "unified",
-    baseBranch: undefined,
     agents: [],
     selectedAgentId: undefined,
     draftCount: 0,
@@ -28,149 +34,308 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return btn as HTMLButtonElement;
 }
 
-// Round-4 Fix 5: a workspace with no base branch must not offer a scope option
-// `CodePaneBridge.refName(for:)` is guaranteed to reject.
-describe("Toolbar — base-branch scope availability (round-4 Fix 5)", () => {
-  it("disables the option and gives it an explanatory title when the workspace has no base branch", () => {
+function compareBtn(container: HTMLElement): HTMLButtonElement {
+  const btn = container.querySelector(".compare-btn");
+  if (!btn) throw new Error("no .compare-btn found");
+  return btn as HTMLButtonElement;
+}
+
+function menuItems(container: HTMLElement): HTMLButtonElement[] {
+  return [...container.querySelectorAll<HTMLButtonElement>(".compare-menu .item")];
+}
+
+describe("Toolbar — compare menu", () => {
+  it("labels the button with the current scope: Uncommitted, Last commit, or a ref name", () => {
     const container = document.createElement("div");
-    const callbacks = makeCallbacks();
-    const state = baseState({ baseBranch: undefined });
+    renderToolbar(container, baseState({ scope: { kind: "uncommitted" } }), makeCallbacks());
+    expect(compareBtn(container).textContent).toBe("Uncommitted");
 
-    renderToolbar(container, state, callbacks);
+    const container2 = document.createElement("div");
+    renderToolbar(container2, baseState({ scope: { kind: "lastCommit" } }), makeCallbacks());
+    expect(compareBtn(container2).textContent).toBe("Last commit");
 
-    const btn = findButton(container, "vs base branch");
-    expect(btn.disabled).toBe(true);
-    expect(btn.title).toBe("This workspace has no base branch configured.");
+    const container3 = document.createElement("div");
+    renderToolbar(container3, baseState({ scope: { kind: "ref", refName: "release/1.2" } }), makeCallbacks());
+    expect(compareBtn(container3).textContent).toBe("release/1.2");
   });
 
-  it("never invokes onScopeChange for the disabled option even if a click event reaches it", () => {
+  it("shortens a full 40-character sha ref name to its first 7 characters", () => {
+    const container = document.createElement("div");
+    const sha = "38afff17e4815ab309bf1d7ffca0787e805f7af8";
+    renderToolbar(container, baseState({ scope: { kind: "ref", refName: sha } }), makeCallbacks());
+    expect(compareBtn(container).textContent).toBe(sha.slice(0, 7));
+  });
+
+  it("shortens a full 64-character sha ref name to its first 7 characters", () => {
+    const container = document.createElement("div");
+    const sha = "38afff17e4815ab309bf1d7ffca0787e805f7af8a4667915530bc0463115518d";
+    renderToolbar(container, baseState({ scope: { kind: "ref", refName: sha } }), makeCallbacks());
+    expect(compareBtn(container).textContent).toBe(sha.slice(0, 7));
+  });
+
+  it("opens the menu with all four items on click, and closes it on a second click", () => {
+    const container = document.createElement("div");
+    renderToolbar(container, baseState(), makeCallbacks());
+
+    expect(container.querySelector(".compare-menu")).toBeNull();
+    compareBtn(container).click();
+    expect(menuItems(container).map((el) => el.textContent)).toEqual([
+      "Uncommitted",
+      "Last commit",
+      "Branch…",
+      "Commit or ref…",
+    ]);
+
+    compareBtn(container).click();
+    expect(container.querySelector(".compare-menu")).toBeNull();
+  });
+
+  it("marks the item matching the current scope with the 'on' class", () => {
+    const container = document.createElement("div");
+    renderToolbar(container, baseState({ scope: { kind: "lastCommit" } }), makeCallbacks());
+    compareBtn(container).click();
+
+    const items = menuItems(container);
+    expect(items.find((el) => el.textContent === "Last commit")!.classList.contains("on")).toBe(true);
+    expect(items.find((el) => el.textContent === "Uncommitted")!.classList.contains("on")).toBe(false);
+  });
+
+  it("dispatches onScopeChange and closes the menu when Uncommitted or Last commit is picked", () => {
     const container = document.createElement("div");
     const callbacks = makeCallbacks();
-    const state = baseState({ baseBranch: undefined });
+    renderToolbar(container, baseState({ scope: { kind: "lastCommit" } }), callbacks);
 
-    renderToolbar(container, state, callbacks);
+    compareBtn(container).click();
+    menuItems(container).find((el) => el.textContent === "Uncommitted")!.click();
 
-    const btn = findButton(container, "vs base branch");
-    // `.click()` is suppressed by jsdom for a disabled button, mirroring real browsers; dispatching
-    // the event directly bypasses that suppression, standing in for "somehow activated" despite the
-    // disabled attribute — the segButton listener's own `if (btn.disabled) return` guard is what
-    // must stop it from here.
-    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(callbacks.onScopeChange).toHaveBeenCalledWith({ kind: "uncommitted" });
+    expect(container.querySelector(".compare-menu")).toBeNull();
+  });
 
+  it("lists a 'vs <baseBranch>' preset between Last commit and Branch… when a base branch is configured", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    renderToolbar(container, baseState({ baseBranch: "main" }), callbacks);
+
+    compareBtn(container).click();
+    expect(menuItems(container).map((el) => el.textContent)).toEqual([
+      "Uncommitted",
+      "Last commit",
+      "vs main",
+      "Branch…",
+      "Commit or ref…",
+    ]);
+
+    menuItems(container).find((el) => el.textContent === "vs main")!.click();
+
+    expect(callbacks.onScopeChange).toHaveBeenCalledWith({ kind: "ref", refName: "main" });
+    expect(container.querySelector(".compare-menu")).toBeNull();
+  });
+
+  it("marks the 'vs <baseBranch>' preset 'on' only when the current scope is a ref matching the base branch", () => {
+    const container = document.createElement("div");
+    renderToolbar(container, baseState({ baseBranch: "main", scope: { kind: "ref", refName: "main" } }), makeCallbacks());
+    compareBtn(container).click();
+    expect(menuItems(container).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(true);
+
+    const container2 = document.createElement("div");
+    renderToolbar(
+      container2,
+      baseState({ baseBranch: "main", scope: { kind: "ref", refName: "release/1.2" } }),
+      makeCallbacks(),
+    );
+    compareBtn(container2).click();
+    expect(menuItems(container2).find((el) => el.textContent === "vs main")!.classList.contains("on")).toBe(false);
+  });
+
+  it("omits the 'vs <baseBranch>' preset entirely when no base branch is configured", () => {
+    const container = document.createElement("div");
+    renderToolbar(container, baseState(), makeCallbacks());
+    compareBtn(container).click();
+    expect(menuItems(container).map((el) => el.textContent)).toEqual([
+      "Uncommitted",
+      "Last commit",
+      "Branch…",
+      "Commit or ref…",
+    ]);
+  });
+
+  it("calls onOpenRefSearch with 'branch' or 'ref' and closes the menu, without touching onScopeChange", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    renderToolbar(container, baseState(), callbacks);
+
+    compareBtn(container).click();
+    menuItems(container).find((el) => el.textContent === "Branch…")!.click();
+
+    expect(callbacks.onOpenRefSearch).toHaveBeenCalledWith("branch");
     expect(callbacks.onScopeChange).not.toHaveBeenCalled();
+    expect(container.querySelector(".compare-menu")).toBeNull();
+
+    compareBtn(container).click();
+    menuItems(container).find((el) => el.textContent === "Commit or ref…")!.click();
+
+    expect(callbacks.onOpenRefSearch).toHaveBeenCalledWith("ref");
   });
 
-  it("enables the option and labels it with the branch name when the workspace has one", () => {
+  it("closes the menu on an outside click", () => {
     const container = document.createElement("div");
-    const callbacks = makeCallbacks();
-    const state = baseState({ baseBranch: "main" });
+    document.body.appendChild(container);
+    try {
+      renderToolbar(container, baseState(), makeCallbacks());
+      compareBtn(container).click();
+      expect(container.querySelector(".compare-menu")).not.toBeNull();
 
-    renderToolbar(container, state, callbacks);
-
-    const btn = findButton(container, "vs main");
-    expect(btn.disabled).toBe(false);
-    btn.click();
-    expect(callbacks.onScopeChange).toHaveBeenCalledWith({ kind: "baseBranch" });
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      expect(container.querySelector(".compare-menu")).toBeNull();
+    } finally {
+      container.remove();
+    }
   });
-});
 
-describe("Toolbar — 'vs ref…' focuses the live input after rebuild (round-8 Fix 4)", () => {
-  it("focuses the input that is actually in the document, not a detached node from the pre-click render", () => {
-    // jsdom only tracks `document.activeElement` for a node connected to the document — a detached
-    // container's `.focus()` calls are silently inert — so this container (unlike this file's other
-    // tests, which don't care about focus) has to be attached to `document.body` for the assertion
-    // below to mean anything.
+  it("lets an outside toolbar control finish its click before closing the menu", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     try {
       const callbacks = makeCallbacks();
-      const state = baseState({ baseBranch: "main" });
+      renderToolbar(container, baseState(), callbacks);
+      compareBtn(container).click();
 
-      renderToolbar(container, state, callbacks);
-      const btn = findButton(container, "vs ref…");
-      btn.click(); // opens the ref input, rebuilding the toolbar's children in the process
+      const editorButton = findButton(container, "Editor");
+      editorButton.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      if (editorButton.isConnected) editorButton.click();
 
-      const liveInput = container.querySelector("input");
-      expect(liveInput).not.toBeNull();
-      expect(document.activeElement).toBe(liveInput);
+      expect(callbacks.onModeChange).toHaveBeenCalledWith("editor");
+    } finally {
+      container.remove();
+    }
+  });
+
+  it("does not reopen the compare menu after leaving and returning to Diff mode", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    try {
+      let handle: ReturnType<typeof renderToolbar>;
+      const callbacks = makeCallbacks();
+      callbacks.onModeChange = vi.fn((mode) => handle.update(baseState({ mode })));
+      handle = renderToolbar(container, baseState(), callbacks);
+      compareBtn(container).click();
+
+      findButton(container, "Editor").click();
+      handle.update(baseState({ mode: "diff" }));
+
+      expect(container.querySelector(".compare-menu")).toBeNull();
+    } finally {
+      container.remove();
+    }
+  });
+
+  it("closes the menu on Escape", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    try {
+      renderToolbar(container, baseState(), makeCallbacks());
+      compareBtn(container).click();
+      expect(container.querySelector(".compare-menu")).not.toBeNull();
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      expect(container.querySelector(".compare-menu")).toBeNull();
     } finally {
       container.remove();
     }
   });
 });
 
-describe("Toolbar — pending 'vs ref' text survives a wholesale rebuild (round-14 Fix 2)", () => {
-  it("keeps the ref input open with the typed text, focus, and caret preserved across update()", () => {
+describe("Toolbar — compare menu keyboard focus", () => {
+  // The compare button's own click handler rebuilds the toolbar (`build()` fully replaces the DOM),
+  // which would otherwise destroy the focused button mid keyboard-activation (Enter/Space) and drop
+  // focus to `document.body` — breaking Tab into the menu, and leaving `refSearchDialog.ts` nothing
+  // real to restore focus to when it closes. These tests cover the rebuilt DOM getting focus back.
+
+  it("focuses the first menu item when the compare button is activated with focus already on it", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     try {
-      const callbacks = makeCallbacks();
-      const state = baseState({ baseBranch: "main", agents: [AGENT_1], selectedAgentId: AGENT_1.id, draftCount: 0 });
+      renderToolbar(container, baseState(), makeCallbacks());
+      compareBtn(container).focus();
 
-      const { update } = renderToolbar(container, state, callbacks);
-      findButton(container, "vs ref…").click(); // opens the ref input, focusing it
+      compareBtn(container).click();
 
-      const input = container.querySelector("input")!;
-      input.value = "feature/partial-ty";
-      input.dispatchEvent(new Event("input"));
-      input.setSelectionRange(7, 7); // caret in the middle of "feature/|partial-ty"
-
-      // A mid-typing agent/draft-count change, unrelated to the ref input, must not wipe it out —
-      // `update()` rebuilds the toolbar wholesale on every such change.
-      update(baseState({ baseBranch: "main", agents: [AGENT_1, AGENT_2], selectedAgentId: AGENT_2.id, draftCount: 3 }));
-
-      const rebuiltInput = container.querySelector("input")!;
-      expect(rebuiltInput.value).toBe("feature/partial-ty");
-      expect(document.activeElement).toBe(rebuiltInput);
-      expect(rebuiltInput.selectionStart).toBe(7);
-      expect(rebuiltInput.selectionEnd).toBe(7);
+      expect(document.activeElement).toBe(menuItems(container)[0]);
     } finally {
       container.remove();
     }
   });
 
-  it("closes the ref input on Escape and does not resurface the stale text the next time it's opened", () => {
+  it("focuses the compare button after picking 'Branch…' from a keyboard-focused menu item", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     try {
       const callbacks = makeCallbacks();
-      const state = baseState({ baseBranch: "main" });
+      renderToolbar(container, baseState(), callbacks);
+      compareBtn(container).focus();
+      compareBtn(container).click();
 
-      const { update } = renderToolbar(container, state, callbacks);
-      findButton(container, "vs ref…").click();
+      const branchItem = menuItems(container).find((el) => el.textContent === "Branch…")!;
+      branchItem.focus();
+      branchItem.click();
 
-      const input = container.querySelector("input")!;
-      input.value = "abandoned-branch";
-      input.dispatchEvent(new Event("input"));
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-
-      update(baseState({ baseBranch: "main" }));
-      expect(container.querySelector(".ref-input.open")).toBeNull();
-
-      // Re-opening must start blank, not resurface "abandoned-branch" from the closed session.
-      findButton(container, "vs ref…").click();
-      expect(container.querySelector("input")!.value).toBe("");
+      expect(callbacks.onOpenRefSearch).toHaveBeenCalledWith("branch");
+      expect(document.activeElement).toBe(compareBtn(container));
     } finally {
       container.remove();
     }
   });
 
-  it("still commits the typed ref exactly as before on Enter (regression check)", () => {
+  it("returns focus to the compare button when Escape closes the menu", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     try {
-      const callbacks = makeCallbacks();
-      const state = baseState({ baseBranch: "main" });
+      renderToolbar(container, baseState(), makeCallbacks());
+      compareBtn(container).focus();
+      compareBtn(container).click();
+      menuItems(container)[0]!.focus();
 
-      renderToolbar(container, state, callbacks);
-      findButton(container, "vs ref…").click();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
-      const input = container.querySelector("input")!;
-      input.value = "release/1.2";
-      input.dispatchEvent(new Event("input"));
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      expect(document.activeElement).toBe(compareBtn(container));
+    } finally {
+      container.remove();
+    }
+  });
 
-      expect(callbacks.onScopeChange).toHaveBeenCalledWith({ kind: "ref", refName: "release/1.2" });
+  it("does not steal focus on an unrelated update() when focus is outside the toolbar", () => {
+    const container = document.createElement("div");
+    const outsideInput = document.createElement("input");
+    document.body.appendChild(container);
+    document.body.appendChild(outsideInput);
+    try {
+      const handle = renderToolbar(container, baseState({ draftCount: 0 }), makeCallbacks());
+      outsideInput.focus();
+      expect(document.activeElement).toBe(outsideInput);
+
+      handle.update(baseState({ draftCount: 1 }));
+
+      expect(document.activeElement).toBe(outsideInput);
+    } finally {
+      container.remove();
+      outsideInput.remove();
+    }
+  });
+
+  it("preserves the focused menu item across an unrelated update()", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    try {
+      const handle = renderToolbar(container, baseState({ draftCount: 0 }), makeCallbacks());
+      compareBtn(container).focus();
+      compareBtn(container).click();
+      const branchItem = menuItems(container).find((el) => el.textContent === "Branch…")!;
+      branchItem.focus();
+
+      handle.update(baseState({ draftCount: 1 }));
+
+      expect(document.activeElement?.textContent).toBe("Branch…");
     } finally {
       container.remove();
     }

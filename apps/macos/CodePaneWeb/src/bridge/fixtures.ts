@@ -1,4 +1,4 @@
-import { CodePaneAgentSummary, CodePaneInitPayload, DiffFileEntry, DiffScope } from "./types";
+import { CodePaneAgentSummary, CodePaneInitPayload, DiffFileEntry, DiffScope, WorkspaceRefListResult } from "./types";
 
 /**
  * Fixture data for the `npm run dev` harness and for the mock bridge's unit
@@ -180,20 +180,38 @@ index 0000000..8a9b7c6
   },
 ];
 
-/** `vs base branch` and named-ref scopes intentionally return a smaller subset, so switching scopes in the harness visibly changes the file list. */
-const BASE_BRANCH_FILES: DiffFileEntry[] = UNCOMMITTED_FILES.slice(0, 4);
+/** `lastCommit` and named-ref scopes intentionally return a smaller subset, so switching scopes in the harness visibly changes the file list. */
+const LAST_COMMIT_FILES: DiffFileEntry[] = UNCOMMITTED_FILES.slice(0, 4);
 
 export function fixtureDiffFiles(scope: DiffScope, version: number): DiffFileEntry[] {
   if (scope.kind === "uncommitted") {
     return version % 2 === 0 ? UNCOMMITTED_FILES : UNCOMMITTED_FILES_V2;
   }
-  if (scope.kind === "baseBranch") {
-    return BASE_BRANCH_FILES;
+  if (scope.kind === "lastCommit") {
+    return LAST_COMMIT_FILES;
   }
   // scope.kind === "ref": only "main" has fixture data; any other ref name
-  // demonstrates the "No changes" empty state.
-  return scope.refName === "main" ? BASE_BRANCH_FILES : [];
+  // (including one of the fixture SHAs in FIXTURE_REF_LIST below) demonstrates the "No changes"
+  // empty state.
+  return scope.refName === "main" ? LAST_COMMIT_FILES : [];
 }
+
+/** Backs the mock's `workspaceRefList()` — the compare menu's "Branch…" / "Commit or ref…" search
+ *  dialog fetches this fresh on every open. `commits`' shas are real 40-character SHA-1 hex hashes
+ *  (of the fixture strings below), so the dialog's 7-character truncation and full-sha round trip
+ *  through `DiffScope`'s `ref` kind behave exactly as they would against a real workspace. */
+export const FIXTURE_REF_LIST: WorkspaceRefListResult = {
+  branches: ["main", "feature/pane-toolbar", "release/1.4", "yd/review-comments"],
+  branchesTruncated: false,
+  commits: [
+    { sha: "38afff17e4815ab309bf1d7ffca0787e805f7af8", subject: "Add compare menu to the diff pane header" },
+    { sha: "df277975d2783b0e7fd4d0487d990bd60442923c", subject: "Fix conflict banner focus trap" },
+    { sha: "a549a44b3316991928c80b3bee0eb916d16c9dcc", subject: "Debounce editor state pushes" },
+    { sha: "51e560e4d4dacc331c2c4232a7f2d3815bfdadf5", subject: "Truncate oversized generated-file patches" },
+    { sha: "6ff2a3583ee231701dfbe81b175ba2938202db7b", subject: "Seed recent-files list from init payload" },
+  ],
+  commitsTruncated: false,
+};
 
 /** Files readable/writable in Editor mode. Keyed by workspace-relative path. */
 export const FIXTURE_FILE_CONTENTS: Record<string, string> = {
@@ -253,5 +271,8 @@ export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
   initialMode: "diff",
   initialScope: { kind: "uncommitted" },
   theme: "dark",
+  // Matches FIXTURE_REF_LIST.branches so the harness's "Branch…" search dialog demonstrates the
+  // "base" badge and first-sort behavior.
+  baseBranch: "main",
   agents: FIXTURE_AGENTS,
 };

@@ -164,7 +164,7 @@ extension SpacesDeviceAPICommand {
     /// check, so neither ever needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: true
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList: true
         default: false
         }
     }
@@ -1038,16 +1038,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         NSError(domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
     }
 
-    /// The workspace id a workspace file-read/write/diff/file-list request targets, used to route it to its
-    /// per-workspace serial queue (`workspaceGitQueue(for:)`). `preconditionFailure`s mirror
-    /// `handleWorkspaceGitRequest`'s: only these four commands ever reach this accessor.
+    /// The workspace id a workspace file-read/write/diff/file-list/ref-list request targets, used to route
+    /// it to its per-workspace serial queue (`workspaceGitQueue(for:)`). `preconditionFailure`s mirror
+    /// `handleWorkspaceGitRequest`'s: only these five commands ever reach this accessor.
     private func workspaceGitQueueWorkspaceID(for request: SpacesDeviceAPIRequest) -> String {
         switch request.command {
         case .workspaceFileRead(let payload): return payload.workspaceID
         case .workspaceFileWrite(let payload): return payload.workspaceID
         case .workspaceDiff(let payload): return payload.workspaceID
         case .workspaceFileList(let payload): return payload.workspaceID
-        default: preconditionFailure("Only workspace file-read/write/diff/file-list commands run on a workspace-git queue.")
+        case .workspaceRefList(let payload): return payload.workspaceID
+        default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on a workspace-git queue.")
         }
     }
     /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
@@ -1362,17 +1363,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Identifies one (workspace, ref) diff-signature subscription scope. `refName == nil` (or empty,
-    /// normalized to `nil` below) is the uncommitted-changes scope; a non-nil `refName` is a base-branch
-    /// review scope whose signature additionally tracks that ref's merge-base with `HEAD` (see
-    /// `SpacesDeviceWorkspaceDiffEngine.scopeSignature`). Two subscriptions to the same workspace but
-    /// different refs get independent producers, poll timers, and socket paths, so a base-branch review
-    /// pane and an uncommitted-changes pane on the same workspace never share a signature or a socket.
+    /// Identifies one (workspace, ref, lastCommit) diff-signature subscription scope. `refName == nil,
+    /// lastCommit == false` (or an empty/whitespace `refName`, normalized to `nil` below) is the
+    /// uncommitted-changes scope; a non-nil `refName` is a base-branch review scope whose signature
+    /// additionally tracks that ref's merge-base with `HEAD`; `lastCommit == true` is the committed-only
+    /// scope, whose signature depends only on `HEAD` itself (see
+    /// `SpacesDeviceWorkspaceDiffEngine.scopeSignature`). Three subscriptions to the same workspace but
+    /// different scopes get independent producers, poll timers, and socket paths, so an uncommitted, a
+    /// base-branch-review, and a last-commit pane on the same workspace never share a signature or a
+    /// socket.
     struct WorkspaceDiffScope: Hashable, Sendable {
         let workspaceID: String
         let refName: String?
+        let lastCommit: Bool
 
-        init(workspaceID: String, refName: String?) {
+        init(workspaceID: String, refName: String?, lastCommit: Bool = false) {
             self.workspaceID = workspaceID
             // Shares `SpacesDeviceWorkspaceDiffEngine.normalizedRefName` (same target) rather than
             // duplicating the empty/whitespace-to-nil rule: this scope's identity must normalize a ref
@@ -1380,6 +1385,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // the uncommitted scope here while every pull against that same blank ref fails on the engine
             // side with a merge-base error on an empty argument.
             self.refName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(refName)
+            self.lastCommit = lastCommit
         }
     }
 
@@ -1479,7 +1485,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     let signature =
                         latestSignatureBox.signature ?? signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
                     return try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.encodeLine(
-                        SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: scope.workspaceID, refName: scope.refName, scopeSignature: signature))
+                        SpacesDeviceWorkspaceDiffSignatureFrame(
+                            workspaceID: scope.workspaceID, refName: scope.refName, lastCommit: scope.lastCommit, scopeSignature: signature))
                 })
             let timer = DispatchSource.makeTimerSource(queue: streamQueue)
             timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
@@ -1529,12 +1536,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             existing.subscriberCount += 1
             return existing.socketPath
         }
-        let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+        let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(
+            workspaceID: scope.workspaceID, refName: scope.refName, lastCommit: scope.lastCommit)
         // Dedicated per-scope queue, never shared with any other scope's subscription: a wedged repository's
         // git calls (now up to 30s, per the git-command timeout) must degrade only this scope's poll,
         // keepalive, and producer-socket accept, never another scope's. See the type doc on
         // `WorkspaceDiffSignatureSubscription`.
-        let streamQueue = DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.refName ?? "uncommitted")")
+        let streamQueue = DispatchQueue(
+            label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.lastCommit ? "last-commit" : (scope.refName ?? "uncommitted"))")
         let subscription = WorkspaceDiffSignatureSubscription(
             scope: scope, socketPath: socketPath, streamQueue: streamQueue,
             signatureProvider: { [weak self] scope in try? self?.computeWorkspaceDiffScopeSignature(scope: scope) })
@@ -1568,7 +1577,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
         }
-        return try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: workspace.dir, refName: scope.refName, gitClient: workspaceGitClient)
+        return try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
+            workspaceDir: workspace.dir, refName: scope.refName, lastCommit: scope.lastCommit, gitClient: workspaceGitClient)
     }
 
     /// Refuses `scope` before either subscribe transport (macOS `NWConnection` relay, Linux TLS relay)
@@ -1599,6 +1609,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// correctly once `handleWorkspaceDiffRequest`'s own check runs, when the pane's `workspaceDiff` pull
     /// fires from the resulting signature event, and this subscribe path already treats failures here as
     /// best-effort/retry.
+    /// Rejects the same `lastCommit`+`refName` combination `handleWorkspaceDiffRequest` rejects on the pull
+    /// path (see that function's up-front check), before either subscribe transport registers a
+    /// diff-signature subscription for it. Without this, a subscription for the combination would sit
+    /// alongside a pull path that always 400s for the identical scope: the client could never successfully
+    /// fetch a diff for what it just subscribed to.
+    ///
+    /// Takes the raw payload fields, not a `WorkspaceDiffScope`, because `WorkspaceDiffScope.init`
+    /// normalizes `refName` (blank/whitespace collapses to `nil`) but does not reject the combination —
+    /// constructing the scope first and inspecting it here would silently accept a blank-`refName` request
+    /// that paired `lastCommit: true` with a non-blank ref, since normalization already erased the
+    /// distinction this check needs.
+    private func assertWorkspaceDiffSignatureScopeIsUnambiguous(refName: String?, lastCommit: Bool) throws {
+        if lastCommit, SpacesDeviceWorkspaceDiffEngine.normalizedRefName(refName) != nil {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "lastCommit and refName are mutually exclusive."])
+        }
+    }
+
     private func assertWorkspaceDiffScopeIsGitRepository(scope: WorkspaceDiffScope) throws {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard let workspace = try store.workspace(id: scope.workspaceID) else {
@@ -1976,10 +2004,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert `.runWorkspaceSetup` to `workspaceSetupQueue` before they reach here (see
         // `runsOnWorkspaceSetupQueue`), so this case only keeps the switch exhaustive.
         case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
-        // Both transports divert workspace file-read/write/diff/file-list commands to `workspaceGitQueue`
-        // before they reach here (see `runsOnWorkspaceGitQueue`), so this case only keeps the switch
-        // exhaustive.
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: return try handleWorkspaceGitRequest(request)
+        // Both transports divert workspace file-read/write/diff/file-list/ref-list commands to
+        // `workspaceGitQueue` before they reach here (see `runsOnWorkspaceGitQueue`), so this case only
+        // keeps the switch exhaustive.
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList:
+            return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
@@ -2106,7 +2135,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs one workspace file-read/write/diff/file-list command (see `runsOnWorkspaceGitQueue`) on
+    /// Runs one workspace file-read/write/diff/file-list/ref-list command (see `runsOnWorkspaceGitQueue`) on
     /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
     /// a request handled on one queue must not touch a `SQLiteStore` opened on another.
     private func handleWorkspaceGitRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -2116,7 +2145,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
         case .workspaceDiff(let payload): return try handleWorkspaceDiffRequest(payload, context: context)
         case .workspaceFileList(let payload): return try handleWorkspaceFileListRequest(payload, context: context)
-        default: preconditionFailure("Only workspace file-read/write/diff/file-list commands run on the workspace-git queue.")
+        case .workspaceRefList(let payload): return try handleWorkspaceRefListRequest(payload, context: context)
+        default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on the workspace-git queue.")
         }
     }
 
@@ -3379,6 +3409,23 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(ok: true, message: "Listed workspace files.", result: .workspaceFileList(result))
     }
 
+    /// Lists the branches and recent commits the Compare dialog's ref search offers; see
+    /// `SpacesDeviceWorkspaceRefListEngine.listRefs`. Read-only, and like `handleWorkspaceFileListRequest`
+    /// (its closest sibling) has no `assertIsGitRepository` gate of its own: a non-git workspace simply has
+    /// nothing to list, which the engine itself already reports as empty, untruncated lists rather than an
+    /// error.
+    private func handleWorkspaceRefListRequest(_ request: SpacesDeviceWorkspaceRefListRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let deadlineStart = Date()
+        guard let workspace = try context.store().workspace(id: request.workspaceID) else {
+            throw Self.workspaceNotFoundError(workspaceID: request.workspaceID)
+        }
+        let result = try SpacesDeviceWorkspaceRefListEngine.listRefs(
+            workspaceDir: workspace.dir, baseBranch: workspace.baseBranch, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
+        return SpacesDeviceAPIResponse(ok: true, message: "Listed workspace refs.", result: .workspaceRefList(result))
+    }
+
     /// Compare-and-swap write. `expectedSHA256` is compared against the current disk content's hash
     /// (`nil` on both sides only when the file does not exist yet); a mismatch is reported as a typed
     /// `SpacesDeviceWorkspaceFileWriteResult` conflict (`ok: true`, `didWrite: false`), not a transport
@@ -3515,6 +3562,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func handleWorkspaceDiffRequest(_ request: SpacesDeviceWorkspaceDiffRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        // `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffRequest`'s
+        // doc comment) — checked first, before any git or workspace-lookup work, since this is a pure
+        // request-shape error the client should never legitimately construct.
+        if request.lastCommit, SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil {
+            return SpacesDeviceAPIResponse(ok: false, message: "lastCommit and refName are mutually exclusive.", errorCode: .invalidArgument)
+        }
         // round-15: captured BEFORE `assertIsGitRepository` runs, so this one clock is the request-wide
         // budget shared by repo validation, ref validation, and `buildDiff` — see `diffBuildDeadline`'s doc
         // comment. The repo probe's own elapsed time is deliberately burned from this same shared budget
@@ -3528,13 +3581,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // A caller-supplied ref that doesn't resolve must be rejected as `invalidArgument`, distinct from
         // `buildDiff`'s own ambiguous `.gitCommandFailed` (which also covers a transient git hang/timeout)
         // — see `assertRefIsResolvable`'s doc comment for why the client's retry classification depends on
-        // this split.
-        if let normalizedRefName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) {
+        // this split. Skipped for `lastCommit`, which never takes a ref to validate.
+        if !request.lastCommit, let normalizedRefName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) {
             try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
                 workspaceDir: workspaceDir, refName: normalizedRefName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
         }
         let diff = try SpacesDeviceWorkspaceDiffEngine.buildDiff(
-            workspaceDir: workspaceDir, refName: request.refName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
+            workspaceDir: workspaceDir, refName: request.refName, lastCommit: request.lastCommit, gitClient: workspaceGitClient,
+            deadlineStart: deadlineStart)
         return SpacesDeviceAPIResponse(ok: true, message: "Loaded workspace diff.", result: .workspaceDiff(diff))
     }
 
@@ -4381,7 +4435,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // ref) scope and created (or subscriber-counted) on demand; see
                 // `addWorkspaceDiffSignatureSubscriber`. `relayLinuxSubscription` releases the subscriber
                 // slot once this relay loop returns.
-                let scope = WorkspaceDiffScope(workspaceID: scopePayload.workspaceID, refName: scopePayload.refName)
+                let scope = WorkspaceDiffScope(
+                    workspaceID: scopePayload.workspaceID, refName: scopePayload.refName, lastCommit: scopePayload.lastCommit)
                 // A thrown error here would propagate out of `handleClient` uncaught (its only catch just
                 // traces and drops the connection, unlike the macOS `NWConnection` path's `finishRequest`),
                 // so refuse via `.response(...)` the same way the other validation failures below do,
@@ -4392,12 +4447,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // connection that reads as a transport outage on an otherwise healthy daemon.
                 let socketPath: String
                 do {
+                    try assertWorkspaceDiffSignatureScopeIsUnambiguous(refName: scopePayload.refName, lastCommit: scopePayload.lastCommit)
                     try assertWorkspaceDiffScopeIsGitRepository(scope: scope)
                     socketPath = try addWorkspaceDiffSignatureSubscriber(scope: scope)
                 } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
                 return .relay(
                     LinuxSubscription(
-                        sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.refName ?? "")",
+                        sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.lastCommit ? "last-commit" : (scope.refName ?? ""))",
                         installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
                         clientID: nil, diffSignatureScope: scope))
             }
@@ -4573,8 +4629,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 return
             }
             if let scopePayload = request.command.workspaceDiffSignatureScope {
+                // Thrown here propagates out to `processBufferedLines`'s enclosing `do`/`catch`, which
+                // converts it to a typed `failureResponse` and sends that to the client before closing the
+                // connection — the same path every other `try server.handle...Request` failure on this
+                // connection takes, so this does not need its own response-shaping.
+                try assertWorkspaceDiffSignatureScopeIsUnambiguous(refName: scopePayload.refName, lastCommit: scopePayload.lastCommit)
                 try relayWorkspaceDiffSignatureSubscription(
-                    connection: connection, scope: WorkspaceDiffScope(workspaceID: scopePayload.workspaceID, refName: scopePayload.refName),
+                    connection: connection,
+                    scope: WorkspaceDiffScope(
+                        workspaceID: scopePayload.workspaceID, refName: scopePayload.refName, lastCommit: scopePayload.lastCommit),
                     installationID: request.clientApp?.installationID ?? "")
                 return
             }
@@ -4703,9 +4766,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
                 relaySource.setCancelHandler { close(relaySocketFD) }
                 streamRelays[ObjectIdentifier(connection)] = StreamRelay(
-                    sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.refName ?? "")", installationID: installationID,
-                    relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: nil, connection: connection,
-                    sendSequencer: StreamSendSequencer(queueKey: queueKey), diffSignatureScope: scope)
+                    sessionID: "workspace-diff-signature:\(scope.workspaceID):\(scope.lastCommit ? "last-commit" : (scope.refName ?? ""))",
+                    installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
+                    heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey), diffSignatureScope: scope)
                 relaySource.resume()
             } catch {
                 // The relay never made it into `streamRelays`, so `closeStreamRelay` will never see this

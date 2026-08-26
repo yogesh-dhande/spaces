@@ -5461,8 +5461,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // deletion this mutation response reports go unpruned indefinitely whenever it lands mid-race —
         // there is no guaranteed follow-up overview the way the terminal prune's self-heal relies on.
         // The keep-set is workspace ids from this overview: a workspace absent from `overview.workspaces`
-        // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set).
-        panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id)))
+        // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set). A
+        // reported orphaned global pane (the Editor pointed at the just-deleted workspace) is retargeted
+        // or closed right after, rather than left stranded pointing at nothing.
+        if let orphan = panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id))) {
+            resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+        }
         // Same overview this device's prune just consumed carries this device's agent rows too, so a
         // code pane's assigned-agent dropdown stays current with whatever just spawned/exited.
         panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: self)
@@ -11148,6 +11152,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let workspaceID = clientWorkspaceIDForFocusedWindow() { return workspaceID }
         if NSApp.isActive, let selectedWorkspaceID { return selectedWorkspaceID }
         if let workspaceID = clientActiveWorkspaceID() { return workspaceID }
+        return nil
+    }
+
+    /// Retargets the Editor window's orphaned pane — one `pruneOpenCodePanes` reports still pointed at
+    /// `goneWorkspaceID` after that workspace left a device's overview — to the workspace ⌘⌥E would open
+    /// next, or closes the window outright when no workspace remains anywhere to show. The Editor must
+    /// not simply keep pointing at the gone workspace: every bridge call it makes would fail.
+    func resolveOrphanedGlobalEditorPane(excluding goneWorkspaceID: String) {
+        if let fallback = globalEditorFallbackWorkspaceID(excluding: goneWorkspaceID, allowedWorkspaceKeys: nil) {
+            panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: fallback.deviceID, workspaceID: fallback.workspaceID)
+        } else {
+            panelCoordinator.closeGlobalEditorCodePane()
+        }
+    }
+
+    /// Mirrors `globalEditorWorkspaceID`'s own chain (focused tracked window, selected workspace,
+    /// daemon's last-active workspace) but skips a candidate that names `goneWorkspaceID` or no longer
+    /// exists, falling through to the next link exactly as the task's "same chain" rule asks. Reads
+    /// `deviceSections` rather than `findWorkspace`/`projects`: the overview-apply call sites that feed
+    /// `resolveOrphanedGlobalEditorPane` update `deviceSections` before pruning but rebuild the flat
+    /// sidebar data (what `findWorkspace` reads) only afterward, so `findWorkspace` would still report
+    /// the just-deleted workspace as present.
+    /// When every chain candidate is itself unusable, falls through to the first workspace found on any
+    /// device — otherwise a stray cached selection elsewhere could close the Editor while other
+    /// workspaces are still open. Nil only when no workspace exists anywhere.
+    /// `allowedWorkspaceKeys` constrains startup restoration to workspaces whose device overview is
+    /// loaded; the live deletion path passes nil because its already-open Editor follows the ordinary
+    /// device availability behavior.
+    func globalEditorFallbackWorkspaceID(excluding goneWorkspaceID: String?, allowedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>?) -> (
+        deviceID: String, workspaceID: String
+    )? {
+        func candidate(_ workspaceID: String?) -> (deviceID: String, workspaceID: String)? {
+            guard let workspaceID, workspaceID != goneWorkspaceID else { return nil }
+            guard let section = deviceSections.first(where: { $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } } })
+            else { return nil }
+            if let allowedWorkspaceKeys, !allowedWorkspaceKeys.contains(.init(deviceID: section.deviceID, workspaceID: workspaceID)) { return nil }
+            return (section.deviceID, workspaceID)
+        }
+        if let match = candidate(clientWorkspaceIDForFocusedWindow()) { return match }
+        if NSApp.isActive, let match = candidate(selectedWorkspaceID) { return match }
+        if let match = candidate(clientActiveWorkspaceID()) { return match }
+        for section in deviceSections {
+            for workspaces in section.workspacesByProject.values {
+                if let workspace = workspaces.first(where: { workspace in
+                    workspace.id != goneWorkspaceID
+                        && (allowedWorkspaceKeys?.contains(.init(deviceID: section.deviceID, workspaceID: workspace.id)) ?? true)
+                }) {
+                    return (section.deviceID, workspace.id)
+                }
+            }
+        }
         return nil
     }
 

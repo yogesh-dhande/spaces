@@ -134,6 +134,23 @@ describe("RealSpacesBridge", () => {
     window.__spacesBridge!.reject(msg.id, { code: "invalidArgument", message: "session s1 is not running" });
     await expect(call).rejects.toMatchObject({ code: "invalidArgument", message: "session s1 is not running" });
   });
+
+  it("posts workspaceRefList with no params, and resolves with the reply", async () => {
+    const bridge = createRealBridge();
+    const call = bridge.workspaceRefList();
+    const [msg] = postMessage.mock.calls[0]! as [{ id: string; method: string; params: unknown }];
+    expect(msg.method).toBe("workspaceRefList");
+    expect(msg.params).toEqual({});
+
+    const result = {
+      branches: ["main"],
+      branchesTruncated: false,
+      commits: [{ sha: "a".repeat(40), subject: "Initial commit" }],
+      commitsTruncated: false,
+    };
+    window.__spacesBridge!.resolve(msg.id, result);
+    await expect(call).resolves.toEqual(result);
+  });
 });
 
 describe("MockSpacesBridge", () => {
@@ -320,5 +337,17 @@ describe("MockSpacesBridge", () => {
     ]);
 
     await expect(bridge.reviewCommentList()).resolves.toEqual([]);
+  });
+
+  it("workspaceRefList returns the fixture branch and commit history", async () => {
+    const bridge = createMockBridge();
+    const result = await bridge.workspaceRefList();
+    expect(result.branches).toContain("main");
+    expect(result.branchesTruncated).toBe(false);
+    expect(result.commits.length).toBeGreaterThan(0);
+    for (const commit of result.commits) {
+      expect(commit.sha).toMatch(/^[0-9a-f]{40}$/);
+    }
+    expect(result.commitsTruncated).toBe(false);
   });
 });

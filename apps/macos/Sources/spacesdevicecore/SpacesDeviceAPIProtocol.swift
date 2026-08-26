@@ -990,6 +990,50 @@ public struct SpacesDeviceWorkspaceFileListResult: Codable, Sendable, Equatable 
     }
 }
 
+/// Lists a workspace's local branches and recent commit history, for the diff scope picker's ref-search
+/// dialog (the web app resolves the user's typed text against these lists instead of round-tripping every
+/// keystroke to the daemon). Read-only, local-only: no network call is made, so this never reflects a
+/// remote's branches the workspace hasn't fetched.
+public struct SpacesDeviceWorkspaceRefListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+/// One commit in a `workspaceRefList` result's `commits` list. `sha` is the full (not abbreviated) commit
+/// hash, so it can be sent back as `SpacesDeviceWorkspaceDiffRequest.refName` unambiguously.
+public struct SpacesDeviceWorkspaceRefListCommit: Codable, Sendable, Equatable {
+    public let sha: String
+    public let subject: String
+
+    public init(sha: String, subject: String) {
+        self.sha = sha
+        self.subject = subject
+    }
+}
+
+/// Result of `workspaceRefList`. `branches` are resolvable branch names: local branches (`refs/heads`)
+/// under their own short name, and remote branches (`refs/remotes/origin`, minus the synthetic
+/// `origin/HEAD`) under their full `origin/<name>` short name — a local `foo` and `origin/foo` are
+/// distinct refs and both appear when both exist. The combined list is deduped and sorted, capped at
+/// `SpacesDeviceWorkspaceRefListEngine.maxBranches` with `branchesTruncated` when there are more.
+/// `commits` are `HEAD`'s ancestry, most recent first, capped at
+/// `SpacesDeviceWorkspaceRefListEngine.maxCommits` with `commitsTruncated` when there are more. A non-git
+/// workspace, or one with an unborn `HEAD`, returns both lists empty with both truncation flags `false`.
+public struct SpacesDeviceWorkspaceRefListResult: Codable, Sendable, Equatable {
+    public let branches: [String]
+    public let branchesTruncated: Bool
+    public let commits: [SpacesDeviceWorkspaceRefListCommit]
+    public let commitsTruncated: Bool
+
+    public init(branches: [String], branchesTruncated: Bool, commits: [SpacesDeviceWorkspaceRefListCommit], commitsTruncated: Bool) {
+        self.branches = branches
+        self.branchesTruncated = branchesTruncated
+        self.commits = commits
+        self.commitsTruncated = commitsTruncated
+    }
+}
+
 /// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` is the hash of the
 /// disk content the client last read (from `workspaceFileRead`); `nil` asserts the file must not exist yet
 /// (create). When the disk content does not match `expectedSHA256`, the daemon does not write — it reports
@@ -1028,20 +1072,35 @@ public struct SpacesDeviceWorkspaceFileWriteResult: Codable, Sendable, Equatable
     }
 }
 
-/// Selects what `workspaceDiff` compares. `refName == nil` diffs uncommitted changes against `HEAD`
-/// (tracked edits plus untracked files synthesized as add-diffs). A non-nil `refName` diffs the merge-base
-/// of `refName` and `HEAD` against the working tree, so it also includes uncommitted changes: reviewing an
-/// agent's work against a base branch means "everything since it diverged, including what it hasn't
-/// committed yet." The daemon takes only the explicit ref the client sends — it never invents a base
-/// branch; the client resolves "base branch" from `SpacesDeviceWorkspaceSummary.baseBranch` and disables
-/// that scope in its UI when the workspace has none.
+/// Selects what `workspaceDiff` compares. `refName == nil, lastCommit == false` diffs uncommitted changes
+/// against `HEAD` (tracked edits plus untracked files synthesized as add-diffs). A non-nil `refName` diffs
+/// the merge-base of `refName` and `HEAD` against the working tree, so it also includes uncommitted changes:
+/// reviewing an agent's work against a base branch means "everything since it diverged, including what it
+/// hasn't committed yet." `lastCommit == true` diffs `HEAD`'s parent against `HEAD` — committed changes
+/// only, with no working-tree or untracked involvement at all — and is mutually exclusive with `refName`
+/// (both set is `.invalidArgument`). The daemon takes only the explicit ref the client sends — it never
+/// invents a base branch; the client resolves "base branch" from `SpacesDeviceWorkspaceSummary.baseBranch`
+/// and omits that preset from its UI when the workspace has none.
 public struct SpacesDeviceWorkspaceDiffRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let refName: String?
+    public let lastCommit: Bool
 
-    public init(workspaceID: String, refName: String? = nil) {
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false) {
         self.workspaceID = workspaceID
         self.refName = refName
+        self.lastCommit = lastCommit
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit }
+
+    /// Custom decode so an encoder that omits a `false` field (rather than sending it explicitly) still
+    /// decodes correctly: absent `lastCommit` decodes as `false`, matching `init`'s default.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
     }
 }
 
@@ -1106,18 +1165,31 @@ public struct SpacesDeviceWorkspaceDiffResult: Codable, Sendable, Equatable {
 /// `WorkspaceDiffSignatureSubscription`), not a convenience for the client. A client compares
 /// `scopeSignature` against the last one it acted on and ignores a repeat.
 ///
-/// `refName` mirrors the subscribe request's scope (`nil` for the uncommitted-changes scope) so a client
-/// multiplexing more than one `subscribeWorkspaceDiffSignature` stream for the same workspace can route an
-/// incoming frame to the right one.
+/// `refName`/`lastCommit` mirror the subscribe request's scope (both false/nil for the uncommitted-changes
+/// scope) so a client multiplexing more than one `subscribeWorkspaceDiffSignature` stream for the same
+/// workspace can route an incoming frame to the right one.
 public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let refName: String?
+    public let lastCommit: Bool
     public let scopeSignature: String
 
-    public init(workspaceID: String, refName: String? = nil, scopeSignature: String) {
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, scopeSignature: String) {
         self.workspaceID = workspaceID
         self.refName = refName
+        self.lastCommit = lastCommit
         self.scopeSignature = scopeSignature
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, scopeSignature }
+
+    /// Mirrors `SpacesDeviceWorkspaceDiffRequest`'s custom decode: absent `lastCommit` decodes as `false`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+        scopeSignature = try container.decode(String.self, forKey: .scopeSignature)
     }
 }
 
@@ -1227,8 +1299,7 @@ public struct SpacesDeviceWorkspaceReviewCommentUpsertRequest: Codable, Sendable
     public let body: String
 
     public init(
-        workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String,
-        body: String
+        workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String
     ) {
         self.workspaceID = workspaceID
         self.id = id
@@ -1624,8 +1695,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
-        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil,
-        selectionEndRow: UInt32? = nil, selectionRectangle: Bool? = nil
+        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
+        selectionRectangle: Bool? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1991,6 +2062,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Lists every path inside a workspace's checkout the user would consider part of the workspace; see
     /// `SpacesDeviceWorkspaceFileListRequest`. Read-only.
     case workspaceFileList(SpacesDeviceWorkspaceFileListRequest)
+    case workspaceRefList(SpacesDeviceWorkspaceRefListRequest)
     /// Structured uncommitted-or-vs-ref diff for a workspace's checkout, for the code pane's review view.
     case workspaceDiff(SpacesDeviceWorkspaceDiffRequest)
     /// Long-lived subscription that streams a workspace/ref scope's `scopeSignature` whenever it changes
@@ -2076,6 +2148,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceFileRead: "workspaceFileRead"
         case .workspaceFileWrite: "workspaceFileWrite"
         case .workspaceFileList: "workspaceFileList"
+        case .workspaceRefList: "workspaceRefList"
         case .workspaceDiff: "workspaceDiff"
         case .subscribeWorkspaceDiffSignature: "subscribeWorkspaceDiffSignature"
         case .subscribeWorkspaceFileSignature: "subscribeWorkspaceFileSignature"
@@ -2140,11 +2213,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         return false
     }
 
-    /// The (workspace, ref) scope a `subscribeWorkspaceDiffSignature` subscription is for, so the transport
-    /// layer can key its per-scope producer socket without re-decoding the command payload. `refName ==
-    /// nil` is the uncommitted-changes scope, matching `workspaceDiff`'s own convention.
-    public var workspaceDiffSignatureScope: (workspaceID: String, refName: String?)? {
-        if case .subscribeWorkspaceDiffSignature(let payload) = self { return (payload.workspaceID, payload.refName) }
+    /// The (workspace, ref, lastCommit) scope a `subscribeWorkspaceDiffSignature` subscription is for, so
+    /// the transport layer can key its per-scope producer socket without re-decoding the command payload.
+    /// `refName == nil, lastCommit == false` is the uncommitted-changes scope, matching `workspaceDiff`'s
+    /// own convention.
+    public var workspaceDiffSignatureScope: (workspaceID: String, refName: String?, lastCommit: Bool)? {
+        if case .subscribeWorkspaceDiffSignature(let payload) = self { return (payload.workspaceID, payload.refName, payload.lastCommit) }
         return nil
     }
 
@@ -2184,7 +2258,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceFileList, .workspaceDiff, .workspaceReviewCommentList:
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceFileList, .workspaceRefList, .workspaceDiff,
+            .workspaceReviewCommentList:
             true
         default: false
         }
@@ -2254,6 +2329,7 @@ extension SpacesDeviceAPICommand: Codable {
         case workspaceFileRead
         case workspaceFileWrite
         case workspaceFileList
+        case workspaceRefList
         case workspaceDiff
         case subscribeWorkspaceDiffSignature
         case subscribeWorkspaceFileSignature
@@ -2349,6 +2425,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadRequest.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteRequest.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListRequest.self, forKey: key))
+        case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListRequest.self, forKey: key))
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
         case .subscribeWorkspaceDiffSignature:
             self = .subscribeWorkspaceDiffSignature(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
@@ -2429,6 +2506,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
+        case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .subscribeWorkspaceDiffSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceDiffSignature)
         case .subscribeWorkspaceFileSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceFileSignature)
@@ -2516,6 +2594,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteResult)
     case workspaceFileList(SpacesDeviceWorkspaceFileListResult)
+    case workspaceRefList(SpacesDeviceWorkspaceRefListResult)
     case workspaceDiff(SpacesDeviceWorkspaceDiffResult)
     case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
@@ -2545,6 +2624,7 @@ extension SpacesDeviceAPIResult: Codable {
         case workspaceFileRead
         case workspaceFileWrite
         case workspaceFileList
+        case workspaceRefList
         case workspaceDiff
         case workspaceReviewCommentList
         case workspaceReviewCommentUpsert
@@ -2579,6 +2659,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListResult.self, forKey: key))
+        case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListResult.self, forKey: key))
         case .workspaceDiff: self = .workspaceDiff(try container.decode(SpacesDeviceWorkspaceDiffResult.self, forKey: key))
         case .workspaceReviewCommentList:
             self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListResult.self, forKey: key))
@@ -2612,6 +2693,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
+        case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
         case .workspaceDiff(let payload): try container.encode(payload, forKey: .workspaceDiff)
         case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
@@ -2703,6 +2785,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var workspaceFileList: SpacesDeviceWorkspaceFileListResult? { if case .workspaceFileList(let payload) = result { payload } else { nil } }
+
+    public var workspaceRefList: SpacesDeviceWorkspaceRefListResult? { if case .workspaceRefList(let payload) = result { payload } else { nil } }
 
     public var workspaceDiff: SpacesDeviceWorkspaceDiffResult? { if case .workspaceDiff(let payload) = result { payload } else { nil } }
 

@@ -476,8 +476,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // workspace ids from this just-installed authoritative overview, which no pane-replacement
             // race can invalidate: a workspace absent from `overview.workspaces` was deleted, not
             // merely hidden (a hidden workspace stays listed with `isHidden` set).
-            host.panelCoordinator.pruneOpenCodePanes(
+            if let orphan = host.panelCoordinator.pruneOpenCodePanes(
                 deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
+            {
+                host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+            }
             // Same just-installed overview carries this device's agent rows too, so a code pane's
             // assigned-agent dropdown stays current with whatever just spawned/exited.
             host.panelCoordinator.updateCodePaneAgents(deviceID: snapshot.localDeviceID, hosting: host)
@@ -1297,7 +1300,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // a pane-replacement race to protect, so skipping it here for a stale epoch would let a
             // remote workspace deletion that arrives mid-race go unpruned indefinitely — the next
             // identical overview early-returns above before it could retry.
-            host.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
+            if let orphan = host.panelCoordinator.pruneOpenCodePanes(
+                deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
+            {
+                host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+            }
             // Same just-installed overview carries this device's agent rows too, so a code pane's
             // assigned-agent dropdown stays current with whatever just spawned/exited.
             host.panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: host)

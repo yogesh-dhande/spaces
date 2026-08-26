@@ -5,16 +5,12 @@ import spacesdevicecore
 /// whatever `subscribeWorkspaceDiffSignature` hands back, so that single method is the seam it
 /// depends on rather than the concrete, network-performing client — a test substitutes a handle that
 /// just records whether/how many times it was stopped.
-protocol CodePaneDiffSignatureStreamHandle: AnyObject, Sendable {
-    func stop()
-}
+protocol CodePaneDiffSignatureStreamHandle: AnyObject, Sendable { func stop() }
 
 extension SpacesDeviceWorkspaceDiffSignatureStreamClient: CodePaneDiffSignatureStreamHandle {}
 
 /// A live file-signature subscription handle. Mirrors `CodePaneDiffSignatureStreamHandle` exactly.
-protocol CodePaneFileSignatureStreamHandle: AnyObject, Sendable {
-    func stop()
-}
+protocol CodePaneFileSignatureStreamHandle: AnyObject, Sendable { func stop() }
 
 extension SpacesDeviceWorkspaceFileSignatureStreamClient: CodePaneFileSignatureStreamHandle {}
 
@@ -27,27 +23,27 @@ extension SpacesDeviceWorkspaceFileSignatureStreamClient: CodePaneFileSignatureS
 /// adoption and the deferred-ready gate (`adoptCommittedWriteIntoEditorState`,
 /// `outstandingFileWriteCount`), exactly the class of completion this seam exists for.
 protocol CodePaneDeviceGateway: Sendable {
-    func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult
+    func workspaceDiff(workspaceID: String, refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceDiffResult
 
     func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
         -> SpacesDeviceWorkspaceFileReadResult
 
     func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult
 
-    func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
-    ) async throws -> SpacesDeviceWorkspaceFileWriteResult
+    func workspaceRefList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceRefListResult
+
+    func workspaceFileWrite(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord)
+        async throws -> SpacesDeviceWorkspaceFileWriteResult
 
     func subscribeWorkspaceDiffSignature(
-        workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneDiffSignatureStreamHandle
 
     func subscribeWorkspaceFileSignature(
         workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneFileSignatureStreamHandle
 
     func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment]
@@ -68,9 +64,11 @@ protocol CodePaneDeviceGateway: Sendable {
 /// via `Task.detached` — matching how these calls ran before this seam existed, so wrapping them in
 /// `async` changes nothing about where the blocking I/O actually executes.
 struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
-    func workspaceDiff(workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceDiffResult {
+    func workspaceDiff(workspaceID: String, refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceDiffResult
+    {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.workspaceDiff(workspaceID: workspaceID, refName: refName, device: device)
+            try SpacesDeviceClient.workspaceDiff(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device)
         }.value
     }
 
@@ -83,14 +81,16 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult {
-        try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.workspaceFileList(workspaceID: workspaceID, device: device)
-        }.value
+        try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.workspaceFileList(workspaceID: workspaceID, device: device) }.value
     }
 
-    func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord
-    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
+    func workspaceRefList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceRefListResult {
+        try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.workspaceRefList(workspaceID: workspaceID, device: device) }.value
+    }
+
+    func workspaceFileWrite(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord)
+        async throws -> SpacesDeviceWorkspaceFileWriteResult
+    {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileWrite(
                 workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256, device: device)
@@ -98,20 +98,18 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     func subscribeWorkspaceDiffSignature(
-        workspaceID: String, refName: String?, device: SpacesPairedDeviceRecord,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneDiffSignatureStreamHandle {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceDiffSignature(
-                workspaceID: workspaceID, refName: refName, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
         }.value
     }
 
     func subscribeWorkspaceFileSignature(
         workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneFileSignatureStreamHandle {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceFileSignature(

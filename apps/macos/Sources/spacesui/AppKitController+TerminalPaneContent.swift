@@ -150,11 +150,15 @@ extension AppKitController {
     ///   unreachable at launch stays pending, and by the time its device reconnects the user may already
     ///   have opened a fresh Editor via ⌘⌥E — restoring this window's own code pane on top would
     ///   duplicate the singleton, so it is dropped here instead, same as any other dead pane.
+    /// - Parameter orphanedEditorFallback: A live workspace selected through the same fallback chain
+    ///   used for an Editor whose workspace is deleted while the app is running. Before pruning, a
+    ///   persisted code pane whose workspace disappeared while the app was closed is retargeted here,
+    ///   preserving its pane and window identity. Nil keeps the close-when-no-workspace-remains rule.
     nonisolated static func panelWindowRestoreDecision(
         layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>, retainedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>,
-        editorAlreadyOpen: Bool
+        editorAlreadyOpen: Bool, orphanedEditorFallback: PanelLayoutEngine.WorkspaceKey? = nil
     ) -> PanelWindowRestoreDecision {
-        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
+        guard var layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
         else { return .skip }
         let referencedDeviceIDs = Set(
             PanelLayoutEngine.allPanes(in: layout).map { pane in
@@ -164,6 +168,15 @@ extension AppKitController {
                 }
             })
         guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
+        if !editorAlreadyOpen, let fallback = orphanedEditorFallback, retainedWorkspaceKeys.contains(fallback) {
+            for pane in PanelLayoutEngine.allPanes(in: layout) {
+                guard case .codePane(let deviceID, let workspaceID) = pane.content,
+                    !retainedWorkspaceKeys.contains(.init(deviceID: deviceID, workspaceID: workspaceID))
+                else { continue }
+                layout = PanelLayoutEngine.retargetPane(
+                    paneID: pane.id, to: .codePane(deviceID: fallback.deviceID, workspaceID: fallback.workspaceID), in: layout)
+            }
+        }
         let pruned = PanelLayoutEngine.prunedLayout(
             layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: retainedWorkspaceKeys, droppingAllCodePanes: editorAlreadyOpen)
         return pruned.isEmpty ? .discard : .open(pruned)
@@ -215,6 +228,9 @@ extension AppKitController {
             readySections.flatMap { section in
                 (section.overview?.workspaces ?? []).map { PanelLayoutEngine.WorkspaceKey(deviceID: section.deviceID, workspaceID: $0.id) }
             })
+        let orphanedEditorFallback = globalEditorFallbackWorkspaceID(excluding: nil, allowedWorkspaceKeys: retainedWorkspaceKeys).map {
+            PanelLayoutEngine.WorkspaceKey(deviceID: $0.deviceID, workspaceID: $0.workspaceID)
+        }
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
             // Re-read fresh on every iteration, not hoisted above the loop: a `.open` decision below
@@ -222,12 +238,20 @@ extension AppKitController {
             // same pass just restored must already count as "live" for the next pending record.
             switch Self.panelWindowRestoreDecision(
                 layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs,
-                retainedWorkspaceKeys: retainedWorkspaceKeys, editorAlreadyOpen: panelCoordinator.hasLiveGlobalCodePane)
+                retainedWorkspaceKeys: retainedWorkspaceKeys, editorAlreadyOpen: panelCoordinator.hasLiveGlobalCodePane,
+                orphanedEditorFallback: orphanedEditorFallback)
             {
             case .waitForDevices: remaining.append(record)
             case .skip: break
             case .discard: try? clientDatabase().deletePanelWindow(id: record.id)
             case .open(let layout):
+                // Keep the row aligned with the effective restored layout. This makes an offline
+                // deletion's Editor retarget durable (and avoids re-pruning dead panes on every launch)
+                // while preserving the stored frame before the window exists to report one itself.
+                if let data = try? JSONEncoder().encode(layout) {
+                    try? clientDatabase().upsertPanelWindow(
+                        .init(id: record.id, layoutJSON: String(decoding: data, as: UTF8.self), frame: record.frame))
+                }
                 let frame = record.frame.map { NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
                 reopenPersistedPanelWindow(record: record, layout: layout, frame: frame)
             }

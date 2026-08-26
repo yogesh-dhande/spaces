@@ -77,6 +77,7 @@ function makeBridge(): SpacesBridge & {
     workspaceFileRead: notUsed,
     workspaceFileWrite: notUsed,
     workspaceFileList: notUsed,
+    workspaceRefList: notUsed,
     subscribeDiffSignature: () => () => {},
     subscribeFileSignature: () => () => {},
     notifyEditorStateChanged: () => {},
@@ -312,8 +313,8 @@ describe("CommentsController — card create/edit/delete RPC round-trips", () =>
     const batchBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Add to batch")!;
     batchBtn.click();
 
-    // Collapsing an empty card would hide it with no way to bring it back (the tray only lists
-    // non-empty drafts), so the click above must be rejected rather than silently orphaning it.
+    // An empty-body card has nothing to batch — `addToBatch`'s own empty-body guard rejects the
+    // click before it ever touches `batchedIds`, the same guard `sendOne` uses for an empty send.
     expect(lastToolbarState(onToolbarStateChange).draftCount).toBe(0);
     expect(bridge.drafts.size).toBe(0);
   });
@@ -1046,7 +1047,7 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     return { bridge, controller, diffViewFake };
   }
 
-  it("blur-then-Add-to-batch on a provisional card: collapses under the server id once the held create-persist resolves, and the tray lists it", async () => {
+  it("blur-then-Add-to-batch on a provisional card: stays inline under the server id once the held create-persist resolves, showing a disabled Batched button, and the tray lists it", async () => {
     const { bridge, controller, diffViewFake } = setup();
     controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
     const provisionalDraft = firstAnchoredComment(diffViewFake);
@@ -1071,20 +1072,28 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     const serverId = persisted!.id;
     expect(serverId).not.toBe(provisionalDraft.id); // re-keyed by the persist, as usual
 
-    // addToBatch's own continuation (resolve id → collapse) runs after the persist above, so wait
-    // for its effect: the collapsed id drops out of the *visible* (inline) list `refresh()` passes
-    // to `DiffView.setComments`.
+    // addToBatch's own continuation (resolve id → mark batched) runs after the persist above, so
+    // wait for its effect: the batched id stays in the inline list `refreshCardsOnly()` passes to
+    // `DiffView.setComments` — a batched comment is never hidden, see `batchedIds`'s doc comment.
     await vi.waitFor(() => {
       const calls = diffViewFake.setComments.mock.calls;
       const visible = calls.at(-1)![0] as { comment: SpacesReviewComment }[];
-      expect(visible.find((ac) => ac.comment.id === serverId)).toBeUndefined();
+      expect(visible.find((ac) => ac.comment.id === serverId)).toBeDefined();
     });
 
-    // Collapsed under the SERVER id, not the stale provisional one — nothing in the bridge or the
+    // Batched under the SERVER id, not the stale provisional one — nothing in the bridge or the
     // controller's local mirror still refers to `provisionalDraft.id` at all.
     expect(bridge.drafts.has(provisionalDraft.id)).toBe(false);
 
-    // The tray lists every sendable draft regardless of collapse state (see `renderTray` /
+    // The card's own "Add to batch" button reflects the batched state: rebuilt as a disabled
+    // "Batched" button (renderCard is invoked directly here to inspect the same DOM the controller
+    // would have produced for this comment/id).
+    const rebuiltCard = controller.hooks.renderCard({ comment: { ...provisionalDraft, id: serverId, body: "Batch this one" }, position: { lineNumber: 1, outdated: false } });
+    const rebuiltBatchBtn = [...rebuiltCard.querySelectorAll("button")].find((b) => b.textContent === "Batched")!;
+    expect(rebuiltBatchBtn).toBeDefined();
+    expect(rebuiltBatchBtn.disabled).toBe(true);
+
+    // The tray lists every sendable draft regardless of batched state (see `renderTray` /
     // `docs/spec.md`'s "Add to batch" correction) — confirm it renders this one.
     const container = document.createElement("div");
     controller.mount(container);
@@ -1094,7 +1103,7 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     expect(container.querySelector(".comment-tray-loc")!.textContent).toBe("src/foo.ts:1");
   });
 
-  it("a create-persist that fails leaves the card uncollapsed, so its error banner stays visible", async () => {
+  it("a create-persist that fails leaves the card un-batched, so its error banner stays visible", async () => {
     const { bridge, controller, diffViewFake } = setup();
     controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
     const provisionalDraft = firstAnchoredComment(diffViewFake);
@@ -1122,6 +1131,92 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     // render count changes). So exactly one more render happens here versus the old surfaceError-only
     // catch, even though the card is still keyed by the same (never re-keyed) provisional id.
     expect(diffViewFake.setComments.mock.calls.length).toBe(rendersBeforeFailure + 1);
+  });
+});
+
+describe("CommentsController — 'Add to batch' keeps the card inline (batching is presentation-only)", () => {
+  function setup() {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container, onToolbarStateChange };
+  }
+
+  it("a batched comment stays in the annotations passed to DiffView.setComments, its card shows a disabled Batched button, and the tray still lists it", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "please fix this",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = persisted.body;
+    const batchBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Add to batch")!;
+    batchBtn.click();
+    await vi.waitFor(() => expect(bridge.upsertCallCount).toBeGreaterThanOrEqual(0)); // let the click's microtasks settle
+
+    // Still inline: the id is present in the latest annotations passed to setComments, not filtered
+    // out — a batched comment is never hidden, see `batchedIds`'s doc comment on the controller.
+    const calls = diffViewFake.setComments.mock.calls;
+    const visible = calls.at(-1)![0] as { comment: SpacesReviewComment }[];
+    expect(visible.find((ac) => ac.comment.id === persisted.id)).toBeDefined();
+
+    // The card's own button reflects the batched state once rebuilt.
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltBatchBtn = [...rebuiltCard.querySelectorAll("button")].find(
+      (b) => b.textContent === "Batched" || b.textContent === "Add to batch",
+    )!;
+    expect(rebuiltBatchBtn.textContent).toBe("Batched");
+    expect(rebuiltBatchBtn.disabled).toBe(true);
+
+    // The tray still lists it, unaffected by batching.
+    const rows = container.querySelectorAll(".comment-tray-row");
+    expect(rows).toHaveLength(1);
+    expect(container.querySelector(".comment-tray-loc")!.textContent).toBe("src/foo.ts:1");
+  });
+
+  it("clicking the tray row for a batched comment scrolls to it without un-batching it or hiding the card", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "please fix this",
+    });
+    await controller.loadInitial();
+
+    const card = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    textarea.value = persisted.body;
+    const batchBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Add to batch")!;
+    batchBtn.click();
+
+    const setCommentsCallsBeforeTrayClick = diffViewFake.setComments.mock.calls.length;
+    const row = container.querySelector(".comment-tray-row") as HTMLElement;
+    row.click();
+
+    expect(diffViewFake.scrollToLine).toHaveBeenCalledWith("src/foo.ts", "new", 1);
+    // The tray click is scroll-only: it must not trigger another render pass (no un-batch mutation
+    // to react to) and the row must still be there afterward.
+    expect(diffViewFake.setComments.mock.calls.length).toBe(setCommentsCallsBeforeTrayClick);
+    expect(container.querySelectorAll(".comment-tray-row")).toHaveLength(1);
+
+    const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
+    const rebuiltBatchBtn = [...rebuiltCard.querySelectorAll("button")].find(
+      (b) => b.textContent === "Batched" || b.textContent === "Add to batch",
+    )!;
+    expect(rebuiltBatchBtn.textContent).toBe("Batched"); // still batched, not reverted by the click
   });
 });
 

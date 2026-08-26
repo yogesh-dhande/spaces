@@ -501,13 +501,15 @@ public final class SpacesDeviceWorkspaceDiffSignatureStreamClient: @unchecked Se
     private var lastDeliveredSignature: String?
 
     public init(
-        workspaceID: String, refName: String? = nil, authToken: String?, clientApp: SpacesDeviceClientApp?, resolver: SpacesDeviceEndpointResolver,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, authToken: String?, clientApp: SpacesDeviceClientApp?,
+        resolver: SpacesDeviceEndpointResolver, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws {
         guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
         self.request = SpacesDeviceAPIRequest(
-            command: .subscribeWorkspaceDiffSignature(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: refName)),
-            authToken: authToken, clientApp: clientApp)
+            command: .subscribeWorkspaceDiffSignature(
+                SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit)), authToken: authToken,
+            clientApp: clientApp)
         self.resolver = resolver
         self.onFrame = onFrame
         self.onDisconnect = onDisconnect

@@ -16,6 +16,18 @@ type FakeCodeViewItem = { type: string; version: number | undefined; annotations
 // track item state at all, so they can't catch this class of bug.
 const control = vi.hoisted(() => ({
   items: new Map<string, FakeCodeViewItem>(),
+  // Records every `setSelectedLines` call made against the most recently constructed `FakeCodeView`
+  // — used by the "clears the stuck gutter selection" tests below (see defect 1's doc comment on
+  // `DiffView.requestNewComment`). `null` is exactly what a selection-clear call passes.
+  setSelectedLinesCalls: [] as Array<unknown>,
+  // The options object each `FakeCodeView` was constructed with — lets a test reach in and invoke
+  // `onGutterUtilityClick` directly, the same way the real library's `InteractionManager` would on a
+  // gutter pointerup.
+  lastOptions: undefined as Record<string, unknown> | undefined,
+  // The most recently constructed `FakeCodeView` instance — lets a test call `setSelectedLines`
+  // directly on it to simulate the library's own post-hook re-assert (see the "keeps the selection
+  // cleared" test below).
+  lastInstance: undefined as { setSelectedLines(selection: unknown): void } | undefined,
 }));
 
 vi.mock("@pierre/diffs", async (importOriginal) => {
@@ -27,6 +39,10 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     return true;
   }
   class FakeCodeView {
+    constructor(options: Record<string, unknown>) {
+      control.lastOptions = options;
+      control.lastInstance = this;
+    }
     setup(): void {}
     setOptions(): void {}
     getScrollTop(): number {
@@ -36,6 +52,12 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     cleanUp(): void {}
     getEditor(): object {
       return {};
+    }
+    setSelectedLines(selection: unknown): void {
+      control.setSelectedLinesCalls.push(selection);
+    }
+    clearSelectedLines(): void {
+      control.setSelectedLinesCalls.push(null);
     }
     setItems(items: ReadonlyArray<{ id: string; type: string; version: number | undefined; annotations?: unknown }>): void {
       const nextIds = new Set(items.map((item) => item.id));
@@ -96,6 +118,9 @@ function makeHooks(): DiffCommentHooks {
 
 beforeEach(() => {
   control.items.clear();
+  control.setSelectedLinesCalls = [];
+  control.lastOptions = undefined;
+  control.lastInstance = undefined;
 });
 
 describe("DiffView.setComments", () => {
@@ -195,5 +220,80 @@ describe("DiffView.setComments forceCardRender", () => {
 
     expect(updateItemSpy).not.toHaveBeenCalled();
     updateItemSpy.mockRestore();
+  });
+});
+
+describe("DiffView gutter-utility click", () => {
+  // Regression: `@pierre/diffs`' `InteractionManager` sets its own `selectedRange` on a
+  // gutter-utility pointerdown and never clears it in this configuration (line-selection mode is
+  // off) — see `dist/managers/InteractionManager.js`'s `handleDocumentPointerUp` "gutterSelecting"
+  // case. Left unhandled, the clicked line stays highlighted forever and a later gutter click
+  // re-anchors to that stale selection instead of the newly clicked line — reported as "the line
+  // stays highlighted... and I cannot add any other comments in that file." `DiffView.
+  // requestNewComment` must clear the selection itself once the draft is created. The clear is
+  // deferred to a microtask (see that method's doc comment), so these assertions run after a
+  // microtask flush.
+  it("clears the gutter selection after requesting a new comment", async () => {
+    const hooks = makeHooks();
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+
+    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
+      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
+      | undefined;
+    expect(onGutterUtilityClick).toBeDefined();
+
+    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    await Promise.resolve(); // flush the queued microtask clear
+
+    expect(control.setSelectedLinesCalls).toEqual([null]);
+  });
+
+  it("requests a new comment before clearing the selection", async () => {
+    const hooks = makeHooks();
+    const onRequestNewComment = vi.fn();
+    hooks.onRequestNewComment = onRequestNewComment;
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+
+    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
+      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
+      | undefined;
+    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    await Promise.resolve(); // flush the queued microtask clear
+
+    expect(onRequestNewComment).toHaveBeenCalledTimes(1);
+    expect(control.setSelectedLinesCalls).toEqual([null]);
+  });
+
+  // Regression: the library doesn't just leave the old selection alone after our hook runs — it
+  // actively re-asserts it. `InteractionManager`'s "gutterSelecting" pointerup case calls our
+  // `onGutterUtilityClick` hook and THEN, still in the same synchronous pointerup dispatch, calls
+  // `notifySelectionCommitted`, which fires `CodeView`'s wrapped `onLineSelected` ->
+  // `applySelectedLines` and re-sets the same selection. A clear issued synchronously from inside
+  // our hook (the original, buggy implementation) runs BEFORE that re-assert and gets overwritten
+  // by it, so the highlight never actually goes away. Queuing the clear as a microtask lets it run
+  // after the whole pointerup dispatch — including the re-assert simulated here — has finished.
+  it("keeps the selection cleared even when the library re-asserts it synchronously afterward", async () => {
+    const hooks = makeHooks();
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+
+    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
+      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
+      | undefined;
+    const fakeCodeView = control.lastInstance;
+    expect(onGutterUtilityClick).toBeDefined();
+    expect(fakeCodeView).toBeDefined();
+
+    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    // Simulate the library's own re-assert, which happens synchronously right after our hook
+    // returns (still within the pointerup dispatch, before any queued microtask gets a turn).
+    fakeCodeView!.setSelectedLines({ start: 11, end: 11, side: "additions" });
+    expect(control.setSelectedLinesCalls.at(-1)).not.toBeNull(); // re-asserted, not yet cleared
+
+    await Promise.resolve(); // flush the queued microtask clear, which runs after the re-assert
+
+    expect(control.setSelectedLinesCalls.at(-1)).toBeNull();
   });
 });

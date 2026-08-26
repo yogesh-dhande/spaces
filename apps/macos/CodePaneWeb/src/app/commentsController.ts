@@ -86,10 +86,13 @@ export class CommentsController {
 
   private drafts: SpacesReviewComment[] = [];
   private files: readonly DiffFileEntry[] = [];
-  /** Ids whose inline card is hidden ("added to batch") — UI-only, per the spec's "ALL drafts ARE
-   *  the batch" rule: this never affects which comments are sendable, only which ones render
-   *  inline. The tray always lists every sendable draft regardless of this set. */
-  private readonly collapsedIds = new Set<string>();
+  /** Ids marked "added to batch" via a card's "Add to batch" button — UI-only, per the spec's "ALL
+   *  drafts ARE the batch" rule: this never affects which comments are sendable (the tray always
+   *  lists every sendable draft regardless of this set, and `doSendBatch` sends every sendable
+   *  draft the same way). Its only effect is `renderCard`'s button state: a batched card's "Add to
+   *  batch" button renders as a disabled "Batched" state instead of hiding the card — a card stays
+   *  inline, with its Send/Delete buttons still live, once batched. */
+  private readonly batchedIds = new Set<string>();
   private agents: readonly CodePaneAgentSummary[];
   private selectedAgentId: string | undefined;
   /** Set right after a new draft is created (no selection to restore — a brand-new card has
@@ -868,7 +871,7 @@ export class CommentsController {
       // already committed everything live-divergent before that await started), not stale
       // bookkeeping.
       const live = this.liveBodies.get(id);
-      this.collapsedIds.delete(id);
+      this.batchedIds.delete(id);
       this.forgetDraftState(id);
       // Fix 4 (round-2) / round-2b: see `doDeleteDraft`'s identical guard — a `loadInitial` or
       // `reconcileMirrorAfterRejection` response already dispatched before this batch send completed
@@ -1081,17 +1084,18 @@ export class CommentsController {
       // follow the id to its new key too, or a rebuild racing this persist would fail to find the
       // card it meant to refocus.
       if (this.pendingFocus?.id === resolvedId) this.pendingFocus = { ...this.pendingFocus, id: persisted.id };
-      // Same follow-the-id rule as `pendingFocus`/`collapsedIds`: a delete registered before this
+      // Same follow-the-id rule as `pendingFocus`/`batchedIds`: a delete registered before this
       // re-key must coalesce with (not miss) a second delete call for the same row arriving after the
       // rebuild uses the server id — see `deleteDraft`'s doc comment.
       const pendingDelete = this.pendingDeleteById.get(resolvedId);
       if (pendingDelete) this.pendingDeleteById.set(persisted.id, pendingDelete);
-      // Batch-tray membership (see `collapsedIds`'s doc comment) must follow the id the same way —
-      // otherwise a card added to the batch while still provisional would silently fall out of
-      // `collapsedIds` the moment its first persist re-keys it to the server id, reappearing inline.
-      if (this.collapsedIds.has(resolvedId)) {
-        this.collapsedIds.delete(resolvedId);
-        this.collapsedIds.add(persisted.id);
+      // The "Batched" button state (see `batchedIds`'s doc comment) must follow the id the same way
+      // — otherwise a card marked batched while still provisional would silently fall out of
+      // `batchedIds` the moment its first persist re-keys it to the server id, reverting its button
+      // to "Add to batch".
+      if (this.batchedIds.has(resolvedId)) {
+        this.batchedIds.delete(resolvedId);
+        this.batchedIds.add(persisted.id);
       }
     }
     this.drafts = this.drafts.map((d) => (d.id === resolvedId ? persisted : d));
@@ -1178,7 +1182,7 @@ export class CommentsController {
     if (this.provisionalIds.has(resolvedId)) {
       this.provisionalIds.delete(resolvedId);
       this.drafts = this.drafts.filter((d) => d.id !== resolvedId);
-      this.collapsedIds.delete(resolvedId);
+      this.batchedIds.delete(resolvedId);
       this.forgetDraftState(id, resolvedId);
       this.refresh();
       return;
@@ -1195,7 +1199,7 @@ export class CommentsController {
       return;
     }
     this.drafts = this.drafts.filter((d) => d.id !== resolvedId);
-    this.collapsedIds.delete(resolvedId);
+    this.batchedIds.delete(resolvedId);
     this.forgetDraftState(id, resolvedId);
     // Fix 4 (round-2) / round-2b: a `loadInitial` or `reconcileMirrorAfterRejection` response already
     // dispatched before this delete completed still carries this row — tombstone it so that response
@@ -1351,9 +1355,10 @@ export class CommentsController {
       // `doPersistBody`'s mirror of this transfer.
       const pendingDelete = this.pendingDeleteById.get(resolvedId);
       if (pendingDelete) this.pendingDeleteById.set(persisted.id, pendingDelete);
-      // Unlike `doPersistBody`, `collapsedIds` is deliberately NOT transferred here: this path is
-      // reached only via a card's inline Send button, and a collapsed (batch-tray) card has no inline
-      // Send button, so `collapsedIds` membership can never be relevant to a draft reaching this code.
+      // Unlike `doPersistBody`, `batchedIds` is deliberately NOT transferred here: `addToBatch` only
+      // ever adds an already-persisted (non-provisional) id to `batchedIds` — a still-provisional
+      // draft's persisted `body` is always empty (see `addToBatch`'s own guard), so `isProvisional`
+      // and `batchedIds` membership can never both be true for the same id reaching this code.
       // `this.refresh()` must run BEFORE the `reviewCommentsSend` await below (not after): any
       // keystroke typed during that await lands in `liveBodies` under the id the DOM card is actually
       // keyed by, which only matches `persisted.id` once this rebuild has run. This is what the
@@ -1377,7 +1382,7 @@ export class CommentsController {
     // entry here is unsent typing, not stale bookkeeping.
     const live = this.liveBodies.get(persisted.id) ?? this.liveBodies.get(resolvedId) ?? this.liveBodies.get(id);
     this.drafts = this.drafts.filter((d) => d.id !== persisted.id);
-    this.collapsedIds.delete(persisted.id);
+    this.batchedIds.delete(persisted.id);
     this.forgetDraftState(id, resolvedId, persisted.id);
     // Fix 4 (round-2) / round-2b: see `doDeleteDraft`'s identical guard — a `loadInitial` or
     // `reconcileMirrorAfterRejection` response already dispatched before this send completed still
@@ -1394,10 +1399,10 @@ export class CommentsController {
   /**
    * Async click handler for a card's "Add to batch" button — mirrors `sendOne`/`deleteDraft`'s
    * coordination pattern (await any persist already in flight, then re-resolve the id) instead of
-   * synchronously collapsing the card: a still-provisional card's first blur persist may still be
-   * in flight when this is clicked (blur fires before click — see the class doc comment), and
-   * collapsing under the pre-persist provisional id would leave `collapsedIds` holding a key that
-   * `doPersistBody`'s re-key block (see its transfer of `collapsedIds` alongside `idAliases`) would
+   * synchronously marking the card batched: a still-provisional card's first blur persist may still
+   * be in flight when this is clicked (blur fires before click — see the class doc comment), and
+   * marking the pre-persist provisional id would leave `batchedIds` holding a key that
+   * `doPersistBody`'s re-key block (see its transfer of `batchedIds` alongside `idAliases`) would
    * otherwise have to guess at.
    *
    * `body` is read live from the card's textarea at click time, mirroring `sendOne`'s empty-body
@@ -1416,14 +1421,16 @@ export class CommentsController {
     // rejecting, so the await above resolves the same way whether the persist succeeded or failed.
     // Detect a failed *create* persist here: a draft that is still provisional with an empty stored
     // body never actually round-tripped (see `createDraft`'s `body: ""` placeholder, only ever
-    // overwritten by a successful `doPersistBody`). Collapsing such a card into the tray would hide
-    // it behind a tray that only lists sendable (non-empty-body) drafts, with no way to bring it
-    // back — leave it rendered inline instead, so the user still sees the error banner
-    // `persistBody`'s failure path already surfaced.
+    // overwritten by a successful `doPersistBody`). Marking such a card "Batched" would misreport a
+    // draft the daemon has never seen as confirmed — leave its button live instead, so the user
+    // still sees the error banner `persistBody`'s failure path already surfaced and can retry.
     if (this.provisionalIds.has(resolvedId) && draft.body.trim().length === 0) return;
 
-    this.collapsedIds.add(resolvedId);
-    this.refresh();
+    this.batchedIds.add(resolvedId);
+    // Only this card's button state changed (see `batchedIds`'s doc comment) — the draft set,
+    // anchoring, and tray membership are untouched, so the cheaper forced-card-rebuild path is
+    // enough; see `refreshCardsOnly`'s doc comment.
+    this.refreshCardsOnly();
   }
 
   private anchoredAll(): AnchoredComment[] {
@@ -1456,8 +1463,11 @@ export class CommentsController {
     }
   }
 
-  /** Re-anchors, re-renders the tray, and pushes the toolbar state — the full pipeline, run after
-   *  any change to `drafts`, `files`, or `collapsedIds`. */
+  /** Re-anchors, re-renders every card and the tray, and pushes the toolbar state — the full
+   *  pipeline, run after any change to `drafts` or `files`. Every anchored comment is passed
+   *  straight through to `DiffView.setComments`: a batched comment (`batchedIds`) stays inline like
+   *  any other, its card's "Add to batch" button rendering as the disabled "Batched" state instead
+   *  of the card being hidden — see `batchedIds`'s doc comment. */
   private refresh(): void {
     if (this.pointerPressActive) {
       this.deferredRefreshDuringPress = "full";
@@ -1465,8 +1475,7 @@ export class CommentsController {
     }
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
-    const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
-    this.diffView?.setComments(visible);
+    this.diffView?.setComments(anchored);
     this.lastAnchored = anchored; // Fix 2 (P2): cached for refreshTray() — see its field doc comment
     this.renderTray(anchored);
     this.pushToolbarState();
@@ -1484,14 +1493,14 @@ export class CommentsController {
     this.renderTray(this.lastAnchored);
   }
 
-  /** Cheaper path for a change that only affects card rendering (agent selection/list), not the
-   *  draft set or anchoring itself — still needs the cards re-rendered (their Send button's label
-   *  and disabled state depend on the selected agent), but the tray rows don't. Passes the SAME
+  /** Cheaper path for a change that only affects card rendering (agent selection/list, or a card
+   *  being marked "Batched" — see `addToBatch`), not the draft set or anchoring itself — still
+   *  needs the cards re-rendered (their Send button's label/disabled state depends on the selected
+   *  agent, and "Add to batch"'s on `batchedIds`), but the tray rows don't. Passes the SAME
    *  `AnchoredComment` objects and anchors `setComments` was last called with — nothing about the
-   *  comments or their positions changed, only the agent selection did — so `setComments`'s
-   *  `annotationListEquals` short-circuit would otherwise skip every file here. `forceCardRender:
-   *  true` bypasses that check so each commented file's card still gets rebuilt against the newly
-   *  selected agent. */
+   *  comments or their positions changed — so `setComments`'s `annotationListEquals` short-circuit
+   *  would otherwise skip every file here. `forceCardRender: true` bypasses that check so each
+   *  commented file's card still gets rebuilt. */
   private refreshCardsOnly(): void {
     if (this.pointerPressActive) {
       // Don't downgrade an already-queued full refresh to this cheaper one.
@@ -1500,8 +1509,7 @@ export class CommentsController {
     }
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
-    const visible = anchored.filter((ac) => !this.collapsedIds.has(ac.comment.id));
-    this.diffView?.setComments(visible, true);
+    this.diffView?.setComments(anchored, true);
   }
 
   /** Replays whichever refresh was deferred by the press-scoped rebuild gate once the press ends
@@ -1637,10 +1645,19 @@ export class CommentsController {
     const batchBtn = document.createElement("button");
     batchBtn.type = "button";
     batchBtn.className = "btn";
-    batchBtn.textContent = "Add to batch";
     batchBtn.dataset.commentId = comment.id;
     batchBtn.dataset.cardAction = "batch";
-    batchBtn.addEventListener("click", () => void this.addToBatch(comment.id, textarea.value));
+    if (this.batchedIds.has(comment.id)) {
+      // Terminal, non-interactive state once batched — see `batchedIds`'s doc comment: there is no
+      // "remove from batch" action, since batch membership never affected sendability in the first
+      // place (every sendable draft is already in the tray and already gets sent by "Send batch").
+      batchBtn.textContent = "Batched";
+      batchBtn.disabled = true;
+      batchBtn.title = "Listed in the batch tray below.";
+    } else {
+      batchBtn.textContent = "Add to batch";
+      batchBtn.addEventListener("click", () => void this.addToBatch(comment.id, textarea.value));
+    }
     actions.appendChild(batchBtn);
 
     const deleteBtn = document.createElement("button");
@@ -1696,8 +1713,8 @@ export class CommentsController {
       const row = document.createElement("div");
       row.className = "comment-tray-row";
       row.addEventListener("click", () => {
-        this.collapsedIds.delete(ac.comment.id);
-        this.refresh();
+        // A batched card stays inline (see `batchedIds`'s doc comment) — a tray row click only
+        // scrolls to it, it never mutates batch membership or visibility.
         const position = ac.position;
         if (this.diffView) {
           if (position && !position.outdated) {

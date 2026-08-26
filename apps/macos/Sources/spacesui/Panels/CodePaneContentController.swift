@@ -94,7 +94,7 @@ enum CodePaneMode: Equatable {
     /// resubscribes instead of silently no-op'ing forever.
     private enum DiffSignatureScope: Equatable {
         case none
-        case scope(String?)
+        case scope(refName: String?, lastCommit: Bool)
     }
     private var subscribedScope: DiffSignatureScope = .none
     /// The `scopeSignature` of the last diff the web app is known to have fetched for the current
@@ -218,9 +218,7 @@ enum CodePaneMode: Equatable {
     /// in issue order and a write's success reply is issued before any subsequent flush's collect, so a
     /// later flush's snapshot already carries the post-save baseline on its own.
     private func clearCommittedFileWriteIfSettled() {
-        if outstandingFileWriteCount == 0, outstandingTeardownFlushCount == 0 {
-            lastCommittedFileWrite = nil
-        }
+        if outstandingFileWriteCount == 0, outstandingTeardownFlushCount == 0 { lastCommittedFileWrite = nil }
     }
 
     /// round-16 Fix 1a: the web app's last-known teardown snapshot of comment text typed but not yet
@@ -409,7 +407,9 @@ enum CodePaneMode: Equatable {
         guard currentTheme != appearance else { return }
         currentTheme = appearance
         guard isReady, let scriptEvaluator else { return }
-        guard let script = CodePaneBridge.dispatchEventScript(name: Self.themeEventName, detail: CodePaneBridge.ThemePayload(theme: appearance.rawValue))
+        guard
+            let script = CodePaneBridge.dispatchEventScript(
+                name: Self.themeEventName, detail: CodePaneBridge.ThemePayload(theme: appearance.rawValue))
         else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -423,7 +423,8 @@ enum CodePaneMode: Equatable {
         guard currentAgents != agents else { return }
         currentAgents = agents
         guard isReady, let scriptEvaluator else { return }
-        let payload = CodePaneBridge.AgentsPayload(agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+        let payload = CodePaneBridge.AgentsPayload(
+            agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.agentsEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -445,7 +446,8 @@ enum CodePaneMode: Equatable {
             currentMode = mode
             return
         }
-        guard let script = CodePaneBridge.dispatchEventScript(name: Self.setModeEventName, detail: CodePaneBridge.SetModePayload(mode: mode.wireValue))
+        guard
+            let script = CodePaneBridge.dispatchEventScript(name: Self.setModeEventName, detail: CodePaneBridge.SetModePayload(mode: mode.wireValue))
         else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -459,9 +461,7 @@ enum CodePaneMode: Equatable {
     /// `.copy("Resources/CodePane")`, and SwiftPM keeps only the LAST path component (`CodePane`)
     /// inside the built resource bundle, not the full source-relative path — confirmed by inspecting
     /// `spaces_spacesui.bundle/CodePane/index.html` in a built `.build` tree.
-    static func codePaneIndexURL() -> URL? {
-        Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "CodePane")
-    }
+    static func codePaneIndexURL() -> URL? { Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "CodePane") }
 
     private func installWebView() {
         let configuration = WKWebViewConfiguration()
@@ -486,10 +486,8 @@ enum CodePaneMode: Equatable {
         webView.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(webView)
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: rootView.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor), webView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: rootView.topAnchor), webView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
         ])
         self.webView = webView
         scriptEvaluator = webView
@@ -498,9 +496,7 @@ enum CodePaneMode: Equatable {
         // The built web bundle is checked into the package as a `.copy` resource; it must always be
         // present in a built app, so there is nothing to fall back to if it's missing, and the page
         // just stays blank.
-        if baseDirectory != nil {
-            webView.load(URLRequest(url: CodePaneSchemeHandler.entryURL))
-        }
+        if baseDirectory != nil { webView.load(URLRequest(url: CodePaneSchemeHandler.entryURL)) }
     }
 
     private func teardownWebView() {
@@ -589,8 +585,7 @@ enum CodePaneMode: Equatable {
         outstandingTeardownFlushCount += 1
         scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectReviewCommentStateScript) { [weak self] result in
             withExtendedLifetime(webView) {
-                self?.storeFlushedReviewCommentState(
-                    CodePaneBridge.decodeCollectedReviewCommentState(result), generation: flushGeneration)
+                self?.storeFlushedReviewCommentState(CodePaneBridge.decodeCollectedReviewCommentState(result), generation: flushGeneration)
                 self?.outstandingTeardownFlushCount -= 1
                 self?.clearCommittedFileWriteIfSettled()
                 self?.resumeDeferredReadyIfNeeded()
@@ -657,9 +652,9 @@ enum CodePaneMode: Equatable {
     /// hibernation is not adopted here; that compound case falls back to the ordinary
     /// `handleExternalChange` reconcile on the rehydrated page.
     private func adoptCommittedWriteIntoEditorState() {
-        guard let write = lastCommittedFileWrite, let state = editorState,
-            state.path == write.path, state.baseSHA256 == write.expectedBase
-        else { return }
+        guard let write = lastCommittedFileWrite, let state = editorState, state.path == write.path, state.baseSHA256 == write.expectedBase else {
+            return
+        }
         var newDirty = state.dirty
         var newConflict = state.conflict
         if state.content == write.content {
@@ -741,8 +736,7 @@ enum CodePaneMode: Equatable {
         case .noFile:
             handleEditorStateChanged(nil, senderWebView: senderWebView)
             return
-        case .notThisMessage:
-            break
+        case .notThisMessage: break
         }
         if let mode = CodePaneBridge.decodeModeChanged(body: body) {
             handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: senderWebView)
@@ -813,8 +807,9 @@ enum CodePaneMode: Equatable {
         currentTheme = appearance
         let workspaceInfo = hosting.codePaneWorkspaceInfo(workspaceID: workspaceID)
         let workspaceName = workspaceInfo?.name ?? workspaceID
-        // Same emptiness rule as `refName(for:)`'s `.baseBranch` case: an empty string reads as "no
-        // base branch configured", not a literal branch named "".
+        // An empty string reads as "no base branch configured", not a literal branch named "" — this
+        // is display-only (the toolbar's base preset and ref-dialog badge); it does not feed `refName(for:)`, which
+        // no longer resolves a scope against the workspace's base branch at all.
         let baseBranch = workspaceInfo?.baseBranch.flatMap { $0.isEmpty ? nil : $0 }
         // Reuses whatever `applyRunningAgents` already recorded (e.g. from an overview that landed
         // while this pane was still loading) instead of re-querying, so init and the dedupe guard
@@ -829,16 +824,14 @@ enum CodePaneMode: Equatable {
             initialMode: currentMode.wireValue,
             // Every code pane opens on the uncommitted-vs-HEAD scope; the toolbar's scope control
             // (see CodePaneWeb's toolbar.ts) is what moves it from there.
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: appearance.rawValue, baseBranch: baseBranch,
-            editorState: editorState,
+            initialScope: .init(kind: "uncommitted", refName: nil), theme: appearance.rawValue, baseBranch: baseBranch, editorState: editorState,
             // round-16 Fix 1a: only present when a teardown flush actually captured something (mirrors
             // `editorState`'s own nil-when-empty handling above) — `InitPayload`'s doc comment on this
             // field explains why an omitted key, not an empty array, is the "nothing pending" wire shape.
             pendingReviewComments: pendingReviewCommentState,
             // Only present when a teardown flush (or a live push) actually captured something —
             // mirrors `pendingReviewComments`'s own nil-when-empty handling above.
-            editorUIState: editorUIState,
-            agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+            editorUIState: editorUIState, agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -900,22 +893,18 @@ enum CodePaneMode: Equatable {
             return
         }
         switch plan {
-        case .workspaceFileList:
-            performFileList(id: id, generation: generation, hosting: hosting)
-        case .workspaceDiff(let scope):
-            performWorkspaceDiff(scope: scope, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileRead(let path):
-            performFileRead(path: path, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileList: performFileList(id: id, generation: generation, hosting: hosting)
+        case .workspaceRefList: performRefList(id: id, generation: generation, hosting: hosting)
+        case .workspaceDiff(let scope): performWorkspaceDiff(scope: scope, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileRead(let path): performFileRead(path: path, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256):
             performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
-        case .reviewCommentList:
-            performReviewCommentList(id: id, generation: generation, hosting: hosting)
+        case .reviewCommentList: performReviewCommentList(id: id, generation: generation, hosting: hosting)
         case .reviewCommentUpsert(let commentID, let filePath, let side, let lineNumber, let lineText, let body):
             performReviewCommentUpsert(
                 commentID: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body, id: id,
                 generation: generation, hosting: hosting)
-        case .reviewCommentDelete(let commentID):
-            performReviewCommentDelete(commentID: commentID, id: id, generation: generation, hosting: hosting)
+        case .reviewCommentDelete(let commentID): performReviewCommentDelete(commentID: commentID, id: id, generation: generation, hosting: hosting)
         case .reviewCommentsSend(let sessionID, let text, let comments):
             performReviewCommentsSend(sessionID: sessionID, text: text, comments: comments, id: id, generation: generation, hosting: hosting)
         }
@@ -928,80 +917,75 @@ enum CodePaneMode: Equatable {
                 error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
             return
         }
-        let baseBranch = hosting.codePaneWorkspaceInfo(workspaceID: workspaceID)?.baseBranch
-        switch CodePaneBridge.refName(for: scope, workspaceBaseBranch: baseBranch) {
-        case .failure(let error):
-            reply(id: id, generation: generation, error: error)
-        case .success(let refName):
-            // Every workspaceDiff call claims "latest scope"; a completion that isn't the latest one
-            // anymore must not retarget the live diff-signature stream below (see
-            // `latestDiffRequestToken`'s doc comment) even though its reply still always goes out.
-            latestDiffRequestToken += 1
-            let requestToken = latestDiffRequestToken
-            // Invalidate a pending old-scope backoff retry HERE, at dispatch time, rather than
-            // waiting for `resubscribeDiffSignature` to bump the same generation on this fetch's
-            // completion below: a retry already scheduled for the scope this call is superseding
-            // captured its generation before this dispatch, so without this it stays generation-
-            // valid for the ENTIRE fetch window and is free to wake mid-fetch and resubscribe the
-            // now-stale ref — this was the real, deterministic cause of the intermittent
-            // `aScopeChangeDuringBackoffSupersedesThePendingRetryForTheOldScope` failure, not a
-            // parallel-load flake.
-            //
-            // Conditional on an actual scope change, not unconditional: bumping on every dispatch
-            // would also stale the LIVE stream's own `onDisconnect` handler (it closed over the
-            // generation current when that stream opened) on every same-scope refetch — e.g. the
-            // ordinary `refreshDiff` a `spaces:diffSignature` frame triggers — so a later real
-            // disconnect on a healthy, unchanged-scope stream would be silently ignored and never
-            // reconnect. `subscribedScope != .scope(refName)` only trips for a genuine scope change,
-            // or a refetch dispatched while already disconnected (a disconnect already cleared
-            // `subscribedScope` to `.none`) — never for a refetch against a stream that is still
-            // current and alive. Resetting `diffSignatureReconnectFailures` alongside starts the new
-            // scope's subscription lifecycle at the backoff floor rather than wherever the old
-            // scope's retry loop had climbed to.
-            //
-            // The generation bump and the old subscription's teardown happen atomically, right here at
-            // dispatch time: there is no window where a half-alive stale stream can silently die and
-            // leave nothing to reconnect it. `subscribedScope` and `diffSignatureStream` immediately and
-            // accurately reflect "nothing subscribed" the instant a scope change is dispatched,
-            // regardless of whether the new scope's fetch ever succeeds. This is also what fixes
-            // returning to the OLD scope after a failed fetch for the new one: since `subscribedScope`
-            // was actually cleared (not left pointing at the old scope), both this bump's own condition
-            // above and `resubscribeDiffSignature`'s guard correctly see a fresh state and resubscribe
-            // from scratch, instead of the old scope's now-generation-stale stream being mistaken for
-            // still current.
-            //
-            // `performFileRead`'s identical-shaped bump stays bump-only, without a matching teardown,
-            // because a failed file open actively RESTORES the previous path's monitoring instead — see
-            // `restoreFileSignatureMonitoringAfterFailedOpen`, which reinstalls a live stream for
-            // whatever file the pane is still showing. The diff side has no equivalent restore target:
-            // there's no "previous scope's stream" worth reinstalling here, so instead of restoring it
-            // tears down at dispatch and simply relies on the next `workspaceDiff` call — same scope or
-            // different — to resubscribe from a clean `.none` state.
-            if subscribedScope != .scope(refName) {
-                diffSignatureSubscriptionGeneration += 1
-                diffSignatureReconnectFailures = 0
-                diffSignatureStream?.stop()
-                diffSignatureStream = nil
-                subscribedScope = .none
-            }
-            let workspaceID = workspaceID
-            let deviceGateway = deviceGateway
-            Task { [weak self] in
-                do {
-                    let result = try await deviceGateway.workspaceDiff(workspaceID: workspaceID, refName: refName, device: device)
-                    guard let self else { return }
-                    self.reply(id: id, generation: generation, result: result)
-                    guard self.latestDiffRequestToken == requestToken else { return }
-                    // Recorded before resubscribing, and only for a still-current request (a
-                    // superseded fetch's result is not what the web app is actually showing, so it
-                    // must not poison the dedupe baseline for whatever scope is current now).
-                    self.lastActedScopeSignature = result.scopeSignature
-                    self.lastActedScope = .scope(refName)
-                    self.resubscribeDiffSignature(refName: refName, device: device)
-                } catch {
-                    guard let self else { return }
-                    self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-                }
+        let (refName, lastCommit) = CodePaneBridge.refName(for: scope)
+        // Every workspaceDiff call claims "latest scope"; a completion that isn't the latest one
+        // anymore must not retarget the live diff-signature stream below (see
+        // `latestDiffRequestToken`'s doc comment) even though its reply still always goes out.
+        latestDiffRequestToken += 1
+        let requestToken = latestDiffRequestToken
+        // Invalidate a pending old-scope backoff retry HERE, at dispatch time, rather than
+        // waiting for `resubscribeDiffSignature` to bump the same generation on this fetch's
+        // completion below: a retry already scheduled for the scope this call is superseding
+        // captured its generation before this dispatch, so without this it stays generation-
+        // valid for the ENTIRE fetch window and is free to wake mid-fetch and resubscribe the
+        // now-stale ref — this was the real, deterministic cause of the intermittent
+        // `aScopeChangeDuringBackoffSupersedesThePendingRetryForTheOldScope` failure, not a
+        // parallel-load flake.
+        //
+        // Conditional on an actual scope change, not unconditional: bumping on every dispatch
+        // would also stale the LIVE stream's own `onDisconnect` handler (it closed over the
+        // generation current when that stream opened) on every same-scope refetch — e.g. the
+        // ordinary `refreshDiff` a `spaces:diffSignature` frame triggers — so a later real
+        // disconnect on a healthy, unchanged-scope stream would be silently ignored and never
+        // reconnect. `subscribedScope != .scope(...)` only trips for a genuine scope change,
+        // or a refetch dispatched while already disconnected (a disconnect already cleared
+        // `subscribedScope` to `.none`) — never for a refetch against a stream that is still
+        // current and alive. Resetting `diffSignatureReconnectFailures` alongside starts the new
+        // scope's subscription lifecycle at the backoff floor rather than wherever the old
+        // scope's retry loop had climbed to.
+        //
+        // The generation bump and the old subscription's teardown happen atomically, right here at
+        // dispatch time: there is no window where a half-alive stale stream can silently die and
+        // leave nothing to reconnect it. `subscribedScope` and `diffSignatureStream` immediately and
+        // accurately reflect "nothing subscribed" the instant a scope change is dispatched,
+        // regardless of whether the new scope's fetch ever succeeds. This is also what fixes
+        // returning to the OLD scope after a failed fetch for the new one: since `subscribedScope`
+        // was actually cleared (not left pointing at the old scope), both this bump's own condition
+        // above and `resubscribeDiffSignature`'s guard correctly see a fresh state and resubscribe
+        // from scratch, instead of the old scope's now-generation-stale stream being mistaken for
+        // still current.
+        //
+        // `performFileRead`'s identical-shaped bump stays bump-only, without a matching teardown,
+        // because a failed file open actively RESTORES the previous path's monitoring instead — see
+        // `restoreFileSignatureMonitoringAfterFailedOpen`, which reinstalls a live stream for
+        // whatever file the pane is still showing. The diff side has no equivalent restore target:
+        // there's no "previous scope's stream" worth reinstalling here, so instead of restoring it
+        // tears down at dispatch and simply relies on the next `workspaceDiff` call — same scope or
+        // different — to resubscribe from a clean `.none` state.
+        if subscribedScope != .scope(refName: refName, lastCommit: lastCommit) {
+            diffSignatureSubscriptionGeneration += 1
+            diffSignatureReconnectFailures = 0
+            diffSignatureStream?.stop()
+            diffSignatureStream = nil
+            subscribedScope = .none
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceDiff(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device)
+                guard let self else { return }
+                self.reply(id: id, generation: generation, result: result)
+                guard self.latestDiffRequestToken == requestToken else { return }
+                // Recorded before resubscribing, and only for a still-current request (a
+                // superseded fetch's result is not what the web app is actually showing, so it
+                // must not poison the dedupe baseline for whatever scope is current now).
+                self.lastActedScopeSignature = result.scopeSignature
+                self.lastActedScope = .scope(refName: refName, lastCommit: lastCommit)
+                self.resubscribeDiffSignature(refName: refName, lastCommit: lastCommit, device: device)
+            } catch {
+                guard let self else { return }
+                self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
             }
         }
     }
@@ -1039,9 +1023,7 @@ enum CodePaneMode: Equatable {
         // re-read) must NOT bump this, or a slower navigation to a different path in flight at the same
         // time would see its own already-captured `navToken` look stale once the reread bumps past it.
         // See `latestFileNavigationToken`'s doc comment and the success arm below for why.
-        if pathChanged {
-            latestFileNavigationToken += 1
-        }
+        if pathChanged { latestFileNavigationToken += 1 }
         let navToken = latestFileNavigationToken
         // Mirrors `performWorkspaceDiff`'s `diffSignatureSubscriptionGeneration` bump: invalidate a
         // pending old-path backoff retry HERE, at dispatch time, only on an actual path change — see
@@ -1250,8 +1232,7 @@ enum CodePaneMode: Equatable {
                         self?.adoptCommittedWriteIntoEditorState()
                     }
                     self?.reply(id: id, generation: generation, result: payload)
-                case .failure(let error):
-                    self?.reply(id: id, generation: generation, error: error)
+                case .failure(let error): self?.reply(id: id, generation: generation, error: error)
                 }
                 self?.outstandingFileWriteCount -= 1
                 self?.clearCommittedFileWriteIfSettled()
@@ -1284,9 +1265,26 @@ enum CodePaneMode: Equatable {
             do {
                 let result = try await deviceGateway.workspaceFileList(workspaceID: workspaceID, device: device)
                 self?.reply(id: id, generation: generation, result: result)
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
+        }
+    }
+
+    /// Mirrors `performFileList` exactly: `SpacesDeviceWorkspaceRefListResult` is already the wire
+    /// contract the Compare dialog's ref search expects, so the daemon result is replied directly.
+    private func performRefList(id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceRefList(workspaceID: workspaceID, device: device)
+                self?.reply(id: id, generation: generation, result: result)
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1303,9 +1301,7 @@ enum CodePaneMode: Equatable {
             do {
                 let comments = try await deviceGateway.workspaceReviewCommentList(workspaceID: workspaceID, device: device)
                 self?.reply(id: id, generation: generation, result: comments)
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1328,15 +1324,13 @@ enum CodePaneMode: Equatable {
         Task { [weak self] in
             do {
                 let comment = try await deviceGateway.workspaceReviewCommentUpsert(
-                    workspaceID: workspaceID, id: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText,
-                    body: body, device: device)
+                    workspaceID: workspaceID, id: commentID, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body,
+                    device: device)
                 self?.reply(id: id, generation: generation, result: comment)
                 // Only a CREATE (`commentID == nil` on the call this Task is completing) can have raced a
                 // teardown flush that snapshotted this same draft while it was still provisional — an
                 // UPDATE's snapshot entry, if any, was already non-provisional and needs no correction.
-                if commentID == nil {
-                    self?.reconcilePendingReviewCommentStateAfterCreate(comment: comment)
-                }
+                if commentID == nil { self?.reconcilePendingReviewCommentStateAfterCreate(comment: comment) }
                 self?.outstandingReviewCommentMutationCount -= 1
                 self?.resumeDeferredReadyIfNeeded()
             } catch {
@@ -1450,8 +1444,7 @@ enum CodePaneMode: Equatable {
     }
 
     private func performReviewCommentsSend(
-        sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], id: String, generation: Int,
-        hosting: any CodePaneHosting
+        sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], id: String, generation: Int, hosting: any CodePaneHosting
     ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -1485,21 +1478,21 @@ enum CodePaneMode: Equatable {
     /// (Re)points the live diff-signature stream at `refName` if it isn't already there. A repeat
     /// `workspaceDiff` call for the same resolved scope is a no-op here — only an actual scope
     /// change tears down and reopens the stream.
-    private func resubscribeDiffSignature(refName: String?, device: SpacesPairedDeviceRecord) {
-        guard subscribedScope != .scope(refName) else { return }
+    private func resubscribeDiffSignature(refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord) {
+        guard subscribedScope != .scope(refName: refName, lastCommit: lastCommit) else { return }
         // Defensive: in the normal flow `lastActedScopeSignature` is already refreshed for `refName`
         // before this runs (`performWorkspaceDiff` sets it, then calls this), including for a
         // disconnect-driven reconnect to the SAME scope (nothing here touches it, so a connect frame
         // repeating an unchanged signature is still correctly suppressed — see
         // `handleDiffSignatureFrame`). This only guards a hypothetical future caller that resubscribes
         // without having freshened it first.
-        if lastActedScope != .scope(refName) {
+        if lastActedScope != .scope(refName: refName, lastCommit: lastCommit) {
             lastActedScopeSignature = nil
             lastActedScope = .none
         }
         diffSignatureStream?.stop()
         diffSignatureStream = nil
-        subscribedScope = .scope(refName)
+        subscribedScope = .scope(refName: refName, lastCommit: lastCommit)
         diffSignatureSubscriptionGeneration += 1
         let subscriptionGeneration = diffSignatureSubscriptionGeneration
         let workspaceID = workspaceID
@@ -1525,12 +1518,12 @@ enum CodePaneMode: Equatable {
         Task { [weak self] in
             do {
                 let client = try await deviceGateway.subscribeWorkspaceDiffSignature(
-                    workspaceID: workspaceID, refName: refName, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                    workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
                 // The pane may have deactivated, or resubscribed to a different scope, while this was
                 // in flight; only keep the client if it's still the one this scope wants. Scope alone
                 // is not enough: a rapid A → B → A scope-change sequence can land a STALE A attempt's
                 // completion here after a newer A attempt has already taken over — `subscribedScope ==
-                // .scope(refName)` would read true again even though this in-flight `Task` belongs to a
+                // .scope(refName: refName, lastCommit: lastCommit)` would read true again even though this in-flight `Task` belongs to a
                 // completely different (superseded) subscription attempt than the one that's actually
                 // current. `subscriptionGeneration` is the identity of this one ATTEMPT, not just its
                 // target scope, so it's what actually tells a stale A from the current A apart. Without
@@ -1540,8 +1533,8 @@ enum CodePaneMode: Equatable {
                 // when that stale client eventually disconnects, `handleDiffSignatureDisconnect`'s own
                 // generation guard correctly refuses to act on it, so the pane silently stops
                 // reconnecting until something else forces a fresh resubscribe.
-                guard let self, self.subscribedScope == .scope(refName), self.diffSignatureSubscriptionGeneration == subscriptionGeneration,
-                    self.webView != nil
+                guard let self, self.subscribedScope == .scope(refName: refName, lastCommit: lastCommit),
+                    self.diffSignatureSubscriptionGeneration == subscriptionGeneration, self.webView != nil
                 else {
                     client.stop()
                     return
@@ -1559,17 +1552,18 @@ enum CodePaneMode: Equatable {
                 // failure must not clear `subscribedScope`/schedule a reconnect for a newer, still-live
                 // subscription that has nothing to do with this failure — `subscriptionGeneration` (not
                 // just scope) is what tells them apart.
-                guard let self, self.subscribedScope == .scope(refName), self.diffSignatureSubscriptionGeneration == subscriptionGeneration
+                guard let self, self.subscribedScope == .scope(refName: refName, lastCommit: lastCommit),
+                    self.diffSignatureSubscriptionGeneration == subscriptionGeneration
                 else { return }
                 self.subscribedScope = .none
-                self.scheduleDiffSignatureReconnect(refName: refName, generation: subscriptionGeneration)
+                self.scheduleDiffSignatureReconnect(refName: refName, lastCommit: lastCommit, generation: subscriptionGeneration)
             }
         }
     }
 
     /// Clears `subscribedScope`/`diffSignatureStream` after a real disconnect (daemon restart,
     /// network drop) so the next same-scope `workspaceDiff` call resubscribes instead of skipping
-    /// forever via `resubscribeDiffSignature`'s `guard subscribedScope != .scope(refName)`, and starts
+    /// forever via `resubscribeDiffSignature`'s `guard subscribedScope != .scope(refName:lastCommit:)`, and starts
     /// a bounded-backoff retry loop (see `scheduleDiffSignatureReconnect`) so a pane's live updates
     /// recover on their own instead of staying dead until the user happens to change scope (see
     /// docs/spec.md's "live-updates as the working tree changes" promise). Guarded by
@@ -1585,12 +1579,19 @@ enum CodePaneMode: Equatable {
     private func handleDiffSignatureDisconnect(subscriptionGeneration: Int) {
         guard subscriptionGeneration == diffSignatureSubscriptionGeneration else { return }
         diffSignatureStream = nil
-        // Capture before clearing: the scheduled retry below needs the dropped subscription's ref
-        // name to retarget the same scope once the backoff elapses.
+        // Capture before clearing: the scheduled retry below needs the dropped subscription's scope
+        // to retarget the same (ref, lastCommit) pair once the backoff elapses.
         let refName: String?
-        if case .scope(let capturedRefName) = subscribedScope { refName = capturedRefName } else { refName = nil }
+        let lastCommit: Bool
+        if case .scope(let capturedRefName, let capturedLastCommit) = subscribedScope {
+            refName = capturedRefName
+            lastCommit = capturedLastCommit
+        } else {
+            refName = nil
+            lastCommit = false
+        }
         subscribedScope = .none
-        scheduleDiffSignatureReconnect(refName: refName, generation: subscriptionGeneration)
+        scheduleDiffSignatureReconnect(refName: refName, lastCommit: lastCommit, generation: subscriptionGeneration)
     }
 
     /// Schedules the next reconnect attempt for the diff-signature stream on a bounded-exponential
@@ -1605,11 +1606,11 @@ enum CodePaneMode: Equatable {
     /// `deactivate()`/`close()` (via `teardownWebView` bumping the generation), a user-triggered
     /// `workspaceDiff` for a different scope, or an earlier retry already succeeding all bump
     /// `diffSignatureSubscriptionGeneration`, which makes this check fail and the attempt a no-op.
-    private func scheduleDiffSignatureReconnect(refName: String?, generation: Int) {
+    private func scheduleDiffSignatureReconnect(refName: String?, lastCommit: Bool, generation: Int) {
         diffSignatureReconnectFailures += 1
         let delay = RemoteConnectionBackoff.delay(
-            consecutiveFailures: diffSignatureReconnectFailures, floor: diffSignatureReconnectFloor, cap: diffSignatureReconnectCap,
-            jitterFraction: 0)
+            consecutiveFailures: diffSignatureReconnectFailures, floor: diffSignatureReconnectFloor, cap: diffSignatureReconnectCap, jitterFraction: 0
+        )
         Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, self.diffSignatureSubscriptionGeneration == generation else { return }
@@ -1619,10 +1620,10 @@ enum CodePaneMode: Equatable {
             // first retry after a restart-triggered disconnect always fail permanently. Reschedule
             // instead: this is just another failed attempt, same as a subscribe throwing below.
             guard let hosting = self.hosting, let device = hosting.codePaneDevice(workspaceID: self.workspaceID) else {
-                self.scheduleDiffSignatureReconnect(refName: refName, generation: generation)
+                self.scheduleDiffSignatureReconnect(refName: refName, lastCommit: lastCommit, generation: generation)
                 return
             }
-            self.resubscribeDiffSignature(refName: refName, device: device)
+            self.resubscribeDiffSignature(refName: refName, lastCommit: lastCommit, device: device)
         }
     }
 
@@ -1706,9 +1707,7 @@ enum CodePaneMode: Equatable {
                 // Subscribing is a best-effort live-refresh add-on; a failure here doesn't affect the
                 // read result already delivered, so nothing more is surfaced to the web app beyond
                 // scheduling a retry (below) — mirrors `resubscribeDiffSignature`'s failure arm exactly.
-                guard let self, self.subscribedFilePath == path, self.fileSignatureSubscriptionGeneration == subscriptionGeneration else {
-                    return
-                }
+                guard let self, self.subscribedFilePath == path, self.fileSignatureSubscriptionGeneration == subscriptionGeneration else { return }
                 self.subscribedFilePath = nil
                 self.scheduleFileSignatureReconnect(path: path, generation: subscriptionGeneration)
             }
@@ -1734,8 +1733,8 @@ enum CodePaneMode: Equatable {
     private func scheduleFileSignatureReconnect(path: String, generation: Int) {
         fileSignatureReconnectFailures += 1
         let delay = RemoteConnectionBackoff.delay(
-            consecutiveFailures: fileSignatureReconnectFailures, floor: fileSignatureReconnectFloor, cap: fileSignatureReconnectCap,
-            jitterFraction: 0)
+            consecutiveFailures: fileSignatureReconnectFailures, floor: fileSignatureReconnectFloor, cap: fileSignatureReconnectCap, jitterFraction: 0
+        )
         Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, self.fileSignatureSubscriptionGeneration == generation else { return }
@@ -1787,14 +1786,12 @@ enum CodePaneMode: Equatable {
 
 extension CodePaneContentController: WKScriptMessageHandler {
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        MainActor.assumeIsolated {
-            handleScriptMessage(name: message.name, body: message.body, senderWebView: message.webView)
-        }
+        MainActor.assumeIsolated { handleScriptMessage(name: message.name, body: message.body, senderWebView: message.webView) }
     }
 }
 
-private extension CodePaneMode {
-    var wireValue: String {
+extension CodePaneMode {
+    fileprivate var wireValue: String {
         switch self {
         case .diff: "diff"
         case .editor: "editor"
@@ -1803,7 +1800,5 @@ private extension CodePaneMode {
 
     /// Inverse of `wireValue` — decodes a `modeChanged` push's `mode` string. `decodeModeChanged`
     /// already restricts this to `"diff"`/`"editor"`, so the default arm is unreachable in practice.
-    init(wireValue: String) {
-        self = wireValue == "editor" ? .editor : .diff
-    }
+    fileprivate init(wireValue: String) { self = wireValue == "editor" ? .editor : .diff }
 }

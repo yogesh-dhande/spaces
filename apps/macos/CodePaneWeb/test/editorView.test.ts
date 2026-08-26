@@ -54,6 +54,9 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     workspaceFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "File search is not available yet.")),
+    // Not used by EditorView (ref search is diff-mode only) — stubbed so this satisfies
+    // `SpacesBridge` without any of these tests needing to care about the compare menu.
+    workspaceRefList: vi.fn().mockRejectedValue(new Error("not used")),
     subscribeDiffSignature: vi.fn(() => () => {}),
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyEditorStateChanged: vi.fn(),

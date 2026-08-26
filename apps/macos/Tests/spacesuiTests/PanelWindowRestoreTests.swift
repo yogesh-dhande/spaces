@@ -17,13 +17,11 @@ import Testing
         #expect(
             AppKitController.panelWindowRestoreDecision(
                 layoutJSON: json, loadedDeviceIDs: ["local"], retainedSessionIDs: ["sess-a", "sess-b"], retainedWorkspaceKeys: [],
-                editorAlreadyOpen: false)
-                == .waitForDevices)
+                editorAlreadyOpen: false) == .waitForDevices)
         #expect(
             AppKitController.panelWindowRestoreDecision(
                 layoutJSON: json, loadedDeviceIDs: ["local", "remote"], retainedSessionIDs: ["sess-a", "sess-b"], retainedWorkspaceKeys: [],
-                editorAlreadyOpen: false)
-                == .open(layout))
+                editorAlreadyOpen: false) == .open(layout))
     }
 
     @Test func skipsUnreadableAndFutureVersionRows() {
@@ -66,6 +64,34 @@ import Testing
             AppKitController.panelWindowRestoreDecision(
                 layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [], retainedWorkspaceKeys: [],
                 editorAlreadyOpen: false) == .discard)
+    }
+
+    @Test func retargetsCodePaneWhoseWorkspaceWasDeletedWhileTheAppWasClosed() throws {
+        let codePane = Pane(id: "a", content: .codePane(deviceID: "old-device", workspaceID: "ws-gone"))
+        let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: codePane, to: PanelLayout())
+        let fallback = PanelLayoutEngine.WorkspaceKey(deviceID: "new-device", workspaceID: "ws-live")
+
+        let decision = AppKitController.panelWindowRestoreDecision(
+            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["old-device", "new-device"], retainedSessionIDs: [],
+            retainedWorkspaceKeys: [fallback], editorAlreadyOpen: false, orphanedEditorFallback: fallback)
+
+        guard case .open(let restored) = decision else {
+            Issue.record("expected the persisted Editor to reopen on the fallback workspace, got \(decision)")
+            return
+        }
+        #expect(PanelLayoutEngine.allPanes(in: restored).map(\.id) == ["a"])
+        #expect(PanelLayoutEngine.allPanes(in: restored).map(\.content) == [.codePane(deviceID: "new-device", workspaceID: "ws-live")])
+    }
+
+    @Test func discardsOrphanedCodePaneInsteadOfDuplicatingAnAlreadyOpenEditor() throws {
+        let codePane = Pane(id: "a", content: .codePane(deviceID: "old-device", workspaceID: "ws-gone"))
+        let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: codePane, to: PanelLayout())
+        let fallback = PanelLayoutEngine.WorkspaceKey(deviceID: "new-device", workspaceID: "ws-live")
+
+        #expect(
+            AppKitController.panelWindowRestoreDecision(
+                layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["old-device", "new-device"], retainedSessionIDs: [],
+                retainedWorkspaceKeys: [fallback], editorAlreadyOpen: true, orphanedEditorFallback: fallback) == .discard)
     }
 
     @Test func opensCodePaneWhoseWorkspaceSurvives() throws {

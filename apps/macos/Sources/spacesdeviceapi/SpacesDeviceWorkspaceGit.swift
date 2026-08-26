@@ -94,7 +94,6 @@ enum SpacesDeviceWorkspacePathResolver {
         return resolvedCandidate.path
     }
 }
-
 /// Cross-platform SHA-256 over raw bytes, for the file-read/write/CAS hashes. Mirrors
 /// `SpacesDevicePairingStore`'s `hash(_:)` pattern but takes `Data` directly rather than a `String`, since
 /// file content is not always valid UTF-8.
@@ -236,8 +235,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     private static func remainingTimeout(start: Date) throws -> TimeInterval {
         let remaining = diffBuildDeadline - Date().timeIntervalSince(start)
         guard remaining > 0 else {
-            throw SpacesRuntimeError.gitCommandFailed(
-                message: "Git command timed out after \(diffBuildDeadline)s: request-wide deadline elapsed")
+            throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(diffBuildDeadline)s: request-wide deadline elapsed")
         }
         return min(gitCommandTimeout, remaining)
     }
@@ -292,8 +290,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     static func assertIsGitRepository(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws {
         guard try gitClient.isRepoStrict(path: workspaceDir) else {
             throw NSError(
-                domain: "SpacesDeviceAPIServer", code: 400,
-                userInfo: [NSLocalizedDescriptionKey: "Workspace directory is not a git repository."])
+                domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Workspace directory is not a git repository."])
         }
     }
 
@@ -322,8 +319,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// trouble into a permanent rejection, breaking the exact distinction this function exists to preserve.
     static func assertRefIsResolvable(workspaceDir: String, refName: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws {
         let resolved = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(refName)^{commit}"],
-            timeout: try remainingTimeout(start: deadlineStart), allowedExitCodes: [0, 1])
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(refName)^{commit}"], timeout: try remainingTimeout(start: deadlineStart),
+            allowedExitCodes: [0, 1])
         guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 400,
@@ -349,9 +346,9 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// no request-wide budget, because a poll tick has no such budget to share. `buildDiff` passes its own
     /// `start` here so this call's commands are folded into the same request-wide deadline (`remainingTimeout`)
     /// as `buildDiff`'s other up-front commands.
-    static func scopeSignature(workspaceDir: String, refName: String? = nil, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil)
-        throws -> String
-    {
+    static func scopeSignature(
+        workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil
+    ) throws -> String {
         // `--verify --quiet` + `allowedExitCodes: [0, 1]` (no `try?`), not a bare `rev-parse HEAD`: an
         // unborn HEAD (a freshly `git init`ed repo, still a valid git project — see `buildDiff`'s identical
         // probe, which this is now textually the same command as) exits 1 with empty stdout, which is the
@@ -365,6 +362,16 @@ enum SpacesDeviceWorkspaceDiffEngine {
             ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"],
             timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout, allowedExitCodes: [0, 1]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // The lastCommit scope is committed-only: its diff never involves the working tree, so its
+        // signature must not either. It depends on nothing but the resolved HEAD commit — not `git
+        // status`, not any file's size/mtime/mode — so this returns immediately, before any of those other
+        // commands run, rather than computing and then discarding inputs the lastCommit diff never reads. An
+        // unborn HEAD (`headSHA` empty) is a stable, valid state of its own, so it hashes a fixed sentinel
+        // rather than the empty string, keeping the signature a legitimate, non-empty token rather than an
+        // artifact of `headSHA` happening to be blank.
+        if lastCommit { return SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("last-commit:\(headSHA.isEmpty ? "unborn" : headSHA)\n".utf8)) }
+
         // `--untracked-files=all` (rather than git's default `normal`) is required here: the default
         // collapses every file inside a wholly-untracked directory into one `?? dir/` record, so editing a
         // file inside an already-untracked directory would not change this signature (the directory's own
@@ -392,9 +399,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // comment for why a leading space/tab must survive.
         let prefix = strippingTrailingNewline(
             try gitClient.runGitAndCapture(
-                ["-C", workspaceDir, "rev-parse", "--show-prefix"],
-                timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
-            ))
+                ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout))
 
         var input = Data((headSHA + "\n").utf8)
         // The common case — a workspace rooted AT the repository root, `prefix.isEmpty` — must hash
@@ -414,8 +419,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
             let mergeBase =
                 (try? gitClient.runGitAndCapture(
                     ["-C", workspaceDir, "merge-base", normalizedRef, "HEAD"],
-                    timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)) ?? "merge-base-error"
+                    timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
+                ).trimmingCharacters(in: .whitespacesAndNewlines)) ?? "merge-base-error"
             input.append(Data("merge-base:\(mergeBase)\n".utf8))
         }
 
@@ -509,11 +514,14 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// default — it passes its own shared `deadlineStart` explicitly, so this request-wide budget also
     /// covers the repo/ref validation that ran before `buildDiff` was ever called (see `diffBuildDeadline`'s
     /// doc comment).
-    static func buildDiff(workspaceDir: String, refName: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()) throws
-        -> SpacesDeviceWorkspaceDiffResult
-    {
+    static func buildDiff(
+        workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()
+    ) throws -> SpacesDeviceWorkspaceDiffResult {
         let start = deadlineStart
-        let signature = try scopeSignature(workspaceDir: workspaceDir, refName: refName, gitClient: gitClient, deadlineStart: start)
+        let signature = try scopeSignature(
+            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: start)
+
+        if lastCommit { return try buildLastCommitDiff(workspaceDir: workspaceDir, gitClient: gitClient, signature: signature, deadlineStart: start) }
 
         let compareRef: String
         if let normalizedRef = normalizedRefName(refName) {
@@ -522,8 +530,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // papered over — unlike the nil-`refName` path below, which treats an unborn `HEAD` as a
             // supported "changes in a repo with no commits yet" case.
             compareRef = try gitClient.runGitAndCapture(
-                ["-C", workspaceDir, "merge-base", normalizedRef, "HEAD"], timeout: try remainingTimeout(start: start))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+                ["-C", workspaceDir, "merge-base", normalizedRef, "HEAD"], timeout: try remainingTimeout(start: start)
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
             // Detect an unborn `HEAD` (a freshly `git init`ed repo with no commits yet — still a valid git
             // project, and `assertIsGitRepository` above already accepted it) with one cheap probe. The
@@ -561,8 +569,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 // with a non-SHA-1 object format (`git init --object-format=sha256`), where that constant
                 // would not resolve to anything.
                 compareRef = try gitClient.runGitAndCapture(
-                    ["-C", workspaceDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: start))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    ["-C", workspaceDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: start)
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
 
@@ -639,10 +647,10 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // Only the trailing newline git appends is stripped here — see `strippingTrailingNewline`'s doc
         // comment for why a leading space/tab must survive.
         let prefix = strippingTrailingNewline(
-            try gitClient.runGitAndCapture(
-                ["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start)))
+            try gitClient.runGitAndCapture(["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: try remainingTimeout(start: start)))
         let scopedStatusEntries =
-            prefix.isEmpty ? changedEntries(fromPorcelainZ: statusOutput) : subtreeScoped(changedEntries(fromPorcelainZ: statusOutput), prefix: prefix)
+            prefix.isEmpty
+            ? changedEntries(fromPorcelainZ: statusOutput) : subtreeScoped(changedEntries(fromPorcelainZ: statusOutput), prefix: prefix)
         // `--untracked-files=all` should mean every `??` record is already a file, never a directory, but
         // the filter costs nothing and defends against any edge git itself has not been audited against
         // (e.g. a submodule or other non-regular-file entry reported with a trailing slash).
@@ -664,9 +672,86 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 return DiffFilePlan(path: plan.path, oldPath: nil, status: .modified, source: .deletedButUntrackedInWorktree(compareRef: compareRef))
             }
         }
-        plans += untrackedPaths.filter { !deletedButUntrackedPaths.contains($0) }
-            .map { path in DiffFilePlan(path: path, oldPath: nil, status: .untracked, source: .untracked) }
+        plans += untrackedPaths.filter { !deletedButUntrackedPaths.contains($0) }.map { path in
+            DiffFilePlan(path: path, oldPath: nil, status: .untracked, source: .untracked)
+        }
 
+        let files = try buildFiles(plans: plans, workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: start)
+        return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: files)
+    }
+
+    /// The lastCommit scope's diff: committed-only, `git diff <parent> HEAD` with the exact same flags as
+    /// every other diff invocation in this engine, and no working-tree or untracked involvement at all — no
+    /// `git status`, no `deletedButUntrackedInWorktree` coalescing, since neither concept applies to a diff
+    /// between two commits. Root commit and unborn HEAD are the same two special cases `buildDiff`'s
+    /// nil-`refName` path already handles, probed the same way, but note the base case flips: THIS scope has
+    /// no working tree to fall back on, so an unborn HEAD only ever has one legitimate outcome —
+    /// nothing has been committed yet, so the "last commit" is empty.
+    private static func buildLastCommitDiff(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, signature: String, deadlineStart: Date) throws
+        -> SpacesDeviceWorkspaceDiffResult
+    {
+        let headProbe = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"], timeout: try remainingTimeout(start: deadlineStart),
+            allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !headProbe.isEmpty else {
+            // No commits exist yet, so there is no "last commit" to diff — an empty file list, not an
+            // error, matching `buildDiff`'s own treatment of an unborn HEAD as a supported state rather than
+            // a failure.
+            return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: [])
+        }
+
+        // `HEAD^` resolves to HEAD's first parent; `--verify --quiet` + `allowedExitCodes: [0, 1]` reads a
+        // root commit's "no such ref" (exit 1, empty stdout) as a legitimate answer rather than a failure,
+        // exactly like every other resolvability probe in this file.
+        let parentProbe = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD^"], timeout: try remainingTimeout(start: deadlineStart),
+            allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let parent: String
+        if parentProbe.isEmpty {
+            // Root commit: diff the empty tree against HEAD so every file HEAD introduces reports as an
+            // addition — see `buildDiff`'s identical empty-tree comment for why this is computed per call
+            // rather than hardcoded as the well-known SHA-1 constant.
+            parent = try gitClient.runGitAndCapture(
+                ["-C", workspaceDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: deadlineStart)
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            parent = parentProbe
+        }
+
+        // Same flags as every other diff invocation in this engine — see `buildDiff`'s comment block above
+        // for the full rationale for each one. Two explicit positional refs (`parent HEAD`), not a single
+        // `compareRef` against the working tree, is what makes this diff committed-only.
+        let nameStatusOutput = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", parent, "HEAD"],
+            timeout: try remainingTimeout(start: deadlineStart))
+        let plans = parseNameStatusZ(nameStatusOutput).map { entry -> DiffFilePlan in
+            let diffArguments: [String]
+            if let oldPath = entry.oldPath {
+                diffArguments = [
+                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
+                    parent, "HEAD", "--", ":(literal)\(oldPath)", ":(literal)\(entry.path)",
+                ]
+            } else {
+                diffArguments = [
+                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
+                    parent, "HEAD", "--", ":(literal)\(entry.path)",
+                ]
+            }
+            return DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(diffArguments: diffArguments))
+        }
+
+        let files = try buildFiles(plans: plans, workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
+        return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: files)
+    }
+
+    /// Fetches each plan's patch, capped as it goes: shared by `buildDiff`'s normal (uncommitted/ref) scope
+    /// and `buildLastCommitDiff`'s committed-only scope, since the per-file byte cap, the aggregate byte
+    /// cap, and the deadline-truncation shape are identical for both — only how `plans` gets built differs.
+    private static func buildFiles(plans: [DiffFilePlan], workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
+        -> [SpacesDeviceWorkspaceDiffFile]
+    {
         var totalPatchBytes = 0
         var overTotalCap = false
         // Checked once per iteration, before spawning git for that file, so a file already in flight when
@@ -690,12 +775,12 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // identity yet to truncate onto. `try?` deliberately discards that thrown case rather than
             // propagating it: expiry becoming `nil` here is exactly the "sticky, truncate the rest" outcome
             // this loop already has a shape for.
-            guard let fileTimeout = try? remainingTimeout(start: start) else {
+            guard let fileTimeout = try? remainingTimeout(start: deadlineStart) else {
                 pastDeadline = true
                 files.append(SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true))
                 continue
             }
-            let file = try buildFile(for: plan, workspaceDir: workspaceDir, gitClient: gitClient, timeout: fileTimeout, deadlineStart: start)
+            let file = try buildFile(for: plan, workspaceDir: workspaceDir, gitClient: gitClient, timeout: fileTimeout, deadlineStart: deadlineStart)
             if let patch = file.patch {
                 let patchBytes = patch.utf8.count
                 guard totalPatchBytes + patchBytes <= totalPatchByteCap else {
@@ -709,8 +794,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             }
             files.append(file)
         }
-
-        return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: files)
+        return files
     }
 
     /// `timeout` is the caller's already-shrunk-to-the-request-deadline budget (see `buildDiff`'s loop,
@@ -891,8 +975,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 [
                     "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
                     compareRef, "--", ":(literal)\(path)",
-                ],
-                timeout: diffTimeout, maxOutputBytes: perFilePatchByteCap + 1, environmentOverrides: scratchIndexEnvironment)
+                ], timeout: diffTimeout, maxOutputBytes: perFilePatchByteCap + 1, environmentOverrides: scratchIndexEnvironment)
             let metadata = parsePatchMetadata(patch)
             if exceedsPerFilePatchByteCapAfterDecode(patch, isBinary: metadata.isBinary) {
                 return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
@@ -905,14 +988,16 @@ enum SpacesDeviceWorkspaceDiffEngine {
             let patchValue: String? = patch.isEmpty || metadata.isBinary ? nil : patch
             return SpacesDeviceWorkspaceDiffFile(
                 path: path, status: .modified, patch: patchValue, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA)
-        } catch SpacesRuntimeError.outputExceededCap {
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
-        }
+        } catch SpacesRuntimeError.outputExceededCap { return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true) }
     }
 
     // MARK: - `git status --porcelain -z` parsing
 
-    private struct PorcelainEntry { let status: String; let path: String; let origPath: String? }
+    private struct PorcelainEntry {
+        let status: String
+        let path: String
+        let origPath: String?
+    }
 
     /// Parses NUL-delimited `git status --porcelain -z` output. Each record is `XY PATH`, except for a
     /// rename/copy (`X` or `Y` is `R`/`C`), whose original path follows as its own NUL-terminated record
@@ -978,16 +1063,18 @@ enum SpacesDeviceWorkspaceDiffEngine {
         var data = Data()
         for entry in entries {
             data.append(Data("\(entry.status) \(entry.path)\0".utf8))
-            if let origPath = entry.origPath {
-                data.append(Data("\(origPath)\0".utf8))
-            }
+            if let origPath = entry.origPath { data.append(Data("\(origPath)\0".utf8)) }
         }
         return data
     }
 
     // MARK: - `git diff --name-status -z` parsing
 
-    private struct NameStatusEntry { let status: SpacesDeviceWorkspaceDiffFileStatus; let path: String; let oldPath: String? }
+    private struct NameStatusEntry {
+        let status: SpacesDeviceWorkspaceDiffFileStatus
+        let path: String
+        let oldPath: String?
+    }
 
     /// Parses `git diff -M --name-status -z <ref>` output: NUL-delimited records, `STATUS\0PATH\0` for an
     /// add/modify/delete, or `STATUS\0OLDPATH\0NEWPATH\0` for a rename/copy (`R100`, `C75`, ...) — the old
@@ -1079,18 +1166,12 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // git subprocess timeout would still stall this whole `workspaceDiff` pull for up to 30s over one
         // special file. Such a path is reported as a bare untracked entry with no patch instead.
         let type = attributes[.type] as? FileAttributeType
-        guard type == .typeRegular || type == .typeSymbolicLink else {
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked)
-        }
+        guard type == .typeRegular || type == .typeSymbolicLink else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked) }
 
         if type == .typeRegular {
-            guard size <= perFilePatchByteCap else {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true)
-            }
+            guard size <= perFilePatchByteCap else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true) }
 
-            guard let handle = FileHandle(forReadingAtPath: fullPath) else {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked)
-            }
+            guard let handle = FileHandle(forReadingAtPath: fullPath) else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked) }
             defer { try? handle.close() }
             let sniff = (try? handle.read(upToCount: SpacesDeviceWorkspaceBinaryGuess.sniffLength)) ?? Data()
             guard !SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(sniff) else {
@@ -1119,8 +1200,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 [
                     "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--",
                     "/dev/null", path,
-                ],
-                timeout: timeout, allowedExitCodes: [0, 1], maxOutputBytes: perFilePatchByteCap + 1)
+                ], timeout: timeout, allowedExitCodes: [0, 1], maxOutputBytes: perFilePatchByteCap + 1)
             // The sniff above is only an advisory early-out that avoids spawning git for obvious binaries —
             // it sees at most `sniffLength` bytes and knows nothing of `.gitattributes` (a `-diff` attribute
             // forces git to treat even plain-text content as binary). Git's own "Binary files ... differ"
@@ -1133,9 +1213,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             return SpacesDeviceWorkspaceDiffFile(
                 path: path, status: .untracked, patch: metadata.isBinary ? nil : patch, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA,
                 newSHA: metadata.newSHA)
-        } catch SpacesRuntimeError.outputExceededCap {
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true)
-        }
+        } catch SpacesRuntimeError.outputExceededCap { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true) }
     }
 }
 
@@ -1191,9 +1269,7 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// The two can only diverge when the on-disk state changes after registration, which is exactly the
     /// case above, where the probe is the honest answer.
     static func listFiles(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceFileListResult {
-        guard try gitClient.isRepoStrict(path: workspaceDir) else {
-            return listFilesystemFiles(workspaceDir: workspaceDir)
-        }
+        guard try gitClient.isRepoStrict(path: workspaceDir) else { return listFilesystemFiles(workspaceDir: workspaceDir) }
         return try listGitFiles(workspaceDir: workspaceDir, gitClient: gitClient)
     }
 
@@ -1274,8 +1350,7 @@ enum SpacesDeviceWorkspaceFileListEngine {
         let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: fullPath) else { return false }
         switch attributes[.type] as? FileAttributeType {
-        case .typeRegular:
-            return isWithinMaxBytes(attributes)
+        case .typeRegular: return isWithinMaxBytes(attributes)
         case .typeSymbolicLink:
             guard let resolvedPath = try? SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: path, workspaceDir: workspaceDir),
                 let resolvedAttributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
@@ -1329,5 +1404,122 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// token a terminal NUL produces.
     private static func splitNULDelimited(_ output: String) -> [String] {
         output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+    }
+}
+
+/// Backs the read-only `workspaceRefList` Device API command: the branch and recent-commit lists the
+/// Compare dialog's ref search offers when building a `ref`/`lastCommit` diff scope. Local-only — no
+/// `ls-remote` — since this only needs to offer refs the workspace already knows about, not discover new
+/// ones from origin; the diff itself (`buildDiff`) already requires no network access either.
+enum SpacesDeviceWorkspaceRefListEngine {
+    /// Mirrors `SpacesDeviceWorkspaceDiffEngine.gitCommandTimeout`'s reasoning: a wedged repository must
+    /// not permanently occupy the workspace's serial git queue.
+    private static let gitCommandTimeout: TimeInterval = 30
+
+    /// One budget for repository validation, both branch enumerations, and both commit-history
+    /// probes. Kept below the client's 60-second large-payload timeout so an abandoned ref-list
+    /// request cannot continue occupying the workspace's serial git queue.
+    private static let refListDeadline: TimeInterval = 45
+
+    private static func remainingTimeout(start: Date) throws -> TimeInterval {
+        let remaining = refListDeadline - Date().timeIntervalSince(start)
+        guard remaining > 0 else {
+            throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(refListDeadline)s: request-wide deadline elapsed")
+        }
+        return min(gitCommandTimeout, remaining)
+    }
+
+    /// Hard cap on returned branch names; `branchesTruncated` is `true` when the workspace has more.
+    static let maxBranches = 1000
+
+    /// Hard cap on returned commits; `commitsTruncated` is `true` when HEAD's history has more.
+    static let maxCommits = 300
+
+    /// Non-git workspace (a supported product type, see docs/spec.md) has no refs at all: empty lists with
+    /// both truncation flags `false`, not an error — mirroring `SpacesDeviceWorkspaceFileListEngine`'s own
+    /// non-git handling of the sibling `workspaceFileList` command.
+    static func listRefs(workspaceDir: String, baseBranch: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()) throws
+        -> SpacesDeviceWorkspaceRefListResult
+    {
+        guard try gitClient.isRepoStrict(path: workspaceDir) else {
+            return SpacesDeviceWorkspaceRefListResult(branches: [], branchesTruncated: false, commits: [], commitsTruncated: false)
+        }
+        let (branches, branchesTruncated) = try listBranches(
+            workspaceDir: workspaceDir, baseBranch: baseBranch, gitClient: gitClient, deadlineStart: deadlineStart)
+        let (commits, commitsTruncated) = try listCommits(workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
+        return SpacesDeviceWorkspaceRefListResult(
+            branches: branches, branchesTruncated: branchesTruncated, commits: commits, commitsTruncated: commitsTruncated)
+    }
+
+    /// Every name returned here must be independently resolvable with `git rev-parse --verify
+    /// <name>^{commit}`, since the Compare dialog feeds a selected entry straight into
+    /// `assertRefIsResolvable`. Local branches (`refs/heads`) are listed under their own short name;
+    /// remote branches (`refs/remotes/origin`) are listed under their full `origin/<name>` short name,
+    /// with only the synthetic `origin/HEAD` entry dropped. A local `foo` and `origin/foo` are distinct
+    /// refs that can point at different commits, so both are kept as distinct entries — no stripping the
+    /// `origin/` prefix, and no cross-dedup between the two sets, unlike `workspacecore/GitClient
+    /// .branchOptions`'s merged local-name shape (which this also differs from by skipping that function's
+    /// live `ls-remote --heads origin` call and its `defaultBranch` fallback, neither of which this
+    /// local-only, read-only listing needs). The combined set is deduped (a name can only repeat if the
+    /// same ref were listed twice) and sorted with `localizedStandardCompare`.
+    private static func listBranches(workspaceDir: String, baseBranch: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> (
+        branches: [String], truncated: Bool
+    ) {
+        var branches = Set<String>()
+        let local = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "for-each-ref", "--format=%(refname:short)", "refs/heads"], timeout: try remainingTimeout(start: deadlineStart))
+        for raw in local.split(separator: "\n") {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { branches.insert(trimmed) }
+        }
+        let remote = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
+            timeout: try remainingTimeout(start: deadlineStart))
+        for raw in remote.split(separator: "\n") {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != "origin/HEAD", trimmed.hasPrefix("origin/") else { continue }
+            branches.insert(trimmed)
+        }
+        let sorted = branches.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        guard sorted.count > maxBranches else { return (sorted, false) }
+        var capped = Array(sorted.prefix(maxBranches))
+        // Workspaces store a bare configured base name. Prefer that local ref when present; otherwise
+        // preserve the corresponding origin-tracking ref. Reserving one slot keeps the configured base
+        // selectable even when more than `maxBranches` lexicographically earlier refs exist.
+        let listedBaseBranch = baseBranch.flatMap { branches.contains($0) ? $0 : branches.contains("origin/\($0)") ? "origin/\($0)" : nil }
+        if let listedBaseBranch, !capped.contains(listedBaseBranch) {
+            capped[capped.count - 1] = listedBaseBranch
+            capped.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+        }
+        return (capped, true)
+    }
+
+    /// The most recent commits reachable from HEAD, newest first, each with its full sha and subject. An
+    /// unborn HEAD (no commits yet, still a valid git project) is probed for separately, the same way
+    /// every other unborn-HEAD check in this file is, and reports as an empty, untruncated list rather
+    /// than an error.
+    private static func listCommits(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> (
+        commits: [SpacesDeviceWorkspaceRefListCommit], truncated: Bool
+    ) {
+        let headProbe = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"], timeout: try remainingTimeout(start: deadlineStart),
+            allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !headProbe.isEmpty else { return ([], false) }
+
+        // `%H%x00%s`: full sha, a NUL, then the commit's subject line, one record per `%n`-terminated
+        // (newline) line — a subject can never itself contain a NUL or a newline, so splitting each line
+        // once on the NUL cleanly separates the two fields. `-n <maxCommits + 1>` fetches one commit past
+        // the cap so truncation is detected without a separate `rev-list --count` call.
+        let output = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "log", "--no-color", "--format=%H%x00%s", "-n", "\(maxCommits + 1)", "HEAD"],
+            timeout: try remainingTimeout(start: deadlineStart))
+        let commits: [SpacesDeviceWorkspaceRefListCommit] = output.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
+            let parts = line.split(separator: "\u{0}" as Character, maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return nil }
+            return SpacesDeviceWorkspaceRefListCommit(sha: String(parts[0]), subject: String(parts[1]))
+        }
+        guard commits.count > maxCommits else { return (commits, false) }
+        return (Array(commits.prefix(maxCommits)), true)
     }
 }

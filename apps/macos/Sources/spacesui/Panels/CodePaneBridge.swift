@@ -42,9 +42,7 @@ enum CodePaneBridge {
     /// at all (missing `id`/`method`) — there is nothing to correlate a reply with, so the caller
     /// drops it silently rather than guessing an id to reject.
     static func decodeRequest(body: Any) -> Request? {
-        guard let dict = body as? [String: Any], let id = dict["id"] as? String, let method = dict["method"] as? String else {
-            return nil
-        }
+        guard let dict = body as? [String: Any], let id = dict["id"] as? String, let method = dict["method"] as? String else { return nil }
         return Request(id: id, method: method, params: dict["params"] as? [String: Any] ?? [:])
     }
 
@@ -177,9 +175,7 @@ enum CodePaneBridge {
         guard let jsonString = result as? String else { return .notReported }
         if jsonString == "__uninstalled__" { return .notReported }
         if jsonString == "__none__" { return .none }
-        guard let data = jsonString.data(using: .utf8),
-            let entries = try? JSONDecoder().decode([ReviewCommentEntryPayload].self, from: data)
-        else {
+        guard let data = jsonString.data(using: .utf8), let entries = try? JSONDecoder().decode([ReviewCommentEntryPayload].self, from: data) else {
             return .notReported
         }
         return .entries(entries)
@@ -236,9 +232,7 @@ enum CodePaneBridge {
 
     /// Decodes a `{method:"editorStateChanged", params}` notification body.
     static func decodeEditorStateChanged(body: Any) -> EditorStateChangedMessage {
-        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editorStateChanged" else {
-            return .notThisMessage
-        }
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editorStateChanged" else { return .notThisMessage }
         guard let params = dict["params"] as? [String: Any], !params.isEmpty else { return .noFile }
         guard let path = params["path"] as? String, let baseSHA256 = params["baseSHA256"] as? String,
             let baseContent = params["baseContent"] as? String, let content = params["content"] as? String, let dirty = params["dirty"] as? Bool
@@ -277,45 +271,36 @@ enum CodePaneBridge {
     /// The three `DiffScope` kinds `CodePaneWeb/src/bridge/types.ts` defines.
     enum DiffScope: Equatable {
         case uncommitted
-        case baseBranch
+        case lastCommit
         case ref(String)
     }
 
-    /// Decodes a `DiffScope` from its wire shape: `{kind:"uncommitted"}`, `{kind:"baseBranch"}`, or
+    /// Decodes a `DiffScope` from its wire shape: `{kind:"uncommitted"}`, `{kind:"lastCommit"}`, or
     /// `{kind:"ref", refName}`.
     static func decodeDiffScope(_ value: Any?) -> Result<DiffScope, BridgeError> {
         guard let dict = value as? [String: Any], let kind = dict["kind"] as? String else {
             return .failure(BridgeError(code: .invalidArgument, message: "Missing or invalid diff scope."))
         }
         switch kind {
-        case "uncommitted":
-            return .success(.uncommitted)
-        case "baseBranch":
-            return .success(.baseBranch)
+        case "uncommitted": return .success(.uncommitted)
+        case "lastCommit": return .success(.lastCommit)
         case "ref":
             guard let refName = dict["refName"] as? String, !refName.isEmpty else {
                 return .failure(BridgeError(code: .invalidArgument, message: "A \"ref\" scope requires a non-empty refName."))
             }
             return .success(.ref(refName))
-        default:
-            return .failure(BridgeError(code: .invalidArgument, message: "Unknown diff scope kind \"\(kind)\"."))
+        default: return .failure(BridgeError(code: .invalidArgument, message: "Unknown diff scope kind \"\(kind)\"."))
         }
     }
 
-    /// Resolves a `DiffScope` to the `refName` argument `workspaceDiff`/`subscribeWorkspaceDiffSignature`
-    /// take: `nil` for uncommitted-vs-HEAD, the workspace's configured base branch for `.baseBranch`
-    /// (rejected if the workspace has none), or the literal ref/SHA text for `.ref`.
-    static func refName(for scope: DiffScope, workspaceBaseBranch: String?) -> Result<String?, BridgeError> {
+    /// Resolves a `DiffScope` to the `(refName, lastCommit)` pair `workspaceDiff`/
+    /// `subscribeWorkspaceDiffSignature` take: `(nil, false)` for uncommitted-vs-HEAD, `(nil, true)` for
+    /// the committed-only last-commit scope, or `(refName, false)` for the literal ref/SHA text of `.ref`.
+    static func refName(for scope: DiffScope) -> (refName: String?, lastCommit: Bool) {
         switch scope {
-        case .uncommitted:
-            return .success(nil)
-        case .ref(let refName):
-            return .success(refName)
-        case .baseBranch:
-            guard let workspaceBaseBranch, !workspaceBaseBranch.isEmpty else {
-                return .failure(BridgeError(code: .invalidArgument, message: "This workspace has no base branch configured."))
-            }
-            return .success(workspaceBaseBranch)
+        case .uncommitted: return (nil, false)
+        case .lastCommit: return (nil, true)
+        case .ref(let refName): return (refName, false)
         }
     }
 
@@ -337,6 +322,8 @@ enum CodePaneBridge {
         /// Lists every path in the workspace's checkout, for the Editor pane's file tree and
         /// quick-open. No params.
         case workspaceFileList
+        /// Lists the branches and recent commits the Compare dialog's ref search offers. No params.
+        case workspaceRefList
         case reviewCommentList
         /// `commentID` is `nil` for a new draft — the daemon mints its id — or names an existing
         /// draft this workspace owns when the web app is editing one.
@@ -352,8 +339,7 @@ enum CodePaneBridge {
     /// params are missing/malformed. An unknown method is rejected with `invalidArgument`.
     static func plan(for request: Request) -> Result<Plan, BridgeError> {
         switch request.method {
-        case "workspaceDiff":
-            return decodeDiffScope(request.params["scope"]).map { .workspaceDiff(scope: $0) }
+        case "workspaceDiff": return decodeDiffScope(request.params["scope"]).map { .workspaceDiff(scope: $0) }
         case "workspaceFileRead":
             guard let path = request.params["path"] as? String else {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path."))
@@ -365,23 +351,19 @@ enum CodePaneBridge {
             // which is exactly the `Plan` case's own "create" meaning — no separate null-check needed.
             guard let path = request.params["path"] as? String, let content = request.params["content"] as? String,
                 let options = request.params["options"] as? [String: Any]
-            else {
-                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite requires a path, content, and options."))
-            }
+            else { return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite requires a path, content, and options.")) }
             let baseSHA256 = options["baseSHA256"] as? String
             return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256))
-        case "workspaceFileList":
-            return .success(.workspaceFileList)
-        case "reviewCommentList":
-            return .success(.reviewCommentList)
+        case "workspaceFileList": return .success(.workspaceFileList)
+        case "workspaceRefList": return .success(.workspaceRefList)
+        case "reviewCommentList": return .success(.reviewCommentList)
         case "reviewCommentUpsert":
             guard let filePath = request.params["filePath"] as? String, let sideRaw = request.params["side"] as? String,
                 let side = SpacesDeviceReviewCommentSide(rawValue: sideRaw), let lineNumber = request.params["lineNumber"] as? Int,
                 let lineText = request.params["lineText"] as? String, let body = request.params["body"] as? String
             else {
                 return .failure(
-                    BridgeError(
-                        code: .invalidArgument, message: "reviewCommentUpsert requires filePath, side, lineNumber, lineText, and body."))
+                    BridgeError(code: .invalidArgument, message: "reviewCommentUpsert requires filePath, side, lineNumber, lineText, and body."))
             }
             let commentID = request.params["id"] as? String
             return .success(
@@ -401,14 +383,12 @@ enum CodePaneBridge {
             var comments: [SpacesDeviceReviewCommentSendEntry] = []
             for raw in rawComments {
                 guard let id = raw["id"] as? String, let revision = raw["revision"] as? Int else {
-                    return .failure(
-                        BridgeError(code: .invalidArgument, message: "Each reviewCommentsSend entry requires an id and revision."))
+                    return .failure(BridgeError(code: .invalidArgument, message: "Each reviewCommentsSend entry requires an id and revision."))
                 }
                 comments.append(SpacesDeviceReviewCommentSendEntry(id: id, revision: revision))
             }
             return .success(.reviewCommentsSend(sessionID: sessionID, text: text, comments: comments))
-        default:
-            return .failure(BridgeError(code: .invalidArgument, message: "Unknown method \"\(request.method)\"."))
+        default: return .failure(BridgeError(code: .invalidArgument, message: "Unknown method \"\(request.method)\"."))
         }
     }
 
@@ -418,9 +398,7 @@ enum CodePaneBridge {
     /// A CAS write conflict is never routed through here — it's a normal typed result
     /// (`{conflict:true, currentSHA256}`), not a thrown error; see `fileWritePayload`.
     static func mapClientError(_ error: Error) -> BridgeError {
-        guard let clientError = error as? SpacesDeviceClientError else {
-            return BridgeError(code: .unavailable, message: error.localizedDescription)
-        }
+        guard let clientError = error as? SpacesDeviceClientError else { return BridgeError(code: .unavailable, message: error.localizedDescription) }
         guard case .requestRejected(let message, let code) = clientError else {
             // missingLocalBootstrap / missingOverview / missingCertificateFingerprint: all describe
             // the device or its credentials being unreachable right now, not a bad request.
@@ -438,16 +416,12 @@ enum CodePaneBridge {
     private static func bridgeErrorCode(for code: SpacesDeviceErrorCode?) -> ErrorCode {
         guard let code else { return .internalError }
         switch code {
-        case .notFound:
-            return .notFound
-        case .invalidArgument, .ownershipRejected, .payloadTooLarge, .unsupportedFormat:
-            return .invalidArgument
-        case .conflict:
-            return .conflict
-        case .internalError:
-            return .internalError
-        case .unauthorized, .sessionNotRunning, .sessionNotAvailable, .serviceNotRunning, .busy, .capabilityMissing, .misroutedRequest,
-            .shuttingDown, .handingOff:
+        case .notFound: return .notFound
+        case .invalidArgument, .ownershipRejected, .payloadTooLarge, .unsupportedFormat: return .invalidArgument
+        case .conflict: return .conflict
+        case .internalError: return .internalError
+        case .unauthorized, .sessionNotRunning, .sessionNotAvailable, .serviceNotRunning, .busy, .capabilityMissing, .misroutedRequest, .shuttingDown,
+            .handingOff:
             return .unavailable
         }
     }
@@ -488,9 +462,7 @@ enum CodePaneBridge {
     }
 
     static func fileWritePayload(_ result: SpacesDeviceWorkspaceFileWriteResult) -> Result<FileWritePayload, BridgeError> {
-        if result.didWrite {
-            return .success(FileWritePayload(ok: true, conflict: nil, currentSHA256: nil, fileMissing: nil, sha256: result.sha256))
-        }
+        if result.didWrite { return .success(FileWritePayload(ok: true, conflict: nil, currentSHA256: nil, fileMissing: nil, sha256: result.sha256)) }
         // A nil current hash on a failed write means the daemon found no file at all where the CAS
         // check expected one — i.e. it was deleted after the editor last read it. That's a legitimate
         // conflict, not a daemon bug: the write still can't proceed (there's nothing to compare the
@@ -536,7 +508,10 @@ enum CodePaneBridge {
         return "window.__spacesBridge.reject(\(jsonLiteral(forString: id)), \(errorJSON));"
     }
 
-    private struct ErrorPayload: Encodable { let code: String; let message: String }
+    private struct ErrorPayload: Encodable {
+        let code: String
+        let message: String
+    }
 
     private static func jsonLiteral(_ value: some Encodable) -> String? {
         guard let data = try? encoder.encode(value) else { return nil }
@@ -569,9 +544,8 @@ enum CodePaneBridge {
         let initialMode: String
         let initialScope: Scope
         let theme: String
-        /// The workspace's configured base branch, nil-omitted when it has none. Lets the toolbar
-        /// disable (and, where it labels segments, name) the "vs base branch" scope instead of
-        /// always offering an option `refName(for:)` is guaranteed to reject.
+        /// The workspace's configured base branch, nil-omitted when it has none. Drives the toolbar's
+        /// one-click "vs <base>" preset and the ref dialog's base badge.
         let baseBranch: String?
         /// The host-held editor-state snapshot from before this pane's most recent hibernation
         /// cycle, nil-omitted when there is none (a pane's first-ever load, or one whose editor
@@ -656,8 +630,6 @@ extension WKWebView: CodePaneScriptEvaluator {
     /// into a `nil` result rather than being surfaced separately — see `CollectedEditorState`'s doc
     /// comment for why its only caller treats that identically to the page answering `null`.
     func evaluateCodePaneScript(_ script: String, completion: @escaping @MainActor (Any?) -> Void) {
-        evaluateJavaScript(script) { result, _ in
-            MainActor.assumeIsolated { completion(result) }
-        }
+        evaluateJavaScript(script) { result, _ in MainActor.assumeIsolated { completion(result) } }
     }
 }

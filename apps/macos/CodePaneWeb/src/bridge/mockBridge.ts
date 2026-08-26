@@ -3,6 +3,7 @@ import {
   FIXTURE_ALL_PATHS,
   FIXTURE_FILE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
+  FIXTURE_REF_LIST,
   fixtureDiffFiles,
   fixtureHash,
 } from "./fixtures";
@@ -25,6 +26,7 @@ import {
   WorkspaceFileReadResult,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
+  WorkspaceRefListResult,
 } from "./types";
 
 const INIT_EVENT = "spaces:init";
@@ -38,10 +40,6 @@ const MOCK_LATENCY_MS = 120;
 
 function delay<T>(value: T): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), MOCK_LATENCY_MS));
-}
-
-function scopeKey(scope: DiffScope): string {
-  return scope.kind === "ref" ? `ref:${scope.refName}` : scope.kind;
 }
 
 /**
@@ -96,7 +94,6 @@ export class MockSpacesBridge implements SpacesBridge {
   private lastAgentsLength = FIXTURE_AGENTS.length;
 
   async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {
-    void scopeKey(scope);
     const files = fixtureDiffFiles(scope, this.version);
     return delay({ scopeSignature: `fixture-v${this.version}`, files });
   }
@@ -138,6 +135,10 @@ export class MockSpacesBridge implements SpacesBridge {
 
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
     return delay({ paths: FIXTURE_ALL_PATHS, truncated: false });
+  }
+
+  async workspaceRefList(): Promise<WorkspaceRefListResult> {
+    return delay(FIXTURE_REF_LIST);
   }
 
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {

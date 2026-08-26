@@ -653,16 +653,17 @@ public enum SpacesDeviceClient {
         return result
     }
 
-    /// Fetches a workspace's diff on a paired device. `refName == nil` diffs uncommitted changes against
-    /// `HEAD`; a non-nil `refName` diffs the merge-base of `refName` and `HEAD` against the working tree
-    /// (see `SpacesDeviceWorkspaceDiffRequest`).
+    /// Fetches a workspace's diff on a paired device. `refName == nil, lastCommit == false` diffs
+    /// uncommitted changes against `HEAD`; `lastCommit == true` diffs `HEAD`'s own commit (its parent
+    /// against its tree); a non-nil `refName` diffs the merge-base of `refName` and `HEAD` against the
+    /// working tree (see `SpacesDeviceWorkspaceDiffRequest`).
     public static func workspaceDiff(
-        workspaceID: String, refName: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceDiffResult {
         let response = try request(
-            .init(command: .workspaceDiff(.init(workspaceID: workspaceID, refName: refName))), device: device, clientApp: clientApp,
-            profile: profile)
+            .init(command: .workspaceDiff(.init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit))), device: device,
+            clientApp: clientApp, profile: profile)
         guard let result = response.workspaceDiff else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -677,6 +678,19 @@ public enum SpacesDeviceClient {
         let response = try request(
             .init(command: .workspaceFileList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceFileList else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Lists the branches and recent commits the Compare dialog's ref search offers, on a paired device
+    /// (see `SpacesDeviceWorkspaceRefListRequest`).
+    public static func workspaceRefList(
+        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceRefListResult {
+        let response = try request(
+            .init(command: .workspaceRefList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceRefList else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return result
@@ -736,20 +750,20 @@ public enum SpacesDeviceClient {
             device: device, clientApp: clientApp, profile: profile)
     }
 
-    /// Opens a live per-(workspace, ref)-scope diff-signature subscription: the paired daemon pushes a frame
-    /// whenever the scope's `scopeSignature` changes (notify-then-pull; the daemon polls, see
-    /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiff` (with the same `refName`)
-    /// on delivery rather than trust any payload carried on the frame. `refName` selects the same scope
-    /// `workspaceDiff` would (`nil` for uncommitted changes); pass the same value to both so their
+    /// Opens a live per-(workspace, ref, lastCommit)-scope diff-signature subscription: the paired daemon
+    /// pushes a frame whenever the scope's `scopeSignature` changes (notify-then-pull; the daemon polls, see
+    /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiff` (with the same `refName`
+    /// and `lastCommit`) on delivery rather than trust any payload carried on the frame. `refName` and
+    /// `lastCommit` select the same scope `workspaceDiff` would; pass the same values to both so their
     /// subscription and results agree. The returned client must be retained and `stop()`ped.
     public static func subscribeWorkspaceDiffSignature(
-        workspaceID: String, refName: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceWorkspaceDiffSignatureStreamClient {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
         let client = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
-            workspaceID: workspaceID, refName: refName, authToken: authToken, clientApp: clientApp,
+            workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, authToken: authToken, clientApp: clientApp,
             resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
             onDisconnect: onDisconnect)
         try client.start()
@@ -1204,13 +1218,13 @@ public enum SpacesDeviceClient {
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList: largePayloadRequestTimeoutSeconds
+        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList:
+            largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
             .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .openServiceTunnel,
-            .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns, .workspaceReviewCommentList,
+            .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns, .workspaceReviewCommentList,
             .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
             defaultRequestTimeoutSeconds
         }

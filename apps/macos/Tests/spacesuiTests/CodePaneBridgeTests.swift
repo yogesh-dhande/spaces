@@ -28,47 +28,32 @@ import spacesterminalcore
 
     // `[String: Any]` isn't `Sendable`, so these are separate tests rather than one parameterized
     // over an `arguments:` array (Swift Testing requires `Sendable` arguments).
-    @Test func decodeRequestRejectsABodyMissingId() {
-        #expect(CodePaneBridge.decodeRequest(body: ["method": "workspaceFileList"]) == nil)
-    }
+    @Test func decodeRequestRejectsABodyMissingId() { #expect(CodePaneBridge.decodeRequest(body: ["method": "workspaceFileList"]) == nil) }
 
-    @Test func decodeRequestRejectsABodyMissingMethod() {
-        #expect(CodePaneBridge.decodeRequest(body: ["id": "1"]) == nil)
-    }
+    @Test func decodeRequestRejectsABodyMissingMethod() { #expect(CodePaneBridge.decodeRequest(body: ["id": "1"]) == nil) }
 
-    @Test func decodeRequestRejectsANonStringId() {
-        #expect(CodePaneBridge.decodeRequest(body: ["id": 1, "method": "workspaceFileList"]) == nil)
-    }
+    @Test func decodeRequestRejectsANonStringId() { #expect(CodePaneBridge.decodeRequest(body: ["id": 1, "method": "workspaceFileList"]) == nil) }
 
-    @Test func decodeRequestRejectsNonDictionaryBody() {
-        #expect(CodePaneBridge.decodeRequest(body: "not a dictionary") == nil)
-    }
+    @Test func decodeRequestRejectsNonDictionaryBody() { #expect(CodePaneBridge.decodeRequest(body: "not a dictionary") == nil) }
 
-    @Test func isReadyRecognizesTheFireAndForgetNotification() {
-        #expect(CodePaneBridge.isReady(body: ["method": "ready"]))
-    }
+    @Test func isReadyRecognizesTheFireAndForgetNotification() { #expect(CodePaneBridge.isReady(body: ["method": "ready"])) }
 
-    @Test func isReadyRejectsAnythingWithAnId() {
-        #expect(!CodePaneBridge.isReady(body: ["id": "1", "method": "ready"]))
-    }
+    @Test func isReadyRejectsAnythingWithAnId() { #expect(!CodePaneBridge.isReady(body: ["id": "1", "method": "ready"])) }
 
-    @Test func isReadyRejectsOtherMethods() {
-        #expect(!CodePaneBridge.isReady(body: ["method": "workspaceFileList"]))
-    }
+    @Test func isReadyRejectsOtherMethods() { #expect(!CodePaneBridge.isReady(body: ["method": "workspaceFileList"])) }
 
     // MARK: - Diff scope decode
 
-    @Test func decodeDiffScopeUncommitted() {
-        #expect(CodePaneBridge.decodeDiffScope(["kind": "uncommitted"]) == .success(.uncommitted))
-    }
+    @Test func decodeDiffScopeUncommitted() { #expect(CodePaneBridge.decodeDiffScope(["kind": "uncommitted"]) == .success(.uncommitted)) }
 
-    @Test func decodeDiffScopeBaseBranch() {
-        #expect(CodePaneBridge.decodeDiffScope(["kind": "baseBranch"]) == .success(.baseBranch))
-    }
+    @Test func decodeDiffScopeLastCommit() { #expect(CodePaneBridge.decodeDiffScope(["kind": "lastCommit"]) == .success(.lastCommit)) }
 
-    @Test func decodeDiffScopeRef() {
-        #expect(CodePaneBridge.decodeDiffScope(["kind": "ref", "refName": "main"]) == .success(.ref("main")))
-    }
+    /// `baseBranch` was the pre-"last commit" committed-only scope kind; the wire no longer offers it
+    /// (the Compare dialog resolves a base branch to a `ref` scope client-side instead), so it must
+    /// be rejected like any other unrecognized kind rather than silently accepted.
+    @Test func decodeDiffScopeRejectsBaseBranch() { #expect(CodePaneBridge.decodeDiffScope(["kind": "baseBranch"]).isInvalidArgumentFailure) }
+
+    @Test func decodeDiffScopeRef() { #expect(CodePaneBridge.decodeDiffScope(["kind": "ref", "refName": "main"]) == .success(.ref("main"))) }
 
     @Test func decodeDiffScopeRefRequiresANonEmptyRefName() {
         let result = CodePaneBridge.decodeDiffScope(["kind": "ref", "refName": ""])
@@ -80,35 +65,30 @@ import spacesterminalcore
         #expect(result.isInvalidArgumentFailure)
     }
 
-    @Test func decodeDiffScopeRejectsUnknownKind() {
-        #expect(CodePaneBridge.decodeDiffScope(["kind": "bogus"]).isInvalidArgumentFailure)
-    }
+    @Test func decodeDiffScopeRejectsUnknownKind() { #expect(CodePaneBridge.decodeDiffScope(["kind": "bogus"]).isInvalidArgumentFailure) }
 
-    @Test func decodeDiffScopeRejectsNonDictionary() {
-        #expect(CodePaneBridge.decodeDiffScope("uncommitted").isInvalidArgumentFailure)
-    }
+    @Test func decodeDiffScopeRejectsNonDictionary() { #expect(CodePaneBridge.decodeDiffScope("uncommitted").isInvalidArgumentFailure) }
 
-    @Test func decodeDiffScopeRejectsNil() {
-        #expect(CodePaneBridge.decodeDiffScope(nil).isInvalidArgumentFailure)
-    }
+    @Test func decodeDiffScopeRejectsNil() { #expect(CodePaneBridge.decodeDiffScope(nil).isInvalidArgumentFailure) }
 
     // MARK: - refName resolution
 
-    @Test func refNameForUncommittedIsNil() {
-        #expect(CodePaneBridge.refName(for: .uncommitted, workspaceBaseBranch: "main") == .success(nil))
+    @Test func refNameForUncommittedIsNilWithoutLastCommit() {
+        let (refName, lastCommit) = CodePaneBridge.refName(for: .uncommitted)
+        #expect(refName == nil)
+        #expect(!lastCommit)
     }
 
-    @Test func refNameForRefIsTheLiteralRef() {
-        #expect(CodePaneBridge.refName(for: .ref("feature/x"), workspaceBaseBranch: nil) == .success("feature/x"))
+    @Test func refNameForRefIsTheLiteralRefWithoutLastCommit() {
+        let (refName, lastCommit) = CodePaneBridge.refName(for: .ref("feature/x"))
+        #expect(refName == "feature/x")
+        #expect(!lastCommit)
     }
 
-    @Test func refNameForBaseBranchUsesTheWorkspacesConfiguredBranch() {
-        #expect(CodePaneBridge.refName(for: .baseBranch, workspaceBaseBranch: "develop") == .success("develop"))
-    }
-
-    @Test func refNameForBaseBranchFailsWithoutOne() {
-        #expect(CodePaneBridge.refName(for: .baseBranch, workspaceBaseBranch: nil).isInvalidArgumentFailure)
-        #expect(CodePaneBridge.refName(for: .baseBranch, workspaceBaseBranch: "").isInvalidArgumentFailure)
+    @Test func refNameForLastCommitIsNilRefNameWithLastCommitSet() {
+        let (refName, lastCommit) = CodePaneBridge.refName(for: .lastCommit)
+        #expect(refName == nil)
+        #expect(lastCommit)
     }
 
     // MARK: - InitPayload base branch encoding (round-4 Fix 5)
@@ -117,9 +97,8 @@ import spacesterminalcore
     /// key is present at all, so it must encode when the workspace has one...
     @Test func initPayloadEncodesBaseBranchWhenPresent() throws {
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: "main", editorState: nil,
-            pendingReviewComments: nil, editorUIState: nil, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: "main", editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -130,9 +109,8 @@ import spacesterminalcore
     /// other nil-omitted field in this payload.
     @Test func initPayloadOmitsBaseBranchKeyWhenAbsent() throws {
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, editorUIState: nil, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -145,9 +123,8 @@ import spacesterminalcore
     /// restore" from "restore this snapshot" by whether the `editorState` key is present at all.
     @Test func initPayloadOmitsEditorStateKeyWhenAbsent() throws {
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, editorUIState: nil, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -157,9 +134,8 @@ import spacesterminalcore
     @Test func initPayloadEncodesEditorStateWhenPresent() throws {
         let state = CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 1", content: "let x = 1", dirty: true)
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: state,
-            pendingReviewComments: nil, editorUIState: nil, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: nil, editorState: state, pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -179,9 +155,8 @@ import spacesterminalcore
     /// sending `null`, since the web side uses key presence to decide whether to restore anything.
     @Test func initPayloadOmitsEditorUIStateKeyWhenAbsent() throws {
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, editorUIState: nil, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -191,9 +166,8 @@ import spacesterminalcore
     @Test func initPayloadEncodesEditorUIStateWhenPresent() throws {
         let state = CodePaneBridge.EditorUIState(sidebarMode: "changes", recentPaths: ["a.swift", "b.swift"])
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor",
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: "dark", baseBranch: nil, editorState: nil,
-            pendingReviewComments: nil, editorUIState: state, agents: [])
+            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor", initialScope: .init(kind: "uncommitted", refName: nil),
+            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: state, agents: [])
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -205,11 +179,10 @@ import spacesterminalcore
     // MARK: - editorStateChanged decode (round-5 hibernation fix)
 
     @Test func decodeEditorStateChangedParsesAFileSnapshot() {
-        let message = CodePaneBridge.decodeEditorStateChanged(
-            body: [
-                "method": "editorStateChanged",
-                "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
-            ])
+        let message = CodePaneBridge.decodeEditorStateChanged(body: [
+            "method": "editorStateChanged",
+            "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
+        ])
 
         #expect(
             message
@@ -218,13 +191,12 @@ import spacesterminalcore
     }
 
     @Test func decodeEditorStateChangedParsesAConflictFlag() {
-        let message = CodePaneBridge.decodeEditorStateChanged(
-            body: [
-                "method": "editorStateChanged",
-                "params": [
-                    "path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true, "conflict": true,
-                ],
-            ])
+        let message = CodePaneBridge.decodeEditorStateChanged(body: [
+            "method": "editorStateChanged",
+            "params": [
+                "path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true, "conflict": true,
+            ],
+        ])
 
         #expect(
             message
@@ -234,11 +206,10 @@ import spacesterminalcore
     }
 
     @Test func decodeEditorStateChangedDefaultsConflictToFalseWhenAbsent() {
-        let message = CodePaneBridge.decodeEditorStateChanged(
-            body: [
-                "method": "editorStateChanged",
-                "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
-            ])
+        let message = CodePaneBridge.decodeEditorStateChanged(body: [
+            "method": "editorStateChanged",
+            "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
+        ])
 
         guard case .file(let state) = message else {
             Issue.record("expected a decoded file snapshot")
@@ -270,10 +241,9 @@ import spacesterminalcore
 
     @Test func decodeEditorStateChangedTreatsMissingBaseContentAsNoFile() {
         #expect(
-            CodePaneBridge.decodeEditorStateChanged(
-                body: [
-                    "method": "editorStateChanged", "params": ["path": "a.swift", "baseSHA256": "sha-1", "content": "let x = 1", "dirty": true],
-                ]) == .noFile, "baseContent is required, mirroring the other snapshot fields")
+            CodePaneBridge.decodeEditorStateChanged(body: [
+                "method": "editorStateChanged", "params": ["path": "a.swift", "baseSHA256": "sha-1", "content": "let x = 1", "dirty": true],
+            ]) == .noFile, "baseContent is required, mirroring the other snapshot fields")
     }
 
     // MARK: - modeChanged decode (round-5 hibernation fix)
@@ -294,22 +264,24 @@ import spacesterminalcore
     // MARK: - editorUIStateChanged push decode
 
     @Test func decodeEditorUIStateChangedParsesASnapshot() {
-        let message = CodePaneBridge.decodeEditorUIStateChanged(
-            body: ["method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": ["a.ts", "b.ts"]]])
+        let message = CodePaneBridge.decodeEditorUIStateChanged(body: [
+            "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": ["a.ts", "b.ts"]],
+        ])
 
         #expect(message == CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"]))
     }
 
     @Test func decodeEditorUIStateChangedRejectsAnythingWithAnId() {
         #expect(
-            CodePaneBridge.decodeEditorUIStateChanged(
-                body: ["id": "1", "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]]) == nil)
+            CodePaneBridge.decodeEditorUIStateChanged(body: [
+                "id": "1", "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()],
+            ]) == nil)
     }
 
     @Test func decodeEditorUIStateChangedRejectsOtherMethods() {
         #expect(
-            CodePaneBridge.decodeEditorUIStateChanged(
-                body: ["method": "modeChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]]) == nil)
+            CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "modeChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]])
+                == nil)
     }
 
     @Test func decodeEditorUIStateChangedRejectsMissingParams() {
@@ -326,6 +298,12 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "uncommitted"]])
 
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiff(scope: .uncommitted)))
+    }
+
+    @Test func planForWorkspaceDiffDecodesLastCommitScope() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "lastCommit"]])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiff(scope: .lastCommit)))
     }
 
     @Test func planForWorkspaceDiffPropagatesAScopeDecodeFailure() {
@@ -357,8 +335,7 @@ import spacesterminalcore
 
     @Test func planForWorkspaceFileWrite() {
         let request = CodePaneBridge.Request(
-            id: "1", method: "workspaceFileWrite",
-            params: ["path": "src/a.swift", "content": "hi", "options": ["baseSHA256": "abc123"]])
+            id: "1", method: "workspaceFileWrite", params: ["path": "src/a.swift", "content": "hi", "options": ["baseSHA256": "abc123"]])
 
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "src/a.swift", content: "hi", baseSHA256: "abc123")))
     }
@@ -400,13 +377,18 @@ import spacesterminalcore
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileList))
     }
 
+    /// Mirrors `planForWorkspaceFileListRequiresNoParams`: `workspaceRefList` carries no per-request
+    /// params either, since the workspace is implied by the pane's own `workspaceID`.
+    @Test func planForWorkspaceRefListRequiresNoParams() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceRefList", params: [:])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceRefList))
+    }
+
     @Test func planForReviewCommentsSendDecodesEachEntrysIdAndRevision() {
         let request = CodePaneBridge.Request(
             id: "1", method: "reviewCommentsSend",
-            params: [
-                "sessionId": "agent-1", "text": "please fix",
-                "comments": [["id": "c1", "revision": 0], ["id": "c2", "revision": 2]],
-            ])
+            params: ["sessionId": "agent-1", "text": "please fix", "comments": [["id": "c1", "revision": 0], ["id": "c2", "revision": 2]]])
 
         #expect(
             CodePaneBridge.plan(for: request)
@@ -414,8 +396,7 @@ import spacesterminalcore
                     .reviewCommentsSend(
                         sessionID: "agent-1", text: "please fix",
                         comments: [
-                            SpacesDeviceReviewCommentSendEntry(id: "c1", revision: 0),
-                            SpacesDeviceReviewCommentSendEntry(id: "c2", revision: 2),
+                            SpacesDeviceReviewCommentSendEntry(id: "c1", revision: 0), SpacesDeviceReviewCommentSendEntry(id: "c2", revision: 2),
                         ])))
     }
 
@@ -444,25 +425,16 @@ import spacesterminalcore
         #expect(error == CodePaneBridge.BridgeError(code: .notFound, message: "nope"))
     }
 
-    @Test("mapClientError maps every SpacesDeviceErrorCode", arguments: [
-        (SpacesDeviceErrorCode.notFound, CodePaneBridge.ErrorCode.notFound),
-        (.invalidArgument, .invalidArgument),
-        (.ownershipRejected, .invalidArgument),
-        (.payloadTooLarge, .invalidArgument),
-        (.unsupportedFormat, .invalidArgument),
-        (.conflict, .conflict),
-        (.internalError, .internalError),
-        (.unauthorized, .unavailable),
-        (.sessionNotRunning, .unavailable),
-        (.sessionNotAvailable, .unavailable),
-        (.serviceNotRunning, .unavailable),
-        (.busy, .unavailable),
-        (.capabilityMissing, .unavailable),
-        (.misroutedRequest, .unavailable),
-        (.shuttingDown, .unavailable),
-        (.handingOff, .unavailable),
-    ])
-    func mapClientErrorMapsEveryDeviceErrorCode(deviceCode: SpacesDeviceErrorCode, bridgeCode: CodePaneBridge.ErrorCode) {
+    @Test(
+        "mapClientError maps every SpacesDeviceErrorCode",
+        arguments: [
+            (SpacesDeviceErrorCode.notFound, CodePaneBridge.ErrorCode.notFound), (.invalidArgument, .invalidArgument),
+            (.ownershipRejected, .invalidArgument), (.payloadTooLarge, .invalidArgument), (.unsupportedFormat, .invalidArgument),
+            (.conflict, .conflict), (.internalError, .internalError), (.unauthorized, .unavailable), (.sessionNotRunning, .unavailable),
+            (.sessionNotAvailable, .unavailable), (.serviceNotRunning, .unavailable), (.busy, .unavailable), (.capabilityMissing, .unavailable),
+            (.misroutedRequest, .unavailable), (.shuttingDown, .unavailable), (.handingOff, .unavailable),
+        ]) func mapClientErrorMapsEveryDeviceErrorCode(deviceCode: SpacesDeviceErrorCode, bridgeCode: CodePaneBridge.ErrorCode)
+    {
         let error = CodePaneBridge.mapClientError(SpacesDeviceClientError.requestRejected(message: "m", code: deviceCode))
 
         #expect(error.code == bridgeCode)
@@ -490,13 +462,15 @@ import spacesterminalcore
     // MARK: - Result payload shaping
 
     @Test func fileReadPayloadDecodesUTF8Text() {
-        let result = SpacesDeviceWorkspaceFileReadResult(base64Data: Data("hello".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false)
+        let result = SpacesDeviceWorkspaceFileReadResult(
+            base64Data: Data("hello".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false)
 
         #expect(CodePaneBridge.fileReadPayload(result) == .success(CodePaneBridge.FileReadPayload(content: "hello", sha256: "sha", size: 5)))
     }
 
     @Test func fileReadPayloadRejectsBinaryGuesses() {
-        let result = SpacesDeviceWorkspaceFileReadResult(base64Data: Data("hello".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: true)
+        let result = SpacesDeviceWorkspaceFileReadResult(
+            base64Data: Data("hello".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: true)
 
         #expect(CodePaneBridge.fileReadPayload(result).isInvalidArgumentFailure)
     }
@@ -523,8 +497,7 @@ import spacesterminalcore
 
         #expect(
             CodePaneBridge.fileWritePayload(result)
-                == .success(
-                    CodePaneBridge.FileWritePayload(ok: nil, conflict: true, currentSHA256: "current-sha", fileMissing: nil, sha256: nil)))
+                == .success(CodePaneBridge.FileWritePayload(ok: nil, conflict: true, currentSHA256: "current-sha", fileMissing: nil, sha256: nil)))
     }
 
     /// A CAS conflict is a typed result, never a thrown error — `fileWritePayload`, not
@@ -555,8 +528,7 @@ import spacesterminalcore
     @Test func resolveScriptEncodesTheIdAndResultAsJSON() throws {
         let script = try #require(
             CodePaneBridge.resolveScript(
-                id: "req-1",
-                result: CodePaneBridge.FileWritePayload(ok: true, conflict: nil, currentSHA256: nil, fileMissing: nil, sha256: nil)))
+                id: "req-1", result: CodePaneBridge.FileWritePayload(ok: true, conflict: nil, currentSHA256: nil, fileMissing: nil, sha256: nil)))
 
         #expect(script == #"window.__spacesBridge.resolve("req-1", {"ok":true});"#)
     }
@@ -567,8 +539,7 @@ import spacesterminalcore
     @Test func resolveScriptEncodesFileMissingConflictWithoutACurrentSHA256Key() throws {
         let script = try #require(
             CodePaneBridge.resolveScript(
-                id: "req-1",
-                result: CodePaneBridge.FileWritePayload(ok: nil, conflict: true, currentSHA256: nil, fileMissing: true, sha256: nil)))
+                id: "req-1", result: CodePaneBridge.FileWritePayload(ok: nil, conflict: true, currentSHA256: nil, fileMissing: true, sha256: nil)))
 
         #expect(script == #"window.__spacesBridge.resolve("req-1", {"conflict":true,"fileMissing":true});"#)
     }
@@ -598,7 +569,11 @@ import spacesterminalcore
         let script = try #require(CodePaneBridge.resolveScript(id: "req-1", result: payload))
 
         let resultJSON = try #require(stripped(script, prefix: #"window.__spacesBridge.resolve("req-1", "#, suffix: ");"))
-        struct DecodedFileReadPayload: Decodable { let content: String; let sha256: String; let size: Int }
+        struct DecodedFileReadPayload: Decodable {
+            let content: String
+            let sha256: String
+            let size: Int
+        }
         let decoded = try JSONDecoder().decode(DecodedFileReadPayload.self, from: Data(resultJSON.utf8))
         #expect(decoded.content == dangerousContent)
     }
@@ -608,7 +583,10 @@ import spacesterminalcore
         let script = CodePaneBridge.rejectScript(id: "req-1", error: CodePaneBridge.BridgeError(code: .internalError, message: dangerousMessage))
 
         let errorJSON = try #require(stripped(script, prefix: #"window.__spacesBridge.reject("req-1", "#, suffix: ");"))
-        struct DecodedError: Decodable { let code: String; let message: String }
+        struct DecodedError: Decodable {
+            let code: String
+            let message: String
+        }
         let decoded = try JSONDecoder().decode(DecodedError.self, from: Data(errorJSON.utf8))
         #expect(decoded.message == dangerousMessage)
         #expect(decoded.code == "internalError")
@@ -619,7 +597,8 @@ import spacesterminalcore
         // is entirely on the detail side, so it exercises a value with the same dangerous
         // characters instead.
         let script = try #require(
-            CodePaneBridge.dispatchEventScript(name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd")))
+            CodePaneBridge.dispatchEventScript(name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd"))
+        )
 
         let detailJSON = try #require(
             stripped(script, prefix: #"window.dispatchEvent(new CustomEvent("spaces:diffSignature", {detail: "#, suffix: "}));"))
@@ -669,7 +648,8 @@ import spacesterminalcore
 
         #expect(
             CodePaneBridge.decodeCollectedEditorState(json)
-                == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true)))
+                == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true))
+        )
     }
 
     @Test func decodeCollectedEditorStateParsesAConflictFlag() {
@@ -765,7 +745,9 @@ import spacesterminalcore
     @Test func decodeCollectedEditorUIStateParsesAJSONSnapshot() {
         let json = #"{"sidebarMode":"files","recentPaths":["a.ts","b.ts"]}"#
 
-        #expect(CodePaneBridge.decodeCollectedEditorUIState(json) == .state(CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"])))
+        #expect(
+            CodePaneBridge.decodeCollectedEditorUIState(json)
+                == .state(CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"])))
     }
 
     @Test func decodeCollectedEditorUIStateTreatsTheNoneSentinelAsNone() {

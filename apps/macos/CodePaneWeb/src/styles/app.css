@@ -104,29 +104,66 @@
   cursor: default;
 }
 
-.ref-input {
-  display: none;
-  align-items: center;
-  height: 22px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 0 7px;
+/* The diff header's "Compare" menu (toolbar.ts): a single button showing the current scope's
+   label, opening a dropdown of the four compare options anchored below it. `position: relative`
+   here (rather than on `.pane-hdr`) keeps the dropdown's `top: 100%` anchored to the button's own
+   row regardless of where the toolbar places it. */
+.compare {
+  position: relative;
   flex: 0 0 auto;
 }
 
-.ref-input.open {
-  display: flex;
-}
-
-.ref-input input {
+.compare-btn {
   appearance: none;
-  border: none;
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
   background: transparent;
-  color: var(--fg);
+  color: var(--fg2);
   font: inherit;
   font-size: 12px;
-  width: 120px;
-  outline: none;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.compare-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.6);
+}
+
+.compare-menu .item {
+  appearance: none;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: default;
+}
+
+.compare-menu .item:hover {
+  background: var(--row-sel);
+}
+
+.compare-menu .item.on {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .btn {
@@ -516,6 +553,56 @@
   border-top: 1px solid var(--line);
   color: var(--fg3);
   font-size: 11px;
+}
+
+/* refSearchDialog.ts's "Branch…" / "Commit or ref…" overlay: a `.quick-open` panel (inheriting all
+   its rules above) plus row shapes specific to a branch's "base" badge and a commit's sha/subject
+   pair. */
+.ref-search .list .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ref-search .list .row .badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chip);
+  color: var(--fg3);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.ref-search .list .row .sha {
+  flex: 0 0 auto;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--fg3);
+}
+
+.ref-search .list .row .subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg2);
+}
+
+.ref-search .list .row.sel .sha,
+.ref-search .list .row.sel .subject {
+  color: var(--fg);
+}
+
+.ref-search .list .row.literal {
+  color: var(--fg3);
+  font-style: italic;
+}
+
+.ref-search .list .row.literal.sel {
+  color: var(--fg);
 }
 
 /* Non-blocking conflict/status banner, per docs/design.md's rule: a

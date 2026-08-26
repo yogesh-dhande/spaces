@@ -177,91 +177,161 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") == nil, "no controller is built for the pruned pane")
         }
 
-        /// Deleting, stopping, or restarting a workspace closes its code panes but leaves another
-        /// workspace's code pane (open in the same global panel window) untouched. Covers
-        /// `PanelCoordinator.closeCodePanes(workspaceID:)`, the code-pane counterpart of
-        /// `closeTerminalPanes` called from the workspace-teardown chokepoint.
-        @Test func closeCodePanesClosesOnlyTheGivenWorkspacesPanes() throws {
+        /// Deleting, stopping, or restarting a workspace closes its workspace-scoped code panes but
+        /// leaves another workspace's code pane untouched, AND leaves the global Editor's pane on the
+        /// very workspace being closed untouched too — the workspace record still exists (a stop or
+        /// restart never removes it) and the daemon still serves its files, so the singleton window must
+        /// not close out from under the user. Covers `PanelCoordinator.closeCodePanes(workspaceID:)`, the
+        /// code-pane counterpart of `closeTerminalPanes` called from the workspace-teardown chokepoint.
+        @Test func closeCodePanesClosesOnlyTheGivenWorkspacesScopedPaneAndLeavesAGlobalEditorPaneOnItUntouched() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
-            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
-            var layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "code-1", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code-2", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: layout)
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-1") != nil, "precondition: workspace-1's pane controller exists")
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-2") != nil, "precondition: workspace-2's pane controller exists")
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
+            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .diff, in: scope1))
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .diff, in: scope2))
+            let code1 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).first?.id)
+            let code2 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope2)).first?.id)
+            let globalLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: code1) != nil, "precondition: workspace-1's pane controller exists")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: code2) != nil, "precondition: workspace-2's pane controller exists")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "precondition: the global editor pane exists")
 
             controller.panelCoordinator.closeCodePanes(workspaceID: "workspace-1")
 
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["code-2"],
-                "only workspace-1's pane leaves the layout")
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-1") == nil, "workspace-1's controller is torn down")
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-2") != nil, "workspace-2's controller survives")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).isEmpty,
+                "workspace-1's workspace-scoped pane leaves its layout")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: code1) == nil, "workspace-1's controller is torn down")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: code2) != nil, "workspace-2's controller survives")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["monitor"],
+                "the global editor pane, on the very workspace just closed, stays in the layout")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil,
+                "the global editor pane's controller survives a stop/restart of the workspace it shows")
         }
 
         /// `closeCodePanes(deviceID:workspaceIDs:)` — the cross-client lifecycle close run when a
         /// workspace is observed transitioning to not-running in a device's overview (an externally
-        /// initiated stop/restart/delete reaching this client only through a sidebar reload) — closes a
-        /// matching device+workspace code pane but leaves a same-workspace pane on a different device, a
-        /// different workspace's pane on the same device, and a terminal pane untouched.
-        @Test func closeCodePanesByDeviceAndWorkspaceClosesOnlyTheMatchingPane() throws {
+        /// initiated stop/restart reaching this client only through a sidebar reload) — closes a matching
+        /// device+workspace workspace-scoped code pane but leaves a same-workspace pane on a different
+        /// device, a different workspace's pane on the same device, a terminal pane, and the global
+        /// Editor's pane on the transitioning workspace untouched.
+        @Test func closeCodePanesByDeviceAndWorkspaceClosesOnlyTheMatchingScopedPaneAndLeavesAGlobalEditorPaneUntouched() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
-            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
-            var layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "code-target", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code-other-workspace", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: layout
-            )
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-3", pane: Pane(id: "code-other-device", content: .codePane(deviceID: "other-device", workspaceID: "workspace-1")),
-                to: layout)
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-4", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: layout)
-            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-target") != nil, "precondition: the target pane's controller exists")
+            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other")]
+            controller.rebuildFlatSidebarData()
+            let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
+            let otherDeviceScope = PanelScope.workspace(deviceID: "other-device", workspaceID: "workspace-1")
+            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .diff, in: scope1))
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .diff, in: scope2))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(
+                    deviceID: "other-device", workspaceID: "workspace-1", initialMode: .diff, in: otherDeviceScope))
+            let target = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).first?.id)
+            let otherWorkspace = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope2)).first?.id)
+            let otherDevice = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: otherDeviceScope)).first?.id)
+            let globalLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: globalLayout, frame: nil)
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: target) != nil, "precondition: the target pane's controller exists")
 
             controller.panelCoordinator.closeCodePanes(deviceID: deviceID, workspaceIDs: ["workspace-1"])
 
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted() == [
-                    "code-other-device", "code-other-workspace", "term",
-                ], "only the matching device+workspace pane leaves the layout")
-            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code-target") == nil, "the target pane's controller is torn down")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).isEmpty,
+                "only the matching device+workspace code pane leaves its layout")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: target) == nil, "the target pane's controller is torn down")
             #expect(
-                controller.panelCoordinator.codePaneContent(forPaneID: "code-other-workspace") != nil,
+                controller.panelCoordinator.codePaneContent(forPaneID: otherWorkspace) != nil,
                 "a different workspace's pane on the same device survives")
             #expect(
-                controller.panelCoordinator.codePaneContent(forPaneID: "code-other-device") != nil,
-                "the same workspace's pane on a different device survives")
+                controller.panelCoordinator.codePaneContent(forPaneID: otherDevice) != nil, "the same workspace's pane on a different device survives"
+            )
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["monitor"],
+                "the global editor pane, on the transitioning workspace, stays in the layout")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil,
+                "the global editor pane's controller survives the observed run-state transition")
         }
 
         /// `pruneOpenCodePanes` — the overview-driven counterpart of `closeCodePanes`, run when a device's
-        /// overview arrives — closes a code pane whose workspace dropped out of `liveWorkspaceIDs` (the
-        /// workspace was deleted) but leaves one whose workspace is still listed, and never touches a
-        /// pane owned by a different device even if that device's id is absent from the same set.
-        @Test func pruneOpenCodePanesClosesOnlyPanesForGoneWorkspacesOnTheGivenDevice() throws {
+        /// overview arrives — closes a workspace-scoped code pane whose workspace dropped out of
+        /// `liveWorkspaceIDs` (the workspace was deleted) but leaves one whose workspace is still listed,
+        /// and never touches a pane owned by a different device even if that device's id is absent from
+        /// the same set. Returns `nil` when no `.globalWindow` pane is orphaned by this prune.
+        @Test func pruneOpenCodePanesClosesOnlyWorkspaceScopedPanesForGoneWorkspacesOnTheGivenDevice() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
-            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
-            var layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "code-live", content: .codePane(deviceID: deviceID, workspaceID: "workspace-live")), to: PanelLayout())
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-2", pane: Pane(id: "code-gone", content: .codePane(deviceID: deviceID, workspaceID: "workspace-gone")), to: layout)
-            layout = PanelLayoutEngine.appendTab(
-                tabID: "tab-3", pane: Pane(id: "code-other-device", content: .codePane(deviceID: "other-device", workspaceID: "workspace-gone")),
-                to: layout)
+            controller.deviceSections = [
+                twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other", workspaceID: "workspace-2"),
+            ]
+            controller.rebuildFlatSidebarData()
+            let liveScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let goneScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
+            let otherDeviceScope = PanelScope.workspace(deviceID: "other-device", workspaceID: "workspace-2")
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .diff, in: liveScope))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .diff, in: goneScope))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(
+                    deviceID: "other-device", workspaceID: "workspace-2", initialMode: .diff, in: otherDeviceScope))
+            let live = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: liveScope)).first?.id)
+            let gone = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: goneScope)).first?.id)
+            let otherDevice = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: otherDeviceScope)).first?.id)
+
+            let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: ["workspace-1"])
+
+            #expect(orphan == nil, "no global-window pane is open, so nothing is reported orphaned")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: goneScope)).isEmpty,
+                "workspace-2's pane on the pruned device closes")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: gone) == nil, "its controller is torn down")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: live) != nil, "the live workspace's pane survives")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: otherDevice) != nil, "the other device's pane survives")
+        }
+
+        /// `pruneOpenCodePanes` never closes a `.globalWindow` pane directly, even when its own workspace
+        /// dropped out of `liveWorkspaceIDs`: closing the Editor's singleton pane out from under a
+        /// deleted workspace would be wrong (there may be somewhere better to retarget it). Instead it
+        /// hands the orphan's `(deviceID, workspaceID)` back for the caller to resolve
+        /// (`AppKitController.resolveOrphanedGlobalEditorPane`); a still-live workspace, or a pane owned
+        /// by a different device, reports no orphan.
+        @Test func pruneOpenCodePanesReportsAnOrphanedGlobalWindowPaneInsteadOfClosingIt() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-gone")), to: PanelLayout())
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
 
-            controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: ["workspace-live"])
+            let liveOrphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: ["workspace-gone"])
+            #expect(liveOrphan == nil, "the pane's workspace is still live, so nothing is orphaned")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "the pane is untouched while its workspace is live")
 
+            let otherDeviceOrphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: "other-device", liveWorkspaceIDs: [])
+            #expect(otherDeviceOrphan == nil, "a prune for a different device never reports this device's pane as orphaned")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "the pane is untouched by another device's prune")
+
+            let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: [])
+
+            #expect(orphan?.deviceID == deviceID && orphan?.workspaceID == "workspace-gone", "the orphan names the pane's own stale target")
             #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id).sorted() == [
-                    "code-live", "code-other-device",
-                ], "workspace-gone's pane on the pruned device closes; the other device's pane does not")
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == ["monitor"],
+                "the global pane is left in place rather than closed")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "its controller survives, unlike a workspace-scoped prune")
         }
 
         /// `openOrFocusGlobalEditorWindow` — the ⌘⌥E shortcut, the sidebar's "Open in Editor" item, and
@@ -588,31 +658,58 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.panelCoordinator.layout(for: scope).focusedPaneID == "monitor", "the retargeted singleton is focused")
         }
 
-        /// Deleting (or otherwise retiring) a monitor's target workspace closes its pane through the
-        /// existing, unmodified `closeCodePanes` path — retargeting introduces no special-case fallback
-        /// that would try to move the monitor to some other workspace instead of closing it.
-        @Test func deletingAMonitorsWorkspaceClosesItsPaneViaTheExistingPrunePath() throws {
+        /// Deleting the global Editor's target workspace (while another workspace remains) does not
+        /// leave the singleton pointed at a workspace that no longer exists — every bridge call it made
+        /// would fail — nor does it close the window. `pruneOpenCodePanes` reports the orphan and
+        /// `resolveOrphanedGlobalEditorPane` retargets it to the fallback `globalEditorWorkspaceID` would
+        /// pick (here, the client's last-active workspace, deterministically set via
+        /// `setClientActiveWorkspaceID` rather than relying on `NSApp.isActive`/focused-window state that
+        /// a headless test process cannot control), excluding the workspace that just left.
+        @Test func deletingTheMonitorsWorkspaceRetargetsItToTheFallbackWorkspaceAndLeavesTheWindowOpen() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
-            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
-            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
-            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
-            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
-            #expect(
-                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil,
-                "precondition: the monitor retargeted to workspace-2 and is still open")
+            AppKitController.setClientActiveWorkspaceID("workspace-2")
+            defer { AppKitController.setClientActiveWorkspaceID(nil) }
 
-            controller.panelCoordinator.closeCodePanes(workspaceID: "workspace-2")
+            let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: ["workspace-2"])
+            let unwrappedOrphan = try #require(orphan, "workspace-1 dropped out of the live set, so the monitor is reported orphaned")
+            controller.resolveOrphanedGlobalEditorPane(excluding: unwrappedOrphan.workspaceID)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["monitor"],
+                "the window stays open with its singleton pane in place")
+            let retargetedContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "the singleton's pane id keeps a live controller after retargeting")
+            #expect(retargetedContent.workspaceID == "workspace-2", "the pane retargets to the fallback workspace, not the deleted one")
+        }
+
+        /// Deleting the only remaining workspace leaves nothing for the global Editor to show, so
+        /// `resolveOrphanedGlobalEditorPane` closes the window outright instead of retargeting — the one
+        /// lifecycle close left once stop/restart/delete-with-a-survivor are exempted.
+        @Test func deletingTheLastRemainingWorkspaceClosesTheMonitorsWindow() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            // No workspace anywhere: matches how the overview-apply call sites update `deviceSections`
+            // before pruning, so the fallback chain's device-wide sweep has nothing left to find.
+            controller.deviceSections = []
+
+            let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: [])
+            let unwrappedOrphan = try #require(orphan, "workspace-1 dropped out of the live set, so the monitor is reported orphaned")
+            controller.resolveOrphanedGlobalEditorPane(excluding: unwrappedOrphan.workspaceID)
 
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).isEmpty,
-                "the monitor's pane closes through the existing prune path rather than retargeting elsewhere")
+                "with no workspace left anywhere, the window closes rather than retargeting")
             #expect(controller.panelCoordinator.codePaneContent(forPaneID: "monitor") == nil, "its controller is torn down")
         }
 
@@ -652,6 +749,30 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
                     == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "a real subsequent selection change still retargets the monitor")
+        }
+
+        /// A workspace can disappear while Spaces is not running, so the live overview prune never sees
+        /// the transition. Startup restoration keeps the persisted Editor window and pane identity by
+        /// retargeting them to a loaded fallback, and makes that target durable for the next launch.
+        @Test func persistedEditorWhoseWorkspaceWasDeletedOfflineRestoresOnAFallbackWorkspace() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "unused", workspaceID: "workspace-2")]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "editor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-gone")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().upsertPanelWindow(.init(id: "editor-window", layoutJSON: json, frame: nil))
+
+            controller.reopenPersistedPanelWindowsIfPossible()
+
+            let scope = PanelScope.globalWindow(panelWindowID: "editor-window")
+            let expected = PaneContentDescriptor.codePane(deviceID: deviceID, workspaceID: "workspace-2")
+            #expect(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["editor"])
+            #expect(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.content) == [expected])
+            let stored = try #require(controller.clientDatabase().panelWindows().first { $0.id == "editor-window" })
+            let storedLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(stored.layoutJSON.utf8))
+            #expect(PanelLayoutEngine.allPanes(in: storedLayout).map(\.content) == [expected])
         }
 
         // MARK: - Legacy multi-tab global window restore (decision: global windows carry no tabs)

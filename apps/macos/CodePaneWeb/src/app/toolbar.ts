@@ -1,16 +1,22 @@
 import { CodePaneAgentSummary, CodePaneMode, DiffScope } from "../bridge/types";
+import { RefSearchMode } from "./refSearchDialog";
 import { DiffLayout } from "./state";
 
 /**
  * The code pane's toolbar: Variant A ("Toolbar") from the picked mockup.
  * One 30pt `.pane-hdr` strip. The mode toggle stays visible in both modes;
- * the scope and layout segmented controls, and the assigned-agent picker
- * plus "Send batch" button, apply only to Diff mode and are omitted in
- * Editor mode (comments are diff-mode only — see reviewComments.ts).
+ * the compare menu and layout segmented control, and the assigned-agent
+ * picker plus "Send batch" button, apply only to Diff mode and are omitted
+ * in Editor mode (comments are diff-mode only — see reviewComments.ts).
  */
 export interface ToolbarCallbacks {
   onModeChange(mode: CodePaneMode): void;
   onScopeChange(scope: DiffScope): void;
+  /** "Branch…" or "Commit or ref…" was picked from the compare menu — the caller opens
+   *  `refSearchDialog.ts` in the corresponding mode. Unlike `onScopeChange`, this never changes
+   *  `ToolbarState` itself (the dialog's own eventual pick does, via `onScopeChange`), so the
+   *  toolbar closes its own menu immediately rather than waiting on a state update to do it. */
+  onOpenRefSearch(mode: RefSearchMode): void;
   onLayoutChange(layout: DiffLayout): void;
   onAgentSelect(id: string): void;
   onSendBatch(): void;
@@ -20,11 +26,10 @@ export interface ToolbarState {
   mode: CodePaneMode;
   scope: DiffScope;
   layout: DiffLayout;
-  /** The workspace's base branch name, absent when it has none. Absence disables the "vs base
-   *  branch" scope option below rather than hiding it — `CodePaneBridge.refName(for:)` rejects that
-   *  scope outright when the workspace has no base branch configured, so leaving the option enabled
-   *  would offer a guaranteed-to-fail choice. */
-  baseBranch: string | undefined;
+  /** The workspace's configured base branch name, absent when it has none — same source as
+   *  `CodePaneInitPayload.baseBranch` (fixed for the pane's lifetime). Drives the compare menu's
+   *  "vs <baseBranch>" preset, which is omitted entirely (not disabled) when this is absent. */
+  baseBranch?: string;
   /** Agents running in this workspace, for the assigned-agent picker. */
   agents: CodePaneAgentSummary[];
   /** `undefined` when zero agents run, or when more than one runs and none has been picked yet
@@ -32,10 +37,6 @@ export interface ToolbarState {
   selectedAgentId: string | undefined;
   /** Count of drafts with non-empty body — what "Send batch · n" sends and shows. */
   draftCount: number;
-}
-
-function scopeSegmentKind(scope: DiffScope): "uncommitted" | "baseBranch" | "ref" {
-  return scope.kind;
 }
 
 interface SegButtonOptions {
@@ -51,12 +52,29 @@ function segButton(label: string, isOn: boolean, onClick: () => void, options?: 
   if (options?.disabled) btn.disabled = true;
   if (options?.title) btn.title = options.title;
   btn.addEventListener("click", () => {
-    // A disabled button doesn't dispatch a click natively, but guard explicitly too: this is the
-    // only place a disabled segment's callback could still fire from, so it's the one place that
-    // needs to enforce it rather than relying on every caller remembering to check `state.baseBranch`.
     if (btn.disabled) return;
     onClick();
   });
+  return btn;
+}
+
+const FULL_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+/** The compare button's own label for the current scope: the scope name for `uncommitted` and
+ *  `lastCommit`, or the ref name for `kind: "ref"` — shortened to 7 characters when it's a full
+ *  SHA-1 or SHA-256 object id (a typed branch/tag name is shown in full). */
+function compareLabel(scope: DiffScope): string {
+  if (scope.kind === "uncommitted") return "Uncommitted";
+  if (scope.kind === "lastCommit") return "Last commit";
+  return FULL_OBJECT_ID_PATTERN.test(scope.refName) ? scope.refName.slice(0, 7) : scope.refName;
+}
+
+function menuItem(label: string, isOn: boolean, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "item" + (isOn ? " on" : "");
+  btn.textContent = label;
+  btn.addEventListener("click", onClick);
   return btn;
 }
 
@@ -133,22 +151,48 @@ export function renderToolbar(
   el.className = "pane-hdr";
   container.appendChild(el);
 
-  let refInputOpen = false;
-  /** round-14 Fix 2: `update()` rebuilds the toolbar wholesale on every agent-status/draft-count
-   *  change (which arrive mid-typing), and replacing a focused input fires no `blur` event — these
-   *  two closure vars are what carries the user's in-progress ref text and caret position across
-   *  that rebuild, mirroring `commentsController.ts`'s `liveBodies` + `pendingFocus`/
-   *  `captureFocusedCard` pattern for the ref input specifically. */
-  let pendingRefText: string | undefined;
+  /** Whether the compare dropdown is open — a closure var (not part of `ToolbarState`) so it
+   *  survives an unrelated `update()` rebuild (agent-status/draft-count changes arrive independently
+   *  of the menu), the same reason `refInputOpen` used to persist this way before the compare menu
+   *  replaced the inline ref input. */
+  let compareMenuOpen = false;
+  /** Removes the previous build's outside-click/Escape listeners, if any were registered. `build()`
+   *  fully replaces the DOM on every call (`replaceChildren`), so a listener attached to `window`
+   *  during one build would otherwise leak and pile up across rebuilds instead of being torn down
+   *  along with the detached elements it closed over. */
+  let disposeMenuListeners: (() => void) | undefined;
+  let lastState: ToolbarState = initial;
+
+  /** Where to move focus after the rebuild `build()` is about to do, set by whichever call site is
+   *  toggling the menu open or closed. `build()` consumes and clears this, and only ever acts on it
+   *  when focus was inside `el` going into the rebuild — an unrelated `update()` (e.g. draft-count
+   *  changes) never sets this, so it can never steal focus from elsewhere in the page. */
+  let pendingFocus: "menuItem" | "compareBtn" | undefined;
+
+  function closeCompareMenu(): void {
+    compareMenuOpen = false;
+    // The menu-item click handlers below call this before invoking their own callback (see
+    // `onOpenRefSearch`'s doc comment), so focusing the compare button here — rather than leaving
+    // focus wherever the now-removed menu item was — is also what gives `refSearchDialog.ts` a real
+    // `priorFocusEl` to restore to when it closes.
+    pendingFocus = "compareBtn";
+    build(lastState);
+  }
 
   function build(state: ToolbarState): void {
-    // Captured before the DOM is wiped below: a focused input loses focus with no `blur` event once
-    // `replaceChildren()` detaches it, so this is the only chance to notice it was mid-typing.
-    const previousInput = el.querySelector("input");
-    const wasRefInputFocused = previousInput !== null && previousInput === document.activeElement;
-    const priorSelectionStart = wasRefInputFocused ? previousInput.selectionStart : null;
-    const priorSelectionEnd = wasRefInputFocused ? previousInput.selectionEnd : null;
-
+    lastState = state;
+    if (state.mode !== "diff") compareMenuOpen = false;
+    // `replaceChildren()` below destroys whatever was focused inside `el` (e.g. the compare button
+    // itself, mid keyboard-activation). Captured before the removal, so a menu-open/close rebuild can
+    // restore focus to its rebuilt equivalent instead of stranding it on `document.body`.
+    const priorActive = document.activeElement;
+    const shouldRestoreFocus = el.contains(priorActive);
+    const priorMenuItems = [...el.querySelectorAll<HTMLButtonElement>(".compare-menu .item")];
+    const priorMenuItemIndex = priorActive instanceof HTMLButtonElement ? priorMenuItems.indexOf(priorActive) : -1;
+    const focusIntent = pendingFocus;
+    pendingFocus = undefined;
+    disposeMenuListeners?.();
+    disposeMenuListeners = undefined;
     el.replaceChildren();
 
     // Diff | Editor — visible in both modes.
@@ -159,88 +203,82 @@ export function renderToolbar(
     el.appendChild(modeSeg);
 
     if (state.mode === "diff") {
-      const kind = scopeSegmentKind(state.scope);
+      const kind = state.scope.kind;
 
-      const scopeSeg = document.createElement("span");
-      scopeSeg.className = "seg";
-      scopeSeg.appendChild(
-        segButton("Uncommitted", kind === "uncommitted", () => callbacks.onScopeChange({ kind: "uncommitted" })),
-      );
-      scopeSeg.appendChild(
-        segButton(state.baseBranch ? `vs ${state.baseBranch}` : "vs base branch", kind === "baseBranch",
-          () => callbacks.onScopeChange({ kind: "baseBranch" }),
-          state.baseBranch === undefined
-            ? { disabled: true, title: "This workspace has no base branch configured." }
-            : undefined,
-        ),
-      );
-      scopeSeg.appendChild(
-        segButton("vs ref…", kind === "ref", () => {
-          refInputOpen = true;
-          // round-14 Fix 2: clear any leftover text from a previous open — opening the input fresh
-          // should never seed it with stale in-progress text from an unrelated prior session.
-          pendingRefText = undefined;
-          build(state);
-          // Not `refInput.querySelector(...)`: that binding is this callback's own closure, captured
-          // at THIS build() invocation — build(state) above just replaced every child of `el`
-          // (including that exact node) with a fresh tree, so the closed-over `refInput` is already
-          // detached. `el` itself is stable across rebuilds, and build() only ever creates one
-          // `<input>`, so querying `el` fresh is the only way to reach the live, now-attached one.
-          el.querySelector("input")?.focus();
-        }),
-      );
-      el.appendChild(scopeSeg);
+      const compareWrap = document.createElement("span");
+      compareWrap.className = "compare";
 
-      const refInput = document.createElement("span");
-      refInput.className = "ref-input" + (refInputOpen ? " open" : "");
-      const input = document.createElement("input");
-      input.type = "text";
-      input.placeholder = "branch or SHA";
-      // round-14 Fix 2: prefer any in-progress (not-yet-committed) text over the scope's own
-      // `refName` — see `pendingRefText`'s doc comment. Without this, every `update()` call while
-      // the user is mid-typing (an agent-status or draft-count change, unrelated to this input)
-      // would wipe whatever branch name they were typing.
-      input.value = pendingRefText ?? (state.scope.kind === "ref" ? state.scope.refName : "");
-      input.addEventListener("input", () => {
-        pendingRefText = input.value;
+      const compareBtn = document.createElement("button");
+      compareBtn.type = "button";
+      compareBtn.className = "compare-btn";
+      compareBtn.textContent = compareLabel(state.scope);
+      compareBtn.addEventListener("click", () => {
+        compareMenuOpen = !compareMenuOpen;
+        pendingFocus = compareMenuOpen ? "menuItem" : "compareBtn";
+        build(state);
       });
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          const refName = input.value.trim();
-          if (refName.length > 0) {
-            refInputOpen = false;
-            pendingRefText = undefined;
-            callbacks.onScopeChange({ kind: "ref", refName });
-          }
-        } else if (event.key === "Escape") {
-          refInputOpen = false;
-          pendingRefText = undefined;
-          build(state);
-        }
-      });
-      refInput.appendChild(input);
-      el.appendChild(refInput);
+      compareWrap.appendChild(compareBtn);
 
-      if (wasRefInputFocused) {
-        // Restore focus/caret on the freshly created input — see `pendingRefText`'s doc comment for
-        // why a rebuild would otherwise silently kick the user out of this field. Tried synchronously
-        // first; `commentsController.ts`'s `renderCard` needs a deferred tick for the equivalent case
-        // because `@pierre/diffs` inserts its returned card DOM asynchronously relative to this
-        // call — this input is appended synchronously above, so the immediate attempt is expected to
-        // stick, but the deferred fallback below covers it if some environment's DOM timing differs.
-        input.focus();
-        if (priorSelectionStart !== null && priorSelectionEnd !== null) {
-          input.setSelectionRange(priorSelectionStart, priorSelectionEnd);
+      if (compareMenuOpen) {
+        const menu = document.createElement("div");
+        menu.className = "compare-menu";
+
+        menu.appendChild(
+          menuItem("Uncommitted", kind === "uncommitted", () => {
+            closeCompareMenu();
+            callbacks.onScopeChange({ kind: "uncommitted" });
+          }),
+        );
+        menu.appendChild(
+          menuItem("Last commit", kind === "lastCommit", () => {
+            closeCompareMenu();
+            callbacks.onScopeChange({ kind: "lastCommit" });
+          }),
+        );
+        if (state.baseBranch !== undefined) {
+          const baseBranch = state.baseBranch;
+          menu.appendChild(
+            menuItem(`vs ${baseBranch}`, kind === "ref" && state.scope.refName === baseBranch, () => {
+              closeCompareMenu();
+              callbacks.onScopeChange({ kind: "ref", refName: baseBranch });
+            }),
+          );
         }
-        if (document.activeElement !== input) {
-          setTimeout(() => {
-            input.focus();
-            if (priorSelectionStart !== null && priorSelectionEnd !== null) {
-              input.setSelectionRange(priorSelectionStart, priorSelectionEnd);
-            }
-          }, 0);
-        }
+        menu.appendChild(
+          menuItem("Branch…", false, () => {
+            closeCompareMenu();
+            callbacks.onOpenRefSearch("branch");
+          }),
+        );
+        menu.appendChild(
+          menuItem("Commit or ref…", false, () => {
+            closeCompareMenu();
+            callbacks.onOpenRefSearch("ref");
+          }),
+        );
+        compareWrap.appendChild(menu);
+
+        const onMousedown = (event: MouseEvent): void => {
+          if (compareWrap.contains(event.target as Node)) return;
+          // An outside press may be targeting another toolbar control. Remove only the dropdown so
+          // that control remains connected long enough to receive the matching click.
+          compareMenuOpen = false;
+          menu.remove();
+          disposeMenuListeners?.();
+          disposeMenuListeners = undefined;
+        };
+        const onKeydown = (event: KeyboardEvent): void => {
+          if (event.key === "Escape") closeCompareMenu();
+        };
+        window.addEventListener("mousedown", onMousedown);
+        window.addEventListener("keydown", onKeydown);
+        disposeMenuListeners = () => {
+          window.removeEventListener("mousedown", onMousedown);
+          window.removeEventListener("keydown", onKeydown);
+        };
       }
+
+      el.appendChild(compareWrap);
 
       const layoutSeg = document.createElement("span");
       layoutSeg.className = "seg";
@@ -261,6 +299,15 @@ export function renderToolbar(
       buildAgentSlot(agentSlot, state, callbacks);
     }
     el.appendChild(agentSlot);
+
+    if (shouldRestoreFocus && focusIntent === "menuItem") {
+      el.querySelector<HTMLButtonElement>(".compare-menu .item")?.focus();
+    } else if (shouldRestoreFocus && focusIntent === "compareBtn") {
+      el.querySelector<HTMLButtonElement>(".compare-btn")?.focus();
+    } else if (shouldRestoreFocus && priorMenuItemIndex >= 0) {
+      const rebuiltMenuItems = [...el.querySelectorAll<HTMLButtonElement>(".compare-menu .item")];
+      rebuiltMenuItems[Math.min(priorMenuItemIndex, rebuiltMenuItems.length - 1)]?.focus();
+    }
   }
 
   build(initial);

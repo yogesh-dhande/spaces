@@ -75,9 +75,9 @@ let INIT_PAYLOAD: CodePaneInitPayload = {
   initialMode: "diff",
   initialScope: { kind: "uncommitted" },
   theme: "dark",
-  // These tests use the "vs base branch" button purely as a scope-switch trigger (Fix B is about
-  // stale-response ordering, not about base branches) — it must be enabled for that click to do
-  // anything, per round-4 Fix 5's disabled-when-absent toolbar behavior.
+  // Badges the compare dialog's base-branch entry; not exercised by most of this file's tests,
+  // which use the compare menu's "Last commit" item purely as a scope-switch trigger (Fix B is
+  // about stale-response ordering, not about which scope is picked).
   baseBranch: "main",
   // No running agents: these tests exercise refreshDiff's own logic, not the comment surface (see
   // test/commentsController.test.ts and test/reviewComments.test.ts for that).
@@ -175,6 +175,23 @@ function clickButton(container: HTMLElement, label: string): void {
   button.click();
 }
 
+/** Switches the diff pane to the "Last commit" scope via the compare menu — these tests use it
+ *  purely as a trigger for a second, distinct scope (most of them are about refreshDiff's
+ *  request-ordering behavior, not about which scope is picked). Scoped selectors (rather than
+ *  `clickButton`'s label match) because the compare button's own label is "Uncommitted" too when
+ *  that's the current scope, same as the menu item it opens. */
+function switchToLastCommit(container: HTMLElement): void {
+  const compareBtn = container.querySelector(".compare-btn");
+  if (!compareBtn) throw new Error("no .compare-btn found");
+  (compareBtn as HTMLButtonElement).click();
+
+  const item = [...container.querySelectorAll<HTMLButtonElement>(".compare-menu .item")].find(
+    (el) => el.textContent === "Last commit",
+  );
+  if (!item) throw new Error("no 'Last commit' compare menu item found");
+  item.click();
+}
+
 /** Simulates a diff-signature push event on whichever scope is currently subscribed (see
  *  `hoisted.diffSignatureCallbacks`'s doc comment). */
 function fireDiffSignature(): void {
@@ -203,7 +220,7 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     // round-16 Fix 1: with scope A's pull still in flight, a scope switch to B no longer fires a
     // second concurrent request — it coalesces into a single trailing pull (see the round-16
     // describe blocks below for direct coverage of that coalescing), so this stays at 1 call.
-    clickButton(container, "vs main"); // dispatches setScope -> refreshDiff (scope B), coalesced
+    switchToLastCommit(container); // dispatches setScope -> refreshDiff (scope B), coalesced
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
 
     // Resolve the stale scope-A reply: superseded by the coalesce's token bump, so it must not
@@ -224,7 +241,7 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
 
     // round-16 Fix 1: coalesces into the trailing slot instead of firing a second concurrent
     // request (see the note in the sibling test above).
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
 
     // The stale A reply is now an error; it must be swallowed (superseded by the coalesce), not
@@ -299,7 +316,7 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     rejectDiff(0, new Error("boom"));
     await mounted;
 
-    clickButton(container, "vs main"); // dispatches setScope -> a fresh refreshDiff call for scope B
+    switchToLastCommit(container); // dispatches setScope -> a fresh refreshDiff call for scope B
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
 
@@ -324,7 +341,7 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     await vi.advanceTimersByTimeAsync(0);
     expect(container.textContent).toContain("a.ts");
 
-    clickButton(container, "vs main"); // fresh scope, fresh refreshDiff call
+    switchToLastCommit(container); // fresh scope, fresh refreshDiff call
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
     rejectDiff(2, new Error("boom 2"));
@@ -360,7 +377,7 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     // own token bump makes that pending timer a no-op when it eventually would have fired (see the
     // "a scope switch while a retry is pending supersedes it" test above); it fires a fresh pull for
     // scope B instead.
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     await vi.advanceTimersByTimeAsync(0);
     totalCalls += 1;
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // scope B's immediate pull
@@ -453,7 +470,7 @@ describe("mountRoot's refreshDiff — scope switch mid-pull keeps the supersede 
 
     // A scope switch mid-pull must not issue a second concurrent request: its own `refreshDiff(false)`
     // call coalesces into the trailing slot exactly like a direct queue-path call would.
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
 
     // One more signature event lands (now on the newly-subscribed scope B) while still held — this
@@ -505,7 +522,7 @@ describe("mountRoot's refreshDiff — permanent vs. transient failure classifica
     expect(container.textContent).toContain("a.ts");
 
     // A scope switch's own fresh refreshDiff call is the one that fails permanently.
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
 
@@ -540,7 +557,7 @@ describe("mountRoot's refreshDiff — permanent vs. transient failure classifica
     await mounted;
     expect(container.textContent).toContain("ref totally-bogus not found");
 
-    clickButton(container, "vs main"); // no new recovery plumbing needed: setScope's own refreshDiff call recovers it
+    switchToLastCommit(container); // no new recovery plumbing needed: setScope's own refreshDiff call recovers it
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
 
@@ -562,7 +579,7 @@ describe("mountRoot's refreshDiff — permanent vs. transient failure classifica
     await vi.advanceTimersByTimeAsync(0);
     expect(container.textContent).toContain("ref totally-bogus not found");
 
-    clickButton(container, "vs main"); // fresh scope; this refresh fails transiently again
+    switchToLastCommit(container); // fresh scope; this refresh fails transiently again
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
     rejectDiff(2, new Error("boom 2"));
@@ -598,7 +615,7 @@ describe("mountRoot's refreshDiff — `unavailable` is a retried exception withi
     await mounted;
     expect(container.textContent).toContain("a.ts");
 
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     await vi.advanceTimersByTimeAsync(0);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
 
@@ -844,7 +861,7 @@ describe("mountRoot's dispatch — a scope switch synchronously clears the previ
     resolveDiff(0, [makeFile("a.ts")], "sig-a");
     await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
 
-    clickButton(container, "vs main"); // dispatches setScope
+    switchToLastCommit(container); // dispatches setScope
     // No await/waitFor between the click and these assertions: the clear (file list, diff area,
     // comments collapsed to the tray) happens synchronously inside dispatch itself, not after the
     // fresh refreshDiff's fetch resolves — proving it, rather than a slow poll that would also pass
@@ -864,7 +881,7 @@ describe("mountRoot's dispatch — a scope switch synchronously clears the previ
     resolveDiff(0, [makeFile("a.ts")], "sig-a");
     await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
 
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     expect(container.textContent).toContain("Loading diff…");
 
     resolveDiff(1, [makeFile("b.ts")], "sig-b");
@@ -879,7 +896,7 @@ describe("mountRoot's dispatch — a scope switch synchronously clears the previ
     resolveDiff(0, [makeFile("a.ts")], "sig-a");
     await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
 
-    clickButton(container, "vs main");
+    switchToLastCommit(container);
     // Already cleared synchronously, well before the reject below is even issued.
     expect(container.textContent).not.toContain("a.ts");
 

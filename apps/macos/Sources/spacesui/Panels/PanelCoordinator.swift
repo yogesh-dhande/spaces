@@ -215,16 +215,16 @@ import spacesterminalcore
         }
     }
 
-    /// Closes every open code pane matching `matches(deviceID, workspaceID)`, across all panels (a
-    /// workspace panel and any global panel window). A code pane has no session for the daemon to
+    /// Closes every open code pane matching `matches(scope, deviceID, workspaceID)`, across all panels
+    /// (a workspace panel and any global panel window). A code pane has no session for the daemon to
     /// stop, so unlike a terminal pane's close there is no `sessionIsTerminating` distinction to
     /// make: closing one is a pure local layout edit, and the caret never follows — both callers are
     /// closing a pane out from under a workspace that no longer exists, not a pane the user is
     /// looking at.
-    private func closeCodePanes(where matches: (_ deviceID: String, _ workspaceID: String) -> Bool) {
+    private func closeCodePanes(where matches: (_ scope: PanelScope, _ deviceID: String, _ workspaceID: String) -> Bool) {
         for (scope, state) in panels {
             let matchingPaneIDs = PanelLayoutEngine.allPanes(in: state.layout).compactMap { pane -> String? in
-                guard case .codePane(let deviceID, let workspaceID) = pane.content, matches(deviceID, workspaceID) else { return nil }
+                guard case .codePane(let deviceID, let workspaceID) = pane.content, matches(scope, deviceID, workspaceID) else { return nil }
                 return pane.id
             }
             for paneID in matchingPaneIDs { removePane(scope: scope, paneID: paneID, movingKeyboardFocus: false) }
@@ -232,20 +232,57 @@ import spacesterminalcore
     }
 
     /// Closes every open code pane for a workspace. Called from the same workspace-teardown
-    /// chokepoint as `closeTerminalPanes` so a workspace's code pane never outlives the workspace it
-    /// displays (stop, restart, and every delete path). Workspace ids are globally unique UUIDs, so
-    /// an id-only match here can never touch another device's pane; the device-scoped overloads
-    /// below take a device id for a different reason — they're driven by one device's overview or
-    /// status stream, which says nothing about other devices' panes — not because ids could collide.
-    func closeCodePanes(workspaceID: String) { closeCodePanes { _, paneWorkspaceID in paneWorkspaceID == workspaceID } }
+    /// chokepoint as `closeTerminalPanes` so a workspace-scoped code pane never outlives the
+    /// workspace it displays (stop, restart, and every delete path). Exempts `.globalWindow` panes:
+    /// the Editor's singleton pane keeps showing the workspace's files after a stop or restart (the
+    /// daemon still serves them), and a delete's stray pane is handed off by `pruneOpenCodePanes`
+    /// instead of closed here, since only that path knows the fallback workspace to retarget to.
+    /// Workspace ids are globally unique UUIDs, so an id-only match here can never touch another
+    /// device's pane; the device-scoped overloads below take a device id for a different reason —
+    /// they're driven by one device's overview or status stream, which says nothing about other
+    /// devices' panes — not because ids could collide.
+    func closeCodePanes(workspaceID: String) {
+        closeCodePanes { scope, _, paneWorkspaceID in
+            guard case .workspace = scope else { return false }
+            return paneWorkspaceID == workspaceID
+        }
+    }
 
-    /// Closes any open code pane owned by `deviceID` whose workspace dropped out of that device's
-    /// overview workspace list — the code-pane counterpart of `pruneOpenPanes`. A hidden workspace
-    /// remains in the overview with `isHidden` set rather than being omitted, so an id's absence from
-    /// `liveWorkspaceIDs` means the workspace record itself was deleted, not merely hidden. Call only
-    /// with a successfully received overview for `deviceID`; see `pruneOpenPanes`'s contract.
-    func pruneOpenCodePanes(deviceID: String, liveWorkspaceIDs: Set<String>) {
-        closeCodePanes { paneDeviceID, workspaceID in paneDeviceID == deviceID && !liveWorkspaceIDs.contains(workspaceID) }
+    /// Closes any workspace-scoped code pane owned by `deviceID` whose workspace dropped out of that
+    /// device's overview workspace list — the code-pane counterpart of `pruneOpenPanes`. A hidden
+    /// workspace remains in the overview with `isHidden` set rather than being omitted, so an id's
+    /// absence from `liveWorkspaceIDs` means the workspace record itself was deleted, not merely
+    /// hidden. Call only with a successfully received overview for `deviceID`; see `pruneOpenPanes`'s
+    /// contract.
+    ///
+    /// A `.globalWindow` pane is never closed here — the Editor is a singleton the user opens
+    /// explicitly, so losing its workspace must not take the window down with it. When the pane this
+    /// device owns is the one whose workspace just dropped out, its stale `(deviceID, workspaceID)` is
+    /// handed back instead: only the caller knows the sidebar's current selection and the daemon's
+    /// last-active workspace, so only it can pick the fallback to retarget to (or learn that none
+    /// exists, and close the pane outright via `closeGlobalEditorCodePane`). See
+    /// `AppKitController.resolveOrphanedGlobalEditorPane`.
+    @discardableResult func pruneOpenCodePanes(deviceID: String, liveWorkspaceIDs: Set<String>) -> (deviceID: String, workspaceID: String)? {
+        closeCodePanes { scope, paneDeviceID, workspaceID in
+            guard case .workspace = scope else { return false }
+            return paneDeviceID == deviceID && !liveWorkspaceIDs.contains(workspaceID)
+        }
+        guard let placement = anyGlobalCodePanePlacement(),
+            case .codePane(let paneDeviceID, let workspaceID) = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope))?
+                .content, paneDeviceID == deviceID, !liveWorkspaceIDs.contains(workspaceID)
+        else { return nil }
+        return (paneDeviceID, workspaceID)
+    }
+
+    /// Closes the Editor window's code pane outright. The only remaining lifecycle close left for a
+    /// `.globalWindow` pane once stop/restart/delete are exempted above: reached from
+    /// `AppKitController.resolveOrphanedGlobalEditorPane` when `pruneOpenCodePanes` reports an
+    /// orphaned pane and no workspace remains on any device to retarget it to.
+    func closeGlobalEditorCodePane() {
+        closeCodePanes { scope, _, _ in
+            if case .globalWindow = scope { return true }
+            return false
+        }
     }
 
     /// Pushes `spaces:agents` (via `CodePaneContentController.applyRunningAgents`) to every open code
@@ -265,13 +302,18 @@ import spacesterminalcore
     }
 
     /// Cross-client lifecycle close: a workspace observed transitioning to not-running in a device's
-    /// overview closes its code panes, the overview-driven counterpart of the direct-mutation
-    /// `closeWorkspacePanes` path. A workspace's runtime status arrives per device, so the device id
-    /// match scopes this lifecycle close to the device whose overview actually reported the
-    /// transition — workspace ids are already globally unique UUIDs, so the device id isn't needed
-    /// to disambiguate the workspace itself.
+    /// overview closes its workspace-scoped code panes, the overview-driven counterpart of the
+    /// direct-mutation `closeWorkspacePanes` path. Exempts `.globalWindow` panes for the same reason
+    /// `closeCodePanes(workspaceID:)` does — the workspace record is still there, only its runtime
+    /// stopped. A workspace's runtime status arrives per device, so the device id match scopes this
+    /// lifecycle close to the device whose overview actually reported the transition — workspace ids
+    /// are already globally unique UUIDs, so the device id isn't needed to disambiguate the workspace
+    /// itself.
     func closeCodePanes(deviceID: String, workspaceIDs: Set<String>) {
-        closeCodePanes { paneDeviceID, workspaceID in paneDeviceID == deviceID && workspaceIDs.contains(workspaceID) }
+        closeCodePanes { scope, paneDeviceID, workspaceID in
+            guard case .workspace = scope else { return false }
+            return paneDeviceID == deviceID && workspaceIDs.contains(workspaceID)
+        }
     }
 
     /// Every open terminal pane's owning device and session id across all panels, read
