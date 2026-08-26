@@ -887,6 +887,7 @@ public final class WorkspaceOrchestrator {
         for project in projects where project.isGitRepo {
             let worktrees = try git.listWorktrees(path: project.dir)
             var discoverableWorktreeByPath: [String: WorktreeInfo] = [:]
+            let listedWorktreePaths = Set(worktrees.map { normalizePath($0.path) })
             // Paths the probe could not classify at all. Retiring a workspace destroys its worktree along
             // with its record, so the scan acts on these only in the safe direction: it imports nothing for
             // them and retires nothing at them.
@@ -913,6 +914,10 @@ public final class WorkspaceOrchestrator {
 
                 guard !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
+                // Git can silently omit a linked worktree when its administrative `gitdir` link is corrupt.
+                // A checkout directory that still exists but was absent from the successful listing is not
+                // evidence that the user removed it, so leave its record and contents untouched.
+                guard listedWorktreePaths.contains(normalizedWorkspacePath) || !directoryExists(at: normalizedWorkspacePath) else { continue }
                 // The scan may retire a workspace only when its worktree is gone; a workspace whose worktree
                 // is still valid is never removed by cleanup. A probe that failed rather than answered is not
                 // evidence of anything, and this scan is triggered by writes inside `.git` — so it runs

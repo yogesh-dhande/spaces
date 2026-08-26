@@ -53,8 +53,7 @@
                     _ = try? inputClient.send(
                         SpacesDeviceAPIRequest(
                             command: .terminalControl(
-                                SpacesDeviceTerminalControlRequest(
-                                    action: .send, sessionID: sessionID, clientID: "client-control-queue", text: "ls")),
+                                SpacesDeviceTerminalControlRequest(action: .send, sessionID: sessionID, clientID: "client-control-queue", text: "ls")),
                             authToken: pairingStore.authToken, clientApp: clientApp))
                     inputFinished.fulfill()
                 }
@@ -114,8 +113,8 @@
                 DispatchQueue.global().async {
                     _ = try? stateClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID)),
-                            authToken: pairingStore.authToken, clientApp: clientApp))
+                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID)), authToken: pairingStore.authToken,
+                            clientApp: clientApp))
                     stateFinished.fulfill()
                 }
                 XCTAssertEqual(stateRequestArrived.wait(timeout: .now() + 5), .success, "The state read must reach the stalled live core.")
@@ -131,6 +130,216 @@
 
                 releaseStateRequest.signal()
                 wait(for: [stateFinished], timeout: 10)
+            }
+        }
+
+        /// The cross-session guarantee the per-session lanes exist for. Before them every session's
+        /// controls and `.state` exports shared one serial queue, so a keystroke for one pane waited behind
+        /// however many other sessions were mid-round-trip — each able to hold the queue for the client's
+        /// full 5s control deadline, which is why the freeze appeared at roughly five streaming agents.
+        /// A control stalled on one session's engine must now leave another session's control untouched.
+        func testAStalledControlOnOneSessionDoesNotDelayAControlOnAnotherSession() throws {
+            try withTemporaryProfile {
+                let stalledSessionID = "session-lane-stalled-\(UUID().uuidString)"
+                let respondingSessionID = "session-lane-responding-\(UUID().uuidString)"
+                let stalledPaths = try seedRunningSession(sessionID: stalledSessionID)
+                let respondingPaths = try seedRunningSession(sessionID: respondingSessionID)
+
+                let stalledRequestArrived = DispatchSemaphore(value: 0)
+                let releaseStalledRequest = DispatchSemaphore(value: 0)
+                let stalledControlServer = TerminalControlServer(
+                    socketPath: stalledPaths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.lane.stalled.test")
+                ) { _ in
+                    stalledRequestArrived.signal()
+                    releaseStalledRequest.wait()
+                    return TerminalControlResponse(ok: true, message: "Sent input.")
+                }
+                try stalledControlServer.start()
+                defer {
+                    releaseStalledRequest.signal()
+                    stalledControlServer.stop()
+                }
+
+                let respondingControlServer = TerminalControlServer(
+                    socketPath: respondingPaths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.lane.responding.test")
+                ) { _ in TerminalControlResponse(ok: true, message: "Sent input.") }
+                try respondingControlServer.start()
+                defer { respondingControlServer.stop() }
+
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+                try server.start()
+                defer { server.stop() }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "control-lane-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
+
+                let stalledClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { stalledClient.cancel() }
+                let stalledFinished = expectation(description: "The stalled terminal control eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? stalledClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .terminalControl(
+                                SpacesDeviceTerminalControlRequest(
+                                    action: .send, sessionID: stalledSessionID, clientID: "client-control-lane", text: "ls")),
+                            authToken: pairingStore.authToken, clientApp: clientApp))
+                    stalledFinished.fulfill()
+                }
+                XCTAssertEqual(stalledRequestArrived.wait(timeout: .now() + 5), .success, "The terminal control must reach the stalled session.")
+
+                let typingClient = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 5)
+                let startedAt = Date()
+                let response = try typingClient.request(
+                    SpacesDeviceAPIRequest(
+                        command: .terminalControl(
+                            SpacesDeviceTerminalControlRequest(
+                                action: .send, sessionID: respondingSessionID, clientID: "client-control-lane", text: "x")),
+                        authToken: pairingStore.authToken, clientApp: clientApp))
+                let elapsed = Date().timeIntervalSince(startedAt)
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertLessThan(elapsed, 1.5, "A keystroke for one session must not wait behind another session's stalled control.")
+
+                releaseStalledRequest.signal()
+                wait(for: [stalledFinished], timeout: 10)
+            }
+        }
+
+        /// Lanes are retained per outstanding request and dropped at zero, so nothing accumulates for the
+        /// sessions a long-lived daemon has served and forgotten — including the ones that ended without
+        /// the daemon ever being told.
+        func testAControlLaneIsDroppedOnceItsRequestsFinish() throws {
+            try withTemporaryProfile {
+                let sessionID = "session-lane-lifecycle-\(UUID().uuidString)"
+                let paths = try seedRunningSession(sessionID: sessionID)
+
+                let requestArrived = DispatchSemaphore(value: 0)
+                let releaseRequest = DispatchSemaphore(value: 0)
+                let controlServer = TerminalControlServer(
+                    socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.lane.lifecycle.test")
+                ) { _ in
+                    requestArrived.signal()
+                    releaseRequest.wait()
+                    return TerminalControlResponse(ok: true, message: "Sent input.")
+                }
+                try controlServer.start()
+                defer {
+                    releaseRequest.signal()
+                    controlServer.stop()
+                }
+
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+                try server.start()
+                defer { server.stop() }
+                XCTAssertEqual(server.terminalControlLaneCountForTesting, 0, "A server that has answered nothing holds no lanes.")
+
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "control-lane-lifecycle-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                    deviceName: "Mac", appVersion: "1.0")
+
+                let client = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { client.cancel() }
+                let finished = expectation(description: "The terminal control eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? client.send(
+                        SpacesDeviceAPIRequest(
+                            command: .terminalControl(
+                                SpacesDeviceTerminalControlRequest(action: .send, sessionID: sessionID, clientID: "client-control-lane", text: "ls")),
+                            authToken: pairingStore.authToken, clientApp: clientApp))
+                    finished.fulfill()
+                }
+                XCTAssertEqual(requestArrived.wait(timeout: .now() + 5), .success, "The terminal control must reach the session.")
+                XCTAssertEqual(server.terminalControlLaneCountForTesting, 1, "The session being served holds exactly one lane.")
+
+                releaseRequest.signal()
+                wait(for: [finished], timeout: 10)
+
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, server.terminalControlLaneCountForTesting != 0 { Thread.sleep(forTimeInterval: 0.02) }
+                XCTAssertEqual(server.terminalControlLaneCountForTesting, 0, "A lane must not outlive the requests that opened it.")
+            }
+        }
+
+        /// The other half of the false-banner mechanism: the corroboration `.ping` used to be answered
+        /// inline on the shared `spaces.device.api` queue, behind the inline `.overview` work that
+        /// dominates that queue's busy time on a loaded daemon. A daemon busy enough to time a keystroke
+        /// out is exactly the daemon whose inline backlog delayed the probe, so the probe failed precisely
+        /// when it was needed and the pane raised a connection-lost banner over a healthy link.
+        func testASlowInlineOverviewDoesNotDelayAPingOnAnotherConnection() throws {
+            try withTemporaryProfile {
+                let overviewRequestArrived = DispatchSemaphore(value: 0)
+                let releaseOverviewRequest = DispatchSemaphore(value: 0)
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(
+                    host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                    overviewLoaderForTesting: { _ in
+                        overviewRequestArrived.signal()
+                        releaseOverviewRequest.wait()
+                        throw NSError(domain: "TerminalControlQueueServerTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "overview released"])
+                    })
+                try server.start()
+                defer {
+                    releaseOverviewRequest.signal()
+                    server.stop()
+                }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "inline-overview-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                    deviceName: "Mac", appVersion: "1.0")
+
+                let overviewClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { overviewClient.cancel() }
+                let overviewFinished = expectation(description: "The stalled overview eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? overviewClient.send(SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp))
+                    overviewFinished.fulfill()
+                }
+                XCTAssertEqual(overviewRequestArrived.wait(timeout: .now() + 5), .success, "The overview must reach the stalled loader.")
+
+                let probeClient = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 2)
+                let startedAt = Date()
+                let pong = try probeClient.request(SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp))
+                let elapsed = Date().timeIntervalSince(startedAt)
+
+                XCTAssertTrue(pong.ok, pong.message)
+                XCTAssertEqual(pong.message, "pong")
+                XCTAssertLessThan(elapsed, 1.5, "A ping must not wait behind inline overview work on the shared request queue.")
+
+                releaseOverviewRequest.signal()
+                wait(for: [overviewFinished], timeout: 10)
+            }
+        }
+
+        /// A pong still means this daemon decoded the request and composed the answer, which is the whole
+        /// basis for treating a missed probe as conclusive. Moving the answer off the shared queue must not
+        /// have turned it into a bare TCP handshake: an unauthorized ping is still rejected.
+        func testAPingIsStillAuthorized() throws {
+            try withTemporaryProfile {
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+                try server.start()
+                defer { server.stop() }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "ping-auth-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
+
+                let client = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 5)
+                let rejected = try client.request(SpacesDeviceAPIRequest(command: .ping, authToken: "wrong-token", clientApp: clientApp))
+                XCTAssertFalse(rejected.ok)
+                XCTAssertEqual(rejected.errorCode, .unauthorized)
             }
         }
 
@@ -326,6 +535,246 @@
             }
         }
 
+        /// Admission is checked when a request line is read, on that connection's own queue, and the
+        /// handler then hops to the shared queue — so a `resetPairingsAndStop()` can land in between and
+        /// the request would be served after teardown. `.pair` is the sharpest case because it skips
+        /// authorization by design: served late, it mints a token into the pairings file the reset just
+        /// emptied, leaving a credential for a daemon the user believed they had unpaired.
+        ///
+        /// This pins the user-visible invariant — no token survives a reset — across a genuine reset landing
+        /// while a pairing request is in flight on a live connection. It does not pin WHICH guard refused
+        /// it: the moment a connection's read loop decodes a line and enqueues its dispatch is not
+        /// observable through these seams, so whether the reset beat that decode (the read loop's own
+        /// admission check refuses) or followed it (`admitOnQueue` on the shared queue refuses) cannot be
+        /// chosen from a test — removing `admitOnQueue` leaves this test passing, because the read loop
+        /// usually wins the race. The recheck itself is pinned separately and deterministically by
+        /// `testAdmissionIsRefusedOnTheDeviceAPIQueueOnceTheServerStops`.
+        func testAPairThatReachesTheQueueAfterAResetIssuesNoToken() throws {
+            try withTemporaryProfile {
+                let overviewRequestArrived = DispatchSemaphore(value: 0)
+                let releaseOverviewRequest = DispatchSemaphore(value: 0)
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = try SpacesDevicePairingStore()
+                let server = SpacesDeviceAPIServer(
+                    host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                    overviewLoaderForTesting: { _ in
+                        overviewRequestArrived.signal()
+                        releaseOverviewRequest.wait()
+                        throw NSError(domain: "TerminalControlQueueServerTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "overview released"])
+                    })
+                try server.start()
+                defer {
+                    releaseOverviewRequest.signal()
+                    server.stop()
+                }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                // The already-paired client that will hold the shared queue.
+                let holderApp = SpacesDeviceClientApp(
+                    installationID: "reset-race-holder", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
+                let holderWindow = server.openPairingWindow(hosts: ["127.0.0.1"], name: "holder")
+                let holderPairClient = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 5)
+                let holderPaired = try holderPairClient.request(
+                    SpacesDeviceAPIRequest(
+                        command: .pair(
+                            SpacesDevicePairRequest(
+                                pairingCode: holderWindow.code, pairingNonce: holderWindow.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                        clientApp: holderApp))
+                XCTAssertTrue(holderPaired.ok, holderPaired.message)
+                guard case .issuedAuthToken(let holderToken)? = holderPaired.result else { return XCTFail("Pairing issued no token.") }
+
+                let holderClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { holderClient.cancel() }
+                let overviewFinished = expectation(description: "The stalled overview eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? holderClient.send(SpacesDeviceAPIRequest(command: .overview, authToken: holderToken.authToken, clientApp: holderApp))
+                    overviewFinished.fulfill()
+                }
+                XCTAssertEqual(overviewRequestArrived.wait(timeout: .now() + 5), .success, "The overview must reach the stalled loader.")
+
+                // A window the racing client could legitimately pair against, opened while the daemon is
+                // still up: without the recheck it is the reset, not the window, that should have stopped
+                // the pairing.
+                let racingWindow = server.openPairingWindow(hosts: ["127.0.0.1"], name: "racing")
+                let racingApp = SpacesDeviceClientApp(
+                    installationID: "reset-race-racer", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+                    appVersion: "1.0")
+
+                // Established, and its read loop proven live, BEFORE the reset is enqueued: the `.ping` is
+                // answered on this connection's own queue, clear of the blocked shared queue, so it takes
+                // the TLS handshake out of the window the pairing request has to arrive in. It carries the
+                // holder's credentials because a rejected request is answered and then the connection is
+                // cancelled (`finishRequest`), which would kill the connection the pair still has to travel
+                // on. Identity is per request, not per connection, so borrowing it here proves liveness
+                // without pairing the racing client.
+                let racingClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { racingClient.cancel() }
+                let racingPong = try racingClient.send(
+                    SpacesDeviceAPIRequest(command: .ping, authToken: holderToken.authToken, clientApp: holderApp), timeoutSeconds: 5)
+                XCTAssertTrue(racingPong.ok, "The racing connection must still be live when the pair request goes out.")
+
+                // Enqueued on the shared queue while it is blocked, so it runs before anything the racing
+                // client has not even sent yet.
+                server.queue.async { try? server.resetPairingsAndStop() }
+                let pairFinished = expectation(description: "The racing pair request eventually returns.")
+                let pairResponse = ResponseBox()
+                DispatchQueue.global().async {
+                    do {
+                        pairResponse.set(
+                            try racingClient.send(
+                                SpacesDeviceAPIRequest(
+                                    command: .pair(
+                                        SpacesDevicePairRequest(
+                                            pairingCode: racingWindow.code, pairingNonce: racingWindow.nonce,
+                                            clientProtocolVersion: SpacesWireProtocol.version)), clientApp: racingApp),
+                                // Short, because the expected outcome is a refusal on a connection the
+                                // teardown has already cancelled: nothing will answer this one.
+                                timeoutSeconds: 3))
+                    } catch {}
+                    pairFinished.fulfill()
+                }
+
+                releaseOverviewRequest.signal()
+                wait(for: [overviewFinished, pairFinished], timeout: 15)
+
+                XCTAssertNotEqual(pairResponse.value()?.ok, true, "A pair request must not succeed once the pairings have been reset.")
+                XCTAssertEqual(try pairingStore.listDevices(), [], "A reset must leave no pairing behind, including one minted while it ran.")
+                if case .issuedAuthToken(let racedToken)? = pairResponse.value()?.result {
+                    XCTAssertThrowsError(
+                        try pairingStore.authorize(clientApp: racingApp, authToken: racedToken.authToken),
+                        "A token issued across a reset must not authorize.")
+                }
+            }
+        }
+
+        /// The recheck the hopped dispatch performs, pinned directly because the interleaving that needs it
+        /// cannot be produced from a test (see `testAPairThatReachesTheQueueAfterAResetIssuesNoToken`).
+        /// Admission is read on the Device API queue, which is where `stop()` publishes it, so the check
+        /// and the work it guards are one critical section rather than a snapshot taken elsewhere.
+        func testAdmissionIsRefusedOnTheDeviceAPIQueueOnceTheServerStops() throws {
+            try withTemporaryProfile {
+                let identity = try controlQueueTestTLSIdentity()
+                let server = SpacesDeviceAPIServer(
+                    host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: AlwaysAuthorizedControlQueuePairingStore())
+                try server.start()
+                defer { server.stop() }
+
+                try server.queue.sync { XCTAssertNoThrow(try server.admitOnQueue(), "A running server admits requests.") }
+
+                server.stop()
+                // `stop()` hops onto the Device API queue; this sync drains behind it, so the assertion
+                // below reads the state the stop published rather than racing it.
+                server.queue.sync {}
+
+                try server.queue.sync {
+                    XCTAssertThrowsError(try server.admitOnQueue(), "A stopped server refuses a request that reaches its dispatch point.") { error in
+                        XCTAssertEqual(SpacesDeviceAPIServer.errorCode(for: error), .internalError)
+                    }
+                }
+            }
+        }
+
+        /// A connection is started before it is registered, so that an accept never waits on the shared
+        /// queue's inline work — which means the registration lands on that queue after the connection is
+        /// already live, and whatever happened to the connection meanwhile has to win. This drives the
+        /// orderable half: a stop that runs between the accept and the registration must leave the
+        /// registry empty rather than holding a connection its own sweep already passed over.
+        ///
+        /// The other half — a connection whose teardown is enqueued BEFORE its registration — cannot be
+        /// forced through these seams, because the accept handler enqueues the registration on the very
+        /// next statement after starting the connection. That ordering is made harmless structurally
+        /// instead (`RequestConnection.didTearDownOnDeviceAPIQueue`), so registration and removal commute.
+        func testAConnectionAcceptedAcrossAStopDoesNotLingerInTheRegistry() throws {
+            try withTemporaryProfile {
+                let overviewRequestArrived = DispatchSemaphore(value: 0)
+                let releaseOverviewRequest = DispatchSemaphore(value: 0)
+                let identity = try controlQueueTestTLSIdentity()
+                let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
+                let server = SpacesDeviceAPIServer(
+                    host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                    overviewLoaderForTesting: { _ in
+                        overviewRequestArrived.signal()
+                        releaseOverviewRequest.wait()
+                        throw NSError(domain: "TerminalControlQueueServerTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "overview released"])
+                    })
+                try server.start()
+                defer {
+                    releaseOverviewRequest.signal()
+                    server.stop()
+                }
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                let clientApp = SpacesDeviceClientApp(
+                    installationID: "accept-race-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
+
+                let holderClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { holderClient.cancel() }
+                let overviewFinished = expectation(description: "The stalled overview eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? holderClient.send(SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp))
+                    overviewFinished.fulfill()
+                }
+                XCTAssertEqual(overviewRequestArrived.wait(timeout: .now() + 5), .success, "The overview must reach the stalled loader.")
+
+                // Enqueued on the blocked queue, and `stop()` runs inline once it is already there, so the
+                // teardown completes in this slot — ahead of the registration the connection below has not
+                // enqueued yet. A stop that instead landed at the tail would sweep that registration away
+                // itself, and the guard under test would never be what kept the registry empty.
+                server.queue.async { server.stop() }
+
+                // Accepted while the listener is still live and the shared queue is blocked, so its
+                // registration is queued behind the stop. The `.ping` proves the connection is genuinely
+                // up: it is answered on the connection's own queue, clear of the blocked shared queue.
+                let lateClient = try SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                defer { lateClient.cancel() }
+                let pong = try lateClient.send(SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp))
+                XCTAssertEqual(pong.message, "pong")
+
+                releaseOverviewRequest.signal()
+                wait(for: [overviewFinished], timeout: 15)
+
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, server.requestConnectionCountForTesting != 0 { Thread.sleep(forTimeInterval: 0.02) }
+                XCTAssertEqual(server.requestConnectionCountForTesting, 0, "A stopped server must hold no request connections.")
+            }
+        }
+
+        /// The listener runs on a queue of its own, so its state callbacks are not serialized against
+        /// `stopOnQueue`. They therefore publish no lifecycle state themselves: `start` publishes the
+        /// running flags on the Device API queue once its wait succeeds, and the callbacks that do have to
+        /// publish (`.failed`, `.cancelled`, `.waiting`) hop there under a listener-identity guard.
+        ///
+        /// What is pinnable is that publication, in both directions, read on the queue that owns it: a
+        /// started server reports running with a real port and admits requests, and a stopped one reports
+        /// not running — the verdict the supervisor's health check rebuilds on — and refuses them, with no
+        /// listener callback needed to make either true. The interleaving the guard exists for, a `.ready`
+        /// already executing on the listener queue when a stop lands, cannot be produced through these
+        /// seams: nothing can hold an `NWListener` callback mid-flight. That half is argued at the handler.
+        func testListenerLifecycleFlagsArePublishedOnTheDeviceAPIQueue() throws {
+            try withTemporaryProfile {
+                let identity = try controlQueueTestTLSIdentity()
+                let server = SpacesDeviceAPIServer(
+                    host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: AlwaysAuthorizedControlQueuePairingStore())
+                try server.start()
+                defer { server.stop() }
+
+                XCTAssertTrue(server.isRunning, "A started listener reports running by the time `start` returns.")
+                XCTAssertGreaterThan(server.listeningPort, 0, "A started listener publishes the port it took.")
+                try server.queue.sync { XCTAssertNoThrow(try server.admitOnQueue(), "A started server admits requests.") }
+
+                server.stop()
+                // `stop()` hops onto the Device API queue; this sync drains behind it, so the assertions
+                // below read the state the stop published rather than racing it.
+                server.queue.sync {}
+
+                XCTAssertFalse(server.isRunning, "A stopped server reports not running.")
+                try server.queue.sync { XCTAssertThrowsError(try server.admitOnQueue(), "A stopped server refuses requests.") }
+            }
+        }
+
         /// The smallest payload a live core could export: the test only needs the read to be blocking and
         /// to answer eventually, not to carry a particular frame.
         private func liveStatePayload(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
@@ -372,8 +821,8 @@
                     setupScript: "read line < '\(fifoPath)'", stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature",
-                    isDefault: true, isRunning: false, lastLaunchedAt: nil))
+                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: true,
+                    isRunning: false, lastLaunchedAt: nil))
             return fifoPath
         }
 
@@ -402,12 +851,12 @@
             try store.upsert(
                 project: ProjectRecord(
                     id: "project-\(workspaceID)", name: "Lifecycle Stop", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
-                    setupScript: nil, stopScript: "touch '\(markerPath)' && read line < '\(fifoPath)'", ports: [], processes: [],
-                    browserSessions: []))
+                    setupScript: nil, stopScript: "touch '\(markerPath)' && read line < '\(fifoPath)'", ports: [], processes: [], browserSessions: [])
+            )
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature",
-                    isDefault: true, isRunning: false, lastLaunchedAt: nil))
+                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: true,
+                    isRunning: false, lastLaunchedAt: nil))
             return BlockingStopScript(fifoPath: fifoPath, markerPath: markerPath)
         }
 
@@ -425,12 +874,12 @@
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-\(workspaceID)", name: "Archivable", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
-                    setupScript: nil, stopScript: nil, ports: [], processes: [], browserSessions: []))
+                    id: "project-\(workspaceID)", name: "Archivable", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, setupScript: nil,
+                    stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature",
-                    isDefault: false, isRunning: false, lastLaunchedAt: nil))
+                    id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: false,
+                    isRunning: false, lastLaunchedAt: nil))
         }
 
         /// Polls the store rather than the fifo: the goal is to know the setup request has actually reached
@@ -502,6 +951,25 @@
     /// only needs a stable certificate to pin.
     private func controlQueueTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         try TerminalServiceTLSIdentityStore.loadOrCreate(root: controlQueueTestTLSRoot)
+    }
+
+    /// Carries one response out of a background send, guarded because the sending thread writes it and
+    /// the test thread reads it after the expectation settles.
+    private final class ResponseBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var response: SpacesDeviceAPIResponse?
+
+        func set(_ response: SpacesDeviceAPIResponse) {
+            lock.lock()
+            self.response = response
+            lock.unlock()
+        }
+
+        func value() -> SpacesDeviceAPIResponse? {
+            lock.lock()
+            defer { lock.unlock() }
+            return response
+        }
     }
 
     private final class AlwaysAuthorizedControlQueuePairingStore: SpacesDevicePairingStoreProtocol {

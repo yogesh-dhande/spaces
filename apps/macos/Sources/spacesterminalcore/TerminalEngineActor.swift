@@ -58,6 +58,10 @@ import Foundation
     /// True when the calling thread is already running on the engine queue.
     private nonisolated static var isOnEngineQueue: Bool { DispatchQueue.getSpecific(key: queueKey) == queueMarker }
 
+    /// The same fact, for code that must refuse to BLOCK on engine work while standing on the engine —
+    /// see `TerminalControlHandling.resolvedResponse()`, which waits for writes that run here.
+    public nonisolated static var isRunningOnEngineQueue: Bool { isOnEngineQueue }
+
     /// Enters the engine's isolation domain from a NON-main, non-engine thread and runs `body`
     /// synchronously, returning its result. When already on the engine queue, runs inline (the
     /// reentrancy guard). NEVER call this from the main actor — see the one-way rule; use `run(_:)`.

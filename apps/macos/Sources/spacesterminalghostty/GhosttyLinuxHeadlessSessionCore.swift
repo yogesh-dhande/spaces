@@ -760,14 +760,14 @@
 
         private func startControlServer() throws {
             let server = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
-                // The control server runs this on its own transport queue; bridge synchronously onto the
-                // terminal engine actor (never the main actor) so a blocked main actor can't stall control.
-                TerminalEngineActor.runSynchronously {
-                    guard let self else {
-                        return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
-                    }
-                    return self.handleControlRequest(request)
+                // The control server runs this on its own transport queue, which is where the request is
+                // handled from: `handleControlRequest` bridges synchronously onto the terminal engine actor
+                // (never the main actor, so a blocked main actor can't stall control) and then waits HERE,
+                // off the engine, for a send's writes to reach the PTY.
+                guard let self else {
+                    return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
                 }
+                return self.handleControlRequest(request)
             }
             try server.start()
             controlServer = server
@@ -786,33 +786,42 @@
             stateStreamServer = server
         }
 
-        public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        /// Handles a control request from OFF the terminal engine actor: hops onto the engine to handle it
+        /// and then waits here for a send's writes to reach the PTY, so the response reports a real write
+        /// rather than an accepted request. See the embedded core's counterpart.
+        public nonisolated func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            TerminalEngineActor.runSynchronously { self.handleControlRequestOnEngine(request) }.resolvedResponse()
+        }
+
+        func handleControlRequestOnEngine(_ request: TerminalControlRequest) -> TerminalControlHandling {
             let startedAt = Date()
-            let response: TerminalControlResponse
+            let handling: TerminalControlHandling
             switch request.command {
-            case "attach": response = attach(request)
-            case "detach": response = detach(request)
-            case "heartbeat": response = heartbeat(request)
-            case "takeover": response = takeover(request)
-            case "send": response = send(request)
-            case "key": response = key(request)
-            case "clearScreen": response = clearScreen(request)
-            case "resize": response = resize(request)
-            case "scroll": response = scroll(request)
-            case "mouseButton": response = mouseButton(request)
-            case "setAppearance": response = setAppearance(request)
-            case "setSelection": response = setSelection(request)
-            case "clearSelection": response = clearSelection(request)
-            case "readSelectionText": response = readSelectionText(request)
-            default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            case "attach": handling = TerminalControlHandling(response: attach(request))
+            case "detach": handling = TerminalControlHandling(response: detach(request))
+            case "heartbeat": handling = TerminalControlHandling(response: heartbeat(request))
+            case "takeover": handling = TerminalControlHandling(response: takeover(request))
+            case "send": handling = send(request)
+            case "key": handling = TerminalControlHandling(response: key(request))
+            case "clearScreen": handling = TerminalControlHandling(response: clearScreen(request))
+            case "resize": handling = TerminalControlHandling(response: resize(request))
+            case "scroll": handling = TerminalControlHandling(response: scroll(request))
+            case "mouseButton": handling = TerminalControlHandling(response: mouseButton(request))
+            case "setAppearance": handling = TerminalControlHandling(response: setAppearance(request))
+            case "setSelection": handling = TerminalControlHandling(response: setSelection(request))
+            case "clearSelection": handling = TerminalControlHandling(response: clearSelection(request))
+            case "readSelectionText": handling = TerminalControlHandling(response: readSelectionText(request))
+            default:
+                handling = TerminalControlHandling(
+                    response: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'."))
             }
             logMobileTakeoverPerformance(
                 name: "terminal_control_host_handle", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                 attributes: [
-                    "action": request.command, "ok": response.ok ? "1" : "0", "client_id": request.clientID ?? "nil",
+                    "action": request.command, "ok": handling.response.ok ? "1" : "0", "client_id": request.clientID ?? "nil",
                     "owner_epoch": request.ownerEpoch.map(String.init) ?? "nil",
                 ])
-            return response
+            return handling
         }
 
         private func attach(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -919,24 +928,32 @@
             return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
         }
 
-        private func send(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        /// A submit's response carries the write acknowledgement out to its off-engine caller, which waits
+        /// on it: the bytes are written after this returns, so "accepted" is not something this function can
+        /// honestly report as "sent". The other sends keep the enqueue contract. See the embedded core's
+        /// counterpart for the full rationale.
+        private func send(_ request: TerminalControlRequest) -> TerminalControlHandling {
             guard ownerRequestIsCurrent(request) else {
-                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+                return TerminalControlHandling(
+                    response: TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected))
             }
             if request.asPaste {
                 guard var text = request.text, request.bytes == nil else {
-                    return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument))
                 }
                 if request.appendNewline { text.append("\n") }
                 guard let payload = encodePastePayload(text) else {
-                    return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError))
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
                 enqueueControlInputWrite(payload)
-                return TerminalControlResponse(ok: true, message: "Sent input.")
+                return TerminalControlHandling(response: TerminalControlResponse(ok: true, message: "Sent input."))
             }
             guard let payload = request.inputPayload else {
-                return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                return TerminalControlHandling(
+                    response: TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument))
             }
             // Submit-safe two-write split for text payloads: the text goes in paste-encoded (bracketed when
             // the application enabled DECSET 2004) and the carriage return follows as its own write. When
@@ -949,29 +966,47 @@
             // send.
             if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
                 guard let pastePayload = encodePastePayload(text) else {
-                    return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError))
                 }
+                // The payload is encoded here, so the framing this session reports is the framing these
+                // exact bytes carry — the CR's pacing and the encoding can never disagree.
                 let framed = bracketedPasteActive()
                 markLocalOwnerCommandInputOutputResyncPending()
-                enqueueControlInputWrite(pastePayload)
-                if framed {
-                    enqueueControlInputWrite(Data([0x0D]))
-                } else {
-                    controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                        await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
-                    }
-                }
-                return TerminalControlResponse(ok: true, message: "Sent input.")
+                // Each write reports the PTY write itself, not its enqueue: the driver resolves its
+                // acknowledgement from inside the queued write, so a child that exits mid-submit fails the
+                // send instead of leaving a prompt recorded as delivered.
+                let acknowledgement = controlInputSequencer.enqueueSubmit(
+                    writeText: { [weak self] in
+                        guard let write = await TerminalEngineActor.run({ self?.ptyDriver.sendRawBytes(pastePayload) }) else { return .notDelivered }
+                        return await write.outcome() == .delivered ? .written(framed: framed) : .notDelivered
+                    },
+                    writeCarriageReturn: { [weak self] in
+                        guard let write = await TerminalEngineActor.run({ self?.ptyDriver.sendRawBytes(Data([0x0D])) }) else { return .notDelivered }
+                        return await write.outcome()
+                    })
+                return TerminalControlHandling(
+                    response: TerminalControlResponse(ok: true, message: "Sent input."), writeAcknowledgement: acknowledgement)
             }
             markLocalOwnerCommandInputOutputResyncPending()
             var bytes = payload
             if request.appendNewline { bytes.append(0x0D) }
-            enqueueControlInputWrite(bytes)
-            return TerminalControlResponse(ok: true, message: "Sent input.")
+            let acknowledgement = enqueueControlInputWrite(bytes)
+            // A submit answers for its Enter however that Enter was written. A bare Enter and a byte payload
+            // go out as one write rather than the two-write split, but they are still submits, so their
+            // acknowledgement is what the response resolves against — otherwise a teardown racing the queued
+            // CR would report a submitted prompt that never landed. Input without a newline is not a submit
+            // and keeps the unwaited enqueue.
+            return TerminalControlHandling(
+                response: TerminalControlResponse(ok: true, message: "Sent input."),
+                writeAcknowledgement: request.appendNewline ? acknowledgement : nil)
         }
 
-        private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
+        @discardableResult private func enqueueControlInputWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                guard let write = await TerminalEngineActor.run({ self?.ptyDriver.sendRawBytes(bytes) }) else { return .notDelivered }
+                return await write.outcome()
+            }
         }
 
         /// Whether the running application currently has bracketed paste (DECSET 2004) enabled — the
@@ -1707,7 +1742,11 @@
                 rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt,
+                // Published alongside the foreground classification because the two answer different halves
+                // of "is this agent ready for its prompt?": the classification says the agent process is
+                // there, this says its TUI has taken the terminal over. Agent-prompt delivery waits for both.
+                bracketedPasteActive: bracketedPasteActive())
         }
 
         // MARK: - Lifecycle writes (in-memory authority, durable mirror off the engine)
@@ -2139,7 +2178,7 @@
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }

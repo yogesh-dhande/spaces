@@ -165,11 +165,15 @@ echo "Running SwiftPM coverage tests..."
 # spacesPackageTests bundle, so a parallel worker process that ran any daemon-core suite first
 # cannot host the mirror app afterwards — worker assignment is arbitrary, which makes these suites
 # crash their worker only in full runs and take innocent tests down with the redistribution. They
-# are skipped here and run together in their own process below.
+# are skipped here and run together in their own process below. GhosttyEmbeddedSubmitOrderingTests
+# waits for a real embedded-terminal write acknowledgement; parallel coverage workers can delay that
+# write beyond its 5-second assertion timeout, so it also runs in a dedicated serial process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
     --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests \
     --skip GhosttyMirrorSelectionAcrossFramesTests --skip GhosttyMirrorSurfaceMRUTests \
     --skip GhosttyMirrorSurfacePresentationTests \
+    --skip GhosttyEmbeddedSubmitOrderingTests \
+    --skip AgentHookSubprocessTests \
     --skip AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut \
     --skip AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled \
     --skip AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting \
@@ -246,8 +250,15 @@ stage_profiles main
 # shared run below.
 echo "Running process-lifecycle coverage tests serially..."
 run_filtered_coverage_pass process-group-escalation \
-    "AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
+    "AgentHookSubprocessTests|AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
 stage_profiles process-group
+
+# These tests wait for an embedded terminal's write acknowledgement. They pass in an isolated process,
+# but parallel coverage contention can delay that acknowledgement past the test's 5-second timeout.
+# Run the whole suite serially with the same coverage scratch so its profiles merge with the shared run.
+echo "Running embedded-submit ordering coverage tests serially..."
+run_filtered_coverage_pass ghostty-embedded-submit-ordering "GhosttyEmbeddedSubmitOrderingTests"
+stage_profiles ghostty-embedded-submit-ordering
 
 # The mirror-surface suites skipped above, in a process of their own so the mirror service is the
 # process's one embedded ghostty app. Serial and filtered: fresh process, same coverage scratch so

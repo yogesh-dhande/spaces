@@ -103,6 +103,7 @@
                     reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
 
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the latest grid's frame ends the hold")
+            await waitUntil("the latest-grid frame to paint") { model.ownerRenderEpoch != nil }
             XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot?.columns, 45, "the one paint is at the grid the surface last reported")
             XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot?.rows, 35)
         }
@@ -155,6 +156,7 @@
 
             XCTAssertTrue(model.isOwner)
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the new lifecycle's own matching frame releases the hold")
+            await waitUntil("the restarted lifecycle's frame to paint") { model.ownerRenderEpoch != nil }
             XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot?.columns, 40, "the one paint is at the reported grid")
             XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot?.rows, 30)
         }

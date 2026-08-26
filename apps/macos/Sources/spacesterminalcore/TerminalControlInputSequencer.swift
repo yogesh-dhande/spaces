@@ -12,9 +12,9 @@ import Foundation
 /// write needs to be delayed. When the application has NOT enabled bracketed paste — an agent TUI still
 /// initializing right after a detection-based spawn, or a plain byte reader — the paste encoder emits
 /// the text unframed, and only time can keep the CR out of the text's read burst. For that case the
-/// chokepoints enqueue the CR through `enqueueSubmitCarriageReturn`, which spaces it `separation` after
-/// the text AND holds the next write back by the same interval, keeping the CR a lone burst on both
-/// sides.
+/// chokepoints enqueue the whole submit through `enqueueSubmit`, whose text write reports the framing it
+/// actually used and which then spaces the CR `separation` after the text AND holds the next write back
+/// by the same interval, keeping the CR a lone burst on both sides.
 ///
 /// `separation` is sized for the slowest composer among the supported agent TUIs, not the fastest:
 /// Claude Code and Codex read a lone CR burst as a distinct Enter keystroke at a much shorter gap, but
@@ -24,9 +24,13 @@ import Foundation
 /// What this type always guarantees is ordering. Every control-request input write (send
 /// text/bytes/paste, key) for a session funnels through one sequencer in enqueue order, so a later
 /// request's bytes can never land between a submit's text and its CR and merge two submissions into one
-/// line. Callers all run on the main actor, so a text+CR pair claims two adjacent FIFO slots atomically.
-/// (A plain `asyncAfter` of the CR could not give this guarantee — it does not hold a FIFO slot, so
-/// writes submitted during the delay would jump ahead of the pending CR.)
+/// line: a submit is one FIFO slot that writes both. (A plain `asyncAfter` of the CR could not give this
+/// guarantee — it does not hold a FIFO slot, so writes submitted during the delay would jump ahead of
+/// the pending CR.)
+///
+/// Every enqueue returns a `TerminalInputWriteAcknowledgement` that resolves once its writes have run,
+/// so a send chokepoint can answer with a write that reached the PTY rather than with an accepted
+/// request.
 public final class TerminalControlInputSequencer: @unchecked Sendable {
     private let queue = TerminalInputSerialQueue()
     private let lock = NSLock()
@@ -37,23 +41,48 @@ public final class TerminalControlInputSequencer: @unchecked Sendable {
     public init(separation: Duration = .milliseconds(500)) { self.separation = separation }
 
     /// Enqueues an input write, ordered after everything already enqueued and held back until a
-    /// preceding separated submit CR's trailing separation has elapsed.
-    public func enqueueWrite(_ write: @escaping @Sendable () async -> Void) {
+    /// preceding separated submit CR's trailing separation has elapsed. The returned acknowledgement
+    /// resolves when the write has run, carrying what that write reported reaching the PTY.
+    @discardableResult public func enqueueWrite(_ write: @escaping @Sendable () async -> TerminalInputWriteOutcome)
+        -> TerminalInputWriteAcknowledgement
+    {
+        let acknowledgement = TerminalInputWriteAcknowledgement()
         queue.enqueue {
             if let earliest = self.takeEarliestNextWrite() { try? await Task.sleep(until: earliest, clock: .continuous) }
-            await write()
+            acknowledgement.resolve(await write())
         }
+        return acknowledgement
     }
 
-    /// Enqueues an unframed submit's carriage return, separated from the write before it (the text it
-    /// submits) and from the write after it by `separation`. Framed submits never need this — their CR
-    /// goes through `enqueueWrite`.
-    public func enqueueSubmitCarriageReturn(_ write: @escaping @Sendable () async -> Void) {
+    /// Enqueues a submit — the text and the carriage return that submits it — as ONE ordered slot, so
+    /// the CR's pacing is decided by the framing the text write itself reports rather than by a framing
+    /// sampled before that write ran. On the embedded (macOS) path ghostty derives the paste encoding
+    /// from live terminal state at write time, so a decision taken any earlier can pace the CR against a
+    /// framing the text did not go out with, and the two then merge into one read burst that the
+    /// receiving composer takes as an unsubmitted paste.
+    ///
+    /// Framed text needs no delay: its paste frame closes before the CR, which makes the CR a distinct
+    /// Enter keystroke however the bytes are batched into read bursts. Unframed text is separated from
+    /// its CR by `separation`, and the next write is held back by the same interval, keeping that CR a
+    /// lone burst on both sides. A text write that never reached the PTY resolves the acknowledgement
+    /// there and sends no CR: there is nothing to submit.
+    @discardableResult public func enqueueSubmit(
+        writeText: @escaping @Sendable () async -> TerminalSubmitTextWriteOutcome,
+        writeCarriageReturn: @escaping @Sendable () async -> TerminalInputWriteOutcome
+    ) -> TerminalInputWriteAcknowledgement {
+        let acknowledgement = TerminalInputWriteAcknowledgement()
         queue.enqueue {
-            try? await Task.sleep(for: self.separation, clock: .continuous)
-            await write()
-            self.setEarliestNextWrite(.now.advanced(by: self.separation))
+            if let earliest = self.takeEarliestNextWrite() { try? await Task.sleep(until: earliest, clock: .continuous) }
+            guard case .written(let framed) = await writeText() else {
+                acknowledgement.resolve(.notDelivered)
+                return
+            }
+            if !framed { try? await Task.sleep(for: self.separation, clock: .continuous) }
+            let carriageReturnOutcome = await writeCarriageReturn()
+            if !framed { self.setEarliestNextWrite(.now.advanced(by: self.separation)) }
+            acknowledgement.resolve(carriageReturnOutcome)
         }
+        return acknowledgement
     }
 
     /// Suspends until every write enqueued so far has run — including a pending submit CR held back by

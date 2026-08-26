@@ -109,6 +109,15 @@ if [[ -n "$PACKAGE_DIR" && "$MODE" != "build" ]]; then
     die "--package is only valid with --build"
 fi
 
+# Git hooks export repository-local variables for the superproject. Those variables take
+# precedence over `git -C`, including when the target is the Ghostty submodule, so an inherited
+# GIT_DIR can make a submodule query return the Spaces commit instead. This script is always a
+# child process, so clearing Git's complete local-environment set cannot affect the calling Git
+# command or shell.
+while IFS= read -r git_local_variable; do
+    [[ -n "$git_local_variable" ]] && unset "$git_local_variable"
+done < <(git rev-parse --local-env-vars)
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }

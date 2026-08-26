@@ -121,23 +121,46 @@
         /// measures 30us at p50 and 207us at the worst of 5000, against a gate measuring 4.9ms p95
         /// with a 15ms budget. Deferring the write would mean carrying a timestamp through product
         /// code for measurement alone, which buys less than the noise it removes.
-        func sendRawBytes(_ data: Data) {
+        /// The host-PTY writes these bytes produced, or nil when the session has been torn down and there
+        /// was nowhere to write them. The submit path awaits the batch so its send answers for the bytes;
+        /// interactive input uses the `Bool` form below and keeps the enqueue contract.
+        func sendRawBytesAwaitingEmission(_ data: Data) -> TerminalInputWriteBatch? {
             inputActivityHandler?(data.count)
-            sessionDriver.sendRawBytes(data)
+            return sessionDriver.sendRawBytesAwaitingEmission(data)
+        }
+
+        /// Reports whether the bytes reached the session (see the driver): a send whose session has been
+        /// torn down fails rather than silently writing nowhere.
+        @discardableResult func sendRawBytes(_ data: Data) -> Bool {
+            inputActivityHandler?(data.count)
+            return sessionDriver.sendRawBytes(data)
         }
 
         /// Sends a named key press, letting ghostty encode it against the live terminal state. The
         /// encoded length is not observable from here, so owner input activity counts the press itself.
-        func sendKey(_ spec: TerminalKeySpec) {
+        @discardableResult func sendKey(_ spec: TerminalKeySpec) -> Bool {
             inputActivityHandler?(1)
-            GhosttyEmbeddedKeyEvent.withKeyEvent(for: spec) { sessionDriver.sendKey($0) }
+            return GhosttyEmbeddedKeyEvent.withKeyEvent(for: spec) { sessionDriver.sendKey($0) }
         }
 
         @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
             guard !text.isEmpty else { return false }
             inputActivityHandler?(text.utf8.count)
-            sessionDriver.sendTextAsPaste(text)
-            return true
+            return sessionDriver.sendTextAsPaste(text)
+        }
+
+        /// Writes `text` through ghostty's paste encoder and reports, from inside that same engine-isolated
+        /// step, whether it went out framed by bracketed-paste markers. Ghostty derives the framing from
+        /// live terminal state at write time, so the mode is read here — immediately before the write, with
+        /// no tick in between — rather than by the caller before the write is even enqueued. That is as
+        /// close to "decision and encoding at one instant" as the embedded API allows, and it is what the
+        /// submit path paces its carriage return against.
+        func sendSubmitTextAsPaste(_ text: String) -> GhosttySubmitTextWrite {
+            guard !text.isEmpty else { return .notDelivered }
+            let framed = sessionDriver.bracketedPasteActive()
+            inputActivityHandler?(text.utf8.count)
+            guard let writes = sessionDriver.sendTextAsPasteAwaitingEmission(text) else { return .notDelivered }
+            return .written(framed: framed, writes: writes)
         }
 
         func bracketedPasteActive() -> Bool { sessionDriver.bracketedPasteActive() }
@@ -1017,6 +1040,10 @@
         /// caller terminates the session normally.
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             handoffTranscriptReplayOffset = nil
+            // Force the durable row current before the exec. `title` is out of the persist signature, so the
+            // stored title can be arbitrarily stale by now; the adopting core seeds itself from this row, and
+            // the persistence drain later in this function is what makes the write land before `execv`.
+            refreshRuntimeState(force: true)
             suppressBroadcastsForHandoff = true
             runtimeStateTimer?.cancel()
             runtimeStateTimer = nil
@@ -1029,13 +1056,14 @@
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
 
-            // Drain accepted-but-unwritten control input before handing off. A control send is acknowledged
-            // before its bytes reach the PTY: a `terminal send --submit` becomes two sequencer writes (the
-            // pasted text, then the carriage return), and the host PTY write queue behind them is likewise
-            // asynchronous. The control server is stopped above, so no new sends can enqueue — await the
-            // sequencer chain and then the PTY write queue so the `execv` that inherits this same master fd
-            // cannot destroy either with the CR (or the whole line) unwritten. The child's echo of the
-            // drained input flows through the normal output path below.
+            // Drain accepted-but-unwritten control input before handing off. Input can still be queued here:
+            // a plain send is answered as soon as its write is enqueued, a submit's two sequencer writes (the
+            // pasted text, then the carriage return) can be mid-flight for a request the control server has
+            // not answered yet, and the host PTY write queue behind both is asynchronous. The control server
+            // is stopped above, so no new sends can enqueue — await the sequencer chain and then the PTY
+            // write queue so the `execv` that inherits this same master fd cannot destroy either with the CR
+            // (or the whole line) unwritten. The child's echo of the drained input flows through the normal
+            // output path below.
             await controlInputSequencer.drain()
             await rendererHostStorage.drainPendingInputWrites()
 
@@ -1135,9 +1163,15 @@
             // carry the BEL. The coalescing window is restored with it, so a bell moments after the
             // handoff — including one the replayed transcript re-rings through the live action handler —
             // is absorbed into the alert the user already has instead of minting a second one.
-            let persistedBellAt = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt
+            let persistedRuntimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let persistedBellAt = persistedRuntimeState?.bellAt
             currentBellAt = persistedBellAt
             bellCoalescer.seedLastAdvanced(at: persistedBellAt.flatMap(TerminalSessionTimestamp.date(from:)))
+            // Seed the reported title from the row the quiescing daemon forced before `execv`. The adopted
+            // session's program is mid-run and may not report a title again for a long time (a spinner does
+            // so within a frame, an editor showing a filename may never), and this core is the authority the
+            // overview now reads that title from, so starting at nil would blank a live pane's title.
+            currentTitle = persistedRuntimeState?.title
 
             // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
             // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
@@ -1239,14 +1273,14 @@
 
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
-                // The control server runs this on its own transport queue; bridge synchronously onto the
-                // terminal engine actor (never the main actor) so a blocked main actor can't stall control.
-                TerminalEngineActor.runSynchronously {
-                    guard let self else {
-                        return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
-                    }
-                    return self.handleControlRequest(request)
+                // The control server runs this on its own transport queue, which is where the request is
+                // handled from: `handleControlRequest` bridges synchronously onto the terminal engine actor
+                // (never the main actor, so a blocked main actor can't stall control) and then waits HERE,
+                // off the engine, for a send's writes to reach the PTY.
+                guard let self else {
+                    return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
                 }
+                return self.handleControlRequest(request)
             }
             try controlServer.start()
             self.controlServer = controlServer
@@ -1271,28 +1305,40 @@
             self.stateStreamServer = stateStreamServer
         }
 
-        public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        /// Handles a control request from OFF the terminal engine actor: hops onto the engine to handle it
+        /// and then, for a send, waits here for the writes that send enqueued to reach the PTY, so the
+        /// response reports a real write rather than an accepted request. Callers are transport threads —
+        /// this session's control-socket queue and the daemon's off-main send path — never the engine
+        /// itself, which is where those writes run.
+        public nonisolated func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            TerminalEngineActor.runSynchronously { self.handleControlRequestOnEngine(request) }.resolvedResponse()
+        }
+
+        func handleControlRequestOnEngine(_ request: TerminalControlRequest) -> TerminalControlHandling {
             let command = request.commandValue
             trace(
                 "control_request command=\(command.name) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
             )
-            return switch command {
-            case .attach: controlResponseForAttachRequest(request)
-            case .detach: controlResponseForDetachRequest(request)
-            case .heartbeat: controlResponseForHeartbeatRequest(request)
-            case .send: controlResponseForSendRequest(request)
-            case .key: controlResponseForKeyRequest(request)
-            case .clearScreen: controlResponseForClearScreenRequest(request)
-            case .takeover: controlResponseForTakeoverRequest(request)
-            case .resize: controlResponseForResizeRequest(request)
-            case .scroll: controlResponseForScrollRequest(request)
-            case .mouseButton: controlResponseForMouseButtonRequest(request)
-            case .setAppearance: controlResponseForSetAppearanceRequest(request)
-            case .setSelection: controlResponseForSetSelectionRequest(request)
-            case .clearSelection: controlResponseForClearSelectionRequest(request)
-            case .readSelectionText: controlResponseForReadSelectionTextRequest(request)
-            case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
-            }
+            if case .send = command { return controlResponseForSendRequest(request) }
+            let response: TerminalControlResponse =
+                switch command {
+                case .attach: controlResponseForAttachRequest(request)
+                case .detach: controlResponseForDetachRequest(request)
+                case .heartbeat: controlResponseForHeartbeatRequest(request)
+                case .send: preconditionFailure("send is handled above so its write acknowledgement is carried out to the caller")
+                case .key: controlResponseForKeyRequest(request)
+                case .clearScreen: controlResponseForClearScreenRequest(request)
+                case .takeover: controlResponseForTakeoverRequest(request)
+                case .resize: controlResponseForResizeRequest(request)
+                case .scroll: controlResponseForScrollRequest(request)
+                case .mouseButton: controlResponseForMouseButtonRequest(request)
+                case .setAppearance: controlResponseForSetAppearanceRequest(request)
+                case .setSelection: controlResponseForSetSelectionRequest(request)
+                case .clearSelection: controlResponseForClearSelectionRequest(request)
+                case .readSelectionText: controlResponseForReadSelectionTextRequest(request)
+                case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
+                }
+            return TerminalControlHandling(response: response)
         }
 
         private func ownerRequestRejection(for request: TerminalControlRequest, commandName: String, startedAt: Date) -> TerminalControlResponse? {
@@ -1557,89 +1603,155 @@
             return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
         }
 
-        private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        /// A submit's response carries the write acknowledgement out to its off-engine caller, which waits
+        /// on it: the bytes are written on the engine after this returns, so "accepted" is not something
+        /// this function can honestly report as "sent" — and an automation stamping a seed prompt as
+        /// delivered needs "sent".
+        ///
+        /// The other sends keep the enqueue contract deliberately. They carry no downstream record of
+        /// delivery, they are a stream of interactive input whose guarantee is the sequencer's ordering,
+        /// and holding a client's per-keystroke round trip open until each write lands would pay for a
+        /// distinction nothing reads.
+        private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlHandling {
             let startedAt = Date()
             guard isRuntimeInteractiveForControl() else {
-                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+                return TerminalControlHandling(
+                    response: TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning))
             }
             touchClientLease(request.clientID)
-            if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
+            if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) {
+                return TerminalControlHandling(response: rejection)
+            }
             if request.asPaste {
                 guard var text = request.text, request.bytes == nil else {
-                    return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument))
                 }
                 if request.appendNewline { text.append("\n") }
-                guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
+                guard !text.isEmpty else {
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument))
+                }
                 markLocalOwnerCommandInputOutputResyncPending()
                 enqueueControlInputPaste(text)
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
-                return TerminalControlResponse(ok: true, message: "Sent input.")
+                return TerminalControlHandling(response: TerminalControlResponse(ok: true, message: "Sent input."))
             } else {
                 guard let payload = request.inputPayload else {
-                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                    return TerminalControlHandling(
+                        response: TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument))
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
                 // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
                 // Agent TUIs (Claude Code, Codex, OpenCode) group bytes that arrive in one PTY read burst
                 // into a paste, so text merged with its own carriage return lands in the composer
                 // unsubmitted. The text (which may itself contain newlines, e.g. a multi-line notification)
-                // goes in as a paste and the CR (0x0D) follows as its own write. Ghostty derives the paste
-                // encoding from the live terminal state: an application that enabled bracketed paste
-                // (DECSET 2004) receives the text framed by paste markers — the frame closes before the CR
-                // arrives, making the CR a distinct Enter keystroke no matter how the bytes are batched into
-                // read bursts, so the CR follows immediately. An application with bracketed paste OFF — an
-                // agent TUI still initializing right after a detection-based spawn is the case that matters —
-                // receives the text unframed, so only time can keep the CR out of the text's read burst:
-                // that CR goes through the sequencer's separated path instead (issue #187). Enter is a CR
-                // because shells and Claude Code accept LF or CR while Codex and OpenCode submit only on CR.
-                // An empty text with appendNewline is a bare Enter (e.g. answering a TUI dialog): there is
-                // nothing to frame, so the CR goes in alone. Byte payloads are opaque input rather than
-                // composer text, so they keep the single inline write. Both writes funnel through the
-                // sequencer, which keeps the text+CR pair adjacent and ordered against every later input
-                // write.
+                // goes in as a paste and the CR (0x0D) follows as its own write, both inside one sequencer
+                // slot (`enqueueControlInputSubmit`). Ghostty derives the paste encoding from the live
+                // terminal state AT WRITE TIME: an application that enabled bracketed paste (DECSET 2004)
+                // receives the text framed by paste markers — the frame closes before the CR arrives, making
+                // the CR a distinct Enter keystroke no matter how the bytes are batched into read bursts, so
+                // the CR follows immediately. An application with bracketed paste OFF receives the text
+                // unframed, so only time can keep the CR out of the text's read burst and the CR is spaced
+                // from it (issue #187). Which of the two happened is reported by the text write itself
+                // rather than sampled here, so the pacing can never be decided against a framing the bytes
+                // did not go out with. Enter is a CR because shells and Claude Code accept LF or CR while
+                // Codex and OpenCode submit only on CR. An empty text with appendNewline is a bare Enter
+                // (e.g. answering a TUI dialog, or the automation prompt ladder's submit): there is nothing
+                // to frame, so the CR goes in alone. Byte payloads are opaque input rather than composer
+                // text, so they keep the single inline write.
+                var submitAcknowledgement: TerminalInputWriteAcknowledgement?
                 if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
-                    let framed = rendererHostStorage.bracketedPasteActive()
-                    enqueueControlInputPaste(text)
-                    if framed { enqueueControlInputWrite(Data([0x0D])) } else { enqueueSeparatedControlInputCarriageReturn() }
+                    submitAcknowledgement = enqueueControlInputSubmit(text)
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
-                    enqueueControlInputWrite(bytes)
+                    // A submit answers for its Enter however that Enter was written. A bare Enter and a byte
+                    // payload go out as one write rather than the two-write split, but they are still
+                    // submits: their write answers for the host-PTY writes ghostty produced for it and the
+                    // response resolves against that acknowledgement — otherwise a child that exits with
+                    // the CR still queued would report a submitted prompt that never landed. Input without
+                    // a newline is not a submit and keeps the unwaited enqueue, so ordinary interactive
+                    // writes never pay a round trip for an answer no caller asked for.
+                    if request.appendNewline {
+                        submitAcknowledgement = enqueueControlInputSubmitWrite(bytes)
+                    } else {
+                        enqueueControlInputWrite(bytes)
+                    }
                 }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
-                return TerminalControlResponse(ok: true, message: "Sent input.")
+                return TerminalControlHandling(
+                    response: TerminalControlResponse(ok: true, message: "Sent input."), writeAcknowledgement: submitAcknowledgement)
             }
         }
 
-        private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
-        }
-
-        /// The CR of a submit whose text went out unframed (bracketed paste off): spaced from the text
-        /// and from the next write so the receiving composer reads it as a distinct Enter keystroke.
-        private func enqueueSeparatedControlInputCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+        @discardableResult private func enqueueControlInputWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) == true ? .delivered : .notDelivered }
             }
         }
 
-        /// Writes text through ghostty's paste encoder, which frames it with bracketed-paste markers when
-        /// the running application enabled DECSET 2004 and passes it through verbatim otherwise. Used both
-        /// for an explicit paste request and for the text half of a submit, where the framing is what keeps
-        /// the following carriage return a distinct Enter keystroke.
-        private func enqueueControlInputPaste(_ text: String) {
-            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(text) }
+        /// A submit that goes out as one write: a bare Enter, or a byte payload with its appended carriage
+        /// return. Like each half of the two-write submit, it answers for the host-PTY writes ghostty
+        /// produced for it rather than for ghostty having accepted the bytes, so a send whose Enter was
+        /// still queued when the child exited fails instead of reporting a prompt as submitted.
+        private func enqueueControlInputSubmitWrite(_ bytes: Data) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                let writes = await TerminalEngineActor.run { () -> TerminalInputWriteBatch? in
+                    guard let self else { return nil }
+                    return self.rendererHostStorage.sendRawBytesAwaitingEmission(bytes)
+                }
+                guard let writes else { return .notDelivered }
+                return await writes.outcome()
+            }
+        }
+
+        /// A submit — the text and the carriage return that runs it — as one sequencer slot. The text goes
+        /// through ghostty's paste encoder, which frames it with bracketed-paste markers when the running
+        /// application enabled DECSET 2004 and passes it through verbatim otherwise; the write reports which
+        /// it did, and the sequencer paces the CR against that. Reading the mode inside the write is what
+        /// keeps the decision and the encoding at one instant: ghostty derives the encoding from live
+        /// terminal state when the write runs, so a mode sampled at request time can disagree with the
+        /// bytes that actually went out and leave the CR paced for a framing the text never had.
+        /// Each half also answers for the host-PTY writes ghostty produced for it, not for ghostty having
+        /// accepted the input: the batch is collected inside the engine-isolated call and awaited here, off
+        /// the engine, so a write still sitting on the host PTY queue when the child exits fails the send
+        /// instead of stamping a prompt as delivered.
+        private func enqueueControlInputSubmit(_ text: String) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueSubmit(
+                writeText: { [weak self] in
+                    let write = await TerminalEngineActor.run { self?.rendererHostStorage.sendSubmitTextAsPaste(text) ?? .notDelivered }
+                    guard case .written(let framed, let writes) = write else { return .notDelivered }
+                    return await writes.outcome() == .delivered ? .written(framed: framed) : .notDelivered
+                },
+                writeCarriageReturn: { [weak self] in
+                    let writes = await TerminalEngineActor.run { () -> TerminalInputWriteBatch? in
+                        guard let self else { return nil }
+                        return self.rendererHostStorage.sendRawBytesAwaitingEmission(Data([0x0D]))
+                    }
+                    guard let writes else { return .notDelivered }
+                    return await writes.outcome()
+                })
+        }
+
+        /// Writes text through ghostty's paste encoder for an explicit paste request. A submit's text takes
+        /// `enqueueControlInputSubmit` instead, which also reports the framing its CR must be paced against.
+        @discardableResult private func enqueueControlInputPaste(_ text: String) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendTextAsPaste(text) == true ? .delivered : .notDelivered }
             }
         }
 
         /// Queued through the same sequencer as text writes so a key press never overtakes the text it was
         /// meant to follow.
-        private func enqueueControlKeyPress(_ spec: TerminalKeySpec) {
-            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendKey(spec) } }
+        @discardableResult private func enqueueControlKeyPress(_ spec: TerminalKeySpec) -> TerminalInputWriteAcknowledgement {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendKey(spec) == true ? .delivered : .notDelivered }
+            }
         }
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1919,6 +2031,7 @@
                     guard let self, self.started else { return }
                     self.expireStaleRemoteClientsIfNeeded()
                     self.refreshRuntimeState(force: false)
+                    self.flushPendingOverviewSignalForMetadata()
                 }
             }
             timer.resume()
@@ -1954,7 +2067,11 @@
                 rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt,
+                // Published alongside the foreground classification because the two answer different halves
+                // of "is this agent ready for its prompt?": the classification says the agent process is
+                // there, this says its TUI has taken the terminal over. Agent-prompt delivery waits for both.
+                bracketedPasteActive: rendererHostStorage.bracketedPasteActive())
             // Advance the in-memory authoritative state first so broadcasts show live truth immediately,
             // independent of when (or whether) the enqueued durable write lands.
             latestRuntimeState = state
@@ -2246,7 +2363,16 @@
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
-            case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
+            case .setTitle(let title):
+                // The reported title advances the in-memory state — the authority live subscribers and the
+                // overview read — but does not force the durable mirror. An agent TUI animating a spinner in
+                // its title sets one here several times a second, and forcing a write per set committed a
+                // SQLite transaction per animation frame. `title` is out of `runtimeStateSignature`, so this
+                // unforced refresh writes only if some other field moved too. See `shouldPersistRuntimeState`.
+                currentTitle = Self.normalizedSessionMetadataValue(title)
+                postSessionMetadataDidChange()
+                refreshRuntimeState(force: false)
+                return
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
             case .ringBell:
                 // A bell changes no metadata a title is derived from, so it skips the metadata
@@ -2309,13 +2435,14 @@
                     name: "state_change", attributes: ["revision": String(change.revision), "flags": String(change.flags.rawValue)])
                 scheduleScreenStateChangeBroadcast(revision: change.revision)
             }
-            var metadataChanged = false
+            var titleChanged = false
+            var workingDirectoryChanged = false
 
             if change.flags.contains(.title) {
                 let nextTitle = Self.normalizedSessionMetadataValue(change.title)
                 if currentTitle != nextTitle {
                     currentTitle = nextTitle
-                    metadataChanged = true
+                    titleChanged = true
                 }
             }
 
@@ -2323,16 +2450,26 @@
                 let nextWorkingDirectory = Self.normalizedSessionMetadataValue(change.workingDirectory)
                 if currentWorkingDirectory != nextWorkingDirectory {
                     currentWorkingDirectory = nextWorkingDirectory
-                    metadataChanged = true
+                    workingDirectoryChanged = true
                 }
             }
 
-            if metadataChanged { postSessionMetadataDidChange() }
+            if titleChanged || workingDirectoryChanged { postSessionMetadataDidChange() }
 
             if change.flags.contains(.foregroundProcess) { _ = observedChildPID() }
             if change.flags.contains(.size), let size = rendererHostStorage.surfaceCellSize() { lastKnownSurfaceSize = size }
 
-            if metadataChanged || !change.flags.intersection(.runtimeState).isEmpty { refreshRuntimeState(force: true) }
+            // A title-only change refreshes the in-memory state (which is what live subscribers and the
+            // overview read) but does not force the durable mirror: agent TUIs animate a spinner in their
+            // title several times a second, and forcing a write per frame committed a SQLite transaction per
+            // frame. `title` is out of `runtimeStateSignature`, so the unforced refresh persists only if some
+            // other field also moved, and the row still picks the title up on the next write for any reason
+            // and on the exited-state write at termination.
+            if workingDirectoryChanged || !change.flags.intersection(.runtimeState).isEmpty {
+                refreshRuntimeState(force: true)
+            } else if titleChanged {
+                refreshRuntimeState(force: false)
+            }
         }
 
         private func observedChildPID() -> Int32? {
@@ -2368,13 +2505,35 @@
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
         }
 
+        /// Set when a metadata change (title, working directory) still owes overview subscribers a rebuild,
+        /// cleared by the 1 Hz tick that posts it. Overview pushes used to ride the durable runtime-state
+        /// write, so dropping `title` from the persist signature would otherwise leave the sidebar showing a
+        /// stale title until some unrelated field changed. Posting per change instead would push an overview
+        /// rebuild — and a cross-process distributed notification — per spinner frame, which is the cost this
+        /// whole change exists to remove, so the signal is coalesced onto the tick every live session already
+        /// runs. Subscribers converge within a second; live subscribers are unaffected either way, since
+        /// `broadcastCurrentState` below still goes out on every change.
+        private var owesOverviewSignalForMetadata = false
+
         private func postSessionMetadataDidChange() {
             TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
+            owesOverviewSignalForMetadata = true
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+        }
+
+        /// Posts the coalesced metadata overview signal, if one is owed. Driven by the 1 Hz tick. A session
+        /// that ends with a change still owed needs nothing here: termination posts an unconditional
+        /// `TerminalOverviewSignal` of its own once its exited-state write commits.
+        private func flushPendingOverviewSignalForMetadata() {
+            guard owesOverviewSignalForMetadata else { return }
+            owesOverviewSignalForMetadata = false
+            TerminalOverviewSignal.post()
         }
 
         private func postRuntimeStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
+            // This post covers any metadata change still owed, so the tick does not send a second one.
+            owesOverviewSignalForMetadata = false
             TerminalOverviewSignal.post()
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.runtimeState)
         }
@@ -2616,7 +2775,16 @@
         }
 
         /// A runtime state is persisted when it says something the stored row does not: the signature covers
-        /// every field of the row except `updated_at`, which is derived from the write itself.
+        /// every field of the row except `updated_at`, which is derived from the write itself, and `title`.
+        ///
+        /// `title` is excluded because it is not a durable fact about the session, it is whatever the program
+        /// is printing right now, and agent TUIs animate a spinner in it several times a second. Including it
+        /// meant a SQLite transaction per animation frame. The authority for a live session's title is the
+        /// core's in-memory `latestRuntimeState`, which advances on every report and is what live subscribers
+        /// and the device overview read (`TerminalSessionCatalog.mergingLiveInMemorySessions` overlays it onto
+        /// the DB-derived entry). The stored column still converges: any write triggered by another field
+        /// carries the current title, the handoff quiesce forces one before `execv`, and the exited-state
+        /// write records the final title an ended pane is shown under.
         ///
         /// There is deliberately no periodic rewrite of an unchanged row. The 1 Hz refresh runs per session
         /// for as long as the session lives, so rewriting on a timer meant every idle terminal committed a
@@ -2632,7 +2800,7 @@
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
         }
 
         private static func isProcessAlive(pid: Int32) -> Bool {
@@ -2976,6 +3144,11 @@
         }
 
         var debugCurrentTitle: String? { currentTitle }
+        /// Drives the real OSC-title path so a test exercises the same decision a program's title set makes.
+        func debugApplyTitleActionEvent(_ title: String) { applyActionEvent(.setTitle(title)) }
+        /// Runs the coalesced overview-signal flush the 1 Hz tick performs.
+        func debugFlushPendingOverviewSignalForMetadata() { flushPendingOverviewSignalForMetadata() }
+        var debugOwesOverviewSignalForMetadata: Bool { owesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { _ = incomingOutputBuffer.append(data, interactive: false) }
@@ -3057,7 +3230,9 @@
     }
 
     @TerminalEngineActor public final class GhosttyEmbeddedSessionHost {
-        public let core: GhosttyEmbeddedSessionCore
+        /// Nonisolated because the core is itself engine-isolated (and so Sendable), and control requests
+        /// are handled from OFF the engine: a send waits there for its writes, which run on the engine.
+        public nonisolated let core: GhosttyEmbeddedSessionCore
 
         public var launchConfiguration: TerminalSessionLaunchConfiguration { core.launchConfiguration }
         public var paths: TerminalSessionPaths { core.paths }
@@ -3155,7 +3330,9 @@
 
         public func inMemoryCatalogEntry() -> TerminalSessionCatalogEntry? { core.inMemoryCatalogEntry() }
 
-        func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse { core.handleControlRequest(request) }
+        /// Nonisolated for the same reason the core's is: a send waits for its writes, which run on the
+        /// engine, so the request must be handled from off it.
+        nonisolated func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse { core.handleControlRequest(request) }
         func applyActionEvent(_ event: GhosttyActionEvent) { core.applyActionEvent(event) }
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) { core.applySessionStateChange(change) }
         @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] { core.expireStaleRemoteClientsIfNeeded(now: now) }
@@ -3166,6 +3343,9 @@
         }
 
         var debugCurrentTitle: String? { core.debugCurrentTitle }
+        func debugApplyTitleActionEvent(_ title: String) { core.debugApplyTitleActionEvent(title) }
+        func debugFlushPendingOverviewSignalForMetadata() { core.debugFlushPendingOverviewSignalForMetadata() }
+        var debugOwesOverviewSignalForMetadata: Bool { core.debugOwesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { core.debugBufferIncomingOutputForStateExport(data) }

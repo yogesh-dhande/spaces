@@ -19,10 +19,13 @@
 #   d. timeout 2s on a long sleep -> timed_out.
 #   e. attribution stamp for the run's own workspace-bound .automation session (see the note in part_e for
 #      why the spawned-agent sweep cycle needs a real provider and is covered by unit tests instead).
-#   f. agent-kind automation whose workspace does not resolve -> the launch fails cleanly (failed run), the
-#      run's attributed-agent list is empty, and end-agents on the terminal run is an accepted no-op (see the
-#      note in part_f for why the detect/deliver/done + End-agents lifecycle needs a real provider and lives
-#      in unit tests instead).
+#   f. an agent-kind automation whose workspace does not resolve is refused at creation, and end-agents on a
+#      terminal run is an accepted no-op that leaves its status untouched.
+#   g. REAL PROVIDER (`claude` on PATH, skipped with a clear line otherwise): an agent-kind automation drives
+#      Claude Code with a multi-line seed prompt and asserts the whole prompt reached the agent, was
+#      submitted exactly once, and was answered. This is the ground truth for seed-prompt delivery — the
+#      thing no fake can vouch for, since the failure it guards (issue #556) is the real TUI enabling
+#      bracketed paste before its composer accepts input.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -31,6 +34,7 @@ REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_E2E="$BUILD_DIR/spacese2e"
 SPACESD_BIN="$BUILD_DIR/spacesd"
+SPACES_CLI="$BUILD_DIR/spaces"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -55,16 +59,20 @@ cleanup() {
     # Best-effort: delete cancels any running run and cleans up artifacts + attributed sessions.
     "$SPACES_E2E" automation-delete --id "$automation_id" >/dev/null 2>&1 || true
   done
+  # The agent fixture directory is left in place: it lives under the ignored build directory, it is
+  # registered as a Spaces project, and removing it would leave the daemon rescanning a directory that no
+  # longer exists on every discovery pass.
 }
 trap cleanup EXIT
 
 require_binaries() {
-  if [[ ! -x "$SPACES_E2E" || ! -x "$SPACESD_BIN" ]]; then
-    printf 'Building spacesd, spacese2e...\n'
-    (cd "$REPO_ROOT" && "$REPO_ROOT/scripts/swiftpm.sh" build --product spacesd --product spacese2e >/dev/null)
+  if [[ ! -x "$SPACES_E2E" || ! -x "$SPACESD_BIN" || ! -x "$SPACES_CLI" ]]; then
+    printf 'Building spacesd, spacese2e, spaces...\n'
+    (cd "$REPO_ROOT" && "$REPO_ROOT/scripts/swiftpm.sh" build --product spacesd --product spacese2e --product spaces >/dev/null)
   fi
   [[ -x "$SPACES_E2E" ]] || fail "spacese2e not found at $SPACES_E2E"
   [[ -x "$SPACESD_BIN" ]] || fail "spacesd not found at $SPACESD_BIN"
+  [[ -x "$SPACES_CLI" ]] || fail "spaces not found at $SPACES_CLI"
   command -v python3 >/dev/null 2>&1 || fail "python3 is required."
   command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is required."
 }
@@ -241,38 +249,141 @@ part_e() {
 }
 
 part_f() {
-  printf '\n=== Scenario f: agent-kind clean-failure + attributed agents + end-agents ===\n'
-  # The full agent-kind lifecycle — spawn a real coding agent, wait for foreground detection, deliver the
-  # seed prompt, observe `done`, then End-agents the left-open session — cannot run here without a real
-  # provider on PATH. A fake `claude` shell-script fixture passes the spawn command gate (which matches only
-  # the command string) but is NOT foreground-detected: the daemon's foreground classifier
-  # (TerminalForegroundProcessInspector) matches the live foreground process's executable/argv[0] basename,
-  # and a shebang script named `claude` runs as its interpreter (`/bin/bash <path>/claude`), so the detected
-  # executable is `bash`, never `claude`. That detect/deliver/done + End-agents cycle is covered by the
-  # workspacecore unit tests (AutomationServiceTests: prompt delivery, done completion, endAttributedAgents).
-  #
-  # Here we drive the agent-kind clean-failure path end to end: a supported command (`claude`, so the gate
-  # passes) targeting a workspace id that does not resolve, so the spawn fails and the run is recorded failed
-  # with no attributed session created. We then assert the run's attributed-agent list is empty and that
-  # end-agents on the (terminal) run is an accepted no-op that leaves the run failed.
-  create_automation --name "e2e-agent-failure" --kind agent --script "" --agent-command "claude" --agent-prompt "investigate" \
-    --workspace-id "nonexistent-workspace-e2e" --trigger manual --concurrency allow
+  printf '\n=== Scenario f: agent-kind workspace validation + end-agents on a terminal run ===\n'
+  # An automation is bound to a workspace at creation time and the daemon refuses one whose workspace does
+  # not resolve, so an agent-kind run can never start against a missing workspace. Deleting a workspace
+  # takes its automations with it (an app-managed cascade), which is why there is no "run against a
+  # vanished workspace" state to drive here. The rest of the agent-kind lifecycle — spawn a real coding
+  # agent, wait for foreground detection, deliver the seed prompt, observe `done` — is scenario g, which
+  # needs a real provider; the failure branches around it (spawn failure, deadline miss, session end before
+  # delivery) are covered by the workspacecore unit tests (AutomationServiceTests).
+  local create_output=""
+  if create_output="$("$SPACES_E2E" automation-create --name "e2e-agent-bad-workspace" --kind agent --script "" --agent-command "claude" \
+    --agent-prompt "investigate" --workspace-id "nonexistent-workspace-e2e" --trigger manual --concurrency allow 2>&1)"; then
+    fail "creating an agent automation for an unresolvable workspace should be refused, got: $create_output"
+  fi
+  printf '%s' "$create_output" | grep -Fq "Workspace not found" || fail "the refusal did not name the missing workspace: $create_output"
+  pass "scenario f.1: an automation whose workspace does not resolve is refused at creation"
+
+  # End-agents on a terminal run is an accepted no-op: it succeeds and leaves the run's status untouched.
+  create_automation --name "e2e-end-agents-noop" --script "exit 4" --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency allow
   trigger_run "$AUTOMATION_ID"
-  wait_run_status "$AUTOMATION_ID" "$RUN_ID" "failed" || fail "agent run with an unresolvable workspace did not fail"
-
-  # A clean launch failure creates no attributed session, so the run's attributed-agent list is empty.
-  local runs agent_count
-  runs="$("$SPACES_E2E" automation-runs --automation-id "$AUTOMATION_ID")"
-  agent_count="$(json_field "$runs" 'next((len(r["attributedAgents"]) for r in d if r["id"]=="'"$RUN_ID"'"), -1)')"
-  [[ "$agent_count" == "0" ]] || fail "expected 0 attributed agents on the failed run, got $agent_count"
-  pass "scenario f.1: agent-kind run with an unresolvable workspace failed with no attributed agents"
-
-  # End-agents on the terminal (failed) run is an accepted no-op: it succeeds and leaves the run failed.
+  wait_run_status "$AUTOMATION_ID" "$RUN_ID" "failed" || fail "the run did not fail"
   "$SPACES_E2E" automation-end-agents --run-id "$RUN_ID" >/dev/null || fail "end-agents on a terminal run should succeed"
   local status_after
   status_after="$(run_status "$AUTOMATION_ID" "$RUN_ID")"
   [[ "$status_after" == "failed" ]] || fail "end-agents changed the run status to '$status_after', expected failed"
-  pass "scenario f.2: end-agents on the terminal run is a no-op and leaves the run failed"
+  pass "scenario f.2: end-agents on a terminal run is a no-op and leaves the run failed"
+}
+
+# ---------------------------------------------------------------------------
+
+# Fixture directory for the real-provider scenario. It lives inside the checkout (under the ignored build
+# directory) because Claude Code asks for folder trust in a project whose tree the user has not accepted,
+# and a directory inside the checkout inherits the checkout's trust; a directory under the profile root, or
+# one made into a git repo of its own, is a project Claude has never seen and stops at that dialog.
+AGENT_FIXTURE_DIR=""
+
+provision_agent_fixture() {
+  AGENT_FIXTURE_DIR="$APP_ROOT/.build/automation-agent-e2e-fixture"
+  mkdir -p "$AGENT_FIXTURE_DIR"
+  local workspace
+  workspace="$("$SPACES_E2E" register-project --project-dir "$AGENT_FIXTURE_DIR")"
+  AGENT_WORKSPACE_ID="$(json_field "$workspace" 'd["id"]')"
+  [[ -n "$AGENT_WORKSPACE_ID" ]] || fail "could not resolve the agent fixture workspace from: $workspace"
+  printf '[automation-e2e] agent fixture dir=%s workspace=%s\n' "$AGENT_FIXTURE_DIR" "$AGENT_WORKSPACE_ID"
+}
+
+# A session's rendered screen and scrollback, which is what `spaces terminal tail` reconstructs by
+# replaying its transcript through a terminal. The raw output log is a stream of repaints where the same
+# text appears once per redraw, so only the rendered form can answer "how many times did this happen".
+run_session_screen() {
+  "$SPACES_CLI" terminal tail "$1" --lines 400 2>/dev/null || true
+}
+
+part_g() {
+  printf '\n=== Scenario g: real coding agent (claude) seed-prompt delivery ===\n'
+  if ! command -v claude >/dev/null 2>&1; then
+    printf 'SKIP: scenario g needs the `claude` CLI on PATH; it is the real-provider ground truth for seed-prompt delivery.\n'
+    return 0
+  fi
+  provision_agent_fixture
+
+  # Multi-line on purpose: the prompt goes to the agent as one paste, and Claude Code collapses a
+  # multi-line paste to a "[Pasted text]" placeholder in the composer — so NONE of these lines is on
+  # screen until the prompt is actually submitted and rendered as a message. The reply is a word to copy
+  # rather than anything to reason about, so a wrong answer means delivery failed, not that the model
+  # slipped. Submitting once therefore puts the reply token on screen exactly twice: the message and the
+  # answer.
+  local marker="ZZPROMPT-E2E" answer="ZZREPLY-OK"
+  local prompt="$marker-L1 This is an automation seed prompt delivered by Spaces.
+$marker-L2 Do not read or write any files and do not run any commands.
+$marker-L3 Reply with exactly $answer and nothing else."
+
+  create_automation --name "e2e-agent-claude" --kind agent --script "" --agent-command "claude --model haiku" \
+    --agent-prompt "$prompt" --workspace-id "$AGENT_WORKSPACE_ID" --trigger manual --concurrency allow
+  trigger_run "$AUTOMATION_ID"
+  local run_id="$RUN_ID" session_id=""
+  local start deadline_seconds=240
+  start="$(now_ms)"
+  while [[ -z "$session_id" ]]; do
+    session_id="$(run_field "$AUTOMATION_ID" "$run_id" '"terminalSessionID"')"
+    [[ "$session_id" == "None" ]] && session_id=""
+    (( "$(now_ms)" - start < 30000 )) || fail "the agent run never recorded a terminal session"
+    [[ -n "$session_id" ]] || sleep 0.3
+  done
+  printf '[automation-e2e] agent session=%s\n' "$session_id"
+
+  # Poll for the agent's answer. A folder-trust dialog means this machine has never accepted the checkout in
+  # Claude Code; that is an environment gap, not a delivery failure, so it skips rather than fails.
+  local screen="" delivered_at=""
+  start="$(now_ms)"
+  while true; do
+    screen="$(run_session_screen "$session_id")"
+    if printf '%s' "$screen" | grep -Fq "trust this folder"; then
+      printf 'SKIP: claude asked for folder trust in %s; accept it once (run `claude` there) and re-run scenario g.\n' "$AGENT_FIXTURE_DIR"
+      return 0
+    fi
+    # Two occurrences: the submitted message plus the agent's reply. One is only the message.
+    (( "$(printf '%s' "$screen" | grep -o "$answer" | wc -l)" >= 2 )) && break
+    if (( "$(now_ms)" - start >= deadline_seconds * 1000 )); then
+      printf '%s\n' "$screen" | tail -40 >&2
+      fail "the agent never answered the seed prompt within ${deadline_seconds}s (delivery did not reach it)"
+    fi
+    sleep 1
+  done
+  pass "scenario g.1: the agent answered the seed prompt"
+
+  # Delivery is recorded from the terminal's own reaction, which the run observes on its next ticks — the
+  # agent can start answering before the ladder has seen enough to record it.
+  start="$(now_ms)"
+  while true; do
+    delivered_at="$(sqlite3 "$PROFILE_DB_PATH" "SELECT COALESCE(prompt_delivered_at, '') FROM automation_runs WHERE id='$run_id';")"
+    [[ -n "$delivered_at" ]] && break
+    (( "$(now_ms)" - start < 30000 )) || fail "the run answered its prompt but never recorded a delivery timestamp"
+    sleep 0.5
+  done
+  pass "scenario g.2: the run recorded the prompt as delivered"
+
+  # The whole prompt reached the agent: a multi-line paste shows as a placeholder in the composer, so its
+  # lines are on screen only because the agent submitted and rendered the message.
+  local line
+  for line in "$marker-L1" "$marker-L2" "$marker-L3"; do
+    printf '%s' "$screen" | grep -Fq "$line" || fail "the agent's transcript is missing prompt line '$line' — the prompt arrived truncated"
+  done
+  pass "scenario g.3: every line of the multi-line prompt reached the agent"
+
+  # Submitted exactly once. A re-sent prompt is a second user message the agent answers again, so the
+  # delivery ladder duplicating work shows up as a second answer on the rendered screen. The wait covers the
+  # ladder's own retry budget (a few one-second ticks) so a late duplicate is not missed.
+  sleep 12
+  screen="$(run_session_screen "$session_id")"
+  local answers submissions
+  answers="$(printf '%s' "$screen" | grep -o "$answer" | wc -l | tr -d ' ')"
+  submissions="$(printf '%s' "$screen" | grep -o "$marker-L1" | wc -l | tr -d ' ')"
+  [[ "$submissions" == "1" ]] || fail "the prompt appears $submissions times in the agent's transcript, expected exactly 1 (a re-send duplicated the work)"
+  [[ "$answers" == "2" ]] || fail "the reply token appears $answers times, expected 2 (one submitted message and one answer)"
+  pass "scenario g.4: the prompt was submitted exactly once"
 }
 
 main() {
@@ -285,6 +396,7 @@ main() {
   part_d
   part_e
   part_f
+  part_g
   printf '\nAll automation e2e scenarios passed.\n'
 }
 

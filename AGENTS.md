@@ -27,6 +27,7 @@
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
 - When making breaking changes, explicitly ask whether backwards compatibility is needed. Do not make the decision on supporting or not supporting backwards compatibility without explicit approval.
+- A performance change must be measured: capture the metric on the unmodified baseline, capture it again after the change with the identical procedure, and put the before/after numbers in the PR body.
 - Tests should validate product behavior, not database schema shape. Do not add schema-only tests for table or column ownership. Code and behavior tests should cover the contract.
 - Before committing, go through uncommitted changes to identify and act on:
     - wrong paths we went down and any code leftover from those that should be removed
@@ -38,6 +39,7 @@
     - do the tests accurately and sufficiently capture intended product behavior or are we testing for implementation details? do we need to add any more tests?
     - unnecessary fixes, fallback paths, options, arguments, or script modes we added during debuging that should be removed to avoid unnecessary code complexity, code maintenance, or performance issues.
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
+- When a task includes opening a PR, announce the work as done only after the PR has been created successfully.
 - The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate. You can skip the date if making only documentation or website changes.
 
 - When running `git commit`, allow at least a 15-minute timeout so pre-commit checks can finish.
@@ -63,7 +65,7 @@
 - The Ghostty fork is tracked as a git submodule at `apps/macos/vendor/ghostty` on the fork's `spaces` branch.
 - The submodule gitlink is the single source of truth for the Ghostty commit used by `GhosttyKit.xcframework` and `libghostty-vt`.
 - Edit Ghostty in `apps/macos/vendor/ghostty`, commit and push fork changes to the fork's `spaces` branch, then update the parent repo's submodule pointer in the normal Spaces pull request that depends on that Ghostty change.
-- When a change updates the Ghostty fork, sync the fork with upstream as part of that change: merge `ghostty-org/ghostty` `main` (mirrored onto the fork's `main` daily by the fork's `sync-main-from-upstream` workflow) into the `spaces` branch, resolve conflicts in favor of fork behavior (including the iOS GhosttyKit build, which upstream does not carry), then rebuild artifacts and run the fork and Spaces tests before advancing the gitlink.
+- Ordinary fork-updating changes land on the current `spaces` base; they do not carry an upstream sync. Upstream syncs are their own dedicated changes, run periodically: merge `ghostty-org/ghostty` `main` (mirrored onto the fork's `main` daily by the fork's `sync-main-from-upstream` workflow) into the `spaces` branch, resolve conflicts in favor of fork behavior (including the iOS GhosttyKit build, which upstream does not carry), then rebuild artifacts and run the fork and Spaces tests before advancing the gitlink.
 - PR checks and Spaces app releases consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. Trusted same-repo PR, main-push, manual, and release workflows build from the pinned submodule and publish reusable artifacts when the matching release is missing or incomplete.
 - Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.

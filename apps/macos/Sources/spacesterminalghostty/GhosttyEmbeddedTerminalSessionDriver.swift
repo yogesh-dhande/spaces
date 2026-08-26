@@ -443,8 +443,28 @@
             ghostty_session_refresh(session)
         }
 
-        func sendRawBytes(_ data: Data) {
-            guard let session, !data.isEmpty else { return }
+        /// Reports whether the bytes reached the session. A torn-down session (no ghostty session left)
+        /// has nowhere to write them, and saying so is what lets a control-request send answer with a
+        /// real write instead of an accepted request that went nowhere.
+        @discardableResult func sendRawBytes(_ data: Data) -> Bool {
+            guard let session, !data.isEmpty else { return false }
+            sendInputRaw(data, session: session)
+            return true
+        }
+
+        /// The submit path's `sendRawBytes`: the same input, plus the host-PTY writes ghostty produced for
+        /// it, or nil when there was no live session to hand it to. See `sendTextAsPasteAwaitingEmission`
+        /// for why the two shapes exist.
+        func sendRawBytesAwaitingEmission(_ data: Data) -> TerminalInputWriteBatch? {
+            guard let session, let hostPTY, !data.isEmpty else { return nil }
+            let (_, writes) = hostPTY.collectingWrites {
+                sendInputRaw(data, session: session)
+                awaitGhosttyInputEmission(session)
+            }
+            return TerminalInputWriteBatch(writes)
+        }
+
+        private func sendInputRaw(_ data: Data, session: ghostty_session_t) {
             data.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_send_input_raw(session, baseAddress, UInt(data.count))
@@ -454,18 +474,65 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        /// Returns once ghostty's IO thread has processed everything queued before this call — including
+        /// the input just handed to it, whose `receive_buffer` callback is what enqueues the host-PTY
+        /// write.
+        ///
+        /// Input reaches that thread through a FIFO mailbox and is emitted from there with no completion
+        /// signal of its own, so a send cannot otherwise know whether its bytes have become a PTY write
+        /// yet. `ghostty_session_sync_io` posts a message that carries nothing and whose handler does
+        /// nothing (`Message.BlockingSync` in the fork's `termio`), then waits for the IO thread to reach
+        /// it; mailbox order does the rest.
+        ///
+        /// Ordering through a *byte* payload was rejected: `ghostty_session_process_output` would work
+        /// only if the bytes were inert in every parser state, and none are. NUL is ignored while the
+        /// parser executes C0 controls but is forwarded as payload inside DCS/APC passthrough, and any
+        /// byte injected between the units of a multi-byte UTF-8 codepoint invalidates the decode. PTY
+        /// output can be parked in any of those states when a submit lands, and corrupting it would also
+        /// split live terminal state from `output.log` and from handoff replay.
+        ///
+        /// Only the submit path pays for this: it blocks the terminal engine actor for one mailbox round
+        /// trip, which is nothing against a submit's own pacing but would be a real per-keystroke cost on
+        /// interactive input — and interactive input has no delivery record to be honest about.
+        private func awaitGhosttyInputEmission(_ session: ghostty_session_t) { ghostty_session_sync_io(session) }
+
         /// Sends a key press through ghostty's own key encoder, which reads the live terminal state
         /// (Kitty keyboard flags, DECCKM, `modifyOtherKeys`) to pick the right sequence.
-        func sendKey(_ event: ghostty_input_key_s) {
-            guard let surface else { return }
+        @discardableResult func sendKey(_ event: ghostty_input_key_s) -> Bool {
+            guard let surface else { return false }
             _ = ghostty_surface_key(surface, event)
             GhosttyEmbeddedAppService.shared.tick()
             requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
+            return true
         }
 
-        func sendTextAsPaste(_ text: String) {
-            guard let surface = surface, !text.isEmpty else { return }
+        /// Reports whether the text reached the surface, for the same reason `sendRawBytes` does.
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool {
+            guard let surface = surface, !text.isEmpty else { return false }
+            sendText(text, surface: surface)
+            return true
+        }
+
+        /// The submit path's `sendTextAsPaste`: the same paste, plus the host-PTY writes ghostty produced
+        /// for it, or nil when there was no live surface.
+        ///
+        /// Ghostty does not write to the PTY here — it encodes the paste and hands the bytes to its IO
+        /// thread, which calls back into the host PTY driver — so what this call "sent" is only knowable
+        /// from the writes that callback enqueued. Collecting them around a call that waits for that
+        /// emission (`awaitGhosttyInputEmission`) is what lets a submit answer for bytes at the PTY
+        /// instead of for ghostty having taken them: without it, a blocked write queue plus a child exit
+        /// still reports a delivered send.
+        func sendTextAsPasteAwaitingEmission(_ text: String) -> TerminalInputWriteBatch? {
+            guard let surface = surface, let session, let hostPTY, !text.isEmpty else { return nil }
+            let (_, writes) = hostPTY.collectingWrites {
+                sendText(text, surface: surface)
+                awaitGhosttyInputEmission(session)
+            }
+            return TerminalInputWriteBatch(writes)
+        }
+
+        private func sendText(_ text: String, surface: ghostty_surface_t) {
             let data = Data(text.utf8)
             data.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }

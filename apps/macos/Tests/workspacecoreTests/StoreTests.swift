@@ -564,11 +564,10 @@ final class StoreTests: XCTestCase {
         }
     }
 
-    // The v17→v18 step only creates a brand-new table (nothing to carry forward), so this test's job is
-    // proving the migration leaves a genuinely usable table behind on a real pre-existing database — not
-    // just that `current_version` advances — by exercising an insert against an existing workspace row
-    // straight after opening. A store method (`upsertReviewComment`) rather than raw SQL, so the FK
-    // reference this table declares against `workspaces(id)` is exercised as production would use it.
+    // A profile from before the two latest migrations must advance through both steps in order and leave
+    // the Editor's review-comment storage genuinely usable — not merely advance `current_version`. A store
+    // method (`upsertReviewComment`) rather than raw SQL exercises the table's workspace foreign key the
+    // same way production does.
     func testUpgradeFromV17CreatesAUsableReviewCommentsTable() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
@@ -621,7 +620,7 @@ final class StoreTests: XCTestCase {
             let drafts = try store.reviewCommentDrafts(workspaceID: "workspace")
             XCTAssertEqual(drafts.map(\.id), ["comment-1"])
             XCTAssertEqual(drafts.first?.body, "why?")
-            XCTAssertEqual(drafts.first?.revision, 0, "the v17->v18 migration's revision column defaults new/untouched rows to 0")
+            XCTAssertEqual(drafts.first?.revision, 0, "the v18->v19 migration's revision column defaults new/untouched rows to 0")
         }
     }
 

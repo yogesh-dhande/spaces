@@ -62,6 +62,7 @@ dump_lane_state() {
 }
 
 for suite in \
+  AgentHookSubprocessTests \
   SpacesTestHostDetectionTests \
   TerminalServiceSystemdUnitTests \
   TerminalServiceSystemdStartDeadlineTests \

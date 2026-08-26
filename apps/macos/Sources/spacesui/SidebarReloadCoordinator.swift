@@ -1,7 +1,17 @@
 import Foundation
 
 @MainActor final class SidebarReloadCoordinator<Snapshot> {
+    enum ReloadScope: Equatable {
+        case terminalOverview
+        case fullSnapshot
+
+        static func merged(_ lhs: ReloadScope, _ rhs: ReloadScope) -> ReloadScope {
+            lhs == .fullSnapshot || rhs == .fullSnapshot ? .fullSnapshot : .terminalOverview
+        }
+    }
+
     struct ReloadRequest: Equatable {
+        let scope: ReloadScope
         let failurePlaceholderMessage: String?
         let forceRemoteRefresh: Bool
         // Whether this request clears a device's failure backoff, distinct from `forceRemoteRefresh`
@@ -18,7 +28,7 @@ import Foundation
         case queued
     }
 
-    private let loadSnapshot: @MainActor () async -> Result<Snapshot, any Error>
+    private let loadSnapshot: @MainActor (ReloadScope) async -> Result<Snapshot, any Error>
     private let applySnapshot: @MainActor (Snapshot, _ forceRemoteRefresh: Bool, _ bypassesBackoff: Bool) -> Void
     private let handleFailure: @MainActor (any Error, String?) -> Void
     private var reloadTask: Task<Void, Never>?
@@ -39,7 +49,7 @@ import Foundation
     private(set) var state: State = .idle
 
     init(
-        loadSnapshot: @escaping @MainActor () async -> Result<Snapshot, any Error>,
+        loadSnapshot: @escaping @MainActor (ReloadScope) async -> Result<Snapshot, any Error>,
         applySnapshot: @escaping @MainActor (Snapshot, _ forceRemoteRefresh: Bool, _ bypassesBackoff: Bool) -> Void,
         handleFailure: @escaping @MainActor (any Error, String?) -> Void, minimumStartInterval: Duration = .milliseconds(250)
     ) {
@@ -52,9 +62,11 @@ import Foundation
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh") so a
     /// caller that only wants the existing coupled behavior does not have to spell it out. Pass `false`
     /// explicitly to force-refresh without clearing any device's backoff — see `ReloadRequest`.
-    func request(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
+    func request(
+        scope: ReloadScope = .fullSnapshot, failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil
+    ) {
         let request = ReloadRequest(
-            failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh,
+            scope: scope, failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh,
             bypassesBackoff: bypassesBackoff ?? forceRemoteRefresh)
         guard reloadTask?.isCancelled != false else {
             pendingRequest = mergedPendingRequest(existing: pendingRequest, next: request)
@@ -71,7 +83,7 @@ import Foundation
     /// either starts immediately or queues the pending request that the next start carries.
     func requestAndAwaitNextRun() async {
         let targetRunID = nextRunID + 1
-        request()
+        request(scope: .fullSnapshot)
         // `withCheckedContinuation` inherits this method's main-actor isolation, so no run can finish
         // between reading `nextRunID` above and the waiter being registered here.
         await withCheckedContinuation { continuation in nextRunWaiters.append((targetRunID, continuation)) }
@@ -152,7 +164,7 @@ import Foundation
     }
 
     private func run(_ request: ReloadRequest, runID: Int) async {
-        let result = await loadSnapshot()
+        let result = await loadSnapshot(request.scope)
         guard !Task.isCancelled else {
             finishCurrentRun(runID: runID)
             return
@@ -183,6 +195,7 @@ import Foundation
 
     private func mergedPendingRequest(existing: ReloadRequest?, next: ReloadRequest) -> ReloadRequest {
         ReloadRequest(
+            scope: existing.map { ReloadScope.merged($0.scope, next.scope) } ?? next.scope,
             failurePlaceholderMessage: existing?.failurePlaceholderMessage ?? next.failurePlaceholderMessage,
             forceRemoteRefresh: (existing?.forceRemoteRefresh ?? false) || next.forceRemoteRefresh,
             bypassesBackoff: (existing?.bypassesBackoff ?? false) || next.bypassesBackoff)

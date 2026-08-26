@@ -207,7 +207,7 @@ struct SpacesDeviceOverviewBuilder {
             foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue,
             foregroundCommand: TerminalForegroundProcessInspector.displayCommand(
                 executableName: session.runtimeState.foregroundExecutableName, argv: session.runtimeState.foregroundArgv),
-            bellAt: session.runtimeState.bellAt)
+            bellAt: session.runtimeState.bellAt, bracketedPasteActive: session.runtimeState.bracketedPasteActive)
     }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {

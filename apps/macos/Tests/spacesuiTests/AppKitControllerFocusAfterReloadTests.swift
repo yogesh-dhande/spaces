@@ -98,10 +98,12 @@ extension ProcessProfileEnvironmentSuites {
         private func snapshot(overview: SpacesDeviceOverviewPayload, deviceID: String) -> AppKitController.SidebarDataSnapshot {
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
             return AppKitController.SidebarDataSnapshot(
-                config: AppConfig(portRange: .default), projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
-                workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: [], localDeviceID: deviceID, localDeviceName: "This Mac",
-                localPairedDevice: localDevice(), localDeviceOverview: overview, localDaemonStatus: .testStatus, localCompatibility: .compatible,
-                localOfflineMessage: nil)
+                config: AppConfig(portRange: .default),
+                local: AppKitController.LocalDeviceSidebarSnapshot(
+                    projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
+                    workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: [], localDeviceID: deviceID,
+                    localDeviceName: "This Mac", localPairedDevice: localDevice(), localDeviceOverview: overview, localDaemonStatus: .testStatus,
+                    localCompatibility: .compatible, localOfflineMessage: nil))
         }
 
         /// The measured failure: the app is holding the pre-start snapshot when the focus arrives, so the

@@ -4,13 +4,50 @@ import Testing
 @testable import spacesui
 
 @Suite @MainActor struct SidebarReloadCoordinatorTests {
+    @Test func terminalOverviewRequestLoadsOnlyThatScope() async {
+        var loadedScopes: [SidebarReloadCoordinator<Int>.ReloadScope] = []
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: { scope in
+                loadedScopes.append(scope)
+                return .success(1)
+            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in })
+
+        coordinator.request(scope: .terminalOverview)
+        await coordinator.drainCurrentReloadForTesting()
+
+        #expect(loadedScopes == [.terminalOverview])
+    }
+
+    @Test func queuedFullSnapshotDominatesTerminalOverviewRequestsInEitherOrder() async {
+        for queuedScopes in [[SidebarReloadCoordinator<Int>.ReloadScope.terminalOverview, .fullSnapshot], [.fullSnapshot, .terminalOverview]] {
+            var continuations: [CheckedContinuation<Result<Int, any Error>, Never>] = []
+            var loadedScopes: [SidebarReloadCoordinator<Int>.ReloadScope] = []
+            let coordinator = SidebarReloadCoordinator<Int>(
+                loadSnapshot: { scope in
+                    loadedScopes.append(scope)
+                    return await withCheckedContinuation { continuation in continuations.append(continuation) }
+                }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
+
+            coordinator.request(scope: .terminalOverview)
+            #expect(await eventually { continuations.count == 1 })
+            for scope in queuedScopes { coordinator.request(scope: scope) }
+
+            continuations.removeFirst().resume(returning: .success(1))
+            #expect(await eventually { continuations.count == 1 })
+            continuations.removeFirst().resume(returning: .success(2))
+            await coordinator.drainCurrentReloadForTesting()
+
+            #expect(loadedScopes == [.terminalOverview, .fullSnapshot])
+        }
+    }
+
     @Test func queuedReloadsCoalesceWhileLoadIsRunning() async {
         var continuations: [CheckedContinuation<Result<Int, any Error>, Never>] = []
         var applied: [(snapshot: Int, forceRemoteRefresh: Bool, bypassesBackoff: Bool)] = []
         var failures: [String?] = []
 
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
+            loadSnapshot: { _ in await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
             handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) }, minimumStartInterval: .zero)
 
@@ -42,7 +79,7 @@ import Testing
         var failures: [String?] = []
 
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
+            loadSnapshot: { _ in await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
             handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) }, minimumStartInterval: .zero)
 
@@ -79,7 +116,7 @@ import Testing
     @Test func bypassesBackoffDefaultsToForceRemoteRefreshWhenNotSpecified() async {
         var applied: [(forceRemoteRefresh: Bool, bypassesBackoff: Bool)] = []
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { .success(1) },
+            loadSnapshot: { _ in .success(1) },
             applySnapshot: { _, forceRemoteRefresh, bypassesBackoff in applied.append((forceRemoteRefresh, bypassesBackoff)) },
             handleFailure: { _, _ in })
 
@@ -98,7 +135,7 @@ import Testing
     @Test func aForcedRefreshCanBypassFreshnessWithoutClearingBackoff() async {
         var applied: [(forceRemoteRefresh: Bool, bypassesBackoff: Bool)] = []
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { .success(1) },
+            loadSnapshot: { _ in .success(1) },
             applySnapshot: { _, forceRemoteRefresh, bypassesBackoff in applied.append((forceRemoteRefresh, bypassesBackoff)) },
             handleFailure: { _, _ in })
 
@@ -120,7 +157,7 @@ import Testing
         var loads = 0
 
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
@@ -145,7 +182,7 @@ import Testing
         var loads = 0
 
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
@@ -166,7 +203,7 @@ import Testing
     @Test func theFirstRequestStartsImmediately() async {
         var loads = 0
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
@@ -183,7 +220,7 @@ import Testing
         let interval = Duration.milliseconds(100)
         var loads = 0
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: interval)
@@ -205,7 +242,7 @@ import Testing
     @Test func stopCancelsAScheduledStart() async {
         var loads = 0
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
@@ -228,7 +265,7 @@ import Testing
     @Test func awaitingTheNextRunFromIdleReturnsOnceThatRunHasApplied() async {
         var applied: [Int] = []
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { .success(1) }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in },
+            loadSnapshot: { _ in .success(1) }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in },
             minimumStartInterval: .zero)
 
         await coordinator.requestAndAwaitNextRun()
@@ -243,11 +280,14 @@ import Testing
     @Test func awaitingTheNextRunSkipsTheRunAlreadyInFlight() async {
         var continuations: [CheckedContinuation<Result<Int, any Error>, Never>] = []
         var applied: [Int] = []
+        var loadedScopes: [SidebarReloadCoordinator<Int>.ReloadScope] = []
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
-            applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
+            loadSnapshot: { scope in
+                loadedScopes.append(scope)
+                return await withCheckedContinuation { continuation in continuations.append(continuation) }
+            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
 
-        coordinator.request()
+        coordinator.request(scope: .terminalOverview)
         #expect(await eventually { continuations.count == 1 })
 
         let returned = ReturnFlag()
@@ -265,6 +305,7 @@ import Testing
         continuations.removeFirst().resume(returning: .success(2))
         #expect(await eventually { returned.value })
         #expect(applied == [1, 2])
+        #expect(loadedScopes == [.terminalOverview, .fullSnapshot])
         await waiter.value
     }
 
@@ -274,7 +315,7 @@ import Testing
         var loads = 0
         var applied: [Int] = []
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: {
+            loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
             }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .milliseconds(60))
@@ -293,7 +334,7 @@ import Testing
     /// reload that will never happen.
     @Test func stopReleasesAWaiter() async {
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { .success(1) }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
+            loadSnapshot: { _ in .success(1) }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
 
         coordinator.request()
         await coordinator.drainCurrentReloadForTesting()

@@ -38,6 +38,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let terminationEscalationIntervals: TerminationEscalationIntervals
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
+    // Non-nil only while `collectingWrites` is running: the acknowledgements of the writes enqueued
+    // inside it. Guarded by `lock`.
+    private var collectedWrites: [TerminalInputWriteAcknowledgement]?
     private let handoffWriteAction: @Sendable (Int32, Data) -> HandoffWriteResult
     private let lock = NSLock()
     private var masterFD: Int32 = -1
@@ -388,23 +391,75 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         escalateUntilLeaderIsCollected(childPID: pid, processGroupID: resolvedProcessGroupID)
     }
 
-    func sendRawBytes(_ data: Data) {
-        guard !data.isEmpty else { return }
+    /// Hands `data` to the serial write queue and reports, through the returned acknowledgement, what the
+    /// write actually did — resolved inside the queued block, from the fd as it stands at write time and
+    /// from `write(2)`'s own result. Answering at enqueue time cannot be honest: the child can exit
+    /// between the enqueue and the write, and a partial or failed write leaves the payload unsent, which
+    /// is exactly the teardown race a submit's acknowledgement exists to catch (a prompt recorded as
+    /// delivered that never reached the PTY).
+    ///
+    /// The write still runs on `writeQueue` rather than inline so a full PTY buffer cannot block the
+    /// caller (the terminal engine actor). Callers that only need ordering ignore the acknowledgement;
+    /// `drainPendingWrites` keeps its meaning either way, since the acknowledgement resolves inside the
+    /// same queued block that barrier waits for.
+    @discardableResult func sendRawBytes(_ data: Data) -> TerminalInputWriteAcknowledgement {
+        let acknowledgement = TerminalInputWriteAcknowledgement()
+        guard !data.isEmpty else {
+            acknowledgement.resolve(.notDelivered)
+            return acknowledgement
+        }
+        lock.lock()
+        collectedWrites?.append(acknowledgement)
+        lock.unlock()
+        writeQueue.async { [weak self] in
+            guard let self else { return acknowledgement.resolve(.notDelivered) }
+            acknowledgement.resolve(self.writeToMasterFD(data) ? .delivered : .notDelivered)
+        }
+        return acknowledgement
+    }
+
+    /// Runs `body` while recording the acknowledgement of every write enqueued on this driver, and hands
+    /// those back with its result.
+    ///
+    /// An embedded session's input never reaches this driver through a call the sender makes: ghostty
+    /// encodes the text or key and calls back into `sendRawBytes` from inside the ghostty call, so the
+    /// PTY writes a send produced are invisible to the send itself. Capturing them around that call is
+    /// what lets the embedded send chokepoint answer for the bytes rather than for ghostty having
+    /// accepted them. A write another thread enqueues while `body` runs is captured too, which only
+    /// makes the answer stricter: it is still a write to this session's PTY.
+    ///
+    /// Recording is not nested — the terminal engine actor serializes the sends that use it.
+    func collectingWrites<T>(_ body: () -> T) -> (result: T, writes: [TerminalInputWriteAcknowledgement]) {
+        lock.lock()
+        precondition(collectedWrites == nil, "input write collection is not nested")
+        collectedWrites = []
+        lock.unlock()
+        let result = body()
+        lock.lock()
+        let writes = collectedWrites ?? []
+        collectedWrites = nil
+        lock.unlock()
+        return (result, writes)
+    }
+
+    /// Writes every byte of `data` to the master fd, retrying `EINTR`, and reports whether the whole
+    /// payload landed. The fd is resolved HERE rather than carried in from the enqueue, so a session that
+    /// closed while this write sat in the queue writes nothing and says so.
+    private func writeToMasterFD(_ data: Data) -> Bool {
         let fd = currentMasterFD()
-        guard fd >= 0 else { return }
-        writeQueue.async {
-            data.withUnsafeBytes { rawBuffer in
-                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-                var sent = 0
-                while sent < data.count {
-                    let written = write(fd, baseAddress.advanced(by: sent), data.count - sent)
-                    if written <= 0 {
-                        if errno == EINTR { continue }
-                        break
-                    }
-                    sent += written
+        guard fd >= 0 else { return false }
+        return data.withUnsafeBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return false }
+            var sent = 0
+            while sent < data.count {
+                let written = write(fd, baseAddress.advanced(by: sent), data.count - sent)
+                if written <= 0 {
+                    if errno == EINTR { continue }
+                    return false
                 }
+                sent += written
             }
+            return true
         }
     }
 

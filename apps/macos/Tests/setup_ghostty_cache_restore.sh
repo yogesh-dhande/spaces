@@ -18,7 +18,7 @@ fail() {
     for log in release-package.out seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out \
         foreign-arch-reuse.out coexist-current-seed.out coexist-bumped-seed.out coexist-current-restore.out \
         coexist-bumped-restore.out poisoned-cache.out poisoned-cache-restore.out poisoned-local.out \
-        built-reuse.out schema-local.out schema-release.out; do
+        built-reuse.out schema-local.out schema-release.out hook-environment.out; do
         if [[ -f "$TMP_ROOT/$log" ]]; then
             echo "--- $log ---" >&2
             cat "$TMP_ROOT/$log" >&2
@@ -447,6 +447,22 @@ DERIVED_ENTRY="$PRIMARY_APP_ROOT/.local/ghostty-cache/$GHOSTTY_SHA/$CACHE_KEY_LE
 # Artifacts still install into the running tree; only the cache is shared.
 [[ -d "$PRIMARY_WORKTREE/apps/macos/.local/ghosttykit/GhosttyKit.xcframework" ]] \
     || fail "worktree run did not install artifacts into its own .local"
+
+# Git exports repository-local environment variables to hooks. With an initialized submodule,
+# those variables must not override `git -C` when setup inspects Ghostty: otherwise it reads the
+# superproject HEAD as the Ghostty SHA and rejects the valid worktree-local manifest it just
+# installed. A forced gh failure proves this run reuses that manifest without reaching the network.
+git clone -q "$TEMP_GHOSTTY_ROOT" "$PRIMARY_WORKTREE/apps/macos/vendor/ghostty"
+HOOK_GIT_DIR="$(git -C "$PRIMARY_WORKTREE" rev-parse --absolute-git-dir)"
+HOOK_GIT_INDEX_FILE="$(git -C "$PRIMARY_WORKTREE" rev-parse --git-path index)"
+: > "$GH_LOG"
+if ! env "${DERIVED_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "GIT_DIR=$HOOK_GIT_DIR" "GIT_WORK_TREE=$PRIMARY_WORKTREE" \
+    "GIT_INDEX_FILE=$HOOK_GIT_INDEX_FILE" "GIT_PREFIX=" \
+    "$PRIMARY_WORKTREE/apps/macos/scripts/setup_ghostty.sh" > "$TMP_ROOT/hook-environment.out" 2>&1; then
+    fail "worktree setup did not reuse local artifacts under the Git hook environment"
+fi
+[[ ! -s "$GH_LOG" ]] || fail "worktree setup reached the network under the Git hook environment"
 
 # A second worktree restores that entry instead of going back to the network.
 SECOND_WORKTREE="$TMP_ROOT/primary-worktree-2"
