@@ -2,6 +2,7 @@ import { buildPathTree, PathTreeDirNode, PathTreeFileNode, PathTreeNode } from "
 
 export interface FilesTreeCallbacks {
   onSelect(path: string): void;
+  onExpandedPathsChange?(paths: readonly string[]): void;
 }
 
 /** Returned by `renderFilesTree`; the only way callers touch the tree after the initial paint. */
@@ -11,6 +12,7 @@ export interface FilesTreeHandle {
    *  `undefined` or isn't present in this tree. Never rebuilds already-materialized DOM — see the
    *  module doc comment below. */
   setSelected(path: string | undefined): void;
+  expandedPaths(): readonly string[];
 }
 
 /**
@@ -39,6 +41,7 @@ export function renderFilesTree(
   paths: readonly string[],
   selectedPath: string | undefined,
   callbacks: FilesTreeCallbacks,
+  initiallyExpandedPaths: readonly string[] = [],
 ): FilesTreeHandle {
   container.replaceChildren();
 
@@ -49,14 +52,15 @@ export function renderFilesTree(
     empty.className = "empty";
     empty.textContent = "No files";
     container.appendChild(empty);
-    return { setSelected: () => {} };
+    return { setSelected: () => {}, expandedPaths: () => [] };
   }
 
   const tree = buildPathTree(paths);
-  const initialChain = new Set(selectedPath !== undefined ? (collectAncestorDirs(tree, selectedPath) ?? []) : []);
+  const expandedPaths = new Set(initiallyExpandedPaths);
+  for (const path of selectedPath !== undefined ? (collectAncestorDirs(tree, selectedPath) ?? []) : []) expandedPaths.add(path);
 
   for (const node of tree) {
-    container.appendChild(renderNode(node, 0, initialChain, selectedPath, callbacks, registry));
+    container.appendChild(renderNode(node, 0, expandedPaths, selectedPath, callbacks, registry));
   }
 
   let selectedRow = selectedPath !== undefined ? registry.files.get(selectedPath) : undefined;
@@ -78,6 +82,7 @@ export function renderFilesTree(
       selectedRow = row;
       row.scrollIntoView({ block: "nearest" });
     },
+    expandedPaths: () => [...expandedPaths],
   };
 }
 
@@ -116,7 +121,7 @@ function collectAncestorDirs(nodes: readonly PathTreeNode[], path: string): stri
 function renderNode(
   node: PathTreeNode,
   depth: number,
-  initialChain: ReadonlySet<string>,
+  initialChain: Set<string>,
   selectedPath: string | undefined,
   callbacks: FilesTreeCallbacks,
   registry: Registry,
@@ -133,7 +138,7 @@ function renderNode(
 function renderDirNode(
   node: PathTreeDirNode,
   depth: number,
-  initialChain: ReadonlySet<string>,
+  expandedPaths: Set<string>,
   selectedPath: string | undefined,
   callbacks: FilesTreeCallbacks,
   registry: Registry,
@@ -163,14 +168,14 @@ function renderDirNode(
   // Collapsed by default; the one exception is an ancestor of the initial selectedPath, which
   // starts expanded and materialized (see the module doc comment) so the selected row paints
   // visible and highlighted without requiring a manual expand.
-  let expanded = initialChain.has(node.path);
+  let expanded = expandedPaths.has(node.path);
   let materialized = false;
 
   const materialize = (): void => {
     if (materialized) return;
     materialized = true;
     for (const child of node.children) {
-      childrenEl.appendChild(renderNode(child, depth + 1, initialChain, selectedPath, callbacks, registry));
+      childrenEl.appendChild(renderNode(child, depth + 1, expandedPaths, selectedPath, callbacks, registry));
     }
   };
 
@@ -183,7 +188,10 @@ function renderDirNode(
   const toggle = (): void => {
     materialize();
     expanded = !expanded;
+    if (expanded) expandedPaths.add(node.path);
+    else expandedPaths.delete(node.path);
     applyExpandedState();
+    callbacks.onExpandedPathsChange?.([...expandedPaths]);
   };
 
   if (expanded) materialize();

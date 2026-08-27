@@ -81,8 +81,7 @@ public enum SpacesDeviceClient {
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
     /// A response carrying a large embedded payload — a transcript up to the full scrollback budget
     /// (10MB, ~13MB as base64 JSON), a workspace file read/write (`workspaceFileMaxBytes`, also base64),
-    /// or a `workspaceDiff` (patches capped at 8MB total) — needs more than the default timeout on slow
-    /// remote links.
+    /// or one bounded workspace-diff patch range — needs more than the default timeout on slow remote links.
     static let largePayloadRequestTimeoutSeconds: TimeInterval = 60
 
     public static func macOSClientApp(
@@ -702,21 +701,74 @@ public enum SpacesDeviceClient {
         return result
     }
 
-    /// Fetches a workspace's diff on a paired device. `refName == nil, lastCommit == false` diffs
-    /// uncommitted changes against `HEAD`; `lastCommit == true` diffs `HEAD`'s own commit (its parent
-    /// against its tree); a non-nil `refName` diffs the merge-base of `refName` and `HEAD` against the
-    /// working tree (see `SpacesDeviceWorkspaceDiffRequest`).
-    public static func workspaceDiff(
-        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, device: SpacesPairedDeviceRecord,
+    /// Reads one bounded changed-file metadata chunk before the Editor begins fetching patch bodies.
+    public static func workspaceDiffManifestChunk(
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String? = nil, fileIndex: Int,
+        device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceWorkspaceDiffResult {
+    ) throws -> SpacesDeviceWorkspaceDiffManifestChunkResult {
         let response = try request(
-            .init(command: .workspaceDiff(.init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit))), device: device,
+            .init(
+                command: .workspaceDiffManifestChunk(
+                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex))), device: device,
             clientApp: clientApp, profile: profile)
-        guard let result = response.workspaceDiff else {
+        guard let result = response.workspaceDiffManifestChunk else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return result
+    }
+
+    /// Reads one bounded patch range from a daemon-owned transfer. Pass `transferID` returned by the initial
+    /// range unchanged for every later offset.
+    public static func workspaceDiffFileChunk(
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
+        transferID: String? = nil, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceDiffFileChunkResult {
+        let response = try request(
+            .init(
+                command: .workspaceDiffFileChunk(
+                    .init(
+                        workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
+                        byteOffset: byteOffset,
+                        transferID: transferID))), device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceDiffFileChunk else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Releases an incomplete diff patch transfer. It is separate from `workspaceDiffFileChunk`'s typed
+    /// read result because cancellation succeeds without a patch payload and is safe to repeat after an
+    /// ambiguous connection failure.
+    public static func cancelWorkspaceDiffFileChunk(
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
+        transferID: String,
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws {
+        let response = try request(
+            .init(
+                command: .workspaceDiffFileChunk(
+                    .init(
+                        workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
+                        byteOffset: byteOffset,
+                        transferID: transferID, cancel: true))), device: device, clientApp: clientApp, profile: profile)
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+    }
+
+    /// Releases a manifest plan and every patch transfer it owns. Call this when a progressive
+    /// Editor generation is superseded or has consumed all of the patches it needs; daemon TTL reaps an
+    /// abandoned generation.
+    public static func cancelWorkspaceDiffManifest(
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws {
+        let response = try request(
+            .init(
+                command: .workspaceDiffManifestRelease(
+                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID))), device: device,
+            clientApp: clientApp, profile: profile)
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
     }
 
     /// Lists every path in a workspace's checkout on a paired device, for the Editor pane's file tree and
@@ -801,9 +853,9 @@ public enum SpacesDeviceClient {
 
     /// Opens a live per-(workspace, ref, lastCommit)-scope diff-signature subscription: the paired daemon
     /// pushes a frame whenever the scope's `scopeSignature` changes (notify-then-pull; the daemon polls, see
-    /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiff` (with the same `refName`
+    /// `SpacesDeviceAPIServer` for why), and the caller re-fetches `workspaceDiffManifestChunk` (with the same `refName`
     /// and `lastCommit`) on delivery rather than trust any payload carried on the frame. `refName` and
-    /// `lastCommit` select the same scope `workspaceDiff` would; pass the same values to both so their
+    /// `lastCommit` select the same scope the manifest would; pass the same values to both so their
     /// subscription and results agree. The returned client must be retained and `stop()`ped.
     public static func subscribeWorkspaceDiffSignature(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, device: SpacesPairedDeviceRecord,
@@ -946,6 +998,18 @@ public enum SpacesDeviceClient {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return output
+    }
+
+    /// Starts an arbitrary command in a new workspace terminal on a paired device. The daemon runs it
+    /// through the workspace's interactive login shell; a supported coding agent becomes selectable only
+    /// after the regular foreground detector observes it.
+    @discardableResult public static func startWorkspaceCommandSession(
+        workspaceID: String, command: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .startWorkspaceCommandSession(.init(workspaceID: workspaceID, command: command))), device: device, clientApp: clientApp,
+            profile: profile)
     }
 
     /// Spawns a coding agent on a paired device (`spaces agent spawn --device`). Returns the created
@@ -1261,13 +1325,15 @@ public enum SpacesDeviceClient {
     public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
-            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
+            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
             .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList:
+        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
+            .workspaceDiffFileChunk,
+            .workspaceFileList, .workspaceRefList:
             largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,

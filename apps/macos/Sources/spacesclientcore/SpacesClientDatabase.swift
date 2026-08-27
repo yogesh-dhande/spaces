@@ -81,7 +81,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 3
+    public static let currentVersion = 4
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -444,6 +444,44 @@ public final class SpacesClientDatabase {
         try execute(sql: "DELETE FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
     }
 
+    // MARK: - Editor workspace state
+
+    /// Persists the Editor's client-local state for one workspace. The JSON document intentionally
+    /// belongs to the Editor client rather than the daemon: it can include an unsaved buffer and
+    /// view state, neither of which is shared workspace data.
+    public func writeCodePaneWorkspaceState(deviceID: String, workspaceID: String, stateJSON: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO code_pane_workspace_states(device_id, workspace_id, state_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(device_id, workspace_id) DO UPDATE SET
+                  state_json = excluded.state_json,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, workspaceID, stateJSON, Self.timestamp()])
+    }
+
+    public func codePaneWorkspaceState(deviceID: String, workspaceID: String) throws -> String? {
+        try queryRow(
+            sql: "SELECT state_json FROM code_pane_workspace_states WHERE device_id = ? AND workspace_id = ?",
+            bindings: [deviceID, workspaceID])?.first
+    }
+
+    /// All workspace ids carrying Editor state on this client for a device. Callers compare this
+    /// against an authoritative overview to remove records for a workspace deleted while the app
+    /// was not running.
+    public func codePaneWorkspaceIDs(deviceID: String) throws -> [String] {
+        try queryRows(
+            sql: "SELECT workspace_id FROM code_pane_workspace_states WHERE device_id = ?", bindings: [deviceID]
+        ).compactMap(\.first)
+    }
+
+    /// Removes the whole Editor state document when its workspace is deleted. Save and Discard
+    /// instead write an updated document without a dirty editor buffer, retaining view state.
+    /// Ordinary pane hibernation and workspace retargeting deliberately leave it intact.
+    public func deleteCodePaneWorkspaceState(deviceID: String, workspaceID: String) throws {
+        try execute(sql: "DELETE FROM code_pane_workspace_states WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+    }
+
     public struct PanelWindowRecord: Sendable, Equatable {
         public let id: String
         public let layoutJSON: String
@@ -731,6 +769,8 @@ public final class SpacesClientDatabase {
 
             \(panelLayoutsSchemaSQL)
 
+            \(codePaneWorkspaceStateSchemaSQL)
+
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
@@ -826,6 +866,19 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Editor recovery is client/desktop-local and can contain an unsaved file buffer, its merge
+    // base, and focused review-comment text. One versioned JSON document per (device, workspace)
+    // keeps this durable boundary independent from the web bundle's internal state shape.
+    private static let codePaneWorkspaceStateSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS code_pane_workspace_states (
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              state_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, workspace_id)
+            );
+        """
+
     // A database without a current `migration_state` marker fails closed instead of migrating or
     // resetting (see `initializeSchema`). Databases already carrying a marker upgrade serially: each
     // step moves exactly one version forward and carries existing data forward untouched.
@@ -876,6 +929,9 @@ public final class SpacesClientDatabase {
                     ALTER TABLE paired_devices_v3 RENAME TO paired_devices;
                     """)
         },
+        SpacesClientMigrationStep(
+            fromVersion: 3, toVersion: 4, description: "Add client-local Editor workspace recovery state"
+        ) { db in try executeClientBatch(database: db, sql: codePaneWorkspaceStateSchemaSQL) },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }

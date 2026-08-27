@@ -488,7 +488,7 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
 /// changes (notify-then-pull) and, separately, an unconditional keepalive roughly every 20s whose
 /// `scopeSignature` is unchanged (disconnect detection for a Linux relay blocked on a quiet producer — see
 /// `SpacesDeviceWorkspaceDiffSignatureFrame`'s doc comment); this client drops that repeat before it
-/// reaches `onFrame`, so a delivery here always means the owner should re-fetch `workspaceDiff`.
+/// reaches `onFrame`, so a delivery here always means the owner should re-fetch `workspaceDiffManifestChunk`.
 public final class SpacesDeviceWorkspaceDiffSignatureStreamClient: @unchecked Sendable {
     private let request: SpacesDeviceAPIRequest
     private let resolver: SpacesDeviceEndpointResolver

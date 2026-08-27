@@ -223,13 +223,24 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "file:///tmp/a")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 128)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .workspaceDiffManifestChunk(.init(workspaceID: "workspace-1", fileIndex: 0)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceDiffManifestRelease(.init(workspaceID: "workspace-1", manifestID: "manifest-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceDiffFileChunk(
+                    .init(workspaceID: "workspace-1", manifestID: "manifest-1", relativePath: "README.md", byteOffset: 0)), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
     }
 
-    /// round-14 Fix 4: `.workspaceReviewCommentList` is a pure read (its handler only SELECTs from the
-    /// review-comment store), so it joins `.workspaceFileRead`/`.workspaceDiff` as safe to replay after a
+    func testDiffManifestChunkRequiresAnExplicitSemanticFileIndex() {
+        let data = Data(#"{"workspaceID":"workspace-1"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(SpacesDeviceWorkspaceDiffManifestChunkRequest.self, from: data))
+    }
+
+    /// `.workspaceReviewCommentList` is a pure read (its handler only SELECTs from the review-comment
+    /// store), so it joins `.workspaceFileRead`/the workspace diff manifest as safe to replay after a
     /// dropped/stale persistent socket. The sibling mutation commands must stay excluded: an upsert/delete/
     /// send is not idempotent on the wire, so a blind replay could double-create or double-send.
     func testWorkspaceReviewCommentListIsReplaySafeButItsMutationsAreNot() throws {

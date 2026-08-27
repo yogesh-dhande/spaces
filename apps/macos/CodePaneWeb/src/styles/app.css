@@ -65,6 +65,49 @@
   padding: 0 7px;
 }
 
+.agent-command-dialog {
+  position: absolute;
+  z-index: 20;
+  top: 50%;
+  left: 50%;
+  width: min(420px, calc(100% - 32px));
+  transform: translate(-50%, -50%);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.7);
+}
+
+.agent-command-dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-command-dialog input {
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.agent-command-status {
+  min-height: 14px;
+  color: var(--orange);
+  font-size: 11px;
+}
+
+.agent-command-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .seg {
   display: inline-flex;
   border: 1px solid var(--line);
@@ -671,6 +714,12 @@
   font-size: 12px;
   padding: 6px 8px;
   outline: none;
+}
+
+.comment-send-requirement {
+  color: var(--orange);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .comment-card-actions {

@@ -31,26 +31,57 @@ export type DiffScope =
   | { kind: "lastCommit" }
   | { kind: "ref"; refName: string };
 
-/** One file entry in a `workspaceDiff` result. */
+/** One changed-file identity returned by the metadata-first diff manifest. The sidebar can render
+ * this immediately, before the file's patch body has been read. */
+export interface DiffFileManifestEntry {
+  /** Workspace-relative path of the file's current (new) side. */
+  path: string;
+  /** Previous path, present only when `status` is `"renamed"`. */
+  oldPath?: string;
+  status: FileChangeStatus;
+}
+
+/** One completed file patch. `patch` is absent only for a binary file. There is deliberately no
+ * product truncation flag: the daemon transfers every textual patch in bounded transport chunks. */
 export interface DiffFileEntry {
   /** Workspace-relative path of the file's current (new) side. */
   path: string;
   /** Previous path, present only when `status` is `"renamed"`. */
   oldPath?: string;
   status: FileChangeStatus;
-  /** Git unified diff patch text for this file. Absent when `isBinary` or `truncated` is true. */
+  /** Git unified diff patch text for this file. Absent only when `isBinary` is true. */
   patch?: string;
   isBinary: boolean;
-  /** True when the daemon capped the patch (e.g. an oversized generated file) and omitted `patch`. */
-  truncated: boolean;
+  /** Ephemeral client-side transfer state, never persisted with workspace recovery data. */
+  patchState?: "queued" | "streaming" | "ready";
   oldSHA?: string;
   newSHA?: string;
 }
 
-export interface WorkspaceDiffResult {
-  /** Opaque signature identifying this exact diff result. Changes whenever the underlying git state for this scope changes; used to detect staleness and to dedupe signature-change events. */
+/** The small first response of a progressive diff transfer. Its lease freezes the diff file
+ * enumeration and scope signature for this generation. Patch bytes are generated when each file is
+ * first requested, so ordinary worktree churn can be reflected until the next signature refresh. */
+export interface WorkspaceDiffManifestChunkResult {
+  /** Opaque daemon snapshot lease. Every file chunk must echo it; release it once this generation
+   * ends so a churned worktree cannot retain an obsolete full diff plan. */
+  manifestID: string;
   scopeSignature: string;
-  files: DiffFileEntry[];
+  files: DiffFileManifestEntry[];
+  /** Omitted after the final metadata page. This is an entry cursor, never a byte offset. */
+  nextFileIndex?: number;
+}
+
+/** The response to one bounded raw-byte patch read. `patchBase64Data` must be concatenated as bytes
+ * before UTF-8 decoding: a multi-byte codepoint may straddle the 4 MiB transport boundary. */
+export interface WorkspaceDiffFileChunkResult {
+  scopeSignature: string;
+  /** Full completed-file metadata is repeated on every chunk so the client need not infer binary
+   * and rename details from the manifest. */
+  file: DiffFileEntry;
+  transferID?: string;
+  patchBase64Data?: string;
+  /** Omitted at EOF. The client echoes the value unchanged for the next chunk. */
+  nextByteOffset?: number;
 }
 
 export interface WorkspaceFileReadResult {
@@ -125,12 +156,35 @@ export type DiffSignatureListener = (event: DiffSignatureEvent) => void;
  *  metadata only: source text and file paths never cross this fire-and-forget channel. */
 export interface CodePaneRenderMetric {
   kind: "diff" | "editor";
-  trigger: "initial" | "scope" | "workspaceChange" | "fileOpen";
+  trigger:
+    | "initial"
+    | "scope"
+    | "workspaceChange"
+    | "fileOpen"
+    | "manifest"
+    | "filePatch"
+    | "complete"
+    | "workspaceStateRestored"
+    | "diffEdit"
+    | "diffEditSave"
+    | "diffEditCancel";
   elapsedMs: number;
   /** Time through the workspace data response, before DOM/model work. Present for diff metrics. */
   fetchElapsedMs?: number;
   fileCount: number;
   contentBytes: number;
+  path?: string;
+  fileIndex?: number;
+  selectedPriority?: boolean;
+  chunkCount?: number;
+  mode?: CodePaneMode;
+  /** Scope serialized for the native performance log: `uncommitted`, `lastCommit`, or `ref:<name>`. */
+  scope?: string;
+  layout?: "split" | "unified";
+  scrollTop?: number;
+  /** Logical visible/focused source line for workspace-state recovery metrics. */
+  focusedLine?: number;
+  dirty?: boolean;
 }
 
 /**
@@ -242,7 +296,23 @@ export class SpacesBridgeError extends Error implements SpacesErrorShape {
 }
 
 export interface SpacesBridge {
-  workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult>;
+  /** Reads one bounded metadata page. Start with no `manifestID` and `fileIndex: 0`; echo the returned
+   * id and cursor until `nextFileIndex` is absent, then begin the one-at-a-time patch reads. */
+  workspaceDiffManifestChunk(
+    scope: DiffScope,
+    request: { manifestID?: string; fileIndex: number },
+  ): Promise<WorkspaceDiffManifestChunkResult>;
+  /** Reads or cancels one daemon-owned file-patch transfer. `byteOffset: 0` with no `transferID`
+   * starts a transfer; later calls echo both opaque values. */
+  workspaceDiffFileChunk(
+    scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID?: string },
+  ): Promise<WorkspaceDiffFileChunkResult>;
+  workspaceDiffFileChunkCancel(
+    scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID: string },
+  ): Promise<void>;
+  workspaceDiffManifestRelease(scope: DiffScope, request: { manifestID: string }): Promise<void>;
   workspaceFileRead(path: string): Promise<WorkspaceFileReadResult>;
   workspaceFileWrite(path: string, content: string, options: WorkspaceFileWriteOptions): Promise<WorkspaceFileWriteResult>;
   /**
@@ -276,30 +346,10 @@ export interface SpacesBridge {
    * explicit subscribe/unsubscribe RPC here; see README.md for the event-delivery mechanism.
    */
   subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;
-  /**
-   * Fire-and-forget push (like the startup `ready` notification — no reply): tells the host the
-   * editor's current open-file snapshot, so it survives this pane's next hibernation cycle (see
-   * README.md "Editor state survives hibernation"). `undefined` the moment the editor has no open
-   * file. `EditorView` debounces this (~500ms trailing) on buffer edits and sends it immediately
-   * on the discrete transitions (open, save, conflict) — see its call sites.
-   */
-  notifyEditorStateChanged(state: CodePaneEditorState | undefined): void;
-  /**
-   * Fire-and-forget push telling the host the pane's live mode, so a hibernated pane restores to
-   * whichever mode the user last left it in rather than resetting to `initialMode`'s original
-   * value.
-   */
-  notifyModeChanged(mode: CodePaneMode): void;
-  /**
-   * Fire-and-forget push telling the host Editor mode's sidebar toggle and recent-files list, so a
-   * hibernated pane restores to them. Unlike `notifyEditorStateChanged`, this state always has
-   * real defaults (`{sidebarMode: "files", recentPaths: []}`), so there is no `undefined` case to
-   * normalize. Owned by `root.ts` (not `EditorView`): every event that changes this state — the
-   * Files/Changes toggle, a successful open from any of the three entry points — is already routed
-   * through root.ts, which is also the one place tracking `CodePaneMode`, so it needs no separate
-   * push discipline of its own the way `EditorView`'s heavier, edit-driven `editorStateChanged` does.
-   */
-  notifyEditorUIStateChanged(state: CodePaneEditorUIState): void;
+  /** Atomically persists the current workspace-local recovery document. The page owns snapshot
+   * construction so navigation, comment text, and either editing surface cannot race into
+   * separate host writes. */
+  notifyWorkspaceStateChanged(state: CodePaneWorkspaceState): void;
   /** Reports completion after browser layout/paint has had two animation frames to settle. The
    *  native host validates and records this only when DEBUG performance logging is enabled. */
   notifyRenderMetric(metric: CodePaneRenderMetric): void;
@@ -325,6 +375,11 @@ export interface SpacesBridge {
    * stays a draft exactly as it was; callers must not optimistically remove drafts before this resolves.
    */
   reviewCommentsSend(sessionId: string, text: string, comments: ReviewCommentSendEntry[]): Promise<void>;
+  /** Runs a user-entered command in a new background terminal rooted at this workspace. Agent
+   * discovery remains asynchronous and arrives through the normal `spaces:agents` event. */
+  startWorkspaceCommand(command: string): Promise<StartWorkspaceCommandResult>;
+  /** Resumes status-event delivery for a command launch this pane was tracking before restart. */
+  resumeWorkspaceCommandTracking(sessionId: string): Promise<StartWorkspaceCommandResult>;
 }
 
 /** Theme the Swift host reports at init and on subsequent appearance changes. */
@@ -332,9 +387,8 @@ export type CodePaneTheme = "light" | "dark";
 
 export type CodePaneMode = "diff" | "editor";
 
-/** One editor's open-file snapshot: mirrors `CodePaneBridge.EditorState` on the Swift side. Pushed
- *  fire-and-forget via `notifyEditorStateChanged` and rehydrated through `spaces:init`'s
- *  `editorState` field after a hibernation cycle.
+/** One editor's open-file snapshot, folded into the pane's atomic workspace state and rehydrated
+ *  through `spaces:init` after a hibernation cycle.
  *
  *  `baseContent` is the content at the current CAS baseline (`baseSHA256`) — needed so a
  *  rehydrated pane can still diff3-merge a disk change that arrives right after rehydration,
@@ -346,11 +400,11 @@ export type CodePaneMode = "diff" | "editor";
  *  lose (simply not offering Undo after a hibernation cycle), and keeping it out avoids doubling
  *  this payload's size on every debounced push.
  *
- *  This snapshot also can't distinguish "changed on disk" from "deleted on disk" for a rehydrated
+ *  Editor mode cannot distinguish "changed on disk" from "deleted on disk" for a rehydrated
  *  conflict (there is no `diskMissing` field here — see the editor-side field's own doc comment for
- *  why). A rehydrated conflict always renders with the "changed" wording as an approximation; it
- *  self-corrects the moment a fresh `spaces:fileSignature` event or a compare-view action
- *  re-derives the real state. */
+ *  why). A rehydrated editor conflict initially uses the "changed" wording and self-corrects when
+ *  fresh reconciliation re-derives the disk state. Inline diff editing carries its exact conflict
+ *  target in `CodePaneDiffEditorState` below. */
 export interface CodePaneEditorState {
   path: string;
   baseSHA256: string;
@@ -360,16 +414,89 @@ export interface CodePaneEditorState {
   conflict: boolean;
 }
 
-/** Editor mode's UI-state snapshot (distinct from `CodePaneEditorState`'s open-file snapshot
- *  above): which sidebar list is showing, and the recently opened files. Pushed fire-and-forget via
- *  `notifyEditorUIStateChanged` and rehydrated through `spaces:init`'s `editorUIState` field, same
- *  discipline as `CodePaneEditorState` — see `EditorView`'s doc comment. Absent at init defaults to
- *  `{sidebarMode: "files", recentPaths: []}`. */
+/** Diff mode's editable-file snapshot. A conflict must retain the exact CAS target that matches
+ * the comparison the user sees: a SHA means the disk side exists, while `null` means it was deleted
+ * and Keep mine must use create-if-missing. Editor mode has its own live reconciliation path, so
+ * this distinction belongs only to the inline diff editor's durable state. */
+export interface CodePaneDiffEditorState extends CodePaneEditorState {
+  conflictBaseSHA256: string | null;
+}
+
+/** Editor mode's UI-state subset (distinct from `CodePaneEditorState`'s open-file snapshot above):
+ *  which sidebar list is showing and the recently opened files. It is part of the unified workspace
+ *  document. */
 export interface CodePaneEditorUIState {
   sidebarMode: "files" | "changes";
   /** Most-recently-opened first, deduped, capped at 12 — every successful open (⌘P overlay, Files
    *  tree, or Changes list in editor mode) records into this list. */
   recentPaths: string[];
+}
+
+/** Durable Start Agent state. The absolute deadline is minted once by native so a resumed pane
+ * continues the original readiness window instead of granting a restarted command another 90
+ * seconds. `starting` records its terminal session and deadline; a terminal failure preserves the
+ * session for inspection but deliberately clears the deadline. */
+export type PendingAgentLaunch =
+  | {
+      sessionId: string;
+      command: string;
+      status: "starting";
+      message: null;
+      deadlineEpochMilliseconds: number;
+    }
+  | {
+      sessionId: string | null;
+      command: string;
+      status: "failed";
+      message: string | null;
+      deadlineEpochMilliseconds: null;
+    };
+
+/** Client-local workspace recovery data. Patch bodies and rendered DOM deliberately stay out: the
+ * restored page first applies this light state, then streams a fresh manifest and file patches. */
+export interface CodePaneWorkspaceState {
+  mode: CodePaneMode;
+  scope: DiffScope;
+  diffLayout: "split" | "unified";
+  /** Path paired with `diffScrollLine`/`diffScrollSide`; sidebar selection is separate state. */
+  diffSelectedPath?: string | null;
+  /** Omitted for a fresh workspace so the review tree uses its expanded default; an explicit empty
+   * array is the user's durable choice to collapse every directory. */
+  diffTreeExpandedPaths?: string[];
+  diffTreeSelectedPath?: string | null;
+  editorSidebarMode: "files" | "changes";
+  editorRecentPaths: string[];
+  /** Stored by terminal session rather than transient agent id, so comment routing survives restart. */
+  selectedAgentSessionId?: string | null;
+  pendingAgentLaunch: PendingAgentLaunch | null;
+  fileTreeExpandedPaths: string[];
+  fileTreeSelectedPath?: string | null;
+  diffScrollLine?: number | null;
+  /** Side paired with `diffScrollLine`; logical line numbers are independently numbered per side. */
+  diffScrollSide: ReviewCommentSide | null;
+  diffFocusedLine?: number | null;
+  /** Path/side paired with `diffFocusedLine`, retained independently from scroll and sidebar state. */
+  diffFocusedPath: string | null;
+  diffFocusedSide: ReviewCommentSide | null;
+  editorScrollLine?: number | null;
+  editorFocusedLine?: number | null;
+  editorState?: CodePaneEditorState | null;
+  diffEditorState?: CodePaneDiffEditorState | null;
+  pendingReviewComments?: PendingReviewCommentEntry[] | null;
+}
+
+export interface StartWorkspaceCommandResult {
+  sessionId: string;
+  status: "starting";
+  /** Same absolute deadline persisted in `PendingAgentLaunch`; native computes it only once. */
+  deadlineEpochMilliseconds: number;
+}
+
+export interface CodePaneAgentStartStatusEvent {
+  sessionId: string;
+  status: "detected" | "exited" | "timedOut";
+  agent?: CodePaneAgentSummary;
+  message?: string;
 }
 
 /**
@@ -379,25 +506,11 @@ export interface CodePaneEditorUIState {
 export interface CodePaneInitPayload {
   workspaceId: string;
   workspaceName: string;
-  initialMode: CodePaneMode;
-  initialScope: DiffScope;
+  workspaceState: CodePaneWorkspaceState;
   theme: CodePaneTheme;
   /** The workspace's configured base branch name, absent when it has none — drives the compare
    *  menu's one-click preset and the "Branch…" search dialog's first-sort and "base" badge. */
   baseBranch?: string;
-  /** The host-held editor-state snapshot from before this pane's most recent hibernation cycle,
-   *  absent when there is none (a pane's first-ever load, or one whose editor never opened a
-   *  file). See `EditorView.restoreState`'s doc comment for the rehydration rules. */
-  editorState?: CodePaneEditorState;
-  /** The host-held Editor mode UI-state snapshot (sidebar toggle, recent files) from before this
-   *  pane's most recent hibernation cycle, absent when there is none — same rehydration discipline
-   *  as `editorState` above. Defaults to `{sidebarMode: "files", recentPaths: []}` when absent. */
-  editorUIState?: CodePaneEditorUIState;
-  /** round-16 Fix 1a: the host-held snapshot of comment text typed but not yet persisted before this
-   *  pane's most recent teardown, absent when there is none. See
-   *  `CommentsController.restorePendingState`'s doc comment for the rehydration rules — mirrors
-   *  `editorState` above but for the comment surface. */
-  pendingReviewComments?: PendingReviewCommentEntry[];
   /** Agents running in this workspace at startup, for the assigned-agent dropdown (see
    *  `reviewComments.ts`'s `selectDefaultAgentId`). Kept current after startup by `spaces:agents`. */
   agents: CodePaneAgentSummary[];
@@ -428,31 +541,7 @@ export interface CodePaneSetModeEvent {
 declare global {
   interface Window {
     spaces?: SpacesBridge;
-    /**
-     * Host-pulled counterpart to `notifyEditorStateChanged`'s push: the Swift host calls this
-     * synchronously (via `evaluateJavaScript`'s return value, not the message channel) at teardown
-     * to flush whatever the editor holds at that instant, closing the race where a buffer edit is
-     * still inside `EditorView`'s ~500ms debounce window when the page is torn down. Returns the
-     * exact `editorStateChanged` payload shape (`CodePaneEditorState`) JSON-stringified, or `null`
-     * when no file is open — wired in `root.ts` at the point the `EditorView` instance is
-     * constructed, so it always reads that instance's live state. See README.md "Editor state
-     * survives hibernation".
-     */
-    __spacesCollectEditorState?: () => string | null;
-    /** Host-pulled counterpart to `notifyEditorUIStateChanged`'s push — mirrors
-     *  `__spacesCollectEditorState` above, but for Editor mode's sidebar-toggle/recent-files
-     *  snapshot. Returns the exact `editorUIStateChanged` payload shape (`CodePaneEditorUIState`)
-     *  JSON-stringified — never `null`, since this state always has real defaults (see
-     *  `CodePaneEditorUIState`'s doc comment). Wired in `root.ts`, which owns this state directly
-     *  (see `notifyEditorUIStateChanged`'s doc comment for why this lives in root.ts rather than
-     *  `EditorView`), so there is no async teardown race to close the way
-     *  `__spacesCollectEditorState` closes one for the debounced `editorStateChanged` push — this
-     *  simply reads root.ts's own in-memory value synchronously. */
-    __spacesCollectEditorUIState?: () => string | null;
-    /** round-16 Fix 1a: mirrors `__spacesCollectEditorState` above, but for the comment surface —
-     *  see `CommentsController.collectStateForFlush`'s doc comment. Returns the exact
-     *  `PendingReviewCommentEntry[]` JSON-stringified, or `null` when nothing is pending. Wired in
-     *  `root.ts` at the point the `CommentsController` instance is constructed. */
-    __spacesCollectReviewCommentState?: () => string | null;
+    /** Returns the complete lightweight workspace recovery document for host teardown. */
+    __spacesCollectWorkspaceState?: () => string;
   }
 }

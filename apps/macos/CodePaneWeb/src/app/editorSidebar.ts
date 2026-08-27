@@ -8,6 +8,7 @@ export interface EditorSidebarCallbacks {
    *  `CodePaneEditorUIState.sidebarMode` and, for "changes", makes sure the diff has actually been
    *  fetched at least once (see root.ts's `onModeChange` wiring). */
   onModeChange(mode: EditorSidebarMode): void;
+  onTreeStateChange?(state: { expandedPaths: readonly string[]; selectedPath: string | undefined }): void;
 }
 
 /**
@@ -46,16 +47,18 @@ export class EditorSidebar {
    *  result rather than overwriting a newer one — same latest-wins shape as root.ts's
    *  `diffRequestToken`. */
   private fetchToken = 0;
+  private expandedPaths: readonly string[];
 
   constructor(
     private readonly changesListEl: HTMLElement,
     private readonly fileListCache: WorkspaceFileListCache,
-    initial: { sidebarMode: EditorSidebarMode; selectedPath: string | undefined },
+    initial: { sidebarMode: EditorSidebarMode; selectedPath: string | undefined; expandedPaths?: readonly string[] },
     private readonly onSelectFile: (path: string) => void,
     private readonly callbacks: EditorSidebarCallbacks,
   ) {
     this.mode = initial.sidebarMode;
     this.selectedPath = initial.selectedPath;
+    this.expandedPaths = initial.expandedPaths ?? [];
 
     this.el = document.createElement("div");
     this.el.className = "editor-sidebar";
@@ -95,7 +98,7 @@ export class EditorSidebar {
     // EditorSidebar unconditionally, including panes whose top-level mode is Diff (where this
     // sidebar isn't even attached to the DOM) — starting `fileListCache.getFresh()`'s up-to-50,000-path
     // `workspaceFileList` RPC here would run it on the daemon's shared per-workspace serial git queue
-    // for every diff-only pane too, ahead of/alongside its actual `workspaceDiff`. The first fetch is
+    // for every diff-only pane too, ahead of/alongside its actual `workspaceDiffManifestChunk` pull. The first fetch is
     // deferred to whenever this sidebar is actually shown instead: `reattach()` (root.ts calls it on
     // every diff→editor transition, and once more after the very first render for a pane that starts
     // or rehydrates directly into editor mode — see root.ts) and the Files/Changes toggle's
@@ -123,6 +126,8 @@ export class EditorSidebar {
     // ever be observed as "files" — by the constructor if it starts there, or by setMode/renderList
     // before the mode assignment they follow takes effect for any caller.
     this.filesTreeHandle!.setSelected(path);
+    this.expandedPaths = this.filesTreeHandle!.expandedPaths();
+    this.callbacks.onTreeStateChange?.({ expandedPaths: this.expandedPaths, selectedPath: this.selectedPath });
   }
 
   /** Called by root.ts after invalidating the shared `WorkspaceFileListCache` (the diff-signature
@@ -232,6 +237,11 @@ export class EditorSidebar {
   private renderFilesTreeNow(): void {
     this.filesTreeHandle = renderFilesTree(this.filesTreeEl, this.paths, this.selectedPath, {
       onSelect: (path) => this.onSelectFile(path),
-    });
+      onExpandedPathsChange: (expandedPaths) => {
+        this.expandedPaths = expandedPaths;
+        this.callbacks.onTreeStateChange?.({ expandedPaths, selectedPath: this.selectedPath });
+      },
+    }, this.expandedPaths);
+    this.expandedPaths = this.filesTreeHandle.expandedPaths();
   }
 }

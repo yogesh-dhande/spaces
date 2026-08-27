@@ -1103,11 +1103,16 @@ import spacesterminalcore
     /// Detaches every open pane's terminal client at app termination without stopping
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
-    func closeAllContentForTermination() {
+    func closeAllContentForTermination(completion: @escaping () -> Void) {
         for task in contentPreparationTasks.values { task.cancel() }
         contentPreparationTasks.removeAll()
         for content in contentControllers.values { content.close() }
-        for content in codePaneControllers.values { content.close() }
+        let codePanes = codePaneControllers.values.compactMap { $0 as? CodePaneContentController }
+        for codePane in codePanes { codePane.close() }
+        // `codePaneControllers` excludes a controller as soon as a retarget removes it, but its
+        // final WebKit collector may still be alive. The global fence covers both these visible
+        // panes and every already-detached collector before draining the one write-behind queue.
+        CodePaneWorkspaceStatePersistence.finishTermination(completion)
     }
 
     /// Re-themes every open pane's live session to the app's current light/dark appearance. Called when the
@@ -1258,7 +1263,8 @@ import spacesterminalcore
             return true
         }
         return openCodePaneInNewTab(
-            deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, in: .globalWindow(panelWindowID: UUID().uuidString))
+            deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, initialModePolicy: .useRequestedMode,
+            in: .globalWindow(panelWindowID: UUID().uuidString))
     }
 
     /// Reuses an already-open global-window code pane for a navigation gesture: retargets it first if
@@ -1284,13 +1290,17 @@ import spacesterminalcore
     /// Opens a fresh code pane as a new tab in an explicit scope (mirrors `openSessionInNewTab`). The
     /// creation arm `openOrFocusGlobalEditorWindow` reaches once `anyGlobalCodePanePlacement` finds
     /// nothing to reuse.
-    @discardableResult func openCodePaneInNewTab(deviceID: String, workspaceID: String, initialMode: CodePaneMode, in scope: PanelScope? = nil)
+    @discardableResult func openCodePaneInNewTab(
+        deviceID: String, workspaceID: String, initialMode: CodePaneMode,
+        initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode, in scope: PanelScope? = nil
+    )
         -> Bool
     {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: workspaceID) else { return false }
         guard mayCreateCodePane(workspaceID: workspaceID) else { return false }
         let paneID = UUID().uuidString
-        let content = installCodePaneController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode)
+        let content = installCodePaneController(
+            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, initialModePolicy: initialModePolicy)
         let pane = Pane(id: paneID, content: content.descriptor)
         mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
         host.showPanelScope(resolvedScope)
@@ -1303,10 +1313,13 @@ import spacesterminalcore
     /// id already backed by a live controller (e.g. a panel adopted twice) is left untouched rather
     /// than losing its in-flight web view.
     @discardableResult private func installCodePaneController(
-        paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode = .diff
+        paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode = .diff,
+        initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode
     ) -> any PaneContentHosting {
         if let existing = codePaneControllers[paneID] { return existing }
-        let content = CodePaneContentController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, hosting: host)
+        let content = CodePaneContentController(
+            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: initialMode, hosting: host,
+            initialModePolicy: initialModePolicy)
         codePaneControllers[paneID] = content
         return content
     }
@@ -1314,10 +1327,10 @@ import spacesterminalcore
     /// Retargets a single code pane to `(deviceID, workspaceID)` in `mode` — close-and-reinstall on the
     /// same pane id, not a live descriptor edit: `CodePaneContentController.descriptor`/`workspaceID`
     /// are `let`, so a new controller instance is the only way to point a pane at a different
-    /// workspace. Closing the old controller first discards its in-memory editor buffer and
-    /// pending-review-comment snapshot exactly as an ordinary pane close does — safe, since comment
-    /// drafts are persisted per workspace in the daemon DB and an unsaved editor buffer gets no
-    /// confirmation on an ordinary close either.
+    /// workspace. Closing the old controller first flushes its complete local recovery snapshot; the
+    /// replacement starts in the explicit navigation mode while restoring the target workspace's
+    /// independent location, drafts, and unsaved editor buffer. Neither buffer nor comment state is
+    /// shared across workspaces or sent to the daemon.
     ///
     /// The old controller is removed from `codePaneControllers` *before* installing the replacement:
     /// `installCodePaneController` is idempotent and returns the existing controller for an
@@ -1333,7 +1346,8 @@ import spacesterminalcore
     /// monitor" behavior) and `reuseGlobalCodePane` (the navigation gesture's own mode).
     private func retargetCodePane(paneID: String, scope: PanelScope, toDeviceID deviceID: String, workspaceID: String, mode: CodePaneMode) {
         codePaneControllers.removeValue(forKey: paneID)?.close()
-        let content = installCodePaneController(paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode)
+        let content = installCodePaneController(
+            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, initialModePolicy: .useRequestedMode)
         mutateLayout(scope: scope) { PanelLayoutEngine.retargetPane(paneID: paneID, to: content.descriptor, in: $0) }
         if let retargetedPane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) {
             activateContentIfVisible(scope: scope, pane: retargetedPane)

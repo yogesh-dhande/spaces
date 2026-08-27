@@ -45,6 +45,21 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertNil(try database.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"))
     }
 
+    func testCodePaneWorkspaceStateRoundTripsIndependentlyPerDeviceAndDeletes() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.writeCodePaneWorkspaceState(deviceID: "local", workspaceID: "ws-1", stateJSON: #"{"mode":"editor","content":"draft"}"#)
+        try database.writeCodePaneWorkspaceState(deviceID: "remote", workspaceID: "ws-1", stateJSON: #"{"mode":"diff"}"#)
+
+        XCTAssertEqual(try database.codePaneWorkspaceState(deviceID: "local", workspaceID: "ws-1"), #"{"mode":"editor","content":"draft"}"#)
+        XCTAssertEqual(try database.codePaneWorkspaceState(deviceID: "remote", workspaceID: "ws-1"), #"{"mode":"diff"}"#)
+        XCTAssertEqual(try database.codePaneWorkspaceIDs(deviceID: "local"), ["ws-1"])
+
+        try database.deleteCodePaneWorkspaceState(deviceID: "local", workspaceID: "ws-1")
+        XCTAssertNil(try database.codePaneWorkspaceState(deviceID: "local", workspaceID: "ws-1"))
+        XCTAssertEqual(try database.codePaneWorkspaceState(deviceID: "remote", workspaceID: "ws-1"), #"{"mode":"diff"}"#)
+    }
+
     func testPanelWindowsRoundTripWithAndWithoutFrames() throws {
         let database = try makeTemporaryClientDatabase()
 

@@ -13,6 +13,7 @@ function makeCallbacks(): ToolbarCallbacks {
     onOpenRefSearch: vi.fn(),
     onLayoutChange: vi.fn(),
     onAgentSelect: vi.fn(),
+    onStartAgent: vi.fn(),
     onSendBatch: vi.fn(),
   };
 }
@@ -373,15 +374,15 @@ describe("Toolbar — compare menu keyboard focus", () => {
 });
 
 describe("Toolbar — agent slot (Phase 4)", () => {
-  it("renders a static label, with no <select>, when exactly one agent runs", () => {
+  it("renders the compact assigned-agent selector when exactly one agent runs", () => {
     const container = document.createElement("div");
     const state = baseState({ agents: [AGENT_1], selectedAgentId: AGENT_1.id });
 
     renderToolbar(container, state, makeCallbacks());
 
-    const label = container.querySelector(".agent-label");
-    expect(label?.textContent).toBe("claude · main");
-    expect(container.querySelector(".agent-select")).toBeNull();
+    const select = container.querySelector<HTMLSelectElement>(".agent-select");
+    expect(select?.value).toBe(AGENT_1.id);
+    expect(select?.selectedOptions[0]?.textContent).toBe("Send to: claude · main");
   });
 
   it("renders a <select> with a disabled placeholder when more than one agent runs and none is picked", () => {
@@ -410,6 +411,39 @@ describe("Toolbar — agent slot (Phase 4)", () => {
     select.dispatchEvent(new Event("change"));
 
     expect(callbacks.onAgentSelect).toHaveBeenCalledWith(AGENT_2.id);
+  });
+
+  it("resets Start new to the prior assigned agent before opening the command dialog", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    const state = baseState({ agents: [AGENT_1, AGENT_2], selectedAgentId: AGENT_1.id });
+
+    renderToolbar(container, state, callbacks);
+
+    const select = container.querySelector<HTMLSelectElement>(".agent-select")!;
+    select.value = "__start_new_agent__";
+    select.dispatchEvent(new Event("change"));
+
+    expect(callbacks.onStartAgent).toHaveBeenCalledExactlyOnceWith();
+    expect(callbacks.onAgentSelect).not.toHaveBeenCalled();
+    expect(select.value).toBe(AGENT_1.id);
+  });
+
+  it("keeps Send batch available while a newly launched agent is still being detected", () => {
+    const container = document.createElement("div");
+    const state = baseState({
+      agents: [AGENT_1],
+      selectedAgentId: AGENT_1.id,
+      draftCount: 2,
+      agentStarting: true,
+    });
+
+    renderToolbar(container, state, makeCallbacks());
+
+    expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+    expect(container.querySelector("#code-pane-agent-selector")).toBeNull();
+    const sendBatch = findButton(container, "Send batch · 2");
+    expect(sendBatch.disabled).toBe(false);
   });
 
   it("disables Send batch with a no-agent reason when zero agents run", () => {

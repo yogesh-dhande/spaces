@@ -123,10 +123,49 @@ extension ProcessProfileEnvironmentSuites {
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
+        private func recoveredEditorWorkspaceState() -> CodePaneWorkspaceState {
+            CodePaneWorkspaceState(
+                mode: .editor, scope: .init(kind: "ref", refName: "main"), diffLayout: "split", diffSelectedPath: "Sources/App.swift",
+                diffTreeExpandedPaths: ["Sources"], diffTreeSelectedPath: "Sources/App.swift",
+                fileTreeExpandedPaths: ["Sources"], fileTreeSelectedPath: "Sources/App.swift", editorSidebarMode: "changes",
+                editorRecentPaths: ["Sources/App.swift"], diffScrollLine: 41, diffScrollSide: "new",
+                diffFocusedPath: "Sources/App.swift", diffFocusedLine: 42, diffFocusedSide: "new",
+                editorScrollLine: 12, editorFocusedLine: 13,
+                editorState: .init(
+                    path: "Sources/App.swift", baseSHA256: "base-sha", baseContent: "let value = 1", content: "let value = 2", dirty: true,
+                    conflict: false),
+                pendingReviewComments: nil)
+        }
+
+        private func persistEditorWorkspaceState(
+            _ state: CodePaneWorkspaceState, controller: AppKitController, deviceID: String, workspaceID: String
+        ) throws {
+            try controller.clientDatabase().writeCodePaneWorkspaceState(
+                deviceID: deviceID, workspaceID: workspaceID, stateJSON: String(decoding: try JSONEncoder().encode(state), as: UTF8.self))
+            CodePaneWorkspaceStateCache.remove(
+                storageKey: ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: deviceID), workspaceID: workspaceID)
+        }
+
+        private func initialWorkspaceState(from content: CodePaneContentController) throws -> CodePaneBridge.WorkspaceState {
+            content.activate(focus: false)
+            let evaluator = RecordingCodePaneScriptEvaluator()
+            content.scriptEvaluator = evaluator
+            content.handleReady()
+            let script = try #require(evaluator.evaluatedScripts.first { $0.contains("spaces:init") })
+            let prefix = "window.dispatchEvent(new CustomEvent(\"spaces:init\", {detail: "
+            let suffix = "}));"
+            guard script.hasPrefix(prefix), script.hasSuffix(suffix) else { throw CodePaneInitialStateParseError.unexpectedScript }
+            struct InitDetail: Decodable { let workspaceState: CodePaneBridge.WorkspaceState }
+            return try JSONDecoder().decode(
+                InitDetail.self, from: Data(script.dropFirst(prefix.count).dropLast(suffix.count).utf8)).workspaceState
+        }
+
+        private enum CodePaneInitialStateParseError: Error { case unexpectedScript }
+
         /// A terminal pane restored in a workspace's own panel and a code pane restored in the global
         /// singleton window resolve to their own controller instance: the terminal by session id in
         /// `contentControllers`, the code pane by pane id in `codePaneControllers`. Proves the dual-store
-        /// design keeps the two content kinds from colliding rather than one overwriting the other — the
+        /// separation keeps the two content kinds from colliding rather than one overwriting the other — the
         /// scopes differ because a code pane's only legitimate placement is the global singleton window.
         @Test func aTerminalPaneAndACodePaneKeyToDistinctControllers() throws {
             let controller = makeController()
@@ -364,6 +403,8 @@ extension ProcessProfileEnvironmentSuites {
         @Test func openOrFocusGlobalEditorWindowOpensAFreshSingletonWindowWhenNoneExistsAndFocusesOnASecondCall() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
+            let recovered = recoveredEditorWorkspaceState()
+            try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-1")
             controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             var openedGlobalScopes: [PanelScope] = []
@@ -376,6 +417,14 @@ extension ProcessProfileEnvironmentSuites {
             let panes = PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope))
             #expect(panes.map(\.content) == [.codePane(deviceID: deviceID, workspaceID: "workspace-1")])
             let paneID = try #require(panes.first?.id)
+            let codePane = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID) as? CodePaneContentController)
+            let initial = try initialWorkspaceState(from: codePane)
+            #expect(initial.mode == "diff", "an explicit Open Editor action starts in Diff even when the target last used Editor mode")
+            #expect(initial.scope == recovered.scope)
+            #expect(initial.diffLayout == recovered.diffLayout)
+            #expect(initial.diffSelectedPath == recovered.diffSelectedPath)
+            #expect(initial.fileTreeExpandedPaths == recovered.fileTreeExpandedPaths)
+            #expect(initial.editorState == recovered.editorState)
 
             let focusedAgain = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: "workspace-1")
 
@@ -385,7 +434,7 @@ extension ProcessProfileEnvironmentSuites {
                 "the second call focuses the existing pane instead of opening a second one")
         }
 
-        /// Fix 6 (P2 review): an already-open Editor window stays focusable while its device is offline —
+        /// An already-open Editor window stays focusable while its device is offline —
         /// focusing a pane that already exists is client-side, so an unreachable device never withholds
         /// it; only *creating* a fresh one is refused (`PanelCoordinator.mayCreateCodePane`, gated on
         /// `.offline`). This is deliberately not exercised through the *refused* creation branch, since
@@ -516,6 +565,8 @@ extension ProcessProfileEnvironmentSuites {
         @Test func showWorkspaceDetailRetargetsAGlobalPanelWindowsCodePaneToTheNewlySelectedWorkspace() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
+            let recovered = recoveredEditorWorkspaceState()
+            try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-2")
             controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
@@ -546,6 +597,11 @@ extension ProcessProfileEnvironmentSuites {
                 "retarget installs a fresh controller instance rather than mutating the old one in place")
             #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected workspace")
             #expect(retargetedContent.initialMode == .diff, "a retargeted monitor lands in diff mode")
+            let initial = try initialWorkspaceState(from: retargetedContent)
+            #expect(initial.mode == "diff", "sidebar-following retargeting must not reopen the target's stale Editor mode")
+            #expect(initial.scope == recovered.scope)
+            #expect(initial.diffSelectedPath == recovered.diffSelectedPath)
+            #expect(initial.editorState == recovered.editorState)
             #expect(retargetedContent.displayTitle == "Editor — feature-2", "the title reflects the newly selected workspace's name")
             let pane = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" })
             #expect(
@@ -566,7 +622,7 @@ extension ProcessProfileEnvironmentSuites {
         /// presenting workspace-1 again after the Alerts detour would see `previousWorkspaceID == nil` (since
         /// visiting Alerts nil'd out `visibleDetailWorkspaceID`) and skip the retarget, leaving the monitor
         /// incorrectly stranded on workspace-2. Reaches Alerts via `showAlertsDetail`, the same production
-        /// entry point the sidebar's Alerts row and its keyboard shortcut both call (round-16 Fix 2).
+        /// entry point the sidebar's Alerts row and its keyboard shortcut both call.
         @Test func alertsDetourBetweenTwoWorkspacePresentationsStillRetargetsOnReturn() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
@@ -657,6 +713,8 @@ extension ProcessProfileEnvironmentSuites {
         @Test func openOrFocusGlobalEditorWindowRetargetsAnExistingSingletonToDiffMode() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
+            let recovered = recoveredEditorWorkspaceState()
+            try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-1")
             controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
@@ -674,6 +732,12 @@ extension ProcessProfileEnvironmentSuites {
             #expect((retargetedContent as AnyObject?) !== (originalContent as AnyObject?), "retarget installs a fresh controller instance")
             #expect(retargetedContent.workspaceID == "workspace-1", "the new controller is scoped to the requested workspace")
             #expect(retargetedContent.initialMode == .diff, "every open-editor entry point lands in diff mode")
+            let initial = try initialWorkspaceState(from: retargetedContent)
+            #expect(initial.mode == "diff", "retargeting via Open Editor must not restore the target's stale Editor mode")
+            #expect(initial.scope == recovered.scope)
+            #expect(initial.diffLayout == recovered.diffLayout)
+            #expect(initial.diffSelectedPath == recovered.diffSelectedPath)
+            #expect(initial.editorState == recovered.editorState)
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
                     == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the layout's pane descriptor moves to the requested workspace")

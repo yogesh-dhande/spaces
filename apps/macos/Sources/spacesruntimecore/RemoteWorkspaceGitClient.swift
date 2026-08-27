@@ -546,7 +546,7 @@ private func terminateThenKill(_ process: Process, gracePeriod: TimeInterval = 0
 /// fds (normally at exit); a child that writes more than the pipe's kernel buffer (64 KiB on macOS) to a
 /// pipe nobody is reading blocks on that `write()` until it is drained, so a caller that waits for exit
 /// before reading deadlocks against its own child for any output past that size. A `git diff` of a large
-/// file crosses it easily — `workspaceDiff` allows patches up to its 8 MiB total cap — so every
+/// file crosses it easily — the Editor permits arbitrarily large patches over bounded file chunks — so every
 /// `RemoteWorkspaceGitClient` call reads concurrently with the wait instead of after it.
 ///
 /// `@unchecked Sendable`: `data`/`didExceedCap` are only mutated inside the one background read and only

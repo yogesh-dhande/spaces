@@ -31,12 +31,10 @@ describe("codePaneReducer", () => {
     expect(next.mode).toBe("diff");
   });
 
-  it("openFile sets editorPath; closeFile clears it", () => {
+  it("openFile sets editorPath", () => {
     const state = initialState("editor", { kind: "uncommitted" });
     const opened = codePaneReducer(state, { type: "openFile", path: "src/main.ts" });
     expect(opened.editorPath).toBe("src/main.ts");
-    const closed = codePaneReducer(opened, { type: "closeFile" });
-    expect(closed.editorPath).toBeUndefined();
   });
 
   it("returns a new object (never mutates the input state)", () => {

@@ -815,6 +815,25 @@ extension ProcessProfileEnvironmentSuites {
                 "the code pane's liveness prune ran despite the stale epoch, since it has no session for a replacement race to protect")
         }
 
+        @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() throws {
+            let controller = makeController()
+            controller.deviceSections = [section(processSessionID: "predecessor")]
+            try controller.clientDatabase().writeCodePaneWorkspaceState(
+                deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
+
+            let deletedOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: deletedOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            #expect(
+                try controller.clientDatabase().codePaneWorkspaceState(deviceID: deviceID, workspaceID: "workspace-1") == nil,
+                "a remote overview is authoritative for workspace deletion, so it must remove recovery text before it can be restored")
+        }
+
         /// The ordinary case: nothing bumped the epoch between this overview's data being read and it
         /// being applied, so its prune runs and a pane the fresh keep-set no longer retains is closed —
         /// here, the replacement's own session having genuinely ended in the time since the claim.

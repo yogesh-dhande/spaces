@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DiffFileEntry } from "../src/bridge/types";
-import { FileListCallbacks, renderFileList } from "../src/app/fileList";
+import { FileListCallbacks, renderFileList, updateFileListRow } from "../src/app/fileList";
 
 function makeCallbacks(): FileListCallbacks {
   return { onSelect: vi.fn() };
@@ -11,7 +11,6 @@ function makeFile(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
     path: "src/main.ts",
     status: "modified",
     isBinary: false,
-    truncated: false,
     ...overrides,
   };
 }
@@ -66,17 +65,45 @@ describe("fileList — countChanges (round-1 Fix 2)", () => {
     expect(statText(container, "src/main.ts")).toEqual({ additions: "+1", deletions: " -0" });
   });
 
-  it("reports no changes for a file with no patch", () => {
+  it("does not invent a +0/-0 stat before a streamed patch arrives", () => {
     const container = document.createElement("div");
     const file = makeFile({ patch: undefined });
 
     renderFileList(container, [file], undefined, makeCallbacks());
 
-    expect(statText(container, "src/main.ts")).toEqual({ additions: "+0", deletions: " -0" });
+    expect(container.querySelector('[data-path="src/main.ts"] .st')).toBeNull();
   });
 });
 
 describe("fileList — renderFileList (existing behavior)", () => {
+  it("updates one streamed row in place without rebuilding a large manifest tree", () => {
+    const container = document.createElement("div");
+    const files = Array.from({ length: 500 }, (_, index) => makeFile({ path: `src/File${index}.ts`, patchState: "queued" }));
+    renderFileList(container, files, "src/File250.ts", makeCallbacks());
+    const unchanged = container.querySelector<HTMLElement>('[data-path="src/File499.ts"]')!;
+    const target = container.querySelector<HTMLElement>('[data-path="src/File250.ts"]')!;
+
+    expect(updateFileListRow(container, makeFile({ path: "src/File250.ts", patchState: "ready", patch: "@@ -1 +1 @@\n-old\n+new" }))).toBe("updated");
+
+    expect(container.querySelector('[data-path="src/File499.ts"]')).toBe(unchanged);
+    expect(container.querySelector('[data-path="src/File250.ts"]')).toBe(target);
+    expect(target.querySelector(".transfer")).toBeNull();
+    expect(statText(container, "src/File250.ts")).toEqual({ additions: "+1", deletions: " -1" });
+  });
+
+  it("uses the manifest row index instead of scanning sidebar rows for each patch", () => {
+    const container = document.createElement("div");
+    const files = Array.from({ length: 500 }, (_, index) => makeFile({ path: `src/File${index}.ts`, patchState: "queued" }));
+    renderFileList(container, files, undefined, makeCallbacks());
+    const queryAll = vi.spyOn(container, "querySelectorAll").mockImplementation(() => {
+      throw new Error("streamed row update scanned the sidebar");
+    });
+
+    expect(updateFileListRow(container, makeFile({ path: "src/File250.ts", patchState: "streaming" }))).toBe("updated");
+
+    queryAll.mockRestore();
+  });
+
   it("renders an empty-state row when there are no files", () => {
     const container = document.createElement("div");
 
@@ -100,9 +127,9 @@ describe("fileList — renderFileList (existing behavior)", () => {
     expect(callbacks.onSelect).toHaveBeenCalledWith("a.ts");
   });
 
-  it("omits the stat span for binary and truncated files", () => {
+  it("omits the stat span for binary files", () => {
     const container = document.createElement("div");
-    const files = [makeFile({ path: "bin.png", isBinary: true }), makeFile({ path: "big.log", truncated: true })];
+    const files = [makeFile({ path: "bin.png", isBinary: true })];
 
     renderFileList(container, files, undefined, makeCallbacks());
 
@@ -175,6 +202,61 @@ describe("fileList — directory tree (docs mockup 'G — Tree with compacted ch
     expect(dirrow.querySelector(".tri")?.textContent).toBe("▾");
     expect(dirChildren.style.display).not.toBe("none");
     expect(dirrow.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("does not materialize descendants for a persisted collapsed directory until it is expanded", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    callbacks.onExpandedPathsChange = vi.fn();
+    const files = Array.from({ length: 1_000 }, (_, index) => makeFile({ path: `src/File${index}.ts` }));
+
+    renderFileList(container, files, undefined, callbacks, []);
+
+    const dirrow = container.querySelector(".dirrow") as HTMLElement;
+    expect(dirrow.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".row")).toHaveLength(0);
+
+    dirrow.click();
+
+    expect(dirrow.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelectorAll(".row")).toHaveLength(files.length);
+    expect(callbacks.onExpandedPathsChange).toHaveBeenCalledWith(["src"]);
+  });
+
+  it("reveals a selected file's ancestor while leaving unrelated persisted-collapsed directories lazy", () => {
+    const container = document.createElement("div");
+    const files = [makeFile({ path: "macos/Foo.swift" }), makeFile({ path: "ios/Bar.swift" })];
+
+    renderFileList(container, files, "macos/Foo.swift", makeCallbacks(), []);
+
+    const dirrows = [...container.querySelectorAll(".dirrow")] as HTMLElement[];
+    const macosRow = dirrows.find((row) => row.querySelector(".dirlabel")?.textContent === "macos")!;
+    const iosRow = dirrows.find((row) => row.querySelector(".dirlabel")?.textContent === "ios")!;
+    expect(macosRow.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('.row[data-path="macos/Foo.swift"]')?.className).toContain(" on");
+    expect(iosRow.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('.row[data-path="ios/Bar.swift"]')).toBeNull();
+  });
+
+  it("updates a hidden manifest row without replacing the tree, then materializes its final state", () => {
+    const container = document.createElement("div");
+    const files = [makeFile({ path: "src/hidden.ts", patchState: "queued" })];
+    renderFileList(container, files, undefined, makeCallbacks(), []);
+    const group = container.querySelector(".dir-group");
+    const dirrow = container.querySelector(".dirrow") as HTMLElement;
+
+    expect(updateFileListRow(container, makeFile({
+      path: "src/hidden.ts",
+      patchState: "ready",
+      patch: "@@ -1 +1 @@\n-old\n+new",
+    }))).toBe("hidden");
+    expect(container.querySelector(".dir-group")).toBe(group);
+    expect(container.querySelectorAll(".row")).toHaveLength(0);
+
+    dirrow.click();
+
+    expect(container.querySelector(".dir-group")).toBe(group);
+    expect(statText(container, "src/hidden.ts")).toEqual({ additions: "+1", deletions: " -1" });
   });
 
   it("exposes rows as focusable buttons and toggles a directory from the keyboard", () => {

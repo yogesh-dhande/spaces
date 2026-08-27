@@ -1,4 +1,11 @@
-import { CodePaneAgentSummary, CodePaneInitPayload, DiffFileEntry, DiffScope, WorkspaceRefListResult } from "./types";
+import {
+  CodePaneAgentSummary,
+  CodePaneInitPayload,
+  DiffFileEntry,
+  DiffFileManifestEntry,
+  DiffScope,
+  WorkspaceRefListResult,
+} from "./types";
 
 /**
  * Fixture data for the `npm run dev` harness and for the mock bridge's unit
@@ -94,7 +101,6 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     status: "modified",
     patch: MODIFIED_PATCH,
     isBinary: false,
-    truncated: false,
     oldSHA: "a1b2c3d",
     newSHA: "e4f5a6b",
   },
@@ -104,7 +110,6 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     status: "renamed",
     patch: RENAMED_PATCH,
     isBinary: false,
-    truncated: false,
     oldSHA: "9c8b7a6",
     newSHA: "1d2e3f4",
   },
@@ -113,7 +118,6 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     status: "added",
     patch: ADDED_PATCH,
     isBinary: false,
-    truncated: false,
     newSHA: "7f6e5d4",
   },
   {
@@ -121,7 +125,6 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     status: "deleted",
     patch: DELETED_PATCH,
     isBinary: false,
-    truncated: false,
     oldSHA: "3c2b1a0",
   },
   {
@@ -129,23 +132,13 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     status: "untracked",
     patch: UNTRACKED_PATCH,
     isBinary: false,
-    truncated: false,
   },
   {
     path: "assets/logo.png",
     status: "modified",
     isBinary: true,
-    truncated: false,
     oldSHA: "b5a4c3d",
     newSHA: "d3c4a5b",
-  },
-  {
-    path: "dist/bundle.generated.js",
-    status: "modified",
-    isBinary: false,
-    truncated: true,
-    oldSHA: "1111111",
-    newSHA: "2222222",
   },
 ];
 
@@ -175,7 +168,6 @@ index 0000000..8a9b7c6
 +export const ANOTHER_CHANGE = true;
 `,
     isBinary: false,
-    truncated: false,
     newSHA: "8a9b7c6",
   },
 ];
@@ -194,6 +186,12 @@ export function fixtureDiffFiles(scope: DiffScope, version: number): DiffFileEnt
   // (including one of the fixture SHAs in FIXTURE_REF_LIST below) demonstrates the "No changes"
   // empty state.
   return scope.refName === "main" ? LAST_COMMIT_FILES : [];
+}
+
+/** Metadata-first counterpart to `fixtureDiffFiles`: the mock deliberately strips patch bodies so
+ * dev mode exercises the same immediate-sidebar / deferred-file rendering path as production. */
+export function fixtureDiffManifest(scope: DiffScope, version: number): DiffFileManifestEntry[] {
+  return fixtureDiffFiles(scope, version).map(({ path, oldPath, status }) => ({ path, oldPath, status }));
 }
 
 /** Backs the mock's `workspaceRefList()` — the compare menu's "Branch…" / "Commit or ref…" search
@@ -268,8 +266,20 @@ export const FIXTURE_AGENTS: CodePaneAgentSummary[] = [
 export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
   workspaceId: "fixture-workspace",
   workspaceName: "spaces-demo",
-  initialMode: "diff",
-  initialScope: { kind: "uncommitted" },
+  workspaceState: {
+    mode: "diff",
+    scope: { kind: "uncommitted" },
+    diffLayout: "unified",
+    editorSidebarMode: "files",
+    editorRecentPaths: [],
+    selectedAgentSessionId: null,
+    pendingAgentLaunch: null,
+    diffTreeSelectedPath: null,
+    fileTreeExpandedPaths: [],
+    diffScrollSide: null,
+    diffFocusedPath: null,
+    diffFocusedSide: null,
+  },
   theme: "dark",
   // Matches FIXTURE_REF_LIST.branches so the harness's "Branch…" search dialog demonstrates the
   // "base" badge and first-sort behavior.

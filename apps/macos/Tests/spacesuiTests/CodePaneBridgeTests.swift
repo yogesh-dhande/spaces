@@ -10,6 +10,25 @@ import spacesterminalcore
 /// wire protocol (`CodePaneWeb/README.md`) except the actual `SpacesDeviceClient` calls, which only
 /// `CodePaneContentController` makes. Nothing here touches a `WKWebView` or a live device.
 @Suite struct CodePaneBridgeTests {
+    private func workspaceState(
+        mode: String = "diff", editorState: CodePaneBridge.EditorState? = nil, sidebarMode: String = "files", recentPaths: [String] = [],
+        diffScrollSide: String? = nil, diffFocusedSide: String? = nil, diffTreeExpandedPaths: [String]? = nil,
+        diffEditorState: CodePaneBridge.DiffEditorState? = nil
+    ) -> CodePaneBridge.WorkspaceState {
+        CodePaneBridge.WorkspaceState(
+            mode: mode, scope: .uncommitted, diffLayout: "unified", diffSelectedPath: nil,
+            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: nil, fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: sidebarMode,
+            editorRecentPaths: recentPaths, diffScrollLine: diffScrollSide == nil ? nil : 0, diffScrollSide: diffScrollSide,
+            diffFocusedPath: diffFocusedSide == nil ? nil : "diff.swift", diffFocusedLine: diffFocusedSide == nil ? nil : 0, diffFocusedSide: diffFocusedSide, editorScrollLine: nil, editorFocusedLine: nil, editorState: editorState,
+            diffEditorState: diffEditorState, pendingReviewComments: nil)
+    }
+
+    private func initPayload(baseBranch: String? = nil, state: CodePaneBridge.WorkspaceState? = nil) -> CodePaneBridge.InitPayload {
+        CodePaneBridge.InitPayload(
+            workspaceId: "w1", workspaceName: "My Workspace", theme: "dark", baseBranch: baseBranch,
+            workspaceState: state ?? workspaceState(), agents: [])
+    }
+
     // MARK: - Request / ready decode
 
     @Test func decodeRequestReadsIdMethodAndParams() throws {
@@ -91,14 +110,12 @@ import spacesterminalcore
         #expect(lastCommit)
     }
 
-    // MARK: - InitPayload base branch encoding (round-4 Fix 5)
+    // MARK: - InitPayload base branch encoding
 
     /// The toolbar disables (rather than hides) the "vs base branch" option based on whether this
     /// key is present at all, so it must encode when the workspace has one...
     @Test func initPayloadEncodesBaseBranchWhenPresent() throws {
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: "main", editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
+        let payload = initPayload(baseBranch: "main")
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -108,38 +125,35 @@ import spacesterminalcore
     /// ...and must be omitted entirely (not `"baseBranch":null`) when it has none, matching every
     /// other nil-omitted field in this payload.
     @Test func initPayloadOmitsBaseBranchKeyWhenAbsent() throws {
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
+        let payload = initPayload()
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(json["baseBranch"] == nil)
     }
 
-    // MARK: - InitPayload editorState encoding (round-5 hibernation fix)
+    // MARK: - InitPayload editorState encoding
 
-    /// Mirrors the base-branch nil-omission tests above: the web side distinguishes "no snapshot to
-    /// restore" from "restore this snapshot" by whether the `editorState` key is present at all.
-    @Test func initPayloadOmitsEditorStateKeyWhenAbsent() throws {
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
+    /// The complete recovery object always crosses the wire. An absent optional editor snapshot is
+    /// omitted, leaving the page to restore a clean editor while every non-optional field remains
+    /// atomic with it.
+    @Test func initPayloadOmitsAnAbsentEditorStateInsideWorkspaceState() throws {
+        let payload = initPayload()
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["editorState"] == nil)
+        let state = try #require(json["workspaceState"] as? [String: Any])
+        #expect(state["editorState"] == nil)
     }
 
     @Test func initPayloadEncodesEditorStateWhenPresent() throws {
         let state = CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 1", content: "let x = 1", dirty: true)
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: nil, editorState: state, pendingReviewComments: nil, editorUIState: nil, agents: [])
+        let payload = initPayload(state: workspaceState(mode: "editor", editorState: state))
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let editorState = try #require(json["editorState"] as? [String: Any])
+        let workspaceState = try #require(json["workspaceState"] as? [String: Any])
+        let editorState = try #require(workspaceState["editorState"] as? [String: Any])
         #expect(editorState["path"] as? String == "a.swift")
         #expect(editorState["baseSHA256"] as? String == "sha-1")
         #expect(editorState["baseContent"] as? String == "let x = 1")
@@ -148,117 +162,154 @@ import spacesterminalcore
         #expect(editorState["conflict"] as? Bool == false)
     }
 
-    // MARK: - InitPayload editorUIState encoding
+    @Test func editorStateRejectsAPartialSnapshot() {
+        let partial = #"{"path":"a.swift","baseSHA256":"sha-1","baseContent":"let x = 1","content":"let x = 1","dirty":true}"#
 
-    /// Mirrors `initPayloadOmitsEditorStateKeyWhenAbsent`: a pane's first-ever load (or one whose
-    /// sidebar state was never reported) must omit the `editorUIState` key entirely rather than
-    /// sending `null`, since the web side uses key presence to decide whether to restore anything.
-    @Test func initPayloadOmitsEditorUIStateKeyWhenAbsent() throws {
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "diff", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: nil, agents: [])
+        #expect((try? JSONDecoder().decode(CodePaneBridge.EditorState.self, from: Data(partial.utf8))) == nil)
+    }
+
+    @Test func diffEditorConflictPreservesItsExactCASTargetAcrossTheStrictWireState() throws {
+        let changed = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            conflictBaseSHA256: "disk-sha")
+        let deleted = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            conflictBaseSHA256: nil)
+        let clean = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: false, conflict: false,
+            conflictBaseSHA256: nil)
+
+        let changedData = try JSONEncoder().encode(changed)
+        let changedJSON = try #require(JSONSerialization.jsonObject(with: changedData) as? [String: Any])
+        #expect(changedJSON["conflictBaseSHA256"] as? String == "disk-sha")
+
+        let deletedData = try JSONEncoder().encode(deleted)
+        let deletedJSON = try #require(JSONSerialization.jsonObject(with: deletedData) as? [String: Any])
+        #expect(deletedJSON["conflictBaseSHA256"] is NSNull)
+        let cleanData = try JSONEncoder().encode(clean)
+        let cleanJSON = try #require(JSONSerialization.jsonObject(with: cleanData) as? [String: Any])
+        #expect(cleanJSON["conflictBaseSHA256"] is NSNull)
+
+        var missingTarget = changedJSON
+        missingTarget.removeValue(forKey: "conflictBaseSHA256")
+        let missingTargetData = try JSONSerialization.data(withJSONObject: missingTarget)
+        #expect((try? JSONDecoder().decode(CodePaneBridge.DiffEditorState.self, from: missingTargetData)) == nil)
+
+        let invalidNonConflict = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: false,
+            conflictBaseSHA256: "disk-sha")
+        let invalidEmptyTarget = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            conflictBaseSHA256: "")
+        #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: invalidNonConflict)))
+        #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: invalidEmptyTarget)))
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: changed)))
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: deleted)))
+    }
+
+    @Test func workspaceStateChangedRejectsUnknownEnumStringsAndMissingRequiredCollections() throws {
+        let data = try JSONEncoder().encode(workspaceState())
+        var params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        params["mode"] = "unexpected"
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+
+        params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        params.removeValue(forKey: "fileTreeExpandedPaths")
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+
+        params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        params["diffScrollSide"] = "middle"
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+
+        params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        params["diffFocusedSide"] = "middle"
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+    }
+
+    @Test func diffTreeExpansionOmitsFreshStateAndPreservesAnExplicitCollapse() throws {
+        let freshPayload = initPayload(state: workspaceState(diffTreeExpandedPaths: nil))
+        let freshData = try JSONEncoder().encode(freshPayload)
+        let freshJSON = try #require(JSONSerialization.jsonObject(with: freshData) as? [String: Any])
+        let freshState = try #require(freshJSON["workspaceState"] as? [String: Any])
+        #expect(freshState["diffTreeExpandedPaths"] == nil)
+
+        let collapsedPayload = initPayload(state: workspaceState(diffTreeExpandedPaths: []))
+        let collapsedData = try JSONEncoder().encode(collapsedPayload)
+        let collapsedJSON = try #require(JSONSerialization.jsonObject(with: collapsedData) as? [String: Any])
+        let collapsedState = try #require(collapsedJSON["workspaceState"] as? [String: Any])
+        #expect((collapsedState["diffTreeExpandedPaths"] as? [String]) == [])
+    }
+
+    @Test func workspaceStateChangedRequiresAnAbsoluteDeadlineForStartingAgentLaunches() throws {
+        let data = try JSONEncoder().encode(workspaceState())
+        var params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        params["pendingAgentLaunch"] = [
+            "sessionId": "session-start", "command": "custom-agent --review", "status": "starting",
+            "message": NSNull(),
+        ]
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+
+        params["pendingAgentLaunch"] = [
+            "sessionId": "session-start", "command": "custom-agent --review", "status": "starting",
+            "message": NSNull(), "deadlineEpochMilliseconds": 1_000,
+        ]
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) != nil)
+
+        params["pendingAgentLaunch"] = [
+            "sessionId": "session-start", "command": "custom-agent --review", "status": "failed",
+            "message": "No agent detected", "deadlineEpochMilliseconds": 1_000,
+        ]
+        #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
+    }
+
+    @Test func workspaceStateCarriesEachDiffPositionWithItsSide() throws {
+        let state = CodePaneBridge.WorkspaceState(
+            mode: "diff", scope: .uncommitted, diffLayout: "split", diffSelectedPath: "Sources/App.swift",
+            diffTreeExpandedPaths: [], diffTreeSelectedPath: "Sources/App.swift",
+            fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: "files", editorRecentPaths: [],
+            diffScrollLine: 17, diffScrollSide: "old", diffFocusedPath: "Sources/App.swift", diffFocusedLine: 18, diffFocusedSide: "new",
+            editorScrollLine: nil, editorFocusedLine: nil, editorState: nil, diffEditorState: nil, pendingReviewComments: nil)
+
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: data)
+
+        #expect(decoded.diffScrollSide == "old")
+        #expect(decoded.diffFocusedSide == "new")
+        #expect(CodePaneBridge.isValidWorkspaceState(decoded))
+
+        var missingSide = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        missingSide.removeValue(forKey: "diffScrollSide")
+        let missingSideData = try JSONSerialization.data(withJSONObject: missingSide)
+        let incomplete = try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: missingSideData)
+        #expect(!CodePaneBridge.isValidWorkspaceState(incomplete))
+
+        var missingFocusedPath = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        missingFocusedPath.removeValue(forKey: "diffFocusedPath")
+        let missingFocusedPathData = try JSONSerialization.data(withJSONObject: missingFocusedPath)
+        let incompleteFocusedPosition = try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: missingFocusedPathData)
+        #expect(!CodePaneBridge.isValidWorkspaceState(incompleteFocusedPosition))
+    }
+
+    // MARK: - InitPayload sidebar encoding
+
+    @Test func initPayloadEncodesEditorSidebarStateInsideWorkspaceState() throws {
+        let payload = initPayload(state: workspaceState(mode: "editor", sidebarMode: "changes", recentPaths: ["a.swift", "b.swift"]))
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["editorUIState"] == nil)
+        let state = try #require(json["workspaceState"] as? [String: Any])
+        #expect(state["editorSidebarMode"] as? String == "changes")
+        #expect(state["editorRecentPaths"] as? [String] == ["a.swift", "b.swift"])
     }
 
-    @Test func initPayloadEncodesEditorUIStateWhenPresent() throws {
-        let state = CodePaneBridge.EditorUIState(sidebarMode: "changes", recentPaths: ["a.swift", "b.swift"])
-        let payload = CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", initialMode: "editor", initialScope: .init(kind: "uncommitted", refName: nil),
-            theme: "dark", baseBranch: nil, editorState: nil, pendingReviewComments: nil, editorUIState: state, agents: [])
+    @Test func initPayloadEncodesDiffViewportSidesInsideWorkspaceState() throws {
+        let payload = initPayload(state: workspaceState(diffScrollSide: "old", diffFocusedSide: "new"))
 
         let data = try JSONEncoder().encode(payload)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let editorUIState = try #require(json["editorUIState"] as? [String: Any])
-        #expect(editorUIState["sidebarMode"] as? String == "changes")
-        #expect(editorUIState["recentPaths"] as? [String] == ["a.swift", "b.swift"])
-    }
-
-    // MARK: - editorStateChanged decode (round-5 hibernation fix)
-
-    @Test func decodeEditorStateChangedParsesAFileSnapshot() {
-        let message = CodePaneBridge.decodeEditorStateChanged(body: [
-            "method": "editorStateChanged",
-            "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
-        ])
-
-        #expect(
-            message
-                == .file(
-                    CodePaneBridge.EditorState(path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 0", content: "let x = 1", dirty: true)))
-    }
-
-    @Test func decodeEditorStateChangedParsesAConflictFlag() {
-        let message = CodePaneBridge.decodeEditorStateChanged(body: [
-            "method": "editorStateChanged",
-            "params": [
-                "path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true, "conflict": true,
-            ],
-        ])
-
-        #expect(
-            message
-                == .file(
-                    CodePaneBridge.EditorState(
-                        path: "a.swift", baseSHA256: "sha-1", baseContent: "let x = 0", content: "let x = 1", dirty: true, conflict: true)))
-    }
-
-    @Test func decodeEditorStateChangedDefaultsConflictToFalseWhenAbsent() {
-        let message = CodePaneBridge.decodeEditorStateChanged(body: [
-            "method": "editorStateChanged",
-            "params": ["path": "a.swift", "baseSHA256": "sha-1", "baseContent": "let x = 0", "content": "let x = 1", "dirty": true],
-        ])
-
-        guard case .file(let state) = message else {
-            Issue.record("expected a decoded file snapshot")
-            return
-        }
-        #expect(state.conflict == false)
-    }
-
-    @Test func decodeEditorStateChangedTreatsNullParamsAsNoFile() {
-        #expect(CodePaneBridge.decodeEditorStateChanged(body: ["method": "editorStateChanged", "params": NSNull()]) == .noFile)
-    }
-
-    @Test func decodeEditorStateChangedTreatsMissingParamsAsNoFile() {
-        #expect(CodePaneBridge.decodeEditorStateChanged(body: ["method": "editorStateChanged"]) == .noFile)
-    }
-
-    @Test func decodeEditorStateChangedRejectsAnythingWithAnId() {
-        #expect(
-            CodePaneBridge.decodeEditorStateChanged(body: ["id": "1", "method": "editorStateChanged", "params": ["path": "a"]]) == .notThisMessage)
-    }
-
-    @Test func decodeEditorStateChangedRejectsOtherMethods() {
-        #expect(CodePaneBridge.decodeEditorStateChanged(body: ["method": "ready"]) == .notThisMessage)
-    }
-
-    @Test func decodeEditorStateChangedTreatsIncompleteParamsAsNoFile() {
-        #expect(CodePaneBridge.decodeEditorStateChanged(body: ["method": "editorStateChanged", "params": ["path": "a.swift"]]) == .noFile)
-    }
-
-    @Test func decodeEditorStateChangedTreatsMissingBaseContentAsNoFile() {
-        #expect(
-            CodePaneBridge.decodeEditorStateChanged(body: [
-                "method": "editorStateChanged", "params": ["path": "a.swift", "baseSHA256": "sha-1", "content": "let x = 1", "dirty": true],
-            ]) == .noFile, "baseContent is required, mirroring the other snapshot fields")
-    }
-
-    // MARK: - modeChanged decode (round-5 hibernation fix)
-
-    @Test func decodeModeChangedParsesDiffAndEditor() {
-        #expect(CodePaneBridge.decodeModeChanged(body: ["method": "modeChanged", "params": ["mode": "editor"]]) == "editor")
-        #expect(CodePaneBridge.decodeModeChanged(body: ["method": "modeChanged", "params": ["mode": "diff"]]) == "diff")
-    }
-
-    @Test func decodeModeChangedRejectsAnUnknownMode() {
-        #expect(CodePaneBridge.decodeModeChanged(body: ["method": "modeChanged", "params": ["mode": "bogus"]]) == nil)
-    }
-
-    @Test func decodeModeChangedRejectsAnythingWithAnId() {
-        #expect(CodePaneBridge.decodeModeChanged(body: ["id": "1", "method": "modeChanged", "params": ["mode": "editor"]]) == nil)
+        let state = try #require(json["workspaceState"] as? [String: Any])
+        #expect(state["diffScrollSide"] as? String == "old")
+        #expect(state["diffFocusedSide"] as? String == "new")
     }
 
     // MARK: - renderMetric decode
@@ -272,7 +323,9 @@ import spacesterminalcore
         #expect(
             metric
                 == CodePaneBridge.RenderMetric(
-                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17, fileCount: 3, contentBytes: 8192))
+                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17, fileCount: 3, contentBytes: 8192,
+                    path: nil, fileIndex: nil, selectedPriority: false, chunkCount: nil,
+                    mode: nil, scope: nil, layout: nil, scrollTop: nil, focusedLine: nil, dirty: nil))
     }
 
     @Test func decodeRenderMetricRejectsUnknownKindsAndRequestMessages() {
@@ -302,57 +355,81 @@ import spacesterminalcore
         #expect(
             CodePaneBridge.decodeRenderMetric(body: [
                 "method": "renderMetric",
-                "params": ["kind": "editor", "trigger": "fileOpen", "elapsedMs": 1, "fileCount": 1, "contentBytes": 11 * 1024 * 1024],
+                "params": ["kind": "editor", "trigger": "fileOpen", "elapsedMs": 1, "fileCount": 1, "contentBytes": 5 * 1024 * 1024 * 1024],
             ]) == nil)
-    }
-
-    // MARK: - editorUIStateChanged push decode
-
-    @Test func decodeEditorUIStateChangedParsesASnapshot() {
-        let message = CodePaneBridge.decodeEditorUIStateChanged(body: [
-            "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": ["a.ts", "b.ts"]],
-        ])
-
-        #expect(message == CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"]))
-    }
-
-    @Test func decodeEditorUIStateChangedRejectsAnythingWithAnId() {
-        #expect(
-            CodePaneBridge.decodeEditorUIStateChanged(body: [
-                "id": "1", "method": "editorUIStateChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()],
-            ]) == nil)
-    }
-
-    @Test func decodeEditorUIStateChangedRejectsOtherMethods() {
-        #expect(
-            CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "modeChanged", "params": ["sidebarMode": "files", "recentPaths": [String]()]])
-                == nil)
-    }
-
-    @Test func decodeEditorUIStateChangedRejectsMissingParams() {
-        #expect(CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "editorUIStateChanged"]) == nil)
-    }
-
-    @Test func decodeEditorUIStateChangedRejectsIncompleteParams() {
-        #expect(CodePaneBridge.decodeEditorUIStateChanged(body: ["method": "editorUIStateChanged", "params": ["sidebarMode": "files"]]) == nil)
     }
 
     // MARK: - RPC-to-client-call mapping
 
-    @Test func planForWorkspaceDiffDecodesItsScope() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "uncommitted"]])
+    @Test func planForWorkspaceDiffManifestChunkDecodesItsScope() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "uncommitted"], "fileIndex": 0])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiff(scope: .uncommitted)))
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestChunk(scope: .uncommitted, manifestID: nil, fileIndex: 0)))
     }
 
-    @Test func planForWorkspaceDiffDecodesLastCommitScope() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "lastCommit"]])
+    @Test func planForWorkspaceDiffManifestChunkBindsContinuationCursor() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "lastCommit"], "manifestID": "manifest-1", "fileIndex": 42])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiff(scope: .lastCommit)))
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestChunk(scope: .lastCommit, manifestID: "manifest-1", fileIndex: 42)))
     }
 
-    @Test func planForWorkspaceDiffPropagatesAScopeDecodeFailure() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiff", params: ["scope": ["kind": "bogus"]])
+    @Test func planForWorkspaceDiffManifestChunkPropagatesAScopeDecodeFailure() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "bogus"], "fileIndex": 0])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceDiffFileChunkBindsTheManifestAndTransfer() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffFileChunk",
+            params: [
+                "scope": ["kind": "ref", "refName": "main"], "manifestID": "manifest-1", "relativePath": "Sources/App.swift",
+                "byteOffset": 1024, "transferID": "transfer-1",
+            ])
+
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(
+                    .workspaceDiffFileChunk(
+                        scope: .ref("main"), manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 1024,
+                        transferID: "transfer-1")))
+    }
+
+    @Test func planRejectsAChunkWithoutTheManifestThatOwnsIt() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffFileChunk",
+            params: ["scope": ["kind": "uncommitted"], "relativePath": "Sources/App.swift", "byteOffset": 0])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceDiffFileChunkCancelBindsTheManifestAndTransfer() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffFileChunkCancel",
+            params: [
+                "scope": ["kind": "lastCommit"], "manifestID": "manifest-1", "relativePath": "Sources/App.swift", "byteOffset": 2048,
+                "transferID": "transfer-1",
+            ])
+
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(
+                    .workspaceDiffFileChunkCancel(
+                        scope: .lastCommit, manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 2048,
+                        transferID: "transfer-1")))
+    }
+
+    @Test func planForWorkspaceDiffManifestReleaseBindsItsScope() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffManifestRelease",
+            params: ["scope": ["kind": "uncommitted"], "manifestID": "manifest-1"])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestRelease(scope: .uncommitted, manifestID: "manifest-1")))
+    }
+
+    @Test func planRejectsAManifestReleaseWithoutAManifestID() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiffManifestRelease", params: ["scope": ["kind": "uncommitted"]])
 
         #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
     }
@@ -527,7 +604,7 @@ import spacesterminalcore
         #expect(CodePaneBridge.fileReadPayload(result).isInvalidArgumentFailure)
     }
 
-    /// Round-4 Fix 1: a successful write's own hash rides along in the payload, so the client can
+    /// A successful write's own hash rides along in the payload, so the client can
     /// adopt it as the next CAS baseline directly instead of racing a re-read against another writer.
     @Test func fileWritePayloadOnSuccessCarriesTheWritesOwnHash() {
         let result = SpacesDeviceWorkspaceFileWriteResult(didWrite: true, sha256: "new-sha")
@@ -652,7 +729,7 @@ import spacesterminalcore
         #expect(decoded.scopeSignature == "a\"b`c\nd")
     }
 
-    // MARK: - FileSignaturePayload encoding (Phase 5 Part A)
+    // MARK: - FileSignaturePayload encoding
 
     @Test func fileSignaturePayloadOmitsSha256WhenMissingIsTrue() throws {
         let payload = CodePaneBridge.FileSignaturePayload(path: "foo.ts", sha256: nil, missing: true)
@@ -686,141 +763,6 @@ import spacesterminalcore
         #expect(decoded.path == "a\"b`c\nd")
     }
 
-    // MARK: - Collected editor-state flush decode (round-6 Fix 1)
-
-    @Test func decodeCollectedEditorStateParsesAJSONSnapshot() {
-        let json = #"{"path":"foo.ts","baseSHA256":"sha","baseContent":"let x = 0;","content":"let x = 1;","dirty":true}"#
-
-        #expect(
-            CodePaneBridge.decodeCollectedEditorState(json)
-                == .file(CodePaneBridge.EditorState(path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true))
-        )
-    }
-
-    @Test func decodeCollectedEditorStateParsesAConflictFlag() {
-        let json = #"{"path":"foo.ts","baseSHA256":"sha","baseContent":"let x = 0;","content":"let x = 1;","dirty":true,"conflict":true}"#
-
-        #expect(
-            CodePaneBridge.decodeCollectedEditorState(json)
-                == .file(
-                    CodePaneBridge.EditorState(
-                        path: "foo.ts", baseSHA256: "sha", baseContent: "let x = 0;", content: "let x = 1;", dirty: true, conflict: true)))
-    }
-
-    @Test func decodeCollectedEditorStateTreatsTheNoFileSentinelAsNoFile() {
-        // `'__no_file__'` is an installed collector's own explicit "nothing open" answer — the only
-        // case that should clear a stored snapshot.
-        #expect(CodePaneBridge.decodeCollectedEditorState("__no_file__") == .noFile)
-    }
-
-    @Test func decodeCollectedEditorStateTreatsTheUninstalledSentinelAsNotReported() {
-        // `'__uninstalled__'` means the page hasn't finished bootstrapping yet (the collector global
-        // doesn't exist) — this must NOT be treated as "no file", or a teardown flush racing a
-        // reactivate-then-hibernate cycle would wipe a real stored snapshot.
-        #expect(CodePaneBridge.decodeCollectedEditorState("__uninstalled__") == .notReported)
-    }
-
-    @Test func decodeCollectedEditorStateTreatsNilAsNotReported() {
-        // A nil result is what a genuine `evaluateJavaScript` error folds into (see
-        // `CodePaneScriptEvaluator`'s doc comment) — indistinguishable from "didn't answer", so it must
-        // leave the stored snapshot untouched rather than being read as "no file".
-        #expect(CodePaneBridge.decodeCollectedEditorState(nil) == .notReported)
-    }
-
-    @Test func decodeCollectedEditorStateTreatsAMalformedStringAsNotReported() {
-        #expect(CodePaneBridge.decodeCollectedEditorState("not json") == .notReported)
-    }
-
-    @Test func decodeCollectedEditorStateTreatsANonStringResultAsNotReported() {
-        // `evaluateJavaScript`'s completion can hand back other JS value types (numbers, booleans);
-        // the collect script's contract only ever produces one of the two sentinel strings or a JSON
-        // snapshot string, so anything else is treated the same defensive way a malformed string is.
-        #expect(CodePaneBridge.decodeCollectedEditorState(42) == .notReported)
-    }
-
-    // MARK: - Collected review-comment-state flush decode (round-16 Fix 1a)
-
-    /// Mirrors `decodeCollectedEditorStateParsesAJSONSnapshot` exactly, for the comment surface's
-    /// array-of-entries shape instead of a single file snapshot.
-    @Test func decodeCollectedReviewCommentStateParsesAJSONSnapshot() {
-        let json = #"[{"id":"c1","provisional":false,"filePath":"a.ts","side":"new","lineNumber":3,"lineText":"x","body":"hi"}]"#
-
-        #expect(
-            CodePaneBridge.decodeCollectedReviewCommentState(json)
-                == .entries([
-                    CodePaneBridge.ReviewCommentEntryPayload(
-                        id: "c1", provisional: false, filePath: "a.ts", side: .new, lineNumber: 3, lineText: "x", body: "hi")
-                ]))
-    }
-
-    @Test func decodeCollectedReviewCommentStateTreatsTheNoneSentinelAsNone() {
-        // `'__none__'` is an installed collector's own explicit "nothing pending" answer — the only
-        // case that should clear a stored snapshot. Mirrors `'__no_file__'` for the editor surface.
-        #expect(CodePaneBridge.decodeCollectedReviewCommentState("__none__") == .none)
-    }
-
-    @Test func decodeCollectedReviewCommentStateTreatsTheUninstalledSentinelAsNotReported() {
-        // Mirrors `decodeCollectedEditorStateTreatsTheUninstalledSentinelAsNotReported`: this must NOT
-        // be treated as "nothing pending", or a teardown flush racing a reactivate-then-hibernate cycle
-        // would wipe a real stored snapshot.
-        #expect(CodePaneBridge.decodeCollectedReviewCommentState("__uninstalled__") == .notReported)
-    }
-
-    @Test func decodeCollectedReviewCommentStateTreatsNilAsNotReported() {
-        // A nil result is what a genuine `evaluateJavaScript` error folds into (see
-        // `CodePaneScriptEvaluator`'s doc comment) — indistinguishable from "didn't answer", so it must
-        // leave the stored snapshot untouched rather than being read as "nothing pending".
-        #expect(CodePaneBridge.decodeCollectedReviewCommentState(nil) == .notReported)
-    }
-
-    @Test func decodeCollectedReviewCommentStateTreatsAMalformedStringAsNotReported() {
-        #expect(CodePaneBridge.decodeCollectedReviewCommentState("not json") == .notReported)
-    }
-
-    @Test func decodeCollectedReviewCommentStateTreatsANonStringResultAsNotReported() {
-        // Mirrors `decodeCollectedEditorStateTreatsANonStringResultAsNotReported`: anything other than
-        // a sentinel or a JSON array string is treated the same defensive way a malformed string is.
-        #expect(CodePaneBridge.decodeCollectedReviewCommentState(42) == .notReported)
-    }
-
-    // MARK: - Collected editor-UI-state flush decode
-
-    /// Mirrors `decodeCollectedEditorStateParsesAJSONSnapshot` exactly, for the sidebar-UI-state
-    /// surface's single-object shape.
-    @Test func decodeCollectedEditorUIStateParsesAJSONSnapshot() {
-        let json = #"{"sidebarMode":"files","recentPaths":["a.ts","b.ts"]}"#
-
-        #expect(
-            CodePaneBridge.decodeCollectedEditorUIState(json)
-                == .state(CodePaneBridge.EditorUIState(sidebarMode: "files", recentPaths: ["a.ts", "b.ts"])))
-    }
-
-    @Test func decodeCollectedEditorUIStateTreatsTheNoneSentinelAsNone() {
-        // `'__none__'` is an installed collector's own explicit "nothing to report" answer — the only
-        // case that should clear a stored snapshot. Mirrors `'__none__'` for the comment surface.
-        #expect(CodePaneBridge.decodeCollectedEditorUIState("__none__") == .none)
-    }
-
-    @Test func decodeCollectedEditorUIStateTreatsTheUninstalledSentinelAsNotReported() {
-        // Mirrors `decodeCollectedReviewCommentStateTreatsTheUninstalledSentinelAsNotReported`: this
-        // must NOT be treated as "nothing to report", or a teardown flush racing a reactivate-then-
-        // hibernate cycle would wipe a real stored snapshot.
-        #expect(CodePaneBridge.decodeCollectedEditorUIState("__uninstalled__") == .notReported)
-    }
-
-    @Test func decodeCollectedEditorUIStateTreatsNilAsNotReported() {
-        // A nil result is what a genuine `evaluateJavaScript` error folds into — indistinguishable
-        // from "didn't answer", so it must leave the stored snapshot untouched.
-        #expect(CodePaneBridge.decodeCollectedEditorUIState(nil) == .notReported)
-    }
-
-    @Test func decodeCollectedEditorUIStateTreatsAMalformedStringAsNotReported() {
-        #expect(CodePaneBridge.decodeCollectedEditorUIState("not json") == .notReported)
-    }
-
-    @Test func decodeCollectedEditorUIStateTreatsANonStringResultAsNotReported() {
-        #expect(CodePaneBridge.decodeCollectedEditorUIState(42) == .notReported)
-    }
 }
 
 // MARK: - Result convenience

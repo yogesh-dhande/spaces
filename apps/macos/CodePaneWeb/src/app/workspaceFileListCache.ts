@@ -12,7 +12,7 @@ import { SpacesBridge, WorkspaceFileListResult } from "../bridge/types";
  * `resubscribeDiffSignature`'s callback — the same push event that refreshes the diff — so files
  * added or removed by an agent (or any other outside change) reappear without a manual refresh.
  * That push is Diff mode's own signal, though: the Swift host only opens the diff-signature stream
- * after a successful `workspaceDiff` fetch, which a non-git workspace never has (`workspaceFileList`
+ * after a successful `workspaceDiffManifestChunk` pull, which a non-git workspace never has (`workspaceFileList`
  * is its only way to open files at all) and a pane rehydrated straight into Editor mode may not have
  * yet either. `getFresh()` exists for those cases — see its own doc comment.
  *

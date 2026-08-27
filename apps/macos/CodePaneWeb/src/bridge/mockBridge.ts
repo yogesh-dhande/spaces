@@ -5,14 +5,13 @@ import {
   FIXTURE_INIT_PAYLOAD,
   FIXTURE_REF_LIST,
   fixtureDiffFiles,
+  fixtureDiffManifest,
   fixtureHash,
 } from "./fixtures";
 import {
   CodePaneAgentsChangedEvent,
-  CodePaneEditorState,
-  CodePaneEditorUIState,
   CodePaneRenderMetric,
-  CodePaneMode,
+  CodePaneWorkspaceState,
   DiffScope,
   DiffSignatureListener,
   FileSignatureListener,
@@ -22,7 +21,9 @@ import {
   SpacesBridgeError,
   SpacesReviewComment,
   Unsubscribe,
-  WorkspaceDiffResult,
+  StartWorkspaceCommandResult,
+  WorkspaceDiffFileChunkResult,
+  WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
   WorkspaceFileWriteOptions,
@@ -63,6 +64,13 @@ export class MockSpacesBridge implements SpacesBridge {
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
   );
   private readonly comments = new Map<string, SpacesReviewComment>();
+  private readonly patchTransfers = new Map<string, { scopeSignature: string; file: ReturnType<typeof fixtureDiffFiles>[number]; bytes: Uint8Array }>();
+  private readonly manifests = new Map<string, { scope: DiffScope; scopeSignature: string }>();
+  /** Start Agent readiness has one native-minted absolute deadline; resume must reuse it rather
+   * than silently granting another window to the same command. */
+  private readonly agentStartDeadlines = new Map<string, number>();
+  private nextManifestID = 0;
+  private nextPatchTransferID = 0;
 
   notifyReady(): void {
     queueMicrotask(() => {
@@ -94,9 +102,67 @@ export class MockSpacesBridge implements SpacesBridge {
 
   private lastAgentsLength = FIXTURE_AGENTS.length;
 
-  async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {
-    const files = fixtureDiffFiles(scope, this.version);
-    return delay({ scopeSignature: `fixture-v${this.version}`, files });
+  async workspaceDiffManifestChunk(
+    scope: DiffScope,
+    request: { manifestID?: string; fileIndex: number },
+  ): Promise<WorkspaceDiffManifestChunkResult> {
+    let manifestID = request.manifestID;
+    if (manifestID === undefined) {
+      if (request.fileIndex !== 0) throw new SpacesBridgeError("invalidArgument", "manifestID is required after the initial metadata page.");
+      manifestID = `mock-manifest-${this.version}-${++this.nextManifestID}`;
+      this.manifests.set(manifestID, { scope, scopeSignature: `fixture-v${this.version}` });
+    }
+    const manifest = this.manifests.get(manifestID);
+    if (!manifest || JSON.stringify(manifest.scope) !== JSON.stringify(scope)) throw new SpacesBridgeError("conflict", "Diff snapshot expired.");
+    const files = fixtureDiffManifest(scope, this.version);
+    const pageSize = 2;
+    const page = files.slice(request.fileIndex, request.fileIndex + pageSize);
+    if (request.fileIndex > files.length) throw new SpacesBridgeError("invalidArgument", "fileIndex is outside this diff manifest.");
+    const nextFileIndex = request.fileIndex + page.length < files.length ? request.fileIndex + page.length : undefined;
+    return delay({ manifestID, scopeSignature: manifest.scopeSignature, files: page, nextFileIndex });
+  }
+
+  async workspaceDiffFileChunk(
+    scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID?: string },
+  ): Promise<WorkspaceDiffFileChunkResult> {
+    const manifest = this.manifests.get(request.manifestID);
+    if (!manifest) throw new SpacesBridgeError("conflict", "Diff snapshot expired.");
+    const signature = manifest.scopeSignature;
+    let transfer = request.transferID === undefined ? undefined : this.patchTransfers.get(request.transferID);
+    let transferID = request.transferID;
+    if (transfer === undefined) {
+      const file = fixtureDiffFiles(scope, this.version).find((entry) => entry.path === request.relativePath);
+      if (!file) throw new SpacesBridgeError("notFound", `No changed file: ${request.relativePath}`);
+      transferID = `mock-patch-${++this.nextPatchTransferID}`;
+      transfer = { scopeSignature: signature, file, bytes: new TextEncoder().encode(file.patch ?? "") };
+      this.patchTransfers.set(transferID, transfer);
+    }
+    if (transfer.scopeSignature !== signature) throw new SpacesBridgeError("conflict", "Diff changed while patch was streaming.");
+    const chunkBytes = 4 * 1024 * 1024;
+    const bytes = transfer.bytes.slice(request.byteOffset, request.byteOffset + chunkBytes);
+    const nextByteOffset = request.byteOffset + bytes.length < transfer.bytes.length ? request.byteOffset + bytes.length : undefined;
+    if (nextByteOffset === undefined) this.patchTransfers.delete(transferID!);
+    return delay({
+      scopeSignature: signature,
+      file: transfer.file,
+      transferID: nextByteOffset === undefined ? undefined : transferID,
+      patchBase64Data: bytes.length === 0 ? undefined : uint8ArrayToBase64(bytes),
+      nextByteOffset,
+    });
+  }
+
+  async workspaceDiffFileChunkCancel(
+    _scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID: string },
+  ): Promise<void> {
+    this.patchTransfers.delete(request.transferID);
+    await delay(undefined);
+  }
+
+  async workspaceDiffManifestRelease(_scope: DiffScope, request: { manifestID: string }): Promise<void> {
+    this.manifests.delete(request.manifestID);
+    await delay(undefined);
   }
 
   async workspaceFileRead(path: string): Promise<WorkspaceFileReadResult> {
@@ -250,15 +316,40 @@ export class MockSpacesBridge implements SpacesBridge {
     await delay(undefined);
   }
 
-  // The dev harness and unit tests never hibernate a real WKWebView, so there is nothing for the
-  // mock to persist or rehydrate here — these two are no-ops purely to satisfy `SpacesBridge`.
-  notifyEditorStateChanged(_state: CodePaneEditorState | undefined): void {}
-
-  notifyModeChanged(_mode: CodePaneMode): void {}
-
-  notifyEditorUIStateChanged(_state: CodePaneEditorUIState): void {}
+  // The dev harness and unit tests never hibernate a real WKWebView, so recovery is intentionally
+  // in-memory-only here; the fixture init payload already models a clean first mount.
+  notifyWorkspaceStateChanged(_state: CodePaneWorkspaceState): void {}
 
   notifyRenderMetric(_metric: CodePaneRenderMetric): void {}
+
+  async startWorkspaceCommand(_command: string): Promise<StartWorkspaceCommandResult> {
+    const sessionId = `mock-command-${Date.now()}`;
+    const deadlineEpochMilliseconds = Date.now() + 90_000;
+    this.agentStartDeadlines.set(sessionId, deadlineEpochMilliseconds);
+    return delay({
+      sessionId,
+      status: "starting",
+      deadlineEpochMilliseconds,
+    });
+  }
+
+  async resumeWorkspaceCommandTracking(sessionId: string): Promise<StartWorkspaceCommandResult> {
+    const deadlineEpochMilliseconds = this.agentStartDeadlines.get(sessionId);
+    if (deadlineEpochMilliseconds === undefined) {
+      throw new SpacesBridgeError("notFound", "No pending Start Agent command for this session.");
+    }
+    return delay({
+      sessionId,
+      status: "starting",
+      deadlineEpochMilliseconds,
+    });
+  }
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 let lastInstance: MockSpacesBridge | undefined;

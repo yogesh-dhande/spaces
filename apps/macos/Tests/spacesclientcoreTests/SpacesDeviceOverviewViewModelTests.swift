@@ -32,7 +32,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                 for: .workspaceFileWrite(.init(workspaceID: "workspace-1", relativePath: "README.md", base64Data: "", expectedSHA256: nil))),
             SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
         XCTAssertEqual(
-            SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceDiff(.init(workspaceID: "workspace-1"))),
+            SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceDiffManifestChunk(.init(workspaceID: "workspace-1", fileIndex: 0))),
             SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(for: .subscribeWorkspaceDiffSignature(.init(workspaceID: "workspace-1"))),

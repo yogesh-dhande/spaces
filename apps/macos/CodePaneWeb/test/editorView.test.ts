@@ -50,7 +50,10 @@ vi.mock("@pierre/diffs/edit", () => ({
 
 function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
   return {
-    workspaceDiff: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceDiffManifestChunk: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceDiffFileChunk: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceDiffFileChunkCancel: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceDiffManifestRelease: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "File search is not available yet.")),
@@ -59,9 +62,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     workspaceRefList: vi.fn().mockRejectedValue(new Error("not used")),
     subscribeDiffSignature: vi.fn(() => () => {}),
     subscribeFileSignature: vi.fn(() => () => {}),
-    notifyEditorStateChanged: vi.fn(),
-    notifyEditorUIStateChanged: vi.fn(),
-    notifyModeChanged: vi.fn(),
+    notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
     // Not used by EditorView (comments are diff-mode only) — stubbed so this satisfies
     // `SpacesBridge` without any of these tests needing to care about the comment surface.
@@ -69,6 +70,8 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentsSend: vi.fn().mockRejectedValue(new Error("not used")),
+    startWorkspaceCommand: vi.fn().mockRejectedValue(new Error("not used")),
+    resumeWorkspaceCommandTracking: vi.fn().mockRejectedValue(new Error("not used")),
     ...overrides,
   };
 }
@@ -336,8 +339,8 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const result: WorkspaceFileReadResult = { content: "hello\n", sha256: "sha-1", size: 6 };
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() =>
@@ -356,8 +359,8 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const result: WorkspaceFileReadResult = { content: "hello\n", sha256: "sha-1", size: 6 };
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1)); // the open's immediate push
@@ -386,8 +389,8 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const workspaceFileRead = vi.fn().mockResolvedValue(readResult);
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
@@ -415,8 +418,8 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     let resolveWrite: ((result: WorkspaceFileWriteResult) => void) | undefined;
     const workspaceFileWrite = vi.fn(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)));
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
@@ -671,8 +674,8 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
   it("a clean snapshot with disk unchanged shows the snapshot content, issues exactly one reconcile read, and pushes nothing", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "unchanged\n", sha256: "sha-same", size: 10 });
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     await view.restoreState({
       path: "a.ts",
@@ -1652,8 +1655,8 @@ describe("EditorView.collectStateForFlush (round-6 Fix 1)", () => {
     const result: WorkspaceFileReadResult = { content: "hello\n", sha256: "sha-1", size: 6 };
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
-    const bridge = makeBridge({ workspaceFileRead, notifyEditorStateChanged });
-    const view = new EditorView(container, bridge);
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
@@ -3239,5 +3242,146 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(onFileRendered).toHaveBeenCalledTimes(1));
     expect(onFileRendered).toHaveBeenCalledWith("src/a.ts", expect.any(Number), 2);
+  });
+
+  it("retries restored caret focus until the asynchronously attached editor is available", async () => {
+    const result: WorkspaceFileReadResult = { content: "one\ntwo\nthree\n", sha256: "sha-1", size: 14 };
+    const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
+    const view = new EditorView(container, bridge);
+    await openFile(view, bridge, "src/a.ts");
+
+    view.restorePosition(null, 3);
+    // The old one-frame attempt has already observed the unattached editor by this point.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+
+    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 3 }));
+  });
+
+  it("does not start a restored-caret poll for the read-only conflict comparison", async () => {
+    const workspaceFileRead = vi.fn().mockResolvedValue({ content: "disk\n", sha256: "sha-disk", size: 5 });
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    await view.restoreState({
+      path: "src/conflict.ts",
+      baseSHA256: "sha-base",
+      baseContent: "base\n",
+      content: "mine\n",
+      dirty: true,
+      conflict: true,
+    });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/conflict.ts"));
+
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame");
+    view.restorePosition(null, 2);
+
+    expect(requestFrame.mock.calls.map(([callback]) => (callback as unknown as { name: string }).name)).not.toContain("focusWhenAttached");
+    requestFrame.mockRestore();
+  });
+
+  it("does not start a restored-caret poll for a deleted-file placeholder", async () => {
+    // Let the ordinary editor attach finish before the restore reconciliation replaces it with the
+    // non-editable deleted-file placeholder.
+    fakeCodeViewControl.editor = {};
+    const workspaceFileRead = vi.fn().mockRejectedValue(new SpacesBridgeError("notFound", "src/deleted.ts is gone"));
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = new EditorView(container, bridge);
+    await view.restoreState({
+      path: "src/deleted.ts",
+      baseSHA256: "sha-base",
+      baseContent: "before\n",
+      content: "before\n",
+      dirty: false,
+      conflict: false,
+    });
+    await vi.waitFor(() => expect(view.collectStateForFlush()).toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    fakeCodeViewControl.editor = undefined;
+
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame");
+    view.restorePosition(null, 2);
+
+    expect(requestFrame.mock.calls.map(([callback]) => (callback as unknown as { name: string }).name)).not.toContain("focusWhenAttached");
+    requestFrame.mockRestore();
+  });
+
+  it("bounds restored-caret polling when an editable attachment never appears", async () => {
+    // Let the ordinary attach-heal finish first. The editor can disappear after that render (for
+    // example while Pierre replaces an item), so restorePosition still needs a finite retry rather
+    // than relying only on the conflict/placeholder guards above.
+    fakeCodeViewControl.editor = {};
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "one\n", sha256: "sha-1", size: 4 }),
+    });
+    const view = new EditorView(container, bridge);
+    await openFile(view, bridge, "src/a.ts");
+    await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
+    fakeCodeViewControl.editor = undefined;
+
+    const queuedFrames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      queuedFrames.push(callback);
+      return queuedFrames.length;
+    });
+    view.restorePosition(null, 1);
+
+    // Drain more than the permitted number. The old unbounded loop still has a focus callback
+    // queued at this point; the bounded behavior naturally drains to zero.
+    for (let runs = 0; queuedFrames.length > 0 && runs < 130; runs += 1) {
+      queuedFrames.shift()!(performance.now());
+    }
+
+    const focusPolls = requestFrame.mock.calls.filter(
+      ([callback]) => (callback as unknown as { name: string }).name === "focusWhenAttached",
+    );
+    expect(focusPolls).toHaveLength(121);
+    expect(queuedFrames).toHaveLength(0);
+    requestFrame.mockRestore();
+  });
+});
+
+describe("EditorView focused-line recovery", () => {
+  it("does not report a rendered line after its scroll host is detached", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new EditorView(container, makeBridge());
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const line = document.createElement("div");
+    line.dataset.line = "4";
+    Object.defineProperty(host, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(line, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    host.appendChild(line);
+
+    expect(view.visibleLine()).toBe(4);
+    container.remove();
+    expect(view.visibleLine()).toBeNull();
+  });
+
+  it("samples the live caret line for a workspace snapshot even when no edit occurred", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "one\ntwo\nthree\n", sha256: "sha-1", size: 14 }),
+    });
+    const view = new EditorView(container, bridge);
+    view.open("src/a.ts");
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/a.ts"));
+
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    editable.textContent = "one\ntwo\nthree\n";
+    host.appendChild(editable);
+    const text = editable.firstChild!;
+    const selection = document.getSelection()!;
+    const range = document.createRange();
+    range.setStart(text, "one\ntwo\n".length);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    expect(view.focusedLineNumber()).toBe(3);
+    container.remove();
   });
 });

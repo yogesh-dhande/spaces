@@ -84,6 +84,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Rows belonging to an unreachable device stay listed and are dimmed to 55% opacity, with the device named in the row's tooltip. The dimming is the whole marking — the device's own header already reports the state through the control that recovers it, so the rows themselves take no extra icon or label. The same treatment marks any row that stands for an unreachable device, including one that cannot be picked.
 - A compact single-line banner may overlay the top-trailing corner of a content pane, rather than blocking it, in two variants. A transient banner carries state tied to that pane's current action: an indeterminate progress state with a Cancel affordance, a transient error, or an informational notice. Progress stays until the triggering action clears it or is cancelled; error and notice variants auto-dismiss after a few seconds or on click. A persistent banner carries a lasting fact about the pane itself, has no Cancel or click-to-dismiss affordance, and clears only when the fact stops being true; it outlines itself in the tint of the state it reports, so it separates from the content behind it instead of reading as one more transient overlay. A pane has one banner: a transient banner overrides the persistent one while it is up, and dismissing it restores the persistent one.
 - When a pane's content still looks interactive but is not, the banner is the only thing distinguishing the two, so acting on the pane should pulse it rather than leave the action silently inert.
+- Progressive content should reveal structure before detail: show file metadata in the sidebar immediately, then fill patches in reading order. Keep queued-file priority visible through selection and avoid replacing the pane with a blank loading state.
 
 ## Icons And Chips
 - Use icons for obvious actions and state.
@@ -101,6 +102,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Use text buttons where clarity matters more than compactness.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
 - Use a segmented control in a sheet's or view's toolbar/navigation-bar principal position to switch between a small, fixed set of content-rendering modes (e.g. Rendered/Raw) instead of separate screens, buttons, or menu items.
+- In a crowded Editor toolbar, represent agent assignment as a compact selector when running agents exist, with a separated `Start new…` menu item; when none exist, use a compact `Start agent…` action that opens the command-entry dialog without widening the row.
 
 ## Forms
 - Keep forms compact and aligned.
@@ -114,6 +116,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Draft items should enter editing immediately.
 - Canceling a never-saved draft should remove the row rather than leaving placeholder data behind.
 - Detached modal editors should be reserved for edits that are too large, risky, or complex for inline treatment.
+- Diff editing stays inline on the new/right side and one file at a time. Put **Save** and **Cancel** in the edited file's own header, and show **Unsaved changes** there so the recovery state remains attached to the file rather than floating in global chrome. Conflict recovery should use the existing comparison surface and its explicit Keep mine/Take disk actions.
 - For single-value labels such as a connected-device name, rename in place: a right-click context menu (long-press on iOS) offers Rename, which swaps the label for a text field seeded with the current value. Return commits, Esc reverts, and there are no separate Save/Cancel buttons. The label may also enter this state on double-click. Workspace names are not renamed this way: a git workspace shows its branch and a non-git workspace shows its folder name, both read-only.
 
 ## Navigation
@@ -156,6 +159,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Empty or missing values should use muted text placeholders rather than large empty-state treatments in dense views.
 - Missing state should preserve context when possible so the user can act on it in place.
 - Draft state should be obvious and easy to complete or cancel.
+- A blocked review-comment composer should explain the missing prerequisite directly beneath its text area: say whether no agent is running or a running agent must be assigned. Do not add a success helper when sending is available; the enabled action and its agent label are sufficient.
 
 ## Accessibility And Testability
 - Add accessibility identifiers to important controls and fields.

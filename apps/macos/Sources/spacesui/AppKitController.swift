@@ -232,6 +232,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     // device and act as the default target when no row is selected. Per-row device
     // context is resolved via deviceID(for…) helpers and the device sections.
     var localDeviceID = SpacesPairedDeviceRecord.localDeviceID
+    /// Advances whenever an authoritative local overview is installed, including a mutation response.
+    /// Sidebar reloads capture this before their off-main read; a response that lands while that read
+    /// is in flight therefore fences the stale snapshot before it can reconcile missing workspaces.
+    var localOverviewInstallGeneration = 0
     var localDeviceName = "This Mac"
     var localPairedDevice: SpacesPairedDeviceRecord?
     var deviceSections: [DeviceSection] = []
@@ -428,6 +432,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     private var keepsTerminalSessionsRunningDuringTermination = false
+    /// AppKit remains alive in `.terminateLater` while Editor panes collect their last JS-owned
+    /// workspace state and synchronously drain its queued persistence. A second quit request while
+    /// that one is in flight must keep waiting for the same fence rather than starting another close.
+    private var isFinalizingEditorStateForTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
     /// Workspaces whose delete mutation is in flight. Deleting a workspace takes seconds on the owning
@@ -682,24 +690,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isFinalizingEditorStateForTermination { return .terminateLater }
         let liveSessions = Self.liveBuiltInTerminalSessions()
         switch Self.terminalQuitPolicy(liveTerminalSessionCount: liveSessions.count) {
         case .quitImmediately:
             keepsTerminalSessionsRunningDuringTermination = true
-            return .terminateNow
+            return deferTerminationUntilEditorStateIsDurable(sender)
         case .promptForLiveSessions:
             switch presentTerminalQuitDialog(liveSessionCount: liveSessions.count) {
             case .keepRunning:
                 keepsTerminalSessionsRunningDuringTermination = true
-                return .terminateNow
+                return deferTerminationUntilEditorStateIsDurable(sender)
             case .stopAll:
                 keepsTerminalSessionsRunningDuringTermination = false
                 let cleanupResult = performStopAllQuitCleanup(liveSessions: liveSessions)
                 guard cleanupResult.succeeded else { return handleStopAllQuitCleanupFailure(cleanupResult) }
-                return .terminateNow
+                return deferTerminationUntilEditorStateIsDurable(sender)
             case .cancel: return .terminateCancel
             }
         }
+    }
+
+    private func deferTerminationUntilEditorStateIsDurable(_ application: NSApplication) -> NSApplication.TerminateReply {
+        isFinalizingEditorStateForTermination = true
+        panelCoordinator.closeAllContentForTermination { [weak self, weak application] in
+            // The no-pane case settles synchronously inside `applicationShouldTerminate`; reply on
+            // the following main-queue turn so AppKit has observed `.terminateLater` first.
+            DispatchQueue.main.async {
+                guard let self, let application else { return }
+                self.isFinalizingEditorStateForTermination = false
+                application.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -731,11 +754,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
-        // Terminal windows once detached their clients as AppKit closed them during
-        // termination; panes are not closed by AppKit, so detach their clients here.
-        // The sessions themselves are untouched — quit keeps them running unless the
-        // quit dialog already stopped them all.
-        panelCoordinator.closeAllContentForTermination()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
@@ -5452,6 +5470,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// Every overview-install path calls this before it discards the prior workspace catalog. The
+    /// overview is the authority for whether an Editor recovery document still has a workspace to
+    /// belong to; this shared reconciliation also fences any queued write that has not reached SQLite.
+    func removeCodePaneRecoveryStateForDeletedWorkspaces(
+        deviceID: String, liveWorkspaceIDs: Set<String>, previousWorkspaceIDs: Set<String>
+    ) {
+        guard let database = try? clientDatabase() else { return }
+        let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: deviceID)
+        CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
+            storageKey: storageKey,
+            liveWorkspaceIDs: liveWorkspaceIDs,
+            previousWorkspaceIDs: previousWorkspaceIDs,
+            persistedWorkspaceIDs: { (try? database.codePaneWorkspaceIDs(deviceID: deviceID)) ?? [] },
+            delete: { workspaceID in try? database.deleteCodePaneWorkspaceState(deviceID: deviceID, workspaceID: workspaceID) })
+    }
+
     private func applyDeviceOverview(
         _ overview: SpacesDeviceOverviewPayload, deviceID: String, epoch: Int, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil, preserveDetailPane: Bool = false
@@ -5463,11 +5497,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // selection: a mutation that clears the selection (e.g. a remote project delete) would
         // otherwise fall through to the local device and install a remote overview — and its
         // pane-prune keep-set — into the local section.
-        let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
-        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         // Captured before the section is overwritten: the pairing between an ended session and the one
         // that replaced it exists only in the difference between these two overviews.
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+            localOverviewInstallGeneration += 1
+        }
         let previousOverview = deviceSection(id: deviceID)?.overview
+        let liveWorkspaceIDs = Set(overview.workspaces.map(\.id))
+        removeCodePaneRecoveryStateForDeletedWorkspaces(
+            deviceID: deviceID,
+            liveWorkspaceIDs: liveWorkspaceIDs,
+            previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
+        let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject

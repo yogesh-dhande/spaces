@@ -7,7 +7,6 @@ function makeFile(path: string, overrides: Partial<DiffFileEntry> = {}): DiffFil
     path,
     status: "modified",
     isBinary: false,
-    truncated: false,
     ...overrides,
   };
 }

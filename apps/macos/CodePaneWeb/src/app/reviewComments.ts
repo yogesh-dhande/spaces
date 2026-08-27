@@ -86,18 +86,38 @@ export interface AnchoredComment {
  *
  * Deliberately does not re-fetch drafts from the bridge — see `commentsController.ts`'s doc
  * comment on why comments are held in memory and only re-anchored, not re-listed, on every
- * refresh.
+ * refresh. `previousAnchors` is supplied by the controller so a metadata-only queued/streaming
+ * refresh can preserve a position already established by a completed patch; the pure function
+ * itself never guesses a position from an incomplete patch.
  */
 export function reanchorComments(
   comments: readonly SpacesReviewComment[],
   files: readonly DiffFileEntry[],
+  previousAnchors?: ReadonlyMap<string, AnchoredComment>,
 ): AnchoredComment[] {
   const fileByPath = new Map(files.map((f) => [f.path, f]));
+  const linesByPath = new Map<string, Record<ReviewCommentSide, DiffLineRecord[]>>();
   return comments.map((comment): AnchoredComment => {
     const file = fileByPath.get(comment.filePath);
     if (!file) return { comment, position: undefined };
+    // A manifest names the file before its patch arrives. Keep the durable source anchor until
+    // the completed patch provides evidence to confirm, move, or mark it outdated.
+    if (file.patchState === "queued" || file.patchState === "streaming") {
+      const previous = previousAnchors?.get(comment.id);
+      // An earlier refresh may have intentionally cleared the file list (for example while
+      // reporting a durable diff error). In that case the previous entry has no position and
+      // cannot provide evidence that this newly queued file is the same rendered item.
+      if (previous?.position !== undefined) return { comment, position: previous.position };
+      return { comment, position: { lineNumber: comment.lineNumber, outdated: false } };
+    }
 
-    const sideLines = extractDiffLines(file.patch ?? "").filter((line) => line.side === comment.side);
+    let lines = linesByPath.get(file.path);
+    if (!lines) {
+      lines = { old: [], new: [] };
+      for (const line of extractDiffLines(file.patch ?? "")) lines[line.side].push(line);
+      linesByPath.set(file.path, lines);
+    }
+    const sideLines = lines[comment.side];
     const exact = sideLines.find((line) => line.lineNumber === comment.lineNumber && line.text === comment.lineText);
     if (exact) return { comment, position: { lineNumber: exact.lineNumber, outdated: false } };
 
@@ -124,15 +144,21 @@ export function reanchorComments(
  * otherwise the same rule that runs at startup applies again — exactly one running agent is
  * auto-selected, any other count (zero, or more than one with none chosen) leaves selection
  * `undefined` so the toolbar shows the picker (or the no-agent disabled state).
+ * A starting terminal can already appear in the running-agent overview before the launch's keyed
+ * readiness event; that session stays visible but is excluded from assignment until readiness.
  */
 export function selectDefaultAgentId(
   agents: readonly CodePaneAgentSummary[],
   currentSelectedId: string | undefined,
+  excludedSessionId?: string,
 ): string | undefined {
-  if (currentSelectedId !== undefined && agents.some((agent) => agent.id === currentSelectedId)) {
+  const assignableAgents = excludedSessionId === undefined
+    ? agents
+    : agents.filter((agent) => agent.sessionId !== excludedSessionId);
+  if (currentSelectedId !== undefined && assignableAgents.some((agent) => agent.id === currentSelectedId)) {
     return currentSelectedId;
   }
-  return agents.length === 1 ? agents[0]!.id : undefined;
+  return assignableAgents.length === 1 ? assignableAgents[0]!.id : undefined;
 }
 
 /**
@@ -167,7 +193,7 @@ export function formatReviewCommentsText(comments: readonly AnchoredComment[]): 
 }
 
 /**
- * round-14 Fix 3: canonicalizes a gutter click's raw `(side, lineNumber)` before it becomes a
+ * Canonicalizes a gutter click's raw `(side, lineNumber)` before it becomes a
  * comment's stored anchor. A context line exists on both sides of a diff — split layout's gutter
  * reports a context row's click as `side: "old"` (the deletions column it happens to render in),
  * which would otherwise store an old-side anchor for a line that is not actually a deletion:

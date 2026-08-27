@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import spacesdeviceapi
+import spacesdevicecore
 import spacesruntimecore
 
 #if canImport(Darwin)
@@ -169,6 +170,71 @@ import spacesruntimecore
 /// scope-signature logic shells out to the system `git`, so these fixtures are init/commit/modify repos
 /// rather than mocks, matching `RemoteWorkspaceGitClientTests`' approach.
 @Suite struct SpacesDeviceWorkspaceDiffEngineTests {
+    /// Test-only view assembled through the production manifest-plan and per-file patch APIs. It deliberately
+    /// does not retain the removed aggregate builder: product requests enumerate once, then ask for exactly
+    /// the files their viewport needs.
+    private struct DiffFile {
+        let path: String
+        let oldPath: String?
+        let status: SpacesDeviceWorkspaceDiffFileStatus
+        let patch: String?
+        let isBinary: Bool
+        let oldSHA: String?
+        let newSHA: String?
+    }
+
+    private struct DiffResult {
+        let scopeSignature: String
+        let files: [DiffFile]
+    }
+
+    @Test func aLargeManifestResolvesEachPathAndKeepsTheFirstDuplicatePlan() {
+        let first = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+            path: "duplicate.md", oldPath: nil, status: .modified, source: .untracked)
+        let duplicate = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+            path: "duplicate.md", oldPath: nil, status: .deleted,
+            source: .tracked(baseRef: "HEAD", targetRef: nil))
+        let plans = [first] + (0..<10_000).map { index in
+            SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+                path: "Sources/file-" + String(index) + ".swift", oldPath: nil, status: .modified, source: .untracked)
+        } + [duplicate]
+        let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
+
+        #expect(snapshot.plans.count == 10_002)
+        #expect(snapshot.plans[10_000].path == "Sources/file-9999.swift")
+        #expect(snapshot.plan(for: "duplicate.md")?.status == .modified)
+        #expect(snapshot.plan(for: "Sources/file-9999.swift")?.path == "Sources/file-9999.swift")
+        #expect(snapshot.plan(for: "missing.swift") == nil)
+    }
+
+    private func buildDiff(
+        workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient,
+        deadlineStart: Date = Date()
+    ) throws -> DiffResult {
+        let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart)
+        let transferDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: transferDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: transferDirectory) }
+        let files = try snapshot.plans.compactMap { plan -> DiffFile? in
+            let outputURL = transferDirectory.appendingPathComponent(UUID().uuidString)
+            FileManager.default.createFile(atPath: outputURL.path, contents: Data())
+            guard let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
+                snapshot: snapshot, workspaceDir: workspaceDir, relativePath: plan.path, outputURL: outputURL, gitClient: gitClient,
+                deadlineStart: deadlineStart)
+            else { return nil }
+            // Match the chunk contract: a refused/non-produced body has no payload, not an empty text
+            // patch. This is distinct from a generated patch whose textual contents happen to be empty.
+            let patch = transfer.file.isBinary || transfer.patchByteCount == 0
+                ? nil
+                : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
+            return DiffFile(
+                path: transfer.file.path, oldPath: transfer.file.oldPath, status: transfer.file.status, patch: patch,
+                isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA)
+        }
+        return DiffResult(scopeSignature: snapshot.scopeSignature, files: files)
+    }
+
     @Test func scopeSignatureIsStableWhenTheWorkspaceIsIdle() throws {
         let repo = try makeRepo()
         defer { try? FileManager.default.removeItem(at: repo) }
@@ -216,7 +282,7 @@ import spacesruntimecore
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try "new file content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
 
         let modified = try #require(byPath["README.md"])
@@ -245,7 +311,7 @@ import spacesruntimecore
         try "untracked content".write(to: root.appendingPathComponent("UNTRACKED.md"), atomically: true, encoding: .utf8)
         let client = RemoteWorkspaceGitClient()
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: root.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: root.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
 
         let staged = try #require(byPath["STAGED.md"])
@@ -283,7 +349,7 @@ import spacesruntimecore
         edited.append(contentsOf: Data("\nline four edited\n".utf8))
         try edited.write(to: path)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "LATIN1.md" })
         #expect(file.status == .modified)
         #expect(!file.isBinary)
@@ -291,32 +357,6 @@ import spacesruntimecore
         #expect(!patch.isEmpty)
         #expect(patch.contains("@@"))
         #expect(patch.contains("line four edited"))
-    }
-
-    // Round-14 fix: `runGitAndCapture`'s `maxOutputBytes` caps RAW bytes, but the lossy UTF-8 decode
-    // expands each invalid byte to a 3-byte U+FFFD replacement, so a raw patch comfortably under the 1 MiB
-    // per-file cap can still decode to well over it. 400,000 bytes of an invalid leading byte (0xE9,
-    // confirmed empirically: every occurrence decodes to its own replacement character rather than
-    // combining with neighbors) produces a raw patch of ~400 KiB (comfortably under the ~1 MiB cap) that
-    // decodes to ~1.2 MiB (comfortably over it) — margin on both sides, verified against the real
-    // constants before picking this size.
-    @Test func aPatchThatExpandsPastThePerFileCapOnlyAfterTheLossyUTF8DecodeIsTruncated() throws {
-        let repo = try makeRepo()
-        defer { try? FileManager.default.removeItem(at: repo) }
-        let client = RemoteWorkspaceGitClient()
-
-        let path = repo.appendingPathComponent("EXPANDS.md")
-        try Data("line one\n".utf8).write(to: path)
-        try runGit(["add", "EXPANDS.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add expands file"], cwd: repo.path)
-
-        try Data(repeating: 0xE9, count: 400_000).write(to: path)
-
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
-        let file = try #require(result.files.first { $0.path == "EXPANDS.md" })
-        #expect(file.status == .modified)
-        #expect(file.patch == nil)
-        #expect(file.truncated)
     }
 
     // `WorkspaceDiffScope` normalizes an empty/whitespace ref to nil (the uncommitted scope), so a client
@@ -330,8 +370,8 @@ import spacesruntimecore
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try "new file content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
 
-        let nilResult = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
-        let blankResult = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: "   ", gitClient: client)
+        let nilResult = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let blankResult = try buildDiff(workspaceDir: repo.path, refName: "   ", gitClient: client)
 
         #expect(nilResult.scopeSignature == blankResult.scopeSignature)
         #expect(Set(nilResult.files.map(\.path)) == Set(blankResult.files.map(\.path)))
@@ -351,7 +391,7 @@ import spacesruntimecore
         try FileManager.default.moveItem(at: repo.appendingPathComponent("README.md"), to: repo.appendingPathComponent("RENAMED.md"))
         try runGit(["add", "-A"], cwd: repo.path)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let renamed = try #require(result.files.first { $0.path == "RENAMED.md" })
         #expect(renamed.status == .renamed)
         #expect(renamed.oldPath == "README.md")
@@ -367,7 +407,7 @@ import spacesruntimecore
 
         try FileManager.default.moveItem(at: repo.appendingPathComponent("README.md"), to: repo.appendingPathComponent("RENAMED.md"))
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
         #expect(byPath["README.md"]?.status == .deleted)
         #expect(byPath["RENAMED.md"]?.status == .untracked)
@@ -386,7 +426,7 @@ import spacesruntimecore
         // Uncommitted change on top of the feature branch, made after branching from main.
         try "uncommitted".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: "main", gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: "main", gitClient: client)
         let paths = Set(result.files.map(\.path))
         // Against `main`'s merge-base, the diff must show both the committed feature-branch file and the
         // still-uncommitted README edit, since the working tree (not HEAD) is the right-hand side.
@@ -440,61 +480,20 @@ import spacesruntimecore
         #expect(before == after)
     }
 
-    @Test func anOverCapPatchIsTruncatedButTheFileIsStillReported() throws {
+    @Test func aLargeUntrackedFileProducesAPatchWithoutAnAggregateCap() throws {
         let repo = try makeRepo()
         defer { try? FileManager.default.removeItem(at: repo) }
         let client = RemoteWorkspaceGitClient()
 
-        // One line per byte-ish so the unified diff comfortably exceeds the 1 MiB per-file cap.
-        let oversizedContent = (0..<200_000).map { "line \($0) padding padding padding" }.joined(separator: "\n")
-        try oversizedContent.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
-        let file = try #require(result.files.first { $0.path == "README.md" })
-        #expect(file.patch == nil)
-        #expect(file.truncated)
-    }
-
-    @Test func concurrentTrackedPatchWavesPreserveOrderAndTheAggregateCap() throws {
-        let repo = try makeRepo()
-        defer { try? FileManager.default.removeItem(at: repo) }
-        let client = RemoteWorkspaceGitClient()
-        let names = (0..<10).map { String(format: "wave-%02d.txt", $0) }
-
-        for name in names {
-            try "baseline\n".write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
-        }
-        try runGit(["add"] + names, cwd: repo.path)
-        try runGit(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "add wave files"], cwd: repo.path)
-        for (index, name) in names.enumerated() {
-            let payload = "file \(index)\n" + String(repeating: "x", count: 900 * 1024) + "\n"
-            try payload.write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
-        }
-
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
-
-        #expect(result.files.map(\.path) == names)
-        #expect(result.files.prefix(9).allSatisfy { !$0.truncated && $0.patch != nil })
-        #expect(result.files.last?.truncated == true)
-        #expect(result.files.last?.patch == nil)
-        #expect(result.files.compactMap(\.patch).reduce(0) { $0 + $1.utf8.count } <= SpacesDeviceWorkspaceDiffEngine.totalPatchByteCap)
-    }
-
-    @Test func anOverCapUntrackedFileIsTruncatedWithoutReadingTheWholeFile() throws {
-        let repo = try makeRepo()
-        defer { try? FileManager.default.removeItem(at: repo) }
-        let client = RemoteWorkspaceGitClient()
-
-        // Bigger than perFilePatchByteCap on disk: the size-first check must truncate this before any of
-        // it is read into memory or handed to `git diff --no-index`.
-        let oversizedContent = String(repeating: "y", count: SpacesDeviceWorkspaceDiffEngine.perFilePatchByteCap + 1024)
+        // The production path writes the patch to a daemon-owned file and sends fixed-size ranges, so a
+        // large untracked file remains renderable instead of exposing the former aggregate cap.
+        let oversizedContent = String(repeating: "y", count: 1 * 1024 * 1024 + 1024)
         try oversizedContent.write(to: repo.appendingPathComponent("HUGE.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "HUGE.md" })
         #expect(file.status == .untracked)
-        #expect(file.patch == nil)
-        #expect(file.truncated)
+        #expect(file.patch?.contains("yyyy") == true)
     }
 
     // Round-9 fix 3: `buildDiff` now tracks a 45s request-wide deadline (`diffBuildDeadline`) alongside the
@@ -526,10 +525,9 @@ import spacesruntimecore
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try "new file content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         #expect(result.files.count == 2)
         for file in result.files {
-            #expect(!file.truncated)
             #expect(file.patch != nil)
         }
     }
@@ -547,7 +545,7 @@ import spacesruntimecore
 
         // The -z name-status output is exact bytes even though the filename is non-ASCII; identity must
         // come from there, not from a (potentially C-quoted) `diff --git a/... b/...` header.
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == name })
         #expect(file.status == .modified)
         #expect(file.patch?.isEmpty == false)
@@ -558,7 +556,7 @@ import spacesruntimecore
         defer { try? FileManager.default.removeItem(at: repo) }
         let client = RemoteWorkspaceGitClient()
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         #expect(result.files.isEmpty)
     }
 
@@ -574,7 +572,7 @@ import spacesruntimecore
         try "one".write(to: repo.appendingPathComponent("newdir/one.md"), atomically: true, encoding: .utf8)
         try "two".write(to: repo.appendingPathComponent("newdir/two.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
 
         let one = try #require(byPath["newdir/one.md"])
@@ -606,7 +604,7 @@ import spacesruntimecore
         let linkPath = repo.appendingPathComponent("LINK-TO-BINARY")
         try FileManager.default.createSymbolicLink(atPath: linkPath.path, withDestinationPath: "BINARY.bin")
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let link = try #require(result.files.first { $0.path == "LINK-TO-BINARY" })
 
         #expect(link.status == .untracked)
@@ -635,7 +633,7 @@ import spacesruntimecore
         try FileManager.default.createSymbolicLink(atPath: linkPath.path, withDestinationPath: "FIFO")
         try "new file content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
 
         let link = try #require(byPath["LINK-TO-FIFO"])
@@ -680,7 +678,7 @@ import spacesruntimecore
 
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "README.md" })
         #expect(file.isBinary == false)
         #expect(file.oldSHA != nil)
@@ -711,7 +709,7 @@ import spacesruntimecore
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try "untracked content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
 
         let trackedFile = try #require(result.files.first { $0.path == "README.md" })
         #expect(trackedFile.status == .modified)
@@ -742,7 +740,7 @@ import spacesruntimecore
         try "plain ascii text content, nothing binary here".write(
             to: repo.appendingPathComponent("blob.bin"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "blob.bin" })
         #expect(file.status == .untracked)
         #expect(file.isBinary == true)
@@ -766,7 +764,7 @@ import spacesruntimecore
         try "g2".write(to: repo.appendingPathComponent(":(glob)x"), atomically: true, encoding: .utf8)
         try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let magicFile = try #require(result.files.first { $0.path == ":(glob)x" })
         #expect(magicFile.status == .modified)
         let magicPatch = try #require(magicFile.patch)
@@ -792,7 +790,7 @@ import spacesruntimecore
         try runGit(["rm", "--cached", "f.txt"], cwd: repo.path)
         try "content B\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let entries = result.files.filter { $0.path == "f.txt" }
         #expect(entries.count == 1)
         let entry = try #require(entries.first)
@@ -801,6 +799,31 @@ import spacesruntimecore
         let patch = try #require(entry.patch)
         #expect(patch.contains("-content A"))
         #expect(patch.contains("+content B"))
+    }
+
+    @Test func coalescingARecreatedLargeFileDoesNotWriteIntoTheRepositoryObjectStore() throws {
+        let repo = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try "content A\nshared\n".write(to: repo.appendingPathComponent("large.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "large.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "add large file"], cwd: repo.path)
+        let client = RemoteWorkspaceGitClient()
+
+        try runGit(["rm", "--cached", "large.txt"], cwd: repo.path)
+        let largeContent = "content B\n" + String(repeating: "large line\n", count: 64_000)
+        try largeContent.write(to: repo.appendingPathComponent("large.txt"), atomically: true, encoding: .utf8)
+        let objectsBefore = try runGit(["count-objects", "-v"], cwd: repo.path)
+
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+
+        let objectsAfter = try runGit(["count-objects", "-v"], cwd: repo.path)
+        #expect(objectsAfter == objectsBefore)
+        let entry = try #require(result.files.first { $0.path == "large.txt" })
+        #expect(entry.status == .modified)
+        let patch = try #require(entry.patch)
+        #expect(patch.contains("-content A"))
+        #expect(patch.contains("+content B"))
+        #expect(patch.contains("+large line"))
     }
 
     // The signature/status snapshot is intentionally reused by buildDiff. Model an agent staging an
@@ -830,7 +853,7 @@ import spacesruntimecore
             gitExecutable: shim.path,
             environmentOverrides: ["SPACES_RACE_REPO": repo.path, "SPACES_RACE_MARKER": marker.path])
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
 
         #expect(result.files.map(\.path).filter { $0 == "raced.txt" } == ["raced.txt"])
         #expect(result.files.first { $0.path == "raced.txt" }?.status == .added)
@@ -852,7 +875,7 @@ import spacesruntimecore
         try runGit(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "delete f"], cwd: repo.path)
         try "recreated content\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: "main", gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: "main", gitClient: client)
         let entries = result.files.filter { $0.path == "f.txt" }
         #expect(entries.count == 1)
         let entry = try #require(entries.first)
@@ -873,44 +896,11 @@ import spacesruntimecore
         try "recreated old path".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         let client = RemoteWorkspaceGitClient()
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
         #expect(byPath["RENAMED.md"]?.status == .renamed)
         #expect(byPath["RENAMED.md"]?.oldPath == "README.md")
         #expect(byPath["README.md"]?.status == .untracked)
-    }
-
-    // Round-18 fix: `buildCoalescedDeletedButUntrackedFile`'s `update-index --add` unconditionally reads
-    // and SHA-hashes whatever is at `path` to write it as a loose object into the repository's real object
-    // store. An over-cap regular file must be truncated BEFORE that call ever runs — exactly like
-    // `buildUntrackedFile`'s own pre-stat guard — so a read-only diff request never writes a multi-GB blob
-    // into `.git/objects`, and never re-pays the full hash cost on every subsequent pull of the same file.
-    @Test func aRecreatedOverCapFileCoalescesIntoATruncatedEntryWithoutWritingALooseObject() throws {
-        let repo = try makeRepo()
-        defer { try? FileManager.default.removeItem(at: repo) }
-        try "content A\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
-        try runGit(["add", "f.txt"], cwd: repo.path)
-        try runGit(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "add f"], cwd: repo.path)
-        let client = RemoteWorkspaceGitClient()
-
-        try runGit(["rm", "--cached", "f.txt"], cwd: repo.path)
-        let oversizedContent = String(repeating: "z", count: SpacesDeviceWorkspaceDiffEngine.perFilePatchByteCap + 1024)
-        try oversizedContent.write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
-
-        let objectsBefore = try runGit(["count-objects"], cwd: repo.path)
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
-        let objectsAfter = try runGit(["count-objects"], cwd: repo.path)
-
-        let entries = result.files.filter { $0.path == "f.txt" }
-        #expect(entries.count == 1)
-        let entry = try #require(entries.first)
-        #expect(entry.status == .modified)
-        #expect(entry.patch == nil)
-        #expect(entry.truncated)
-        // The actual regression this fix prevents: if the over-cap file reached `update-index --add`, git
-        // would hash and write its content as a brand-new loose object regardless of size. The pre-stat
-        // gate must truncate before that call ever runs, so the object store is left exactly as it was.
-        #expect(objectsAfter == objectsBefore)
     }
 
     // Round-18 fix, corrected scope: the spec's literal "replace f with a bare FIFO via mkfifo" scenario
@@ -935,7 +925,7 @@ import spacesruntimecore
         let fifoPath = repo.appendingPathComponent("f.txt").path
         #expect(mkfifo(fifoPath, 0o644) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let entries = result.files.filter { $0.path == "f.txt" }
         #expect(entries.count == 1)
         let entry = try #require(entries.first)
@@ -962,12 +952,11 @@ import spacesruntimecore
         #expect(mkfifo(fifoPath, 0o644) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
         try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("f.txt").path, withDestinationPath: "real.fifo")
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let entries = result.files.filter { $0.path == "f.txt" }
         #expect(entries.count == 1)
         let entry = try #require(entries.first)
         #expect(entry.status == .modified)
-        #expect(!entry.truncated)
         // Type change (tracked regular file -> symlink) renders as delete-old-content plus add-new-symlink
         // rather than a unified modification; the meaningful assertion is that the new symlink's own link
         // text (its target name) appears, never the FIFO being opened/blocked on.
@@ -991,7 +980,7 @@ import spacesruntimecore
 
         try "app file edited".write(to: workspace.appendingPathComponent("APP.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
         #expect(result.files.count == 1)
         let file = try #require(result.files.first)
         #expect(file.path == "APP.md")
@@ -1014,7 +1003,7 @@ import spacesruntimecore
         try "other file edited".write(to: root.appendingPathComponent("other/OTHER.md"), atomically: true, encoding: .utf8)
         try "root file edited".write(to: root.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
         #expect(result.files.isEmpty)
     }
 
@@ -1026,7 +1015,7 @@ import spacesruntimecore
         try "new inside content".write(to: workspace.appendingPathComponent("NEWINSIDE.md"), atomically: true, encoding: .utf8)
         try "new outside content".write(to: root.appendingPathComponent("other/NEWOUTSIDE.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
         #expect(result.files.count == 1)
         let file = try #require(result.files.first)
         #expect(file.path == "NEWINSIDE.md")
@@ -1052,7 +1041,7 @@ import spacesruntimecore
         try "new inside content".write(to: workspace.appendingPathComponent("NEWINSIDE.md"), atomically: true, encoding: .utf8)
         try "new outside content".write(to: root.appendingPathComponent("other/NEWOUTSIDE.md"), atomically: true, encoding: .utf8)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
         #expect(result.files.count == 1)
         let file = try #require(result.files.first)
         #expect(file.path == "NEWINSIDE.md")
@@ -1068,7 +1057,7 @@ import spacesruntimecore
         try FileManager.default.moveItem(at: workspace.appendingPathComponent("APP.md"), to: workspace.appendingPathComponent("APP2.md"))
         try runGit(["add", "-A"], cwd: root.path)
 
-        let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
+        let result = try buildDiff(workspaceDir: workspace.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "APP2.md" })
         #expect(file.status == .renamed)
         #expect(file.oldPath == "APP.md")

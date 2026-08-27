@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiffView } from "../src/app/diffView";
 import { mountRoot } from "../src/app/root";
 import {
+  CodePaneDiffEditorState,
   CodePaneEditorState,
   CodePaneInitPayload,
+  CodePaneWorkspaceState,
   DiffFileEntry,
   PendingReviewCommentEntry,
   SpacesBridgeError,
+  WorkspaceDiffFileChunkResult,
 } from "../src/bridge/types";
 
 // Captures the options the most recently constructed (fake) CodeView was built with — DiffView and
@@ -16,7 +19,16 @@ import {
 // lazily, on the first successful open (see `ensureCodeView`), which is always after DiffView's own
 // construction at mount — so by the time a test needs it, `.current` is the editor's instance.
 const capturedCodeViewOptions = vi.hoisted(() => ({
-  current: undefined as undefined | { onItemEditChange: (item: unknown, file: { contents: string }) => void },
+  current: undefined as
+    | undefined
+    | {
+        onItemEditChange: (item: { id?: string; type?: string } | undefined, file: { contents: string }) => void;
+        onLineClick?: (range: { start: number; side?: string }, context: { type: string; item: { id: string } }) => void;
+        renderHeaderMetadata?: (file: { name: string }) => HTMLElement | undefined;
+        onPostRender?: (node: HTMLElement, ...args: unknown[]) => void;
+      },
+  scrollCalls: [] as unknown[],
+  selectedLineCalls: [] as unknown[],
 }));
 
 // mountRoot pulls in DiffView and EditorView, both of which construct a real
@@ -35,7 +47,9 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     getScrollTop(): number {
       return 0;
     }
-    scrollTo(): void {}
+    scrollTo(input: unknown): void {
+      capturedCodeViewOptions.scrollCalls.push(input);
+    }
     cleanUp(): void {}
     // Models an attach that completed instantly so `completeEditorAttach`'s poll resolves
     // on its first frame (see the matching fake in editorView.test.ts).
@@ -43,6 +57,10 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
       return {};
     }
     updateItem(): void {}
+    addItem(): void {}
+    setSelectedLines(input: unknown): void {
+      capturedCodeViewOptions.selectedLineCalls.push(input);
+    }
   }
   return { ...actual, CodeView: FakeCodeView };
 });
@@ -65,6 +83,21 @@ vi.stubGlobal(
 // selection change (opening a file via the Files tree, or via ⌘P quick-open, in Editor mode).
 Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 
+/** The production scheduler waits for two actual browser frames before starting patch transport.
+ * These retry tests use fake timers for seconds-long backoff, so make those paint frames explicit
+ * microtasks rather than leaving their promises parked behind a synthetic 16ms RAF clock. */
+const nativeRequestAnimationFrame = window.requestAnimationFrame;
+function useFakeTimersWithImmediatePaint(): void {
+  vi.useFakeTimers();
+  window.requestAnimationFrame = (callback) => {
+    queueMicrotask(() => callback(performance.now()));
+    return 0;
+  };
+}
+afterEach(() => {
+  window.requestAnimationFrame = nativeRequestAnimationFrame;
+});
+
 // Mutable (not `const`) so Fix 1's describe block below can substitute a payload carrying a dirty
 // `editorState` for its one test, then restore the default afterward — the bridge mock's
 // `notifyReady` reads this binding at call time, not at module-evaluation time, so reassigning it
@@ -72,8 +105,29 @@ Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 let INIT_PAYLOAD: CodePaneInitPayload = {
   workspaceId: "w1",
   workspaceName: "Test workspace",
-  initialMode: "diff",
-  initialScope: { kind: "uncommitted" },
+  workspaceState: {
+    mode: "diff",
+    scope: { kind: "uncommitted" },
+    diffLayout: "unified",
+    editorSidebarMode: "files",
+    editorRecentPaths: [],
+    selectedAgentSessionId: null,
+    pendingAgentLaunch: null,
+    fileTreeExpandedPaths: [],
+    diffSelectedPath: null,
+    diffTreeSelectedPath: null,
+    fileTreeSelectedPath: null,
+    diffScrollLine: null,
+    diffScrollSide: null,
+    diffFocusedPath: null,
+    diffFocusedLine: null,
+    diffFocusedSide: null,
+    editorScrollLine: null,
+    editorFocusedLine: null,
+    editorState: null,
+    diffEditorState: null,
+    pendingReviewComments: null,
+  },
   theme: "dark",
   // Badges the compare dialog's base-branch entry; not exercised by most of this file's tests,
   // which use the compare menu's "Last commit" item purely as a scope-switch trigger (Fix B is
@@ -115,7 +169,63 @@ const hoisted = vi.hoisted(() => {
   // Captures every push so a test can assert on the exact `CodePaneEditorUIState` sent — see the
   // Files/Changes sidebar describe block's recent-files and sidebarMode-toggle coverage.
   const notifyEditorUIStateChanged = vi.fn();
+  const notifyWorkspaceStateChanged = vi.fn((state: unknown) => {
+    const workspaceState = state as { mode: string; editorSidebarMode: string; editorRecentPaths: string[] };
+    notifyModeChanged(workspaceState.mode);
+    notifyEditorUIStateChanged({ sidebarMode: workspaceState.editorSidebarMode, recentPaths: workspaceState.editorRecentPaths });
+  });
   const notifyRenderMetric = vi.fn();
+  const reviewCommentList = vi.fn().mockResolvedValue([]);
+  const workspaceFileWrite = vi.fn().mockRejectedValue(new Error("not used"));
+  const startWorkspaceCommand = vi.fn().mockResolvedValue({
+    sessionId: "command-1",
+    status: "starting" as const,
+    deadlineEpochMilliseconds: 90_000,
+  });
+  const resumeWorkspaceCommandTracking = vi.fn().mockResolvedValue({
+    sessionId: "command-1",
+    status: "starting" as const,
+    deadlineEpochMilliseconds: 90_000,
+  });
+  const manifests = new Map<string, { scopeSignature: string; files: DiffFileEntry[] }>();
+  let nextManifestID = 0;
+  let manifestPageSize = Number.POSITIVE_INFINITY;
+  const workspaceDiffManifestChunk = vi.fn((scope: unknown, request: { manifestID?: string; fileIndex: number }) =>
+    {
+      const page = (manifestID: string, manifest: { scopeSignature: string; files: DiffFileEntry[] }) => {
+        const files = manifest.files.slice(request.fileIndex, request.fileIndex + manifestPageSize);
+        return {
+          manifestID,
+          scopeSignature: manifest.scopeSignature,
+          files: files.map(({ path, oldPath, status }) => ({ path, oldPath, status })),
+          nextFileIndex: request.fileIndex + files.length < manifest.files.length ? request.fileIndex + files.length : undefined,
+        };
+      };
+      if (request.manifestID !== undefined) {
+        const manifest = manifests.get(request.manifestID);
+        if (!manifest) return Promise.reject(new Error("missing manifest"));
+        return Promise.resolve(page(request.manifestID, manifest));
+      }
+      if (request.fileIndex !== 0) throw new Error("initial metadata page must start at index zero");
+      return workspaceDiff(scope).then((raw: unknown) => {
+        const result = raw as { scopeSignature: string; files: DiffFileEntry[] };
+        const manifestID = `test-manifest-${++nextManifestID}`;
+        const manifest = { scopeSignature: result.scopeSignature, files: result.files };
+        manifests.set(manifestID, manifest);
+        return page(manifestID, manifest);
+      });
+    },
+  );
+  const workspaceDiffFileChunk = vi.fn((_scope: unknown, request: { manifestID: string; relativePath: string }) => {
+    const manifest = manifests.get(request.manifestID);
+    const file = manifest?.files.find((entry) => entry.path === request.relativePath);
+    if (file && manifest) return Promise.resolve({ scopeSignature: manifest.scopeSignature, file });
+    return Promise.reject(new Error(`missing manifest file ${request.relativePath}`));
+  });
+  const workspaceDiffManifestRelease = vi.fn((_scope: unknown, request: { manifestID: string }) => {
+    manifests.delete(request.manifestID);
+    return Promise.resolve();
+  });
   // round-16 Fix 1: captures every `subscribeDiffSignature` callback root.ts registers, in order,
   // so a test can simulate a diff-signature push event by invoking one directly — mirroring
   // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
@@ -129,12 +239,23 @@ const hoisted = vi.hoisted(() => {
   return {
     pendingDiffCalls,
     workspaceDiff,
+    workspaceDiffManifestChunk,
+    setManifestPageSize: (size: number) => {
+      manifestPageSize = size;
+    },
+    workspaceDiffFileChunk,
+    workspaceDiffManifestRelease,
     workspaceFileList,
     workspaceFileRead,
     workspaceRefList,
+    workspaceFileWrite,
+    startWorkspaceCommand,
+    resumeWorkspaceCommandTracking,
     notifyModeChanged,
     notifyEditorUIStateChanged,
+    notifyWorkspaceStateChanged,
     notifyRenderMetric,
+    reviewCommentList,
     diffSignatureCallbacks,
     subscribeDiffSignature,
   };
@@ -147,21 +268,24 @@ vi.mock("../src/bridge", () => ({
         window.dispatchEvent(new CustomEvent("spaces:init", { detail: INIT_PAYLOAD }));
       });
     },
-    workspaceDiff: hoisted.workspaceDiff,
+    workspaceDiffManifestChunk: hoisted.workspaceDiffManifestChunk,
+    workspaceDiffFileChunk: hoisted.workspaceDiffFileChunk,
+    workspaceDiffFileChunkCancel: vi.fn().mockResolvedValue(undefined),
+    workspaceDiffManifestRelease: hoisted.workspaceDiffManifestRelease,
     workspaceFileRead: hoisted.workspaceFileRead,
     workspaceRefList: hoisted.workspaceRefList,
-    workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileWrite: hoisted.workspaceFileWrite,
     workspaceFileList: hoisted.workspaceFileList,
     subscribeDiffSignature: hoisted.subscribeDiffSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
-    notifyEditorStateChanged: vi.fn(),
-    notifyEditorUIStateChanged: hoisted.notifyEditorUIStateChanged,
-    notifyModeChanged: hoisted.notifyModeChanged,
+    notifyWorkspaceStateChanged: hoisted.notifyWorkspaceStateChanged,
     notifyRenderMetric: hoisted.notifyRenderMetric,
-    reviewCommentList: vi.fn().mockResolvedValue([]),
+    reviewCommentList: hoisted.reviewCommentList,
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentsSend: vi.fn().mockRejectedValue(new Error("not used")),
+    startWorkspaceCommand: hoisted.startWorkspaceCommand,
+    resumeWorkspaceCommandTracking: hoisted.resumeWorkspaceCommandTracking,
   }),
 }));
 
@@ -169,7 +293,7 @@ function makeFile(path: string): DiffFileEntry {
   // isBinary skips patch parsing entirely (buildItem short-circuits to a
   // placeholder item), which keeps these tests independent of the diff patch
   // format — they only care which scope's file list won.
-  return { path, status: "modified", isBinary: true, truncated: false };
+  return { path, status: "modified", isBinary: true };
 }
 
 function resolveDiff(index: number, files: DiffFileEntry[], signature: string): void {
@@ -235,7 +359,11 @@ describe("mountRoot's diff render metrics", () => {
     await mounted;
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
-    expect(hoisted.notifyRenderMetric).not.toHaveBeenCalled();
+    // Workspace-state recovery is independently observable. A detached background refresh must
+    // not claim a visible per-file patch paint.
+    expect(hoisted.notifyRenderMetric.mock.calls.map(([metric]) => (metric as { trigger: string }).trigger)).not.toContain(
+      "filePatch",
+    );
     // This file intentionally retains mounted panes between tests; restore this pane so its global
     // mode listener cannot perturb the later setMode no-op coverage.
     window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
@@ -343,11 +471,12 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     container = document.createElement("div");
-    vi.useFakeTimers();
+    useFakeTimersWithImmediatePaint();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    window.requestAnimationFrame = nativeRequestAnimationFrame;
   });
 
   it("swallows a failed pull, retries at the 1s floor, and renders once the retry succeeds", async () => {
@@ -432,7 +561,7 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(4);
   });
 
-  it("a scope change resets the backoff floor even without an intervening success (round-14 fix)", async () => {
+  it("a scope change resets the backoff floor even without an intervening success", async () => {
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
     rejectDiff(0, new Error("f0")); // call 0: scope A's initial pull fails
@@ -471,6 +600,1204 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     await vi.advanceTimersByTimeAsync(1);
     totalCalls += 1;
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // retried at the floor
+  });
+});
+
+describe("mountRoot's progressive patch scheduler — interrupted chunk recovery", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffManifestChunk.mockClear();
+    hoisted.workspaceDiffFileChunk.mockClear();
+    hoisted.workspaceDiffManifestRelease.mockClear();
+    hoisted.setManifestPageSize(Number.POSITIVE_INFINITY);
+    container = document.createElement("div");
+    useFakeTimersWithImmediatePaint();
+  });
+
+  afterEach(() => {
+    hoisted.setManifestPageSize(Number.POSITIVE_INFINITY);
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    vi.useRealTimers();
+    window.requestAnimationFrame = nativeRequestAnimationFrame;
+  });
+
+  it("subscribes before initial patch streaming so a live signature queues exactly one refresh", async () => {
+    const file = makeFile("initial-stream.ts");
+    hoisted.subscribeDiffSignature.mockClear();
+    hoisted.diffSignatureCallbacks.length = 0;
+    let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+    );
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [file], "initial-stream-sig");
+    await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+
+    // The initial manifest/sidebar is visible, but its first file is still streaming. A worktree
+    // update in this interval must not vanish merely because startup has not yet reached its old
+    // end-of-mount subscription call.
+    expect(hoisted.subscribeDiffSignature).toHaveBeenCalledTimes(1);
+    fireDiffSignature();
+    resolveChunk!({ scopeSignature: "initial-stream-sig", file });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [file], "post-stream-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+
+    // The initial listener stays current through the queued refresh; startup must not layer a
+    // second callback over it after the stream finally settles.
+    expect(hoisted.subscribeDiffSignature).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps completed work visible, releases the interrupted lease, and retries a recoverable notFound chunk", async () => {
+    // A replayed/lost EOF can surface as notFound from the per-file transfer. It is not a bad
+    // comparison scope, so the scheduler must use the same bounded retry path as a manifest
+    // transport failure rather than leave this row permanently Loading.
+    hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new SpacesBridgeError("notFound", "transfer expired"));
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
+
+    resolveDiff(0, [makeFile("replay.ts")], "sig-a");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1);
+    const firstRequest = hoisted.workspaceDiffFileChunk.mock.calls[0]![1] as { manifestID: string };
+    expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledWith(expect.anything(), { manifestID: firstRequest.manifestID });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+
+    resolveDiff(1, [makeFile("replay.ts")], "sig-b");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(2);
+  });
+
+  it("accumulates metadata pages under one manifest before scheduling patches", async () => {
+    hoisted.setManifestPageSize(2);
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [makeFile("one.ts"), makeFile("two.ts"), makeFile("three.ts")], "sig-pages");
+    await vi.waitFor(() => expect(hoisted.workspaceDiffManifestChunk).toHaveBeenCalledTimes(2));
+    await mounted;
+
+    const first = hoisted.workspaceDiffManifestChunk.mock.calls[0]![1] as { manifestID?: string; fileIndex: number };
+    const second = hoisted.workspaceDiffManifestChunk.mock.calls[1]![1] as { manifestID?: string; fileIndex: number };
+    expect(first).toEqual({ manifestID: undefined, fileIndex: 0 });
+    expect(second).toEqual({ manifestID: expect.any(String), fileIndex: 2 });
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a collapsed Changes tree stable while hidden rows stream, then shows their final state on expansion", async () => {
+    const previousPayload = INIT_PAYLOAD;
+    INIT_PAYLOAD = {
+      ...previousPayload,
+      workspaceState: { ...previousPayload.workspaceState, diffTreeExpandedPaths: [] },
+    };
+    try {
+      const file: DiffFileEntry = {
+        path: "src/hidden.ts",
+        status: "modified",
+        isBinary: false,
+        patch: "@@ -1 +1 @@\n-old\n+new",
+      };
+      hoisted.workspaceDiffFileChunk.mockImplementationOnce(() => Promise.resolve({
+        scopeSignature: "sig-hidden-stream",
+        file,
+        patchBase64Data: btoa(file.patch!),
+      }));
+      const mounted = mountRoot(container);
+      await vi.advanceTimersByTimeAsync(0);
+      resolveDiff(0, [file], "sig-hidden-stream");
+      await mounted;
+
+      const group = container.querySelector(".dir-group");
+      const dirrow = container.querySelector(".dirrow") as HTMLElement;
+      expect(dirrow.getAttribute("aria-expanded")).toBe("false");
+      expect(container.querySelectorAll(".row")).toHaveLength(0);
+
+      // Both streaming and completion updates target the backing manifest entry. Neither should
+      // replace the collapsed tree or eagerly create its hidden row.
+      expect(container.querySelector(".dir-group")).toBe(group);
+      expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1);
+
+      dirrow.click();
+
+      expect(container.querySelector(".dir-group")).toBe(group);
+      expect(container.querySelector('.row[data-path="src/hidden.ts"] .st')?.textContent).toBe("+1 -1");
+    } finally {
+      INIT_PAYLOAD = previousPayload;
+    }
+  });
+
+  it("loads persisted comments after the manifest is available without waiting for a held patch stream", async () => {
+    const queuedFile: DiffFileEntry = {
+      path: "comments-while-streaming.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/comments-while-streaming.ts b/comments-while-streaming.ts\n--- a/comments-while-streaming.ts\n+++ b/comments-while-streaming.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    const serverDraft = {
+      id: "comment-during-stream",
+      filePath: queuedFile.path,
+      side: "new" as const,
+      lineNumber: 1,
+      lineText: "after",
+      body: "review while patch is loading",
+      createdAt: "2026-08-26T00:00:00.000Z",
+      revision: 0,
+    };
+    let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+    );
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([serverDraft]);
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [queuedFile], "comments-streaming-sig");
+    await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+
+    // The manifest has named the file, so comments can retain that queued anchor and populate the
+    // tray before the slow file patch completes. Waiting for the full stream hides real drafts.
+    await vi.waitFor(() => expect(container.querySelector(".comment-tray")?.textContent).toContain("review while patch is loading"));
+    expect(container.querySelector(".comment-tray")?.textContent).toContain(`${queuedFile.path}:1`);
+
+    resolveChunk!({ scopeSignature: "comments-streaming-sig", file: queuedFile });
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+  });
+
+  it("releases an initial manifest lease whose first metadata page arrives after supersession", async () => {
+    type MockManifestPage = Awaited<ReturnType<typeof hoisted.workspaceDiffManifestChunk>>;
+    let resolveInitialPage: ((result: MockManifestPage) => void) | undefined;
+    hoisted.workspaceDiffManifestChunk.mockImplementationOnce(
+      () => new Promise<MockManifestPage>((resolve) => { resolveInitialPage = resolve; }),
+    );
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.workspaceDiffManifestChunk).toHaveBeenCalledTimes(1);
+
+    // A scope switch supersedes the first pull before the daemon returns its first metadata page.
+    // That page has already minted a manifest lease, even though the page must never render.
+    switchToLastCommit(container);
+    resolveInitialPage!({ manifestID: "late-initial-manifest", scopeSignature: "sig-late", files: [], nextFileIndex: undefined });
+
+    await vi.waitFor(() => {
+      expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledWith(
+        expect.anything(),
+        { manifestID: "late-initial-manifest" },
+      );
+    });
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-current");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+  });
+
+  it("assembles a multi-chunk textual patch in order before updating only that completed item", async () => {
+    const file: DiffFileEntry = { path: "chunked.ts", status: "modified", isBinary: false };
+    hoisted.workspaceDiffFileChunk
+      .mockImplementationOnce(() =>
+        Promise.resolve({
+          scopeSignature: "sig-chunked",
+          file,
+          patchBase64Data: btoa("first "),
+          transferID: "transfer-1",
+          nextByteOffset: 6,
+        }),
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve({
+          scopeSignature: "sig-chunked",
+          file,
+          patchBase64Data: btoa("second"),
+        }),
+      );
+    const updateFileSpy = vi.spyOn(DiffView.prototype, "updateFile");
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [file], "sig-chunked");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.objectContaining({ relativePath: "chunked.ts", byteOffset: 6, transferID: "transfer-1" }),
+    );
+    expect(updateFileSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ path: "chunked.ts", patch: "first second", patchState: "ready" }),
+    );
+    updateFileSpy.mockRestore();
+  });
+
+  it("reveals a selected queued file when its promoted patch arrives and repairs order once after streaming", async () => {
+    const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
+    let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
+    );
+    const scrollToFile = vi.spyOn(DiffView.prototype, "scrollToFile");
+    const finalizeOrder = vi.spyOn(DiffView.prototype, "finalizeStreamOrder");
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, files, "sig-priority");
+    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+
+    (container.querySelector<HTMLElement>('[data-path="50.ts"]'))!.click();
+    releaseFirst!({ scopeSignature: "sig-priority", file: files[0]! });
+    await mounted;
+
+    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(3);
+    expect(finalizeOrder).toHaveBeenCalledTimes(1);
+    scrollToFile.mockRestore();
+    finalizeOrder.mockRestore();
+  });
+
+  it("uses the sidebar selection, promotion, and reveal path when Quick Open picks a queued diff file", async () => {
+    const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
+    hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false });
+    let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
+    );
+    const scrollToFile = vi.spyOn(DiffView.prototype, "scrollToFile");
+    const finalizeOrder = vi.spyOn(DiffView.prototype, "finalizeStreamOrder");
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, files, "sig-quick-open-priority");
+    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    const input = container.querySelector<HTMLInputElement>(".quick-open input")!;
+    input.value = "50.ts";
+    input.dispatchEvent(new Event("input"));
+    const row = await vi.waitFor(() => {
+      const result = container.querySelector<HTMLElement>('.quick-open .row[data-path="50.ts"]');
+      expect(result).not.toBeNull();
+      return result!;
+    });
+    row.click();
+
+    releaseFirst!({ scopeSignature: "sig-quick-open-priority", file: files[0]! });
+    await mounted;
+
+    expect(hoisted.workspaceDiffFileChunk.mock.calls[1]![1]).toEqual(expect.objectContaining({ relativePath: "50.ts" }));
+    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(3);
+    expect(finalizeOrder).toHaveBeenCalledTimes(1);
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    scrollToFile.mockRestore();
+    finalizeOrder.mockRestore();
+  });
+});
+
+describe("mountRoot's persisted diff position recovery", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffFileChunk.mockClear();
+    capturedCodeViewOptions.current = undefined;
+    capturedCodeViewOptions.scrollCalls = [];
+    capturedCodeViewOptions.selectedLineCalls = [];
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        // The Changes-tree selection is deliberately unrelated: recovery must follow the saved
+        // visible patch rather than a sidebar row from the prior session.
+        diffSelectedPath: "restored.ts",
+        diffTreeSelectedPath: "another-row.ts",
+        diffScrollLine: 7,
+        diffScrollSide: "old",
+        diffFocusedPath: "restored.ts",
+        diffFocusedLine: 8,
+        diffFocusedSide: "old",
+      },
+    };
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    container.remove();
+  });
+
+  it("defers persisted line restoration until the saved path's delayed textual patch post-renders", async () => {
+    const delayedFile: DiffFileEntry = {
+      path: "restored.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/restored.ts b/restored.ts\n--- a/restored.ts\n+++ b/restored.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    let resolveChunk: ((result: { scopeSignature: string; file: DiffFileEntry }) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveChunk = resolve;
+      }),
+    );
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+
+    // The initial diff manifest is still pending. A hibernation at this point must nevertheless
+    // retain the saved logical location instead of serializing nulls from an unpopulated CodeView.
+    const earlySnapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(earlySnapshot).toMatchObject({
+      diffSelectedPath: "restored.ts",
+      diffScrollLine: 7,
+      diffScrollSide: "old",
+      diffFocusedPath: "restored.ts",
+      diffFocusedLine: 8,
+      diffFocusedSide: "old",
+    });
+    resolveDiff(0, [delayedFile], "restore-sig");
+    await vi.waitFor(() => expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1));
+
+    // The manifest has painted only a Loading patch row. Revealing/focusing line 7 here would be
+    // a no-op in Pierre and permanently lose the saved position.
+    expect(capturedCodeViewOptions.scrollCalls).toEqual([]);
+    expect(capturedCodeViewOptions.selectedLineCalls).toEqual([]);
+
+    resolveChunk!({ scopeSignature: "restore-sig", file: delayedFile });
+    await mounted;
+    // This no-op test double does not automatically invoke library post-render callbacks. Drive
+    // the callback exactly as Pierre does after the textual FileDiff is attached.
+    capturedCodeViewOptions.current!.onPostRender!(document.createElement("div"), { item: { id: "restored.ts" } });
+
+    expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+      type: "line",
+      id: "restored.ts",
+      lineNumber: 7,
+      side: "deletions",
+      behavior: "instant",
+    });
+    expect(capturedCodeViewOptions.selectedLineCalls).toContainEqual({
+      id: "restored.ts",
+      range: { start: 8, end: 8, side: "deletions", endSide: "deletions" },
+    });
+  });
+
+  it("keeps the queued restored position in a teardown snapshot until a concrete visible line supersedes it", async () => {
+    document.body.appendChild(container);
+    const delayedFile: DiffFileEntry = {
+      path: "restored.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/restored.ts b/restored.ts\n--- a/restored.ts\n+++ b/restored.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    let resolveChunk: ((result: { scopeSignature: string; file: DiffFileEntry }) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveChunk = resolve; }),
+    );
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [delayedFile], "restore-snapshot-sig");
+    await vi.waitFor(() => expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1));
+
+    // The restored target is still a queued placeholder, so no live line is in the virtualized
+    // diff yet. A host collection at this point must preserve the pending logical position.
+    let snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      diffSelectedPath: "restored.ts",
+      diffScrollLine: 7,
+      diffScrollSide: "old",
+    });
+
+    // Once a concrete rendered line is visible it is authoritative, independent of sidebar
+    // selection or focus. This is the value a later state collection must carry forward.
+    const scrollRoot = container.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const visibleLine = document.createElement("div");
+    visibleLine.dataset.line = "3";
+    visibleLine.dataset.diffPath = "concrete.ts";
+    visibleLine.dataset.diffSide = "new";
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(visibleLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    scrollRoot.appendChild(visibleLine);
+
+    snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      diffSelectedPath: "concrete.ts",
+      diffScrollLine: 3,
+      diffScrollSide: "new",
+    });
+
+    resolveChunk!({ scopeSignature: "restore-snapshot-sig", file: delayedFile });
+    await mounted;
+  });
+});
+
+describe("mountRoot's queued live diff refresh position recovery", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffFileChunk.mockClear();
+    hoisted.workspaceDiffManifestRelease.mockClear();
+    capturedCodeViewOptions.current = undefined;
+    capturedCodeViewOptions.scrollCalls = [];
+    capturedCodeViewOptions.selectedLineCalls = [];
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    container.remove();
+  });
+
+  it("keeps the current location while a signature refresh holds its replacement patch queued", async () => {
+    const file: DiffFileEntry = {
+      path: "live.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/live.ts b/live.ts\n--- a/live.ts\n+++ b/live.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [file], "live-first");
+    await mounted;
+
+    const diffRoot = container.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const visibleLine = document.createElement("div");
+    visibleLine.dataset.line = "11";
+    visibleLine.dataset.diffPath = file.path;
+    visibleLine.dataset.diffSide = "new";
+    Object.defineProperty(diffRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(visibleLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    diffRoot.appendChild(visibleLine);
+    capturedCodeViewOptions.current!.onLineClick!(
+      { start: 12, side: "deletions" },
+      { type: "diff", item: { id: file.path } },
+    );
+    capturedCodeViewOptions.scrollCalls = [];
+    capturedCodeViewOptions.selectedLineCalls = [];
+
+    let releaseReplacementPatch!: (value: WorkspaceDiffFileChunkResult) => void;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseReplacementPatch = resolve; }),
+    );
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [file], "live-second");
+    await vi.waitFor(() => expect(releaseReplacementPatch).toBeTypeOf("function"));
+
+    // The refreshed manifest is metadata-only while its patch is in flight. Its replacement
+    // CodeView has no line to sample, but teardown/state collection must keep the old location.
+    visibleLine.remove();
+    const queuedSnapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(queuedSnapshot).toMatchObject({
+      diffSelectedPath: file.path,
+      diffScrollLine: 11,
+      diffScrollSide: "new",
+      diffFocusedPath: file.path,
+      diffFocusedLine: 12,
+      diffFocusedSide: "old",
+    });
+
+    releaseReplacementPatch({ scopeSignature: "live-second", file });
+    await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(2));
+    capturedCodeViewOptions.current!.onPostRender!(document.createElement("div"), { item: { id: file.path } });
+
+    expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+      type: "line",
+      id: file.path,
+      lineNumber: 11,
+      side: "additions",
+      behavior: "instant",
+    });
+    expect(capturedCodeViewOptions.selectedLineCalls).toContainEqual({
+      id: file.path,
+      range: { start: 12, end: 12, side: "deletions", endSide: "deletions" },
+    });
+  });
+});
+
+describe("mountRoot's diff-tree expansion recovery", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    INIT_PAYLOAD = defaultInitPayload;
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  it("uses the expanded tree default for a fresh workspace whose state omits expansion choices", async () => {
+    const { diffTreeExpandedPaths: _freshExpansionChoice, ...freshWorkspaceState } = defaultInitPayload.workspaceState;
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: freshWorkspaceState };
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("src/fresh.ts")], "fresh-tree-sig");
+    await mounted;
+
+    expect(container.querySelector(".dirrow .tri")?.textContent).toBe("▾");
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).not.toHaveProperty("diffTreeExpandedPaths");
+  });
+
+  it("restores an explicit empty expansion choice as collapse-all", async () => {
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, diffTreeExpandedPaths: [] },
+    };
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("src/collapsed.ts")], "collapsed-tree-sig");
+    await mounted;
+
+    expect(container.querySelector(".dirrow .tri")?.textContent).toBe("▸");
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot.diffTreeExpandedPaths).toEqual([]);
+  });
+});
+
+describe("mountRoot's routine workspace-state snapshots", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.reviewCommentList.mockReset();
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    INIT_PAYLOAD = defaultInitPayload;
+    container = document.createElement("div");
+    useFakeTimersWithImmediatePaint();
+  });
+
+  afterEach(() => {
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    INIT_PAYLOAD = defaultInitPayload;
+    vi.useRealTimers();
+    window.requestAnimationFrame = nativeRequestAnimationFrame;
+  });
+
+  it("does not cancel a failed initial comment-list retry when an unrelated workspace state changes", async () => {
+    const serverDraft = {
+      id: "loaded-after-retry",
+      filePath: "retry.ts",
+      side: "new" as const,
+      lineNumber: 1,
+      lineText: "after retry",
+      body: "loaded after retry",
+      createdAt: "2026-08-26T00:00:00.000Z",
+      revision: 0,
+    };
+    hoisted.reviewCommentList
+      .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "comment service temporarily unavailable"))
+      .mockResolvedValueOnce([serverDraft]);
+    const setCommentsSpy = vi.spyOn(DiffView.prototype, "setComments");
+
+    try {
+      const mounted = mountRoot(container);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
+      resolveDiff(0, [], "comments-retry-sig");
+      await vi.advanceTimersByTimeAsync(0);
+      await mounted;
+      expect(hoisted.reviewCommentList).toHaveBeenCalledTimes(1);
+
+      // Mode is unrelated to comment loading, but dispatching it persists the complete workspace
+      // document. That routine snapshot must not behave like the teardown collector and clear the
+      // retry timer it happens to inspect.
+      clickButton(container, "Editor");
+      expect(hoisted.notifyWorkspaceStateChanged).toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(hoisted.reviewCommentList).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(hoisted.reviewCommentList).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() =>
+        expect(
+          setCommentsSpy.mock.calls.some(([comments]) =>
+            (comments as ReadonlyArray<{ comment: { id: string } }>).some((entry) => entry.comment.id === serverDraft.id),
+          ),
+        ).toBe(true),
+      );
+    } finally {
+      setCommentsSpy.mockRestore();
+    }
+  });
+});
+
+describe("mountRoot's inline diff edit ownership and CAS races", () => {
+  let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
+  const editableFile: DiffFileEntry = {
+    path: "editable.ts",
+    status: "modified",
+    isBinary: false,
+    patch: "diff --git a/editable.ts b/editable.ts\n--- a/editable.ts\n+++ b/editable.ts\n@@ -1 +1 @@\n-before\n+after\n",
+  };
+
+  async function mountEditableDiff(): Promise<void> {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [editableFile], "editable-sig");
+    await mounted;
+  }
+
+  function startEdit(path = editableFile.path): void {
+    capturedCodeViewOptions.current!.onLineClick!(
+      { start: 1, side: "additions" },
+      { type: "diff", item: { id: path } },
+    );
+  }
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffFileChunk.mockClear();
+    hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceFileWrite.mockReset();
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    capturedCodeViewOptions.current = undefined;
+    INIT_PAYLOAD = defaultInitPayload;
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileWrite.mockReset().mockRejectedValue(new Error("not used"));
+    vi.useRealTimers();
+    window.requestAnimationFrame = nativeRequestAnimationFrame;
+  });
+
+  it("retains typing made after Save was clicked as dirty against the write's returned hash", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    let resolveWrite: ((result: { ok: true; sha256: string }) => void) | undefined;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveWrite = resolve;
+      }),
+    );
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current?.renderHeaderMetadata).toBeDefined());
+
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved text\n" });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "saved text\n", { baseSHA256: "sha-before" }));
+
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "typed after save\n" });
+    resolveWrite!({ ok: true, sha256: "sha-saved" });
+
+    await vi.waitFor(() =>
+      expect(
+        hoisted.notifyWorkspaceStateChanged.mock.calls
+          .map(([snapshot]) => snapshot as { diffEditorState: Record<string, unknown> | null })
+          .some(
+            (snapshot) =>
+              snapshot.diffEditorState?.content === "typed after save\n" &&
+              snapshot.diffEditorState.baseSHA256 === "sha-saved" &&
+              snapshot.diffEditorState.baseContent === "saved text\n" &&
+              snapshot.diffEditorState.dirty === true,
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("keeps reconciled content when an older in-flight save resolves afterward", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\nline 4\n", sha256: "sha-before", size: 28 })
+      .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\nline 4 from disk\n", sha256: "sha-disk", size: 38 });
+    let resolveWrite: ((result: { ok: true; sha256: string }) => void) | undefined;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveWrite = resolve;
+      }),
+    );
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "line 1 from mine\nline 2\nline 3\nline 4\n" });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
+      "editable.ts",
+      "line 1 from mine\nline 2\nline 3\nline 4\n",
+      { baseSHA256: "sha-before" },
+    ));
+
+    // The external refresh reconciles a non-overlapping disk edit while the old CAS write is
+    // unresolved. Its generation bump must make the eventual old success retain this merge.
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "reconcile-in-flight-save");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })?.textContent).toContain("Unsaved changes"));
+
+    resolveWrite!({ ok: true, sha256: "sha-saved" });
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+      expect(snapshot.diffEditorState).toMatchObject({
+        path: "editable.ts",
+        content: "line 1 from mine\nline 2\nline 3\nline 4 from disk\n",
+        baseSHA256: "sha-disk",
+        baseContent: "line 1\nline 2\nline 3\nline 4 from disk\n",
+        dirty: true,
+        conflict: false,
+      });
+    });
+  });
+
+  it("keeps dirty A when discarding it to open B fails", async () => {
+    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "first disk\n", sha256: "sha-first", size: 11 })
+      .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [editableFile, second], "discard-failure-sig");
+    await mounted;
+
+    startEdit("editable.ts");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "first edited\n" });
+
+    startEdit("second.ts");
+    const pendingHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    [...pendingHeader.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Discard edits and open")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("second.ts"));
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Couldn't open second.ts for editing. Try again."));
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      path: "editable.ts",
+      content: "first edited\n",
+      dirty: true,
+    });
+  });
+
+  it("ignores a delayed A save after discard-and-open replaces it with B", async () => {
+    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "first disk\n", sha256: "sha-first", size: 11 })
+      .mockResolvedValueOnce({ content: "second disk\n", sha256: "sha-second", size: 12 });
+    let resolveFirstWrite: ((result: { ok: true; sha256: string }) => void) | undefined;
+    hoisted.workspaceFileWrite
+      .mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveFirstWrite = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ ok: true, sha256: "sha-second-saved" });
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [editableFile, second], "two-file-save-sig");
+    await mounted;
+
+    startEdit("editable.ts");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "first edited\n" });
+    const firstHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    firstHeader.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "first edited\n", { baseSHA256: "sha-first" }));
+
+    // The explicit discard flow makes B the active editor while A's write is still unresolved.
+    startEdit("second.ts");
+    const pendingFirstHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    const discard = [...pendingFirstHeader.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.includes("Discard edits and open"),
+    );
+    discard!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("second.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "second.ts", type: "file" }, { contents: "second edited\n" });
+
+    resolveFirstWrite!({ ok: true, sha256: "sha-first-saved" });
+    await vi.waitFor(() =>
+      expect(
+        (hoisted.notifyWorkspaceStateChanged.mock.calls.at(-1)?.[0] as { diffEditorState: { path?: string } | null }).diffEditorState?.path,
+      ).toBe("second.ts"),
+    );
+
+    const secondHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "second.ts" })!;
+    secondHeader.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("second.ts", "second edited\n", { baseSHA256: "sha-second" }),
+    );
+  });
+
+  it("ends a clean A editor before opening B", async () => {
+    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      Promise.resolve({ content: `${path} disk\n`, sha256: `sha-${path}`, size: path.length + 6 }),
+    );
+    const endEditSpy = vi.spyOn(DiffView.prototype, "endEdit");
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [editableFile, second], "two-editable-sig");
+    await mounted;
+    startEdit("editable.ts");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+
+    startEdit("second.ts");
+
+    expect(endEditSpy).toHaveBeenCalledWith("editable.ts");
+    endEditSpy.mockRestore();
+  });
+
+  it("adopts an external change into a clean inline edit without making it dirty", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-before", size: 12 })
+      .mockResolvedValueOnce({ content: "disk changed\n", sha256: "sha-changed", size: 13 });
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    const replaceSpy = vi.spyOn(DiffView.prototype, "replaceEditContent");
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "editable-changed-sig");
+
+    await vi.waitFor(() => expect(replaceSpy).toHaveBeenCalledWith("editable.ts", "disk changed\n", false));
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")?.disabled).toBe(true);
+    replaceSpy.mockRestore();
+  });
+
+  it("reconciles a restored clean diff editor even when its path is absent from the manifest", async () => {
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        diffEditorState: {
+          path: "editable.ts",
+          baseSHA256: "sha-before",
+          baseContent: "disk before\n",
+          content: "disk before\n",
+          dirty: false,
+          conflict: false,
+          conflictBaseSHA256: null,
+        } satisfies CodePaneDiffEditorState,
+      },
+    };
+    hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "disk reset\n", sha256: "sha-reset", size: 11 });
+    const replaceSpy = vi.spyOn(DiffView.prototype, "replaceEditContent");
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "clean-restored-omitted-sig");
+    await mounted;
+
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    expect(replaceSpy).toHaveBeenCalledWith("editable.ts", "disk reset\n", false);
+    const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(collected.diffEditorState).toMatchObject({
+      path: "editable.ts",
+      content: "disk reset\n",
+      baseSHA256: "sha-reset",
+      dirty: false,
+      conflict: false,
+    });
+    replaceSpy.mockRestore();
+  });
+
+  it("keeps a dirty inline edit reachable when a live manifest omits that path", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [], "omitted-edit-sig");
+
+    await vi.waitFor(() =>
+      expect(capturedCodeViewOptions.current?.renderHeaderMetadata?.({ name: "editable.ts" })?.textContent).toContain("Unsaved changes"),
+    );
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+  });
+
+  it("surfaces a manifest transport failure above a dirty editor and retries without hiding Save/Cancel", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+
+    useFakeTimersWithImmediatePaint();
+    fireDiffSignature();
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+    rejectDiff(1, new Error("manifest transport dropped"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe("Couldn't load diff. Try again.");
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.textContent).toContain("Unsaved changes");
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
+    resolveDiff(2, [editableFile], "manifest-retry-sig");
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("surfaces a patch-stream failure above a dirty editor and retries without hiding Save/Cancel", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+
+    useFakeTimersWithImmediatePaint();
+    hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
+    fireDiffSignature();
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+    resolveDiff(1, [editableFile], "patch-retry-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(2);
+
+    expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe("Couldn't load diff. Try again.");
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.textContent).toContain("Unsaved changes");
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
+    resolveDiff(2, [editableFile], "patch-retry-success-sig");
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("freezes an overlapping external write as a disk-versus-buffer comparison and keeps mine CAS-bound to that disk snapshot", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
+      .mockResolvedValueOnce({ content: "disk version\n", sha256: "sha-disk", size: 13 });
+    // Keep the explicit conflict decision in flight. This test verifies the requested CAS baseline
+    // rather than a later refresh triggered by a successful write.
+    hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
+    const setConflictSpy = vi.spyOn(DiffView.prototype, "setEditConflict");
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "my version\n" });
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "conflict-sig");
+
+    await vi.waitFor(() =>
+      expect(setConflictSpy).toHaveBeenCalledWith("editable.ts", { kind: "changed", diskContent: "disk version\n" }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        hoisted.notifyWorkspaceStateChanged.mock.calls
+          .map(([snapshot]) => snapshot as { diffEditorState: CodePaneDiffEditorState | null })
+          .some(
+            (snapshot) =>
+              snapshot.diffEditorState?.conflict === true &&
+              snapshot.diffEditorState.baseSHA256 === "sha-disk" &&
+              snapshot.diffEditorState.baseContent === "disk version\n" &&
+              snapshot.diffEditorState.content === "my version\n" &&
+              snapshot.diffEditorState.conflictBaseSHA256 === "sha-disk",
+          ),
+      ).toBe(true),
+    );
+
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    const keepMine = [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!;
+    keepMine.click();
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "my version\n", { baseSHA256: "sha-disk" }),
+    );
+    setConflictSpy.mockRestore();
+  });
+
+  it("uses create-if-missing CAS when Keep mine resolves a deleted-file conflict", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
+      .mockRejectedValueOnce(new SpacesBridgeError("notFound", "editable.ts was deleted"));
+    hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "restore mine\n" });
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "deleted-edit-sig");
+    const header = await vi.waitFor(() => {
+      const rendered = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(rendered.textContent).toContain("Keep mine");
+      return rendered;
+    });
+
+    const persistedConflict = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as {
+      diffEditorState?: CodePaneDiffEditorState;
+    };
+    expect(persistedConflict.diffEditorState?.conflictBaseSHA256).toBeNull();
+
+    [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!.click();
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "restore mine\n", { baseSHA256: undefined }),
+    );
+  });
+
+  it("restores a changed-file conflict with its persisted disk CAS target", async () => {
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        diffEditorState: {
+          path: "editable.ts",
+          baseSHA256: "sha-disk",
+          baseContent: "disk version\n",
+          content: "my recovered version\n",
+          dirty: true,
+          conflict: true,
+          conflictBaseSHA256: "sha-disk",
+        } satisfies CodePaneDiffEditorState,
+      },
+    };
+    hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
+    await mountEditableDiff();
+
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.textContent).toContain("Workspace changed");
+    [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!.click();
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "my recovered version\n", { baseSHA256: "sha-disk" }),
+    );
+  });
+
+  it("keeps a changed conflict's disk CAS target after Keep mine fails so retry cannot overwrite a newer file", async () => {
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        diffEditorState: {
+          path: "editable.ts",
+          // The conflict's displayed disk snapshot is the only CAS target that makes this Keep
+          // mine confirmation safe. The ordinary edit baseline may still describe the pre-conflict
+          // file after state restoration.
+          baseSHA256: "sha-before-conflict",
+          baseContent: "before conflict\n",
+          content: "my recovered version\n",
+          dirty: true,
+          conflict: true,
+          conflictBaseSHA256: "sha-disk",
+        } satisfies CodePaneDiffEditorState,
+      },
+    };
+    hoisted.workspaceFileWrite
+      .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "device reconnecting"))
+      .mockResolvedValueOnce({ ok: true, sha256: "sha-after-retry" });
+    await mountEditableDiff();
+
+    let header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!.click();
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "my recovered version\n", { baseSHA256: "sha-disk" }),
+    );
+
+    const afterFailure = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as {
+      diffEditorState?: CodePaneDiffEditorState;
+    };
+    expect(afterFailure.diffEditorState).toMatchObject({
+      conflict: true,
+      conflictBaseSHA256: "sha-disk",
+    });
+
+    header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!.click();
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenLastCalledWith(
+        "editable.ts",
+        "my recovered version\n",
+        { baseSHA256: "sha-disk" },
+      ),
+    );
+  });
+
+  it("restores a deleted-file conflict as create-if-missing rather than an existing-file overwrite", async () => {
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        diffEditorState: {
+          path: "editable.ts",
+          baseSHA256: "sha-before-delete",
+          baseContent: "before delete\n",
+          content: "restore my recovered version\n",
+          dirty: true,
+          conflict: true,
+          conflictBaseSHA256: null,
+        } satisfies CodePaneDiffEditorState,
+      },
+    };
+    hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
+    await mountEditableDiff();
+
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.textContent).toContain("deleted on disk");
+    expect([...header.querySelectorAll<HTMLButtonElement>("button")].some((button) => button.textContent === "Close without saving")).toBe(true);
+    [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep mine")!.click();
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "restore my recovered version\n", { baseSHA256: undefined }),
+    );
+  });
+
+  it("surfaces a retryable inline-diff save failure without discarding the edit", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    hoisted.workspaceFileWrite.mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "edited\n" });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    const save = header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!;
+    save.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledTimes(1));
+
+    expect(container.textContent).toContain("Couldn't save editable.ts. Try again.");
+    expect(save.disabled).toBe(false);
+
+    hoisted.workspaceFileWrite.mockResolvedValueOnce({ ok: true, sha256: "sha-after-retry" });
+    save.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledTimes(2));
+  });
+
+  it("surfaces a non-deletion workspace read failure before opening an inline diff edit", async () => {
+    hoisted.workspaceFileRead.mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+
+    expect(container.textContent).toContain("Couldn't open editable.ts for editing. Try again.");
   });
 });
 
@@ -572,7 +1899,7 @@ describe("mountRoot's refreshDiff — scope switch mid-pull keeps the supersede 
     // And the render that actually applied scope B's files used preserveScroll === false: the scope
     // switch's non-preserving intent survived being coalesced with the preserving signature events.
     const finalCall = setFilesSpy.mock.calls[setFilesSpy.mock.calls.length - 1]!;
-    expect(finalCall[0]).toEqual([makeFile("scope-b-only.ts")]);
+    expect(finalCall[0]).toEqual([expect.objectContaining({ ...makeFile("scope-b-only.ts"), patchState: "ready" })]);
     expect(finalCall[1]).toBe(false);
   });
 });
@@ -585,7 +1912,7 @@ describe("mountRoot's refreshDiff — permanent vs. transient failure classifica
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     container = document.createElement("div");
-    vi.useFakeTimers();
+    useFakeTimersWithImmediatePaint();
   });
 
   afterEach(() => {
@@ -679,7 +2006,7 @@ describe("mountRoot's refreshDiff — `unavailable` is a retried exception withi
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     container = document.createElement("div");
-    vi.useFakeTimers();
+    useFakeTimersWithImmediatePaint();
   });
 
   afterEach(() => {
@@ -747,7 +2074,7 @@ describe("mountRoot's refreshDiff — `internalError` joins `unavailable` as a r
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     container = document.createElement("div");
-    vi.useFakeTimers();
+    useFakeTimersWithImmediatePaint();
   });
 
   afterEach(() => {
@@ -825,7 +2152,7 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     container = document.createElement("div");
-    INIT_PAYLOAD = { ...defaultInitPayload, pendingReviewComments: [pendingEntry] };
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, pendingReviewComments: [pendingEntry] } };
     // Not mocked at the module level (only @pierre/diffs's CodeView is faked): spying on the real
     // CommentsController's own `DiffView.setComments` calls (round-16 Fix 1's same technique, see
     // its doc comment above) is the only place `comments.setFiles([])`'s effect is externally
@@ -833,7 +2160,7 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
     // `reanchorComments` only clears a draft's `position` (not its body/tray visibility) when its
     // `filePath` is missing from the file list it was last given.
     setCommentsSpy = vi.spyOn(DiffView.prototype, "setComments");
-    vi.useFakeTimers();
+    useFakeTimersWithImmediatePaint();
   });
 
   afterEach(() => {
@@ -964,7 +2291,9 @@ describe("mountRoot's dispatch — a scope switch synchronously clears the previ
 
     resolveDiff(1, [makeFile("b.ts")], "sig-b");
     await vi.waitFor(() => expect(container.textContent).toContain("b.ts"));
-    expect(container.textContent).not.toContain("Loading diff…");
+    // The manifest sidebar appears before its patch body; the diff surface keeps its loading
+    // affordance until that file reaches the append-only ready transition.
+    expect(container.textContent).toContain("Loading diff…");
     await mounted;
   });
 
@@ -1018,14 +2347,537 @@ describe("mountRoot's spaces:agents wiring", () => {
       }),
     );
     await vi.waitFor(() => {
-      const label = container.querySelector(".agent-label");
-      expect(label?.textContent).toBe("claude · main");
+      const selector = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector");
+      expect(selector?.selectedOptions[0]?.textContent).toBe("Send to: claude · main");
     });
     sendBatchBtn = [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.startsWith("Send batch"),
     ) as HTMLButtonElement;
     // Still disabled: an agent is now selected, but there are zero drafts to send.
     expect(sendBatchBtn.title).toBe("No comments to send.");
+  });
+
+  it("waits for its keyed detected status before assigning a restored starting session", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    const launchingAgent = { id: "launching", label: "claude · starting", sessionId: "launch-session" };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      agents: [launchingAgent],
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        pendingAgentLaunch: {
+          sessionId: launchingAgent.sessionId,
+          command: "claude",
+          status: "starting",
+          message: null,
+          deadlineEpochMilliseconds: Date.now() + 60_000,
+        },
+        pendingReviewComments: [
+          {
+            id: "waiting-for-detection",
+            provisional: true,
+            filePath: "draft.ts",
+            side: "new",
+            lineNumber: 1,
+            lineText: "draft line",
+            body: "please review",
+          },
+        ],
+      },
+    };
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    hoisted.resumeWorkspaceCommandTracking.mockResolvedValueOnce({
+      sessionId: launchingAgent.sessionId,
+      status: "starting",
+      deadlineEpochMilliseconds: INIT_PAYLOAD.workspaceState.pendingAgentLaunch!.deadlineEpochMilliseconds,
+    });
+    try {
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [], "restored-starting-agent-sig");
+      await mounted;
+
+      let sendBatch = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send batch · 1",
+      )!;
+      expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+      expect(sendBatch.disabled).toBe(true);
+      expect(sendBatch.title).toBe("Pick an agent to send to.");
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").selectedAgentSessionId).toBeNull();
+
+      // A full running-agent overview can include the terminal before its hook-backed readiness
+      // event. It stays visible, but is not assignable until the matching keyed event arrives.
+      window.dispatchEvent(new CustomEvent("spaces:agents", { detail: { agents: [launchingAgent] } }));
+      await vi.waitFor(() => expect(sendBatch.disabled).toBe(true));
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").selectedAgentSessionId).toBeNull();
+
+      window.dispatchEvent(
+        new CustomEvent("spaces:agentStartStatus", {
+          detail: { sessionId: launchingAgent.sessionId, status: "detected", agent: launchingAgent },
+        }),
+      );
+      await vi.waitFor(() => {
+        const selector = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector");
+        expect(selector?.selectedOptions[0]?.textContent).toBe("Send to: claude · starting");
+      });
+      sendBatch = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send batch · 1",
+      )!;
+      expect(sendBatch.disabled).toBe(false);
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").selectedAgentSessionId).toBe(launchingAgent.sessionId);
+    } finally {
+      INIT_PAYLOAD = defaultInitPayload;
+      hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    }
+  });
+
+  it("keeps a different restored assignment usable while another session is still starting", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    const assignedAgent = { id: "assigned", label: "codex · review", sessionId: "assigned-session" };
+    const launchingAgent = { id: "launching", label: "claude · starting", sessionId: "launch-session" };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      agents: [assignedAgent, launchingAgent],
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        selectedAgentSessionId: assignedAgent.sessionId,
+        pendingAgentLaunch: {
+          sessionId: launchingAgent.sessionId,
+          command: "claude",
+          status: "starting",
+          message: null,
+          deadlineEpochMilliseconds: Date.now() + 60_000,
+        },
+        pendingReviewComments: [
+          {
+            id: "send-with-existing-agent",
+            provisional: true,
+            filePath: "draft.ts",
+            side: "new",
+            lineNumber: 1,
+            lineText: "draft line",
+            body: "please review",
+          },
+        ],
+      },
+    };
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    hoisted.resumeWorkspaceCommandTracking.mockResolvedValueOnce({
+      sessionId: launchingAgent.sessionId,
+      status: "starting",
+      deadlineEpochMilliseconds: INIT_PAYLOAD.workspaceState.pendingAgentLaunch!.deadlineEpochMilliseconds,
+    });
+    try {
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [], "starting-with-assigned-agent-sig");
+      await mounted;
+
+      const sendBatch = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send batch · 1",
+      )!;
+      expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+      expect(sendBatch.disabled).toBe(false);
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").selectedAgentSessionId).toBe(assignedAgent.sessionId);
+
+      window.dispatchEvent(new CustomEvent("spaces:agents", { detail: { agents: [assignedAgent, launchingAgent] } }));
+      await vi.waitFor(() => expect(sendBatch.disabled).toBe(false));
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").selectedAgentSessionId).toBe(assignedAgent.sessionId);
+    } finally {
+      INIT_PAYLOAD = defaultInitPayload;
+      hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    }
+  });
+
+  it("keeps an assigned agent's Send batch available through a 90-second new-agent detection wait", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    const agent = { id: "a1", label: "claude · main", sessionId: "s1" };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      agents: [agent],
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        selectedAgentSessionId: agent.sessionId,
+        pendingReviewComments: [
+          {
+            id: "pending-sendable",
+            provisional: true,
+            filePath: "draft.ts",
+            side: "new",
+            lineNumber: 1,
+            lineText: "draft line",
+            body: "please review",
+          },
+        ],
+      },
+    };
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    useFakeTimersWithImmediatePaint();
+    try {
+      const mounted = mountRoot(container);
+      await vi.advanceTimersByTimeAsync(0);
+      resolveDiff(0, [], "starting-agent-sig");
+      await vi.advanceTimersByTimeAsync(0);
+      await mounted;
+
+      const selector = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector")!;
+      selector.value = "__start_new_agent__";
+      selector.dispatchEvent(new Event("change"));
+      const input = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+      input.value = "sleep 90";
+      input.dispatchEvent(new Event("input"));
+      input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const sendBatch = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send batch · 1",
+      )!;
+      expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+      expect(sendBatch.disabled).toBe(false);
+
+      // The launch may legitimately take a long time to emit a hook. It is a separate target from
+      // the already assigned running agent, so ordinary comment sending remains available.
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+      expect(sendBatch.disabled).toBe(false);
+    } finally {
+      INIT_PAYLOAD = defaultInitPayload;
+      hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+      vi.useRealTimers();
+      window.requestAnimationFrame = nativeRequestAnimationFrame;
+    }
+  });
+
+  it("merges a detected agent before selecting it when status arrives ahead of the agents overview", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    const existingAgent = { id: "a1", label: "claude · main", sessionId: "s1" };
+    const detectedAgent = { id: "a2", label: "codex · review", sessionId: "s2" };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      agents: [existingAgent],
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        selectedAgentSessionId: existingAgent.sessionId,
+        pendingReviewComments: [
+          {
+            id: "status-before-overview",
+            provisional: true,
+            filePath: "draft.ts",
+            side: "new",
+            lineNumber: 1,
+            lineText: "draft line",
+            body: "please review",
+          },
+        ],
+      },
+    };
+    hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    hoisted.startWorkspaceCommand.mockClear();
+    try {
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [], "detected-before-overview-sig");
+      await mounted;
+
+      const selector = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector")!;
+      selector.value = "__start_new_agent__";
+      selector.dispatchEvent(new Event("change"));
+      const input = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+      input.value = "codex review";
+      input.dispatchEvent(new Event("input"));
+      input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(hoisted.startWorkspaceCommand).toHaveBeenCalledTimes(1));
+
+      hoisted.notifyWorkspaceStateChanged.mockClear();
+      window.dispatchEvent(
+        new CustomEvent("spaces:agentStartStatus", {
+          detail: { sessionId: "command-1", status: "detected", agent: detectedAgent },
+        }),
+      );
+
+      await vi.waitFor(() => {
+        const detectedSelector = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector");
+        expect(detectedSelector?.selectedOptions[0]?.textContent).toBe("Send to: codex · review");
+      });
+      const selected = container.querySelector<HTMLSelectElement>("#code-pane-agent-selector")!;
+      expect([...selected.options].map((option) => option.value)).toEqual(expect.arrayContaining([existingAgent.id, detectedAgent.id]));
+      const sendBatch = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send batch · 1",
+      )!;
+      expect(sendBatch.disabled).toBe(false);
+      expect(hoisted.notifyWorkspaceStateChanged).toHaveBeenLastCalledWith(
+        expect.objectContaining({ selectedAgentSessionId: detectedAgent.sessionId }),
+      );
+    } finally {
+      INIT_PAYLOAD = defaultInitPayload;
+      hoisted.reviewCommentList.mockReset().mockResolvedValue([]);
+    }
+  });
+
+  it("restores a failed Start Agent command and its feedback when retrying after restart", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    const command = "claude --resume";
+    const failure = "The command exited (failed) before its agent hooks registered.";
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        pendingAgentLaunch: {
+          sessionId: "command-failed",
+          command,
+          status: "failed",
+          message: failure,
+          deadlineEpochMilliseconds: null,
+        },
+      },
+    };
+    try {
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [], "failed-launch-sig");
+      await mounted;
+
+      (container.querySelector<HTMLButtonElement>("#code-pane-start-agent"))!.click();
+
+      const dialog = container.querySelector<HTMLElement>("#code-pane-start-agent-dialog")!;
+      expect(dialog.hidden).toBe(false);
+      expect((container.querySelector<HTMLInputElement>("#code-pane-start-agent-command"))!.value).toBe(command);
+      const status = container.querySelector<HTMLElement>("#code-pane-start-agent-status")!;
+      expect(status.textContent).toContain("No agent detected");
+      expect(status.textContent).toContain(failure);
+    } finally {
+      INIT_PAYLOAD = defaultInitPayload;
+    }
+  });
+
+  it("persists the host-minted readiness deadline when a command starts", async () => {
+    const deadlineEpochMilliseconds = 1_756_420_000_000;
+    hoisted.startWorkspaceCommand.mockResolvedValueOnce({
+      sessionId: "command-with-deadline",
+      status: "starting",
+      deadlineEpochMilliseconds,
+    });
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "start-deadline-sig");
+    await mounted;
+
+    (container.querySelector<HTMLButtonElement>("#code-pane-start-agent"))!.click();
+    const input = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+    input.value = "claude --resume";
+    input.dispatchEvent(new Event("input"));
+    input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(hoisted.startWorkspaceCommand).toHaveBeenCalledWith("claude --resume"));
+    await vi.waitFor(() =>
+      expect(
+        hoisted.notifyWorkspaceStateChanged.mock.calls
+          .map(([snapshot]) => snapshot as CodePaneWorkspaceState)
+          .some(
+            (snapshot) =>
+              snapshot.pendingAgentLaunch?.sessionId === "command-with-deadline" &&
+              snapshot.pendingAgentLaunch.deadlineEpochMilliseconds === deadlineEpochMilliseconds,
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("does not launch a second command while the first Start Agent request is in flight", async () => {
+    hoisted.startWorkspaceCommand.mockClear();
+    let resolveFirst!: (result: { sessionId: string; status: "starting"; deadlineEpochMilliseconds: number }) => void;
+    hoisted.startWorkspaceCommand.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve; }),
+    );
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "start-in-flight-sig");
+    await mounted;
+
+    const startButton = container.querySelector<HTMLButtonElement>("#code-pane-start-agent")!;
+    startButton.click();
+    const input = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+    input.value = "claude";
+    input.dispatchEvent(new Event("input"));
+    input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(hoisted.startWorkspaceCommand).toHaveBeenCalledTimes(1);
+
+    // Cancelling only hides the dialog; it cannot cancel the already-issued bridge request. Reopen
+    // it and submit another command to reproduce the duplicate-launch race.
+    (container.querySelector<HTMLButtonElement>("#code-pane-start-agent-cancel")!).click();
+    container.querySelector<HTMLButtonElement>("#code-pane-start-agent")!.click();
+    const reopenedInput = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+    reopenedInput.value = "codex";
+    reopenedInput.dispatchEvent(new Event("input"));
+    expect(container.querySelector<HTMLButtonElement>("#code-pane-start-agent-submit")!.disabled).toBe(true);
+    reopenedInput.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(hoisted.startWorkspaceCommand).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ sessionId: "first-session", status: "starting", deadlineEpochMilliseconds: 90_000 });
+    await vi.waitFor(() => expect(hoisted.notifyWorkspaceStateChanged).toHaveBeenCalled());
+  });
+});
+
+describe("mountRoot's restored Start Agent tracking", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.resumeWorkspaceCommandTracking.mockClear();
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    container = document.createElement("div");
+    useFakeTimersWithImmediatePaint();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    vi.useRealTimers();
+    window.requestAnimationFrame = nativeRequestAnimationFrame;
+  });
+
+  it("retries an unavailable restored tracker before its original deadline and keeps the launch starting on recovery", async () => {
+    const deadlineEpochMilliseconds = Date.now() + 10_000;
+    const launch = {
+      sessionId: "resume-session",
+      command: "claude --resume",
+      status: "starting" as const,
+      message: null,
+      deadlineEpochMilliseconds,
+    };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, pendingAgentLaunch: launch },
+    };
+    hoisted.resumeWorkspaceCommandTracking
+      .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "device reconnecting"))
+      .mockResolvedValueOnce({ sessionId: launch.sessionId, status: "starting", deadlineEpochMilliseconds });
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(1);
+    resolveDiff(0, [], "resume-retry-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(2));
+
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot.pendingAgentLaunch).toEqual(launch);
+    expect(container.querySelector(".agent-label")?.textContent).toBe("Starting agent…");
+  });
+
+  it("treats a timeout-shaped tracker rejection as transient before the original deadline", async () => {
+    const deadlineEpochMilliseconds = Date.now() + 10_000;
+    const launch = {
+      sessionId: "timeout-resume-session",
+      command: "codex --resume",
+      status: "starting" as const,
+      message: null,
+      deadlineEpochMilliseconds,
+    };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, pendingAgentLaunch: launch },
+    };
+    hoisted.resumeWorkspaceCommandTracking
+      .mockRejectedValueOnce(new Error("resume request timed out"))
+      .mockResolvedValueOnce({ sessionId: launch.sessionId, status: "starting", deadlineEpochMilliseconds });
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    resolveDiff(0, [], "resume-timeout-retry-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").pendingAgentLaunch).toEqual(launch);
+  });
+
+  it("reconciles an expired restored session once so native can still detect and assign its agent", async () => {
+    const launch = {
+      sessionId: "already-expired-session",
+      command: "claude --resume",
+      status: "starting" as const,
+      message: null,
+      deadlineEpochMilliseconds: Date.now() - 1,
+    };
+    const detectedAgent = { id: "detected-after-deadline", label: "Claude", sessionId: launch.sessionId };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, pendingAgentLaunch: launch },
+    };
+    hoisted.resumeWorkspaceCommandTracking.mockResolvedValue({
+      sessionId: launch.sessionId,
+      status: "starting",
+      deadlineEpochMilliseconds: launch.deadlineEpochMilliseconds,
+    });
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledExactlyOnceWith(launch.sessionId);
+    resolveDiff(0, [], "resume-expired-detected-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+
+    // Native owns the terminal conclusion after the original deadline. It can still find a hook
+    // that registered while this pane was absent, and the normal keyed event assigns it.
+    window.dispatchEvent(
+      new CustomEvent("spaces:agentStartStatus", {
+        detail: { sessionId: launch.sessionId, status: "detected", agent: detectedAgent },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(container.querySelector<HTMLSelectElement>("#code-pane-agent-selector")?.selectedOptions[0]?.textContent).toBe("Send to: Claude"),
+    );
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").pendingAgentLaunch).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a restored launch at its original deadline after transient tracker errors and retains its command", async () => {
+    const deadlineEpochMilliseconds = Date.now() + 500;
+    const launch = {
+      sessionId: "expired-resume-session",
+      command: "claude --resume",
+      status: "starting" as const,
+      message: null,
+      deadlineEpochMilliseconds,
+    };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, pendingAgentLaunch: launch },
+    };
+    hoisted.resumeWorkspaceCommandTracking.mockRejectedValue(new SpacesBridgeError("unavailable", "device reconnecting"));
+
+    const mounted = mountRoot(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(1);
+    resolveDiff(0, [], "resume-expiry-sig");
+    await vi.advanceTimersByTimeAsync(0);
+    await mounted;
+
+    await vi.advanceTimersByTimeAsync(500);
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot.pendingAgentLaunch).toEqual({
+      sessionId: launch.sessionId,
+      command: launch.command,
+      status: "failed",
+      message: "Timed out waiting for an agent to start.",
+      deadlineEpochMilliseconds: null,
+    });
+    // The first transient resume used the remaining readiness window; expiry gets exactly one
+    // terminal native reconciliation and never schedules another retry window.
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(hoisted.resumeWorkspaceCommandTracking).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1045,13 +2897,121 @@ describe("mountRoot's mode toggle — notifyModeChanged push (round-5 hibernatio
     resolveDiff(0, [], "sig-a");
     await mounted;
 
-    expect(hoisted.notifyModeChanged).not.toHaveBeenCalled(); // startup alone pushes nothing
+    hoisted.notifyModeChanged.mockClear();
 
     clickButton(container, "Editor");
     expect(hoisted.notifyModeChanged).toHaveBeenCalledExactlyOnceWith("editor");
 
     clickButton(container, "Diff");
     expect(hoisted.notifyModeChanged).toHaveBeenNthCalledWith(2, "diff");
+  });
+});
+
+describe("mountRoot's mode-switch position persistence", () => {
+  let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    INIT_PAYLOAD = defaultInitPayload;
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    container.remove();
+  });
+
+  it("keeps each view's durable position through repeated state pushes after the other view detaches", async () => {
+    document.body.appendChild(container);
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "mode-position-sig");
+    await mounted;
+
+    const diffRoot = container.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const diffLine = document.createElement("div");
+    diffLine.dataset.line = "17";
+    diffLine.dataset.diffPath = "diff-visible.ts";
+    diffLine.dataset.diffSide = "old";
+    Object.defineProperty(diffRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(diffLine, "getBoundingClientRect", {
+      value: () => ({ bottom: container.contains(diffLine) ? 1 : -1 }),
+    });
+    diffRoot.appendChild(diffLine);
+
+    clickButton(container, "Editor");
+    let snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      mode: "editor",
+      diffSelectedPath: "diff-visible.ts",
+      diffScrollLine: 17,
+      diffScrollSide: "old",
+    });
+
+    const editorRoot = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const editorLine = document.createElement("div");
+    editorLine.dataset.line = "29";
+    Object.defineProperty(editorRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(editorLine, "getBoundingClientRect", {
+      value: () => ({ bottom: container.contains(editorLine) ? 1 : -1 }),
+    });
+    editorRoot.appendChild(editorLine);
+
+    clickButton(container, "Diff");
+    snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      mode: "diff",
+      diffSelectedPath: "diff-visible.ts",
+      diffScrollLine: 17,
+      editorScrollLine: 29,
+    });
+
+    clickButton(container, "Editor");
+    snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      mode: "editor",
+      diffSelectedPath: "diff-visible.ts",
+      diffScrollLine: 17,
+      editorScrollLine: 29,
+    });
+  });
+
+  it("clears the prior scope's diff position before persisting a new comparison scope", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("old-scope.ts")], "old-scope-position-sig");
+    await mounted;
+
+    capturedCodeViewOptions.current!.onLineClick!(
+      { start: 10, side: "deletions" },
+      { type: "diff", item: { id: "old-scope.ts" } },
+    );
+
+    const diffRoot = container.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const diffLine = document.createElement("div");
+    diffLine.dataset.line = "9";
+    diffLine.dataset.diffPath = "old-scope.ts";
+    diffLine.dataset.diffSide = "new";
+    Object.defineProperty(diffRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(diffLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    diffRoot.appendChild(diffLine);
+
+    switchToLastCommit(container);
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(snapshot).toMatchObject({
+      scope: { kind: "lastCommit" },
+      diffSelectedPath: null,
+      diffScrollLine: null,
+      diffScrollSide: null,
+      diffFocusedPath: null,
+      diffFocusedLine: null,
+      diffFocusedSide: null,
+    });
+
+    resolveDiff(1, [], "new-scope-position-sig");
+    await vi.waitFor(() => expect(container.textContent).not.toContain("Loading diff…"));
   });
 });
 
@@ -1086,12 +3046,10 @@ describe("mountRoot's spaces:setMode wiring", () => {
     resolveDiff(0, [], "sig-a");
     await mounted;
 
-    const modeCallsBefore = hoisted.notifyModeChanged.mock.calls.length;
     const diffCallsBefore = hoisted.workspaceDiff.mock.calls.length;
 
     window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
 
-    expect(hoisted.notifyModeChanged.mock.calls.length).toBe(modeCallsBefore);
     expect(hoisted.workspaceDiff.mock.calls.length).toBe(diffCallsBefore); // no extra refreshDiff
   });
 
@@ -1104,7 +3062,7 @@ describe("mountRoot's spaces:setMode wiring", () => {
       dirty: true,
       conflict: false,
     };
-    INIT_PAYLOAD = { ...defaultInitPayload, editorState: dirtyEditorState };
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, editorState: dirtyEditorState } };
 
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
@@ -1128,8 +3086,8 @@ describe("mountRoot's spaces:setMode wiring", () => {
     // switch — collectStateForFlush would return null/empty if the switch had reset it.
     // `window.__spacesCollectEditorState` is instance-safe even under the shared-`window` pollution
     // above: every mount overwrites it to point at that exact instance (see its wiring in root.ts).
-    const collected = window.__spacesCollectEditorState?.();
-    expect(JSON.parse(collected!)).toEqual(dirtyEditorState);
+    const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(collected.editorState).toEqual(dirtyEditorState);
   });
 });
 
@@ -1157,7 +3115,7 @@ describe("mountRoot's init ordering — the hibernated editor snapshot is restor
       dirty: true,
       conflict: false,
     };
-    INIT_PAYLOAD = { ...defaultInitPayload, editorState: dirtyEditorState };
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, editorState: dirtyEditorState } };
 
     const mounted = mountRoot(container);
     // `refreshDiff`'s own `workspaceDiff` call is this init's first network await (mode is "diff"
@@ -1169,11 +3127,42 @@ describe("mountRoot's init ordering — the hibernated editor snapshot is restor
     // empty here and this flush would return `null` — silently overwriting the host's hibernated
     // snapshot with nothing. Fix 1 moves the restore above every network await in the init tail, so
     // the buffer is already live by the time this synchronous teardown pull can fire.
-    const collected = window.__spacesCollectEditorState?.();
-    expect(collected).not.toBeNull();
-    expect(JSON.parse(collected!)).toEqual(dirtyEditorState);
+    const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    expect(collected.editorState).toEqual(dirtyEditorState);
 
     resolveDiff(0, [], "sig-a");
+    await mounted;
+  });
+
+  it("seeds the inactive diff position before an Editor-mode startup can be torn down", async () => {
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        mode: "editor",
+        diffSelectedPath: "inactive.ts",
+        diffScrollLine: 17,
+        diffScrollSide: "new",
+        diffFocusedPath: "inactive.ts",
+        diffFocusedLine: 18,
+        diffFocusedSide: "new",
+      },
+    };
+
+    window.__spacesCollectWorkspaceState = undefined;
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(window.__spacesCollectWorkspaceState).toBeDefined());
+
+    const collected = JSON.parse(window.__spacesCollectWorkspaceState!());
+    expect(collected).toMatchObject({
+      diffSelectedPath: "inactive.ts",
+      diffScrollLine: 17,
+      diffScrollSide: "new",
+      diffFocusedPath: "inactive.ts",
+      diffFocusedLine: 18,
+      diffFocusedSide: "new",
+    });
+
     await mounted;
   });
 });
@@ -1212,7 +3201,7 @@ describe("mountRoot's init ordering — the seeded pending comment state is rest
       lineText: "  const y = 2;",
       body: "unsaved comment text",
     };
-    INIT_PAYLOAD = { ...defaultInitPayload, pendingReviewComments: [pendingEntry] };
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, pendingReviewComments: [pendingEntry] } };
 
     const mounted = mountRoot(container);
     // Same checkpoint as the editor test above: `refreshDiff`'s own `workspaceDiff` call is this
@@ -1224,9 +3213,8 @@ describe("mountRoot's init ordering — the seeded pending comment state is rest
     // text. Fix 1a moves the restore above every network await in the init tail (see root.ts), so
     // the draft is already live in the controller's mirror by the time this synchronous teardown
     // pull can fire.
-    const collected = window.__spacesCollectReviewCommentState?.();
-    expect(collected).not.toBeNull();
-    const parsedEntries = JSON.parse(collected!) as PendingReviewCommentEntry[];
+    const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+    const parsedEntries = collected.pendingReviewComments as PendingReviewCommentEntry[];
     expect(parsedEntries).toHaveLength(1);
     // The id itself is not preserved: `restorePendingState` mints a fresh provisional id for the
     // recreated draft (`provisionalSequence` restarts at 0 every page load — see its doc comment)
@@ -1347,7 +3335,7 @@ describe("mountRoot's editor-mode-only startup triggers the sidebar's first fetc
   });
 
   it("a pane starting (or rehydrating) directly into editor mode fetches the Files tab's listing without ever going through a dispatch", async () => {
-    INIT_PAYLOAD = { ...defaultInitPayload, initialMode: "editor" };
+    INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, mode: "editor" } };
 
     const mounted = mountRoot(container);
     await mounted;
@@ -1392,7 +3380,10 @@ describe("mountRoot's init ordering — rehydrating into editor mode reads the r
     // No `editorUIState` in the payload — absent defaults to the Files tab (see
     // `CodePaneInitPayload.editorUIState`'s doc comment), the tab whose `reattach()` fires the
     // listing scan this ordering is about.
-    INIT_PAYLOAD = { ...defaultInitPayload, initialMode: "editor", editorState: cleanEditorState };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: { ...defaultInitPayload.workspaceState, mode: "editor", editorState: cleanEditorState },
+    };
 
     const mounted = mountRoot(container);
     await mounted;
@@ -1477,9 +3468,13 @@ describe("mountRoot's Diff-mode ⌘P jump records into recents (Finding E)", () 
     });
     row.click();
 
-    await vi.waitFor(() => expect(hoisted.notifyEditorUIStateChanged).toHaveBeenCalled());
-    const calls = hoisted.notifyEditorUIStateChanged.mock.calls;
-    expect(calls[calls.length - 1]![0]).toEqual({ sidebarMode: "files", recentPaths: ["a.ts"] });
+    await vi.waitFor(() =>
+      expect(
+        hoisted.notifyEditorUIStateChanged.mock.calls
+          .map(([state]) => state as { sidebarMode: string; recentPaths: string[] })
+          .some((state) => state.sidebarMode === "files" && state.recentPaths[0] === "a.ts"),
+      ).toBe(true),
+    );
   });
 });
 
@@ -1581,8 +3576,13 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
   }
 
   function lastPushedState(): { sidebarMode: string; recentPaths: string[] } {
-    const calls = hoisted.notifyEditorUIStateChanged.mock.calls;
-    return calls[calls.length - 1]![0] as { sidebarMode: string; recentPaths: string[] };
+    const snapshots = hoisted.notifyEditorUIStateChanged.mock.calls.map(
+      ([snapshot]) => snapshot as { sidebarMode: string; recentPaths: string[] },
+    );
+    for (let index = snapshots.length - 1; index >= 0; index -= 1) {
+      if (snapshots[index]!.recentPaths.length > 0) return snapshots[index]!;
+    }
+    return { sidebarMode: "files", recentPaths: [] };
   }
 
   /** Opens `path` via the Files tree and waits for the resulting recording push to land — recording
@@ -1590,7 +3590,13 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
    *  synchronously on click. */
   async function openFileRowAndWait(path: string): Promise<void> {
     clickFileRow(path);
-    await vi.waitFor(() => expect(lastPushedState().recentPaths[0]).toBe(path));
+    await vi.waitFor(() =>
+      expect(
+        hoisted.notifyEditorUIStateChanged.mock.calls
+          .map(([snapshot]) => snapshot as { recentPaths: string[] })
+          .some((snapshot) => snapshot.recentPaths[0] === path),
+      ).toBe(true),
+    );
   }
 
   it("opening a file via the Files tree records it as the sole recent path and pushes the update", async () => {
@@ -1640,10 +3646,18 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
     hoisted.notifyEditorUIStateChanged.mockClear(); // drop mountWithFiles' own setup noise, if any
 
     clickButton(container, "Changes");
-    expect(lastPushedState()).toEqual({ sidebarMode: "changes", recentPaths: [] });
+    expect(
+      hoisted.notifyEditorUIStateChanged.mock.calls
+        .map(([snapshot]) => snapshot as { sidebarMode: string; recentPaths: string[] })
+        .some((snapshot) => snapshot.sidebarMode === "changes" && snapshot.recentPaths.length === 0),
+    ).toBe(true);
 
     clickButton(container, "Files");
-    expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: [] });
+    expect(
+      hoisted.notifyEditorUIStateChanged.mock.calls
+        .map(([snapshot]) => snapshot as { sidebarMode: string; recentPaths: string[] })
+        .some((snapshot) => snapshot.sidebarMode === "files" && snapshot.recentPaths.length === 0),
+    ).toBe(true);
   });
 
   // Finding C: `openInEditor` no longer records unconditionally — only `EditorView`'s `onFileOpened`

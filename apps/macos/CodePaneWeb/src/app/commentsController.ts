@@ -35,7 +35,9 @@ export interface CommentsToolbarState {
 }
 
 export interface CommentsControllerCallbacks {
-  onToolbarStateChange(state: CommentsToolbarState): void;
+  /** `liveText` lets the pane repaint the batch count without serializing a complete workspace
+   * snapshot (which can include a large dirty editor buffer) for every keystroke. */
+  onToolbarStateChange(state: CommentsToolbarState, options?: { liveText?: boolean }): void;
 }
 
 const BANNER_TIMEOUT_MS = 4000;
@@ -46,6 +48,11 @@ const BANNER_TIMEOUT_MS = 4000;
  *  precedent of a private per-file copy). */
 const LOAD_INITIAL_RETRY_FLOOR_MS = 1000;
 const LOAD_INITIAL_RETRY_CAP_MS = 30000;
+
+function anchoredPositionEquals(a: AnchoredComment, b: AnchoredComment): boolean {
+  if (a.position === undefined || b.position === undefined) return a.position === b.position;
+  return a.position.lineNumber === b.position.lineNumber && a.position.outdated === b.position.outdated;
+}
 
 /**
  * Owns the diff-mode comment surface end to end: the in-memory draft mirror (rehydrated once from
@@ -81,11 +88,15 @@ const LOAD_INITIAL_RETRY_CAP_MS = 30000;
  */
 export class CommentsController {
   private readonly bridge: SpacesBridge;
-  private readonly onToolbarStateChange: (state: CommentsToolbarState) => void;
+  private readonly onToolbarStateChange: (state: CommentsToolbarState, options?: { liveText?: boolean }) => void;
   private diffView: DiffView | undefined;
 
   private drafts: SpacesReviewComment[] = [];
-  private files: readonly DiffFileEntry[] = [];
+  private files: DiffFileEntry[] = [];
+  private filesByPath = new Map<string, DiffFileEntry>();
+  private fileIndexesByPath = new Map<string, number>();
+  /** Rebuilt with the normal draft refresh path; streaming then reads one file's draft group. */
+  private draftsByPath = new Map<string, SpacesReviewComment[]>();
   /** Ids marked "added to batch" via a card's "Add to batch" button — UI-only, per the spec's "ALL
    *  drafts ARE the batch" rule: this never affects which comments are sendable (the tray always
    *  lists every sendable draft regardless of this set, and `doSendBatch` sends every sendable
@@ -236,6 +247,7 @@ export class CommentsController {
   private readonly trayList: HTMLElement;
   private readonly trayCount: HTMLElement;
   private readonly trayCaret: HTMLElement;
+  private readonly trayRowsByID = new Map<string, HTMLElement>();
   private trayExpanded = true;
 
   /** Fix 2 (P2): the `anchored` array `renderTray` was last called with — `refresh()` is the only
@@ -247,7 +259,9 @@ export class CommentsController {
    *  guard, and the empty case (typing into a card before the first `refresh()` has ever run — not
    *  reachable in practice, since a card only exists after `createDraft`/`loadInitial` already called
    *  `refresh()`) just renders an empty tray instead of needing special-cased no-op handling. */
-  private lastAnchored: readonly AnchoredComment[] = [];
+  private lastAnchored: AnchoredComment[] = [];
+  private lastAnchoredByID = new Map<string, AnchoredComment>();
+  private lastAnchoredIndexesByID = new Map<string, number>();
 
   /**
    * round-15 Fix: press-scoped rebuild gate. `refresh()`/`refreshCardsOnly()` route through
@@ -265,10 +279,20 @@ export class CommentsController {
   private pointerPressActive = false;
   private deferredRefreshDuringPress: "none" | "cardsOnly" | "full" = "none";
 
-  constructor(bridge: SpacesBridge, agents: readonly CodePaneAgentSummary[], callbacks: CommentsControllerCallbacks) {
+  constructor(
+    bridge: SpacesBridge,
+    agents: readonly CodePaneAgentSummary[],
+    callbacks: CommentsControllerCallbacks,
+    selectedAgentSessionId?: string | null,
+    excludedAgentSessionId?: string,
+  ) {
     this.bridge = bridge;
     this.agents = agents;
-    this.selectedAgentId = selectDefaultAgentId(agents, undefined);
+    this.selectedAgentId = selectDefaultAgentId(
+      agents,
+      agents.find((agent) => agent.sessionId === selectedAgentSessionId)?.id,
+      excludedAgentSessionId,
+    );
     this.onToolbarStateChange = callbacks.onToolbarStateChange;
 
     this.banner = document.createElement("div");
@@ -508,37 +532,11 @@ export class CommentsController {
     }, delay);
   }
 
-  /**
-   * round-16 Fix 1a: the Swift host calls this synchronously at web-view teardown (mirroring
-   * `EditorView.collectStateForFlush`/`window.__spacesCollectEditorState` — see that method's doc
-   * comment for the hibernation reasoning this mirrors) to snapshot any comment text that has been
-   * typed but not yet persisted, so it survives the teardown and is rehydrated via `spaces:init`'s
-   * `pendingReviewComments` field on the next page load (see `restorePendingState`).
-   *
-   * A draft is included only if it has unpersisted live text: a still-provisional card (never
-   * round-tripped — see the class doc comment) whose live body is non-empty, or a persisted draft
-   * whose `liveBodies` entry differs from its last-persisted `body` (typed since the last blur, or
-   * since the last successful `doPersistBody`). A clean persisted draft or an empty provisional
-   * card has nothing to lose at teardown, so it is left out — the next page load hydrates persisted
-   * drafts through the ordinary `loadInitial` call instead.
-   *
-   * Returns `null` (not `"[]"`) when nothing is pending, matching `'__none__'`'s meaning on the
-   * Swift side — see `decodeCollectedReviewCommentState`'s doc comment there.
-   *
-   * A second pass over `restoredPendingById` follows the main loop, to cover a persisted entry
-   * `restorePendingState` is still holding because `loadInitial()` hasn't merged its real draft
-   * object into `this.drafts` yet (see that map's doc comment): without it, a second teardown
-   * landing inside that restore→list-merge window would find nothing in `this.drafts` for that id
-   * and silently lose the text a first teardown had already recovered.
-   *
-   * This is also this controller's one teardown seam (the Swift host's synchronous call is the
-   * only signal this controller ever gets that the page is going away), so it doubles as the place
-   * `loadInitial`'s pending retry timer (see `loadInitialRetryFailures`'s doc comment) is cleared —
-   * a retry firing after teardown would call `reviewCommentList` again for a page nobody is looking
-   * at any more.
-   */
-  collectStateForFlush(): string | null {
-    clearTimeout(this.loadInitialRetryTimer);
+  /** Builds pending review-comment recovery state without changing controller lifetime. A draft is
+   * included only when its live text differs from persisted state (or is a nonempty provisional
+   * draft). Root uses this during routine persistence, so it must not cancel retries or prune
+   * recovery maps; the teardown-specific `collectStateForFlush` below owns that lifecycle work. */
+  snapshotPendingState(): string | null {
     const entries: PendingReviewCommentEntry[] = [];
     for (const draft of this.drafts) {
       const live = this.liveBodies.get(draft.id);
@@ -558,9 +556,9 @@ export class CommentsController {
     for (const [id, entry] of this.restoredPendingById) {
       if (this.drafts.some((d) => d.id === id)) {
         // The real draft object has since arrived (via loadInitial's merge) — the main loop above
-        // now covers this id (whether or not it actually emitted it, which depends only on whether
-        // its live text has diverged), so this held copy no longer needs to survive further.
-        this.restoredPendingById.delete(id);
+        // now covers this id (whether or not it actually emits it, which depends only on whether
+        // its live text has diverged). Do not prune the mirror from a routine snapshot: collecting
+        // state must be observational, not change retry or recovery behavior.
         continue;
       }
       // Still not merged in — keep holding it (don't delete here) in case a further teardown lands
@@ -576,6 +574,13 @@ export class CommentsController {
       });
     }
     return entries.length === 0 ? null : JSON.stringify(entries);
+  }
+
+  /** The Swift teardown collector: unlike routine snapshots, a closing page must stop its pending
+   * comment-list retry before returning the same recovery payload. */
+  collectStateForFlush(): string | null {
+    clearTimeout(this.loadInitialRetryTimer);
+    return this.snapshotPendingState();
   }
 
   /**
@@ -626,15 +631,71 @@ export class CommentsController {
    *  live diff refresh — re-anchors the existing draft set against the new files without touching
    *  the drafts themselves. */
   setFiles(files: readonly DiffFileEntry[]): void {
-    this.files = files;
+    this.files = [...files];
+    this.filesByPath = new Map(this.files.map((file) => [file.path, file]));
+    this.fileIndexesByPath = new Map(this.files.map((file, index) => [file.path, index]));
     this.refresh();
+  }
+
+  /** Replaces one streamed file without re-anchoring unrelated drafts. A completed patch cannot
+   * affect comments on any other path, and unchanged anchors do not need card/tray/toolbar work or
+   * a recovery-state push. */
+  updateFile(file: DiffFileEntry): void {
+    const index = this.fileIndexesByPath.get(file.path);
+    if (index === undefined) return;
+    this.files[index] = file;
+    this.filesByPath.set(file.path, file);
+    // A queued/streaming entry has no completed patch against which a source anchor can be
+    // judged. Keep the current anchor until the ready transition supplies that evidence.
+    if (file.patchState === "queued" || file.patchState === "streaming") return;
+    const affectedDrafts = this.draftsByPath.get(file.path) ?? [];
+    if (affectedDrafts.length === 0) return;
+
+    const nextForFile = reanchorComments(affectedDrafts, [file]);
+    let changed = false;
+    const changedAnchors: AnchoredComment[] = [];
+    for (const replacement of nextForFile) {
+      const previous = this.lastAnchoredByID.get(replacement.comment.id);
+      const index = this.lastAnchoredIndexesByID.get(replacement.comment.id);
+      if (!previous || index === undefined || anchoredPositionEquals(previous, replacement)) continue;
+      this.lastAnchored[index] = replacement;
+      this.lastAnchoredByID.set(replacement.comment.id, replacement);
+      changedAnchors.push(replacement);
+      changed = true;
+    }
+    if (!changed) return;
+    if (this.pointerPressActive) {
+      // Keep the latest anchor in the in-memory snapshot above, but do not replace a tray row
+      // while one of its buttons is pressed: replacing it would detach the native click target.
+      // The deferred full refresh replays both the card and tray updates after mouseup.
+      this.deferredRefreshDuringPress = "full";
+      return;
+    }
+    for (const replacement of changedAnchors) this.updateTrayPosition(replacement);
+    this.captureFocusedCard();
+    this.diffView?.updateCommentsForFile(file.path, nextForFile);
   }
 
   /** Re-runs the same auto-default rule used at startup — see `spaces:agents`'s contract in
    *  README.md and `selectDefaultAgentId`'s doc comment. */
-  onAgentsChanged(agents: readonly CodePaneAgentSummary[]): void {
+  onAgentsChanged(agents: readonly CodePaneAgentSummary[], excludedAgentSessionId?: string): void {
     this.agents = agents;
-    this.selectedAgentId = selectDefaultAgentId(agents, this.selectedAgentId);
+    this.selectedAgentId = selectDefaultAgentId(agents, this.selectedAgentId, excludedAgentSessionId);
+    this.pushToolbarState();
+    this.refreshCardsOnly();
+  }
+
+  /** A launch-status event can beat the next full agents overview. Merge its session before
+   * selecting it so the toolbar and durable selected session agree immediately, without replacing
+   * other running agents. */
+  onAgentDetected(agent: CodePaneAgentSummary): void {
+    const existingIndex = this.agents.findIndex(
+      (existing) => existing.id === agent.id || existing.sessionId === agent.sessionId,
+    );
+    this.agents = existingIndex === -1
+      ? [...this.agents, agent]
+      : this.agents.map((existing, index) => (index === existingIndex ? agent : existing));
+    this.selectedAgentId = agent.id;
     this.pushToolbarState();
     this.refreshCardsOnly();
   }
@@ -1434,7 +1495,8 @@ export class CommentsController {
   }
 
   private anchoredAll(): AnchoredComment[] {
-    return reanchorComments(this.drafts, this.files);
+    const previousAnchors = new Map(this.lastAnchored.map((entry) => [entry.comment.id, entry]));
+    return reanchorComments(this.drafts, this.files, previousAnchors);
   }
 
   /** Captures the currently focused comment card's id and caret/selection, if any, into
@@ -1476,9 +1538,21 @@ export class CommentsController {
     this.captureFocusedCard();
     const anchored = this.anchoredAll();
     this.diffView?.setComments(anchored);
-    this.lastAnchored = anchored; // Fix 2 (P2): cached for refreshTray() — see its field doc comment
+    this.adoptAnchored(anchored);
     this.renderTray(anchored);
     this.pushToolbarState();
+  }
+
+  private adoptAnchored(anchored: readonly AnchoredComment[]): void {
+    this.lastAnchored = [...anchored];
+    this.lastAnchoredByID = new Map(anchored.map((entry) => [entry.comment.id, entry]));
+    this.lastAnchoredIndexesByID = new Map(anchored.map((entry, index) => [entry.comment.id, index]));
+    this.draftsByPath = new Map();
+    for (const draft of this.drafts) {
+      const group = this.draftsByPath.get(draft.filePath) ?? [];
+      group.push(draft);
+      this.draftsByPath.set(draft.filePath, group);
+    }
   }
 
   /** Fix 2 (P2): re-renders just the tray from `lastAnchored`, without touching the diff-view cards
@@ -1523,7 +1597,7 @@ export class CommentsController {
     else if (pending === "cardsOnly") this.refreshCardsOnly();
   }
 
-  private pushToolbarState(): void {
+  private pushToolbarState(liveText = false): void {
     // Fix 3 (P2): must agree with `doSendBatch`'s own sendable filter (see its doc comment, ~line
     // 743) — live text with a persisted-body fallback, not `d.body` alone. A card mid-edit that has
     // not blurred yet IS sendable (and so must be counted); a card emptied on screen but not yet
@@ -1531,7 +1605,7 @@ export class CommentsController {
     // is keyed by the draft's current (post-re-key) id, same assumption `doSendBatch`'s filter
     // already relies on, so no `resolveId` call is needed here either.
     const draftCount = this.drafts.filter((d) => (this.liveBodies.get(d.id) ?? d.body).trim().length > 0).length;
-    this.onToolbarStateChange({ agents: [...this.agents], selectedAgentId: this.selectedAgentId, draftCount });
+    this.onToolbarStateChange({ agents: [...this.agents], selectedAgentId: this.selectedAgentId, draftCount }, { liveText });
   }
 
   private renderCard(anchored: AnchoredComment): HTMLElement {
@@ -1544,6 +1618,7 @@ export class CommentsController {
 
     const textarea = document.createElement("textarea");
     textarea.className = "comment-card-body";
+    textarea.id = "code-pane-comment-input";
     // Used by `captureFocusedCard` to map a focused DOM element back to its draft id across a
     // wholesale rebuild (`@pierre/diffs` creates fresh DOM nodes every `setComments` call).
     textarea.dataset.commentId = comment.id;
@@ -1565,7 +1640,7 @@ export class CommentsController {
       // tabs away, even though `pushToolbarState` (see its own Fix 3 comment) already counts live
       // text and `doSendBatch`'s sendable filter already treats this card as sendable right now.
       // Cheap: a filter over a handful of drafts, run once per keystroke.
-      this.pushToolbarState();
+      this.pushToolbarState(true);
       // Fix 2 (P2): keeps the open tray's membership/excerpts live too — see `renderTray`'s doc
       // comment for why it must agree with `pushToolbarState`'s count. No press-gating needed; see
       // `refreshTray`'s doc comment.
@@ -1576,17 +1651,8 @@ export class CommentsController {
     // save is not latency-sensitive the way a file buffer is, so there is no reason to accept the
     // added complexity of a partial-typing race window here.
     //
-    // Accepted v1 behavior: quitting the app while a comment textarea still has focus loses whatever
-    // was typed since the last blur. For a still-provisional draft that never blurred even once,
-    // that's the ENTIRE comment — a provisional draft has no daemon row until its first successful
-    // `persistBody`. This is consistent with the editor's own rule that only quitting and reopening
-    // the app loses an unsaved edit. Hibernation/teardown is NOT this loss window:
-    // `collectStateForFlush` already revives live in-progress text across hibernation via
-    // `spaces:init`. Any click on Send/Add-to-batch/elsewhere blurs the textarea first (browsers
-    // deliver `blur` before `click`), so the loss window is exactly "quit with the caret still in a
-    // card." A debounced durable persist was considered and rejected: routing the COMMON typing flow
-    // through the provisional-draft-to-server-id re-key and card-rebuild machinery on every keystroke
-    // risks focus/caret churn on every comment, just to cover this one quit-only edge.
+    // The pane snapshot collector includes `liveBodies`, so text that still has focus survives a
+    // teardown without persisting/rekeying a provisional server draft on every keystroke.
     textarea.addEventListener("blur", () => {
       const body = textarea.value;
       if (body.trim().length === 0) {
@@ -1617,14 +1683,28 @@ export class CommentsController {
     });
     card.appendChild(textarea);
 
+    const selectedAgent = this.agents.find((agent) => agent.id === this.selectedAgentId);
+    if (selectedAgent === undefined) {
+      const requirement = document.createElement("div");
+      requirement.className = "comment-send-requirement";
+      requirement.id = "code-pane-comment-send-requirement";
+      requirement.dataset.state = this.agents.length === 0 ? "no-running-agent" : "unassigned-agent";
+      requirement.textContent =
+        this.agents.length === 0
+          ? "No running agent. Start one above to send this comment."
+          : "Assign a running agent above to send this comment.";
+      card.appendChild(requirement);
+    }
+
     const actions = document.createElement("div");
     actions.className = "comment-card-actions";
 
-    const agent = this.agents.find((a) => a.id === this.selectedAgentId);
+    const agent = selectedAgent;
     const sendBtn = document.createElement("button");
     sendBtn.type = "button";
     sendBtn.className = "btn primary";
-    sendBtn.textContent = agent ? `Send to ${agent.label}` : "Send";
+    sendBtn.textContent = selectedAgent === undefined ? "Send" : `Send to ${selectedAgent.label}`;
+    sendBtn.id = "code-pane-comment-send";
     // Same purpose the textarea's `dataset.commentId` serves above: maps a focused DOM node back to
     // its draft id (and which action it is) across a wholesale rebuild — see `captureFocusedCard`.
     sendBtn.dataset.commentId = comment.id;
@@ -1709,45 +1789,55 @@ export class CommentsController {
     this.trayCount.textContent = String(sendable.length);
 
     this.trayList.replaceChildren();
+    this.trayRowsByID.clear();
     for (const ac of sendable) {
-      const row = document.createElement("div");
-      row.className = "comment-tray-row";
-      row.addEventListener("click", () => {
-        // A batched card stays inline (see `batchedIds`'s doc comment) — a tray row click only
-        // scrolls to it, it never mutates batch membership or visibility.
-        const position = ac.position;
-        if (this.diffView) {
-          if (position && !position.outdated) {
-            this.diffView.scrollToLine(ac.comment.filePath, ac.comment.side, position.lineNumber);
-          } else {
-            this.diffView.scrollToFile(ac.comment.filePath);
-          }
-        }
-      });
-
-      const loc = document.createElement("span");
-      loc.className = "comment-tray-loc";
-      loc.textContent = `${ac.comment.filePath}:${anchoredLineNumber(ac)}`;
-      row.appendChild(loc);
-
-      const excerpt = document.createElement("span");
-      excerpt.className = "comment-tray-excerpt";
-      excerpt.textContent = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
-      row.appendChild(excerpt);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "comment-tray-remove";
-      removeBtn.textContent = "×";
-      removeBtn.title = "Remove comment";
-      removeBtn.addEventListener("click", (event) => {
-        event.stopPropagation(); // don't also trigger the row's own scroll-to-line click
-        void this.deleteDraft(ac.comment.id, false);
-      });
-      row.appendChild(removeBtn);
-
+      const row = this.buildTrayRow(ac);
+      this.trayRowsByID.set(ac.comment.id, row);
       this.trayList.appendChild(row);
     }
+  }
+
+  /** An anchor-only stream update replaces one tray row so its click closure and location remain
+   * current without rebuilding every comment row. */
+  private updateTrayPosition(anchored: AnchoredComment): void {
+    const prior = this.trayRowsByID.get(anchored.comment.id);
+    if (!prior) return; // empty-body drafts have no tray row
+    const next = this.buildTrayRow(anchored);
+    prior.replaceWith(next);
+    this.trayRowsByID.set(anchored.comment.id, next);
+  }
+
+  private buildTrayRow(ac: AnchoredComment): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "comment-tray-row";
+    row.addEventListener("click", () => {
+      // A batched card stays inline (see `batchedIds`'s doc comment) — a tray row click only
+      // scrolls to it, it never mutates batch membership or visibility.
+      const position = ac.position;
+      if (this.diffView) {
+        if (position && !position.outdated) this.diffView.scrollToLine(ac.comment.filePath, ac.comment.side, position.lineNumber);
+        else this.diffView.scrollToFile(ac.comment.filePath);
+      }
+    });
+    const loc = document.createElement("span");
+    loc.className = "comment-tray-loc";
+    loc.textContent = `${ac.comment.filePath}:${anchoredLineNumber(ac)}`;
+    row.appendChild(loc);
+    const excerpt = document.createElement("span");
+    excerpt.className = "comment-tray-excerpt";
+    excerpt.textContent = this.liveBodies.get(ac.comment.id) ?? ac.comment.body;
+    row.appendChild(excerpt);
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "comment-tray-remove";
+    removeBtn.textContent = "×";
+    removeBtn.title = "Remove comment";
+    removeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void this.deleteDraft(ac.comment.id, false);
+    });
+    row.appendChild(removeBtn);
+    return row;
   }
 
   private updateTrayExpansion(): void {

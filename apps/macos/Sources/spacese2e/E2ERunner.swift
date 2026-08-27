@@ -124,6 +124,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "code-pane",
             kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane"], environment: { $0.codePaneEnvironment() })),
         E2EScenarioDescriptor(
+            name: "code-pane-streaming",
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane-streaming"], environment: { $0.codePaneEnvironment() })),
+        E2EScenarioDescriptor(
             name: "code-pane-churn",
             kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-code-pane-churn"], environment: { $0.codePaneEnvironment() })),
         E2EScenarioDescriptor(

@@ -5,10 +5,36 @@ import spacesterminalcore
 /// One coding agent the code pane can send a review comment/batch to: `id` names the agent row (for
 /// stable dropdown selection across refreshes), `label` is its display name, `sessionID` is the
 /// terminal session `workspaceReviewCommentsSend` writes into.
-struct CodePaneRunningAgent: Equatable {
+struct CodePaneRunningAgent: Equatable, Sendable {
     let id: String
     let label: String
     let sessionID: String
+}
+
+/// One readiness sample for a command the Editor just started. It carries the same foreground facts
+/// `spaces agent spawn` uses, plus the hook-backed agent row required before review comments may be sent.
+/// Keeping the row keyed to `sessionID` prevents two panes that launch at the same time from assigning
+/// each other's agent.
+struct CodePaneAgentStartSnapshot: Equatable, Sendable {
+    let sessionFound: Bool
+    let belongsToWorkspace: Bool
+    let state: TerminalSessionState?
+    let detectedKind: TerminalDetectedAgentKind?
+    let bracketedPasteActive: Bool
+    let agent: CodePaneRunningAgent?
+
+    init(
+        sessionFound: Bool = true, belongsToWorkspace: Bool = true, state: TerminalSessionState?, detectedKind: TerminalDetectedAgentKind?,
+        bracketedPasteActive: Bool,
+        agent: CodePaneRunningAgent?
+    ) {
+        self.sessionFound = sessionFound
+        self.belongsToWorkspace = belongsToWorkspace
+        self.state = state
+        self.detectedKind = detectedKind
+        self.bracketedPasteActive = bracketedPasteActive
+        self.agent = agent
+    }
 }
 
 /// Host-side lookups a code pane's bridge needs to service an RPC, kept as a narrow protocol so
@@ -39,6 +65,13 @@ struct CodePaneRunningAgent: Equatable {
     /// Coding agents currently running in this workspace, for the pane's assigned-agent selection
     /// (auto-default when exactly one runs, a dropdown otherwise; sending disabled when none do).
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent]
+
+    /// Inserts the terminal created by Start Agent into a background tab. The Editor remains the
+    /// selected responder; this is deliberately host-owned because only the panel coordinator knows
+    /// where a workspace's unselected terminal tabs belong.
+    func codePaneInstallBackgroundCommandSession(
+        workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse
+    )
 }
 
 extension AppKitController: CodePaneHosting {
@@ -64,5 +97,16 @@ extension AppKitController: CodePaneHosting {
             guard row.runState == .running, row.activityState != .exited, let sessionID = row.sessionID else { return nil }
             return CodePaneRunningAgent(id: row.id, label: row.name, sessionID: sessionID)
         }
+    }
+
+    func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {
+        let epoch = panelCoordinator.paneReplacementEpoch
+        applyDeviceMutationResponse(response, deviceID: deviceID, epoch: epoch)
+        guard let sessionID = response.sessionID,
+            let request = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: response.overview)
+        else {
+            return
+        }
+        _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .init(focus: .withoutFocus))
     }
 }

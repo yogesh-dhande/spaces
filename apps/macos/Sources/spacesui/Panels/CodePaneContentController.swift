@@ -5,14 +5,20 @@ import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 
-/// The Editor pane's current view: reviewing working-tree changes, or editing a file. Every pane opens
-/// in `.diff` (see `PanelCoordinator.openOrFocusGlobalEditorWindow`); `.editor` is reached only by
-/// switching views from inside the pane itself (`spaces:setMode`). The mode is carried purely as a
-/// runtime hint to the controller and is never persisted — a restored pane always rebuilds as `.diff`,
-/// since the `.codePane` descriptor alone cannot say which view was showing.
-enum CodePaneMode: Equatable {
+/// The Editor pane's current view: reviewing working-tree changes, or editing a file. An explicit
+/// Editor navigation starts in `.diff`; ordinary controller replacement and app relaunch restore the
+/// workspace-local mode.
+enum CodePaneMode: Equatable, Sendable {
     case diff
     case editor
+}
+
+/// Whether a controller is being built for an explicit Editor navigation or only to restore an
+/// existing pane. The requested mode is authoritative only for navigation; recovery otherwise keeps
+/// the user's last mode alongside the rest of the workspace-local snapshot.
+enum CodePaneInitialModePolicy: Equatable, Sendable {
+    case useRequestedMode
+    case restoreWorkspaceMode
 }
 
 /// Code-pane implementation of `PaneContentHosting`: a diff/editor surface backed by a `WKWebView`
@@ -29,12 +35,27 @@ enum CodePaneMode: Equatable {
 /// diff-signature subscription). A hidden tab therefore holds no live web process and no open
 /// daemon stream; showing the pane again pays a fresh page load and a fresh `ready` handshake.
 @MainActor final class CodePaneContentController: NSObject, PaneContentHosting {
+    /// Keeps the exact page that started a teardown collection alive until WebKit returns the page's
+    /// final recovery snapshot. `teardownWebView()` releases its regular references immediately so a
+    /// hidden pane does not retain a web process, but WebKit's asynchronous callback still requires
+    /// both the concrete view and its evaluator to remain alive until that one collection settles.
+    private final class TeardownWorkspaceStateCollector {
+        let webView: WKWebView
+        let scriptEvaluator: any CodePaneScriptEvaluator
+
+        init(webView: WKWebView, scriptEvaluator: any CodePaneScriptEvaluator) {
+            self.webView = webView
+            self.scriptEvaluator = scriptEvaluator
+        }
+    }
+
     private static let messageHandlerName = "spacesBridge"
     private static let initEventName = "spaces:init"
     private static let themeEventName = "spaces:theme"
     private static let diffSignatureEventName = "spaces:diffSignature"
     private static let fileSignatureEventName = "spaces:fileSignature"
     private static let agentsEventName = "spaces:agents"
+    private static let agentStartStatusEventName = "spaces:agentStartStatus"
     private static let setModeEventName = "spaces:setMode"
 
     let descriptor: PaneContentDescriptor
@@ -57,6 +78,15 @@ enum CodePaneMode: Equatable {
     /// like the device being unavailable" rather than something to force-unwrap.
     private weak var hosting: (any CodePaneHosting)?
     private let deviceGateway: any CodePaneDeviceGateway
+    /// The durable, client-local home for workspace state. It is separate from `hosting` because
+    /// unsaved source and view state must never become daemon-synchronized workspace data.
+    private let workspaceStateStore: any CodePaneWorkspaceStateStoring
+    /// Ordered write-behind for `workspaceStateStore`. It owns the expensive JSON encoding and
+    /// SQLite write, while this controller remains the main-actor authority for the live snapshot.
+    private let workspaceStatePersistence: CodePaneWorkspaceStatePersistence
+    /// Guards this short-lived controller's writes against an outgoing controller for the same
+    /// workspace. See `CodePaneWorkspaceStateHandoff` for the A → B → A handoff contract.
+    private let workspaceStateOwner: CodePaneWorkspaceStateHandoff.Owner
 
     /// Set once the web app's `ready` message arrives; the host must wait for it before dispatching
     /// `spaces:init` (see README) and must not push `spaces:theme`/`spaces:diffSignature` before
@@ -71,6 +101,19 @@ enum CodePaneMode: Equatable {
     /// it were new (mirrors `currentTheme`, which is the same kind of workspace/app-level fact).
     private var currentAgents: [CodePaneRunningAgent]?
 
+    /// Pending Start Agent commands keyed by the terminal session their immediate response created.
+    /// The native observer is tied to the visible Editor page; hibernation/retarget cancels it and a
+    /// returned page reconciles the persisted session exactly once before it can report a timeout.
+    /// The gateway uses the same overview payload for local and remote devices.
+    private var agentStartTasks: [String: Task<Void, Never>] = [:]
+    private var agentStartTaskGenerations: [String: Int] = [:]
+    private var nextAgentStartTaskGeneration = 0
+    /// Mirrors the established `spaces agent spawn` readiness budget. Tests shorten both values rather
+    /// than introducing a product-facing timing option.
+    var agentStartReadinessTimeout: TimeInterval = 90
+    var agentStartPollInterval: Duration = .seconds(1)
+    var agentStartNow: () -> Date = Date.init
+
     /// Bumped every time `installWebView()` creates a fresh page. The web app's own JS request-id
     /// counter (`realBridge.ts`) restarts at 1 on every page load, so an id alone can't disambiguate a
     /// reply meant for a hibernation cycle's torn-down page from one meant for the page that replaced
@@ -78,19 +121,19 @@ enum CodePaneMode: Equatable {
     /// through to `reply(id:generation:...)`, which drops the reply once the page has moved on.
     private var pageGeneration = 0
 
-    /// Bumped on every `workspaceDiff` call; the captured value only lets `performWorkspaceDiff`'s
-    /// completion retarget the live diff-signature stream (`resubscribeDiffSignature`) if it is still
-    /// the latest one handed out. This is a different concern from `pageGeneration` above: a stale
+    /// Bumped on every initial `workspaceDiffManifestChunk` call; the captured value lets only the
+    /// latest request's final metadata chunk retarget the live diff-signature stream
+    /// (`resubscribeDiffSignature`). This is a different concern from `pageGeneration` above: a stale
     /// diff response's JS reply must still always go out (the web side matches replies by id and
     /// doesn't care which scope is "current"), but pointing the shared stream at a scope the user has
     /// already navigated away from would visibly regress the live view even on the very same page.
     private var latestDiffRequestToken = 0
 
-    /// The (workspace, ref) scope the live diff-signature stream is pointed at. Every `workspaceDiff`
+    /// The (workspace, ref) scope the live diff-signature stream is pointed at. Every initial `workspaceDiffManifestChunk`
     /// call is the signal to (re)point this: `realBridge.ts`'s `subscribeDiffSignature` never messages
     /// Swift at all (see its doc comment), so the resolved scope of each diff fetch is the only place
     /// scope changes are observable from the host side. Also cleared by an actual stream disconnect
-    /// (see `handleDiffSignatureDisconnect`), so a same-scope `workspaceDiff` after a daemon restart
+    /// (see `handleDiffSignatureDisconnect`), so a same-scope `workspaceDiffManifestChunk` after a daemon restart
     /// resubscribes instead of silently no-op'ing forever.
     private enum DiffSignatureScope: Equatable {
         case none
@@ -98,9 +141,9 @@ enum CodePaneMode: Equatable {
     }
     private var subscribedScope: DiffSignatureScope = .none
     /// The `scopeSignature` of the last diff the web app is known to have fetched for the current
-    /// scope — set the moment a `workspaceDiff` reply for the still-current request is delivered (see
-    /// `performWorkspaceDiff`), paired with the scope it was recorded for so a resubscribe that
-    /// targets a different scope can tell it's stale (defensive: in practice `performWorkspaceDiff`
+    /// scope — set when the final `workspaceDiffManifestChunk` reply for the still-current request is delivered (see
+    /// `performWorkspaceDiffManifestChunk`), paired with the scope it was recorded for so a resubscribe that
+    /// targets a different scope can tell it's stale (defensive: in practice `performWorkspaceDiffManifestChunk`
     /// always refreshes both before `resubscribeDiffSignature` runs for the new scope, so this branch
     /// is not expected to fire — see `handleDiffSignatureFrame`). `nil` (both) means "no diff fetched
     /// yet for any scope this pane life has subscribed to" — a frame always forwards in that state.
@@ -171,35 +214,39 @@ enum CodePaneMode: Equatable {
     var fileSignatureReconnectFloor: Duration = .seconds(1)
     var fileSignatureReconnectCap: Duration = .seconds(30)
 
-    /// The web app's last-known open-editor snapshot, pushed via the `editorStateChanged`
-    /// notification (see `CodePaneBridge.EditorState`). Lives on the controller — which survives
-    /// hibernation — rather than the `WKWebView` — which does not — so an editor's unsaved buffer
-    /// and CAS baseline are restored, not lost, when a tab or workspace switch tears the page down
-    /// and later rebuilds it: `handleReady()` below hands this back through `spaces:init`'s
-    /// `editorState` field. Cleared by `close()` (the pane itself is gone) but not by
-    /// `deactivate()` (hibernation only). No disk persistence, so an app restart starts clean —
-    /// an accepted boundary (see docs/implementation.md's hibernation section).
+    /// The open-editor buffer held inside the complete workspace recovery snapshot.
     private var editorState: CodePaneBridge.EditorState?
-    /// The page generation that most recently wrote `editorState` — via either a debounced push
-    /// (`handleEditorStateChanged`) or a teardown flush (`flushPendingEditorState`'s completion). A
-    /// flush only applies its result when its captured generation is `>=` this value: within one page
-    /// generation a flush always reads state at least as fresh as any of that page's own prior pushes
-    /// (it queries the editor's live fields directly, bypassing the debounce timer), so `>=` — not the
-    /// stricter `==` — is what lets a same-generation flush still (re)apply, while a flush from an
-    /// older generation a newer page has since written over is correctly rejected. Bumped by `close()`
-    /// too, so a flush already in flight when the pane closes for good can't resurrect the snapshot
-    /// `close()` just discarded.
-    private var editorStateGeneration = 0
+    /// A stale page's asynchronous teardown collection must never replace a later page's complete
+    /// recovery snapshot.
+    private var workspaceStateGeneration = 0
+    /// `close()` is nonblocking, but its final WebKit collection is part of the close operation: the
+    /// callback retains this controller until it has applied the page's last complete snapshot. A
+    /// termination caller appends a finalizer which drains durable persistence only after that same
+    /// collection has settled.
+    private var closeStarted = false
+    private var closeFinalizers: [() -> Void] = []
+    /// The final WebKit callback retains the controller while it is pending, but mutation tasks hold
+    /// it weakly. Keep the close handoff alive after that callback until every mutation has refined
+    /// the final snapshot and released the workspace owner.
+    private var closeLifetimeRetainer: CodePaneContentController?
+    /// The normal `webView`/`scriptEvaluator` properties are cleared as soon as a pane hibernates.
+    /// Keep each old pair here only while its complete-state collection is outstanding, then remove it
+    /// from the callback that settles the corresponding flush.
+    private var teardownWorkspaceStateCollectors: [Int: TeardownWorkspaceStateCollector] = [:]
+    private var nextTeardownWorkspaceStateCollectorID = 0
+    /// A replacement for this workspace waits for an older controller's asynchronous collector
+    /// before building `spaces:init`; otherwise A → B → A can rehydrate A from stale cache.
+    private var waitingForWorkspaceStateHandoff = false
 
-    /// round-10: the most recently committed `workspaceFileWrite`'s outcome, used to fold that write
-    /// into a teardown-flushed `editorState` snapshot that still carries the pre-write baseline — see
-    /// `adoptCommittedWriteIntoEditorState`. round-12: lives only for the duration of the write/flush
+    /// The most recently committed `workspaceFileWrite` outcome, used to fold that write into a
+    /// teardown-flushed `editorState` snapshot that still carries the pre-write baseline — see
+    /// `adoptCommittedWriteIntoEditorState`. It lives only for the duration of the write/flush
     /// race it bridges — cleared by `clearCommittedFileWriteIfSettled()` once both
     /// `outstandingFileWriteCount` and `outstandingTeardownFlushCount` are back at zero. The CAS-chain
     /// guard inside `adoptCommittedWriteIntoEditorState` is not sufficient on its own across time:
     /// hashes can recur (an ABA hazard — see `clearCommittedFileWriteIfSettled`'s doc comment for the
     /// full scenario), so the record must not survive past the race window it exists to bridge.
-    private var lastCommittedFileWrite: (path: String, expectedBase: String?, sha256: String, content: String)?
+    private var lastCommittedFileWrite: (path: String, expectedBase: String?, sha256: String, content: String, pageGeneration: Int)?
 
     /// Clears `lastCommittedFileWrite` once neither an in-flight `workspaceFileWrite` nor an in-flight
     /// teardown flush remains outstanding — i.e. once every party that could legitimately consume the
@@ -221,7 +268,7 @@ enum CodePaneMode: Equatable {
         if outstandingFileWriteCount == 0, outstandingTeardownFlushCount == 0 { lastCommittedFileWrite = nil }
     }
 
-    /// round-16 Fix 1a: the web app's last-known teardown snapshot of comment text typed but not yet
+    /// The web app's last-known teardown snapshot of comment text typed but not yet
     /// persisted (see `CodePaneBridge.ReviewCommentEntryPayload`) — mirrors `editorState` above exactly,
     /// including its lifecycle (survives `deactivate()`, discarded by `close()`) and its rehydration
     /// via `spaces:init`'s `pendingReviewComments` field. `nil` means "nothing pending", the same
@@ -236,32 +283,14 @@ enum CodePaneMode: Equatable {
     /// create's RPC went out, so the snapshot's newer text is what should overlay the listed row). See
     /// `reconcilePendingReviewCommentStateAfterCreate(comment:)`.
     private var pendingReviewCommentState: [CodePaneBridge.ReviewCommentEntryPayload]?
-    /// The page generation that most recently wrote `pendingReviewCommentState` — mirrors
-    /// `editorStateGeneration` exactly, but kept as an independent counter (not reused) since the two
-    /// snapshots are written by unrelated flushes and gating one against the other's generation would
-    /// let an editor-only (or comment-only) flush incorrectly block the other's apply.
-    private var pendingReviewCommentStateGeneration = 0
-
-    /// The web app's last-known sidebar UI-state snapshot (see `CodePaneBridge.EditorUIState`) —
-    /// mirrors `pendingReviewCommentState` above exactly, including its lifecycle (survives
-    /// `deactivate()`, discarded by `close()`) and its rehydration via `spaces:init`'s `editorUIState`
-    /// field. `nil` means "nothing to report", the same meaning as the `'__none__'` sentinel on the
-    /// wire.
-    private var editorUIState: CodePaneBridge.EditorUIState?
-    /// The page generation that most recently wrote `editorUIState` — mirrors
-    /// `pendingReviewCommentStateGeneration` exactly, kept as its own independent counter for the same
-    /// reason.
-    private var editorUIStateGeneration = 0
-
-    /// Count of teardown flushes (`flushPendingEditorState`, `flushPendingReviewCommentState` since
-    /// round-16 Fix 1a, and `flushPendingEditorUIState`) started but not yet answered. Bumped when a
-    /// flush actually kicks off, decremented once its completion applies (or discards) its result.
+    /// Count of complete workspace-state teardown collections not yet answered. Bumped when the
+    /// collector starts and decremented once its completion applies (or discards) its result.
     /// `handleReady()` reads this to know whether a flush from the just-torn-down page could still
-    /// overwrite `editorState`/`pendingReviewCommentState`/`editorUIState` with fresher content than
+    /// overwrite the complete recovery state with fresher content than
     /// whatever is on hand right now — see `deferredReadyGeneration` below for why that matters. A
     /// counter, not a flag, because a pane can in principle rack up more than one outstanding flush
     /// (teardown → reactivate → teardown again, all before the first flush's `evaluateJavaScript` round
-    /// trip returns, or all three flushes from the very same teardown still in flight); `handleReady()`
+    /// trip returns); `handleReady()`
     /// must wait for all of them, not just the most recent. `evaluateJavaScript` (what
     /// `evaluateCodePaneScript` wraps) always calls its completion, success or failure, so this is
     /// guaranteed to return to zero and never strands a deferred `ready` forever. Folded into one
@@ -269,7 +298,7 @@ enum CodePaneMode: Equatable {
     /// kind: every flush gates the exact same `ready` decision, so one shared count is the cleaner
     /// mirror and there is nothing any one flush kind needs to know about another's count.
     private var outstandingTeardownFlushCount = 0
-    /// round-16 Fix 1b: count of in-flight review-comment mutation RPCs (`reviewCommentUpsert`/
+    /// Count of in-flight review-comment mutation RPCs (`reviewCommentUpsert`/
     /// `reviewCommentDelete`/`reviewCommentsSend`) — kept separate from `outstandingTeardownFlushCount`
     /// above rather than folded into it, since this counts a different thing (an RPC round trip to the
     /// daemon, not a teardown flush) even though both gate the same `ready` decision below. Bumped
@@ -280,7 +309,7 @@ enum CodePaneMode: Equatable {
     /// `pendingReviewCommentState`, or the next `loadInitial()`) race the mutation's own effect on the
     /// daemon. See the tradeoff noted at each `perform*` call site below.
     private var outstandingReviewCommentMutationCount = 0
-    /// round-10: count of in-flight `workspaceFileWrite` RPCs. A write outstanding at `ready` time can
+    /// Count of in-flight `workspaceFileWrite` RPCs. A write outstanding at `ready` time can
     /// still change what `editorState` should read once it completes — its completion adopts the
     /// committed baseline into the flushed snapshot (see `adoptCommittedWriteIntoEditorState`), and
     /// answering `ready` first would rehydrate the page against the pre-save baseline, making it treat
@@ -289,13 +318,26 @@ enum CodePaneMode: Equatable {
     /// `outstandingReviewCommentMutationCount` exactly: bumped right before the RPC's `Task` starts,
     /// decremented — unconditionally, success or failure — in its completion.
     private var outstandingFileWriteCount = 0
+    /// A Start Agent request can create a terminal after its page has closed. It therefore shares the
+    /// close handoff fence: releasing the owner first would lose the session association needed to
+    /// resume tracking from the replacement pane or after app restart.
+    private var outstandingStartWorkspaceCommandCount = 0
+
+    /// Owner release has the same recovery ordering requirement as `ready`: the final WebKit
+    /// collection and every mutation that can refine it must settle before a replacement may restore
+    /// the workspace or termination may drain persistence.
+    private var closeLifecycleWorkIsSettled: Bool {
+        outstandingTeardownFlushCount == 0 && outstandingReviewCommentMutationCount == 0 && outstandingFileWriteCount == 0
+            && outstandingStartWorkspaceCommandCount == 0
+    }
+
     /// The page generation `handleReady()` was called for when it deferred sending `spaces:init`
     /// because `outstandingTeardownFlushCount`/`outstandingReviewCommentMutationCount`/
     /// `outstandingFileWriteCount` was nonzero —
     /// `nil` when nothing is deferred. Sending init immediately in that state would ship the stale
     /// pre-flush `editorState`/`pendingReviewCommentState`, and once the flush's completion did land,
-    /// `storeFlushedEditorState`'s `generation >= editorStateGeneration` guard (and its
-    /// `storeFlushedReviewCommentState` sibling) would silently drop it (this page's own activity can
+    /// `storeFlushedWorkspaceState`'s `generation >= workspaceStateGeneration` guard would silently drop
+    /// it (this page's own activity can
     /// have already moved the generation past the flush's captured value), losing the just-typed
     /// content for good rather than merely delaying it. Re-checked against `pageGeneration` when the
     /// last outstanding flush/mutation finally settles (`resumeDeferredReadyIfNeeded`), since the page
@@ -307,24 +349,99 @@ enum CodePaneMode: Equatable {
 
     /// The pane's live mode, distinct from the immutable `initialMode` it was constructed with: the
     /// user can toggle Diff/Editor from the in-page toolbar afterward, and this tracks wherever
-    /// they left it (via the `modeChanged` push — see `handleModeChanged`). Survives hibernation
+    /// they left it (via the complete `workspaceStateChanged` notification). Survives hibernation
     /// like `editorState` above (cleared only by `close()`), so a pane hibernated in Editor mode
     /// comes back in Editor mode instead of resetting to whichever mode originally created it.
     private var currentMode: CodePaneMode
+    /// An explicit global-Editor navigation starts in its requested mode. It is retained only until a
+    /// delayed outgoing collector has handed off the target workspace's complete snapshot, so that
+    /// collector restores every other field without overriding the navigation mode.
+    private let forcedInitialMode: CodePaneMode?
+    /// Navigation may select a mode while a returning page is waiting for an older controller's
+    /// final collection. It is an intent, not a complete snapshot: persisting it immediately would
+    /// make the replacement authoritative and discard the collector's newer dirty buffer. Once the
+    /// handoff finishes, the intent is overlaid onto that complete snapshot and persisted together.
+    private var preReadyRequestedMode: CodePaneMode?
+    /// The rest of the workspace-local snapshot, separate from `currentMode` only because the
+    /// controller still needs a convenient native mode enum for panel navigation.
+    private var currentScope: CodePaneBridge.WorkspaceState.Scope
+    private var diffLayout: String
+    private var diffSelectedPath: String?
+    private var diffTreeExpandedPaths: [String]?
+    private var diffTreeSelectedPath: String?
+    private var fileTreeExpandedPaths: [String]
+    private var fileTreeSelectedPath: String?
+    private var editorSidebarMode: String
+    private var editorRecentPaths: [String]
+    private var diffScrollLine: Int?
+    private var diffScrollSide: String?
+    private var diffFocusedPath: String?
+    private var diffFocusedLine: Int?
+    private var diffFocusedSide: String?
+    private var editorScrollLine: Int?
+    private var editorFocusedLine: Int?
+    private var diffEditorState: CodePaneBridge.DiffEditorState?
+    /// Kept independently from the current agent list so app restart can restore the user's explicit
+    /// assignment, then pruned as soon as the owning session is no longer a running hook-backed agent.
+    private var selectedAgentSessionId: String?
+    /// A command launch survives hibernation/restart. `.starting` causes the web app to ask native to
+    /// resume observing the terminal; `.failed` preserves the typed command and explanatory status.
+    private var pendingAgentLaunch: CodePaneBridge.PendingAgentLaunch?
 
     var onTitleChanged: ((String) -> Void)?
 
     init(
         paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode, hosting: any CodePaneHosting,
-        deviceGateway: any CodePaneDeviceGateway = LiveCodePaneDeviceGateway()
+        initialModePolicy: CodePaneInitialModePolicy = .useRequestedMode,
+        deviceGateway: any CodePaneDeviceGateway = LiveCodePaneDeviceGateway(), workspaceStateStore: (any CodePaneWorkspaceStateStoring)? = nil
     ) {
         self.paneID = paneID
         self.workspaceID = workspaceID
         self.descriptor = .codePane(deviceID: deviceID, workspaceID: workspaceID)
+        let workspaceStateStore = workspaceStateStore ?? ClientCodePaneWorkspaceStateStorage(deviceID: deviceID)
+        let restoredState = Self.loadWorkspaceState(from: workspaceStateStore, workspaceID: workspaceID)
         self.initialMode = initialMode
-        self.currentMode = initialMode
+        switch initialModePolicy {
+        case .useRequestedMode:
+            currentMode = initialMode
+            forcedInitialMode = initialMode
+        case .restoreWorkspaceMode:
+            currentMode = restoredState?.codePaneMode ?? initialMode
+            forcedInitialMode = nil
+        }
+        self.currentScope = restoredState?.scope ?? .uncommitted
+        self.diffLayout = restoredState?.diffLayout ?? "unified"
+        self.diffSelectedPath = restoredState?.diffSelectedPath
+        self.diffTreeExpandedPaths = restoredState?.diffTreeExpandedPaths
+        self.diffTreeSelectedPath = restoredState?.diffTreeSelectedPath
+        self.fileTreeExpandedPaths = restoredState?.fileTreeExpandedPaths ?? []
+        self.fileTreeSelectedPath = restoredState?.fileTreeSelectedPath
+        self.editorSidebarMode = restoredState?.editorSidebarMode ?? "files"
+        self.editorRecentPaths = restoredState?.editorRecentPaths ?? []
+        self.diffScrollLine = restoredState?.diffScrollLine
+        self.diffScrollSide = restoredState?.diffScrollSide
+        self.diffFocusedPath = restoredState?.diffFocusedPath
+        self.diffFocusedLine = restoredState?.diffFocusedLine
+        self.diffFocusedSide = restoredState?.diffFocusedSide
+        self.editorScrollLine = restoredState?.editorScrollLine
+        self.editorFocusedLine = restoredState?.editorFocusedLine
+        self.diffEditorState = restoredState?.diffEditorState
+        self.selectedAgentSessionId = restoredState?.selectedAgentSessionId
+        self.pendingAgentLaunch = restoredState?.pendingAgentLaunch
         self.hosting = hosting
         self.deviceGateway = deviceGateway
+        self.workspaceStateStore = workspaceStateStore
+        workspaceStateOwner = CodePaneWorkspaceStateHandoff.claimOwner(
+            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        workspaceStatePersistence = CodePaneWorkspaceStatePersistence(
+            label: "spaces.code-pane.workspace-state.\(deviceID).\(workspaceID)", storageKey: workspaceStateStore.workspaceStateStorageKey,
+            write: { [workspaceStateStore] stateJSON, workspaceID in
+                // Persistence is recovery-only. A failure leaves this launch's in-memory snapshot
+                // authoritative and must not interfere with editing or pane navigation.
+                try? workspaceStateStore.setStateJSON(stateJSON, workspaceID: workspaceID)
+            })
+        editorState = restoredState?.editorState
+        pendingReviewCommentState = restoredState?.pendingReviewComments
         super.init()
         rootView.wantsLayer = true
         rootView.setAccessibilityIdentifier("code-pane-\(paneID)")
@@ -354,34 +471,69 @@ enum CodePaneMode: Equatable {
     /// untouched — hibernation must not lose them (see their doc comments).
     func deactivate() { teardownWebView() }
 
-    /// The pane itself is going away for good, not just hibernating: on top of `deactivate()`'s web
-    /// view teardown, discard the in-memory editor snapshot and live-mode tracking too, since there
-    /// is no pane left for a future `spaces:init` to ever rehydrate them into.
-    ///
-    /// Both callers of `close()` (an ordinary pane close and
-    /// `PanelCoordinator.retargetGlobalWindowCodePanes`'s close-and-reinstall) discard this instance
-    /// afterward rather than ever reactivating it, so the generation bumps below only need to hold for
-    /// as long as this instance keeps existing — they do not need to protect a hypothetical later
-    /// `activate()` on the same, already-closed instance (a scenario that does not occur in the
-    /// product: a controller that has been closed is never handed a new lease on life, it is replaced).
-    func close() {
+    /// The pane itself is going away. The final WebKit collection remains live until its callback
+    /// supplies the page's latest complete snapshot; this method itself stays nonblocking.
+    func close() { beginClose(finalizer: nil) }
+
+    /// App termination supplies the only synchronous durable fence. It runs after the asynchronous
+    /// page collection has applied and enqueued the final document, never before it. The fence is
+    /// app-wide because a retarget may already have detached another controller with a live collector.
+    func closeForTermination(completion: @escaping () -> Void) {
+        beginClose {
+            CodePaneWorkspaceStatePersistence.finishTermination(completion)
+        }
+    }
+
+    private func beginClose(finalizer: (() -> Void)?) {
+        if let finalizer {
+            if closeStarted, closeLifecycleWorkIsSettled {
+                finalizer()
+                return
+            }
+            closeFinalizers.append(finalizer)
+        }
+        guard !closeStarted else { return }
+        closeStarted = true
+        closeLifetimeRetainer = self
+        CodePaneWorkspaceStateHandoff.collectorStarted(
+            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         teardownWebView()
+        finishCloseIfReady()
+    }
+
+    private func finishCloseIfReady() {
+        guard closeStarted, closeLifecycleWorkIsSettled else { return }
+        persistWorkspaceState(fromOutgoingHandoff: true)
+        CodePaneWorkspaceStateHandoff.releaseOwner(workspaceStateOwner)
         editorState = nil
-        // Invalidates a flush already in flight from the teardown just above: without this, its
-        // completion would still satisfy `flushGeneration >= editorStateGeneration` (neither moves on
-        // its own between the two calls) and could resurrect the snapshot this line just discarded.
-        editorStateGeneration += 1
-        // round-16 Fix 1a: mirrors the editorState treatment immediately above, for the same reason —
-        // a comment-state flush already in flight from the teardown just above must not resurrect this
-        // snapshot after close() just discarded it.
         pendingReviewCommentState = nil
-        pendingReviewCommentStateGeneration += 1
-        // Mirrors the pendingReviewCommentState treatment immediately above, for the same reason — a
-        // UI-state flush already in flight from the teardown just above must not resurrect this
-        // snapshot after close() just discarded it.
-        editorUIState = nil
-        editorUIStateGeneration += 1
+        diffEditorState = nil
         currentMode = initialMode
+        let finalizers = closeFinalizers
+        closeFinalizers.removeAll()
+        for finalizer in finalizers { finalizer() }
+        CodePaneWorkspaceStateHandoff.collectorFinished(
+            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        closeLifetimeRetainer = nil
+    }
+
+    private func settleFileWrite() {
+        outstandingFileWriteCount -= 1
+        clearCommittedFileWriteIfSettled()
+        finishCloseIfReady()
+        resumeDeferredReadyIfNeeded()
+    }
+
+    private func settleReviewCommentMutation() {
+        outstandingReviewCommentMutationCount -= 1
+        finishCloseIfReady()
+        resumeDeferredReadyIfNeeded()
+    }
+
+    private func settleStartWorkspaceCommand() {
+        outstandingStartWorkspaceCommandCount -= 1
+        finishCloseIfReady()
+        resumeDeferredReadyIfNeeded()
     }
 
     @discardableResult func makeContentFirstResponder() -> Bool {
@@ -420,11 +572,28 @@ enum CodePaneMode: Equatable {
     /// overview refresh that didn't touch this workspace's agents doesn't spam the page with a
     /// no-op push, mirroring `applyAppearance`'s `currentTheme` guard above.
     func applyRunningAgents(_ agents: [CodePaneRunningAgent]) {
-        guard currentAgents != agents else { return }
-        currentAgents = agents
+        // The host installs a newly-started command through a synchronous overview apply. Hooks can
+        // register before the start RPC's completion reaches the page, so publish that session only
+        // after the keyed readiness observer has confirmed it. Otherwise the page has not received
+        // `pendingAgentLaunch` yet and its one-agent auto-default would assign the not-yet-ready agent.
+        let publishableAgents: [CodePaneRunningAgent]
+        if let pendingAgentLaunch, pendingAgentLaunch.status == "starting" {
+            publishableAgents = agents.filter { $0.sessionID != pendingAgentLaunch.sessionId }
+        } else {
+            publishableAgents = agents
+        }
+        let selectedAssignmentExpired = selectedAgentSessionId.map { selected in
+            !publishableAgents.contains(where: { $0.sessionID == selected })
+        } ?? false
+        if selectedAssignmentExpired {
+            selectedAgentSessionId = nil
+            persistWorkspaceState()
+        }
+        guard currentAgents != publishableAgents else { return }
+        currentAgents = publishableAgents
         guard isReady, let scriptEvaluator else { return }
         let payload = CodePaneBridge.AgentsPayload(
-            agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+            agents: publishableAgents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.agentsEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -435,15 +604,22 @@ enum CodePaneMode: Equatable {
     ///
     /// Deliberately does not set `currentMode` on the live-push path: `currentMode` is a
     /// single-source-of-truth mirror of the page's own live state (see its doc comment), fed only by
-    /// `handleModeChanged`'s `modeChanged` echo — this method just asks the page to switch, the same
-    /// way a toolbar click does, and waits for that same echo to confirm it landed. The not-live path
+    /// the following complete `workspaceStateChanged` notification — this method just asks the page to
+    /// switch, the same way a toolbar click does, and waits for that notification to confirm it landed. The not-live path
     /// (page torn down, or never loaded yet) has no page to echo back from, so it sets `currentMode`
     /// directly — exactly what `close()` already does when resetting to `initialMode`, and what
     /// `sendInitPayload` already reads (`currentMode`, not `initialMode`) to seed the next load.
     func requestMode(_ mode: CodePaneMode) {
-        guard currentMode != mode else { return }
+        let waitingForOutgoingWorkspaceState = !isReady && CodePaneWorkspaceStateHandoff.hasOutstandingCollector(
+            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        guard currentMode != mode || waitingForOutgoingWorkspaceState else { return }
         guard isReady, let scriptEvaluator else {
             currentMode = mode
+            if waitingForOutgoingWorkspaceState {
+                preReadyRequestedMode = mode
+                return
+            }
+            persistWorkspaceState()
             return
         }
         guard
@@ -500,15 +676,8 @@ enum CodePaneMode: Equatable {
     }
 
     private func teardownWebView() {
-        flushPendingEditorState()
-        // round-16 Fix 1a: mirrors the editor-state flush immediately above — both are counted by the
-        // same `outstandingTeardownFlushCount` (see its doc comment), so `handleReady()` waits for
-        // whichever of the two is slower to answer.
-        flushPendingReviewCommentState()
-        // Mirrors the two flushes immediately above — all three are counted by the same
-        // `outstandingTeardownFlushCount` (see its doc comment), so `handleReady()` waits for whichever
-        // is slowest to answer.
-        flushPendingEditorUIState()
+        cancelAgentStartTracking()
+        flushPendingWorkspaceState()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageHandlerName)
         webView?.removeFromSuperview()
         webView = nil
@@ -525,7 +694,7 @@ enum CodePaneMode: Equatable {
         diffSignatureSubscriptionGeneration += 1
         diffSignatureReconnectFailures = 0
         // Invalidates any in-flight diff fetch: without this, a completion that lands after
-        // deactivate() still owns its token (the guard in `performWorkspaceDiff`'s completion would
+        // deactivate() still owns its token (the guard in `performWorkspaceDiffManifestChunk`'s completion would
         // pass) and would reopen a daemon subscription for a pane the user is no longer looking at —
         // and a fast reactivate could then inherit that stale stream ahead of its own fresh fetch.
         latestDiffRequestToken += 1
@@ -547,156 +716,99 @@ enum CodePaneMode: Equatable {
         latestFileNavigationToken += 1
     }
 
-    /// Pulls the web app's live editor snapshot before the page underneath it disappears, closing the
-    /// race where a buffer edit inside `scheduleEditorStatePush`'s trailing debounce window is still
-    /// unsent when the user switches away: unlike that debounced push, this asks the page directly and
-    /// waits for its answer via `evaluateCodePaneScript(_:completion:)`'s return-value seam rather than
-    /// the message channel — a message posted by JS right as its `WKUserContentController` is about to
-    /// have its handler removed has no ordering guarantee against that removal, but a return value does
-    /// not depend on the handler at all.
-    private func flushPendingEditorState() {
+    private func cancelAgentStartTracking() {
+        for task in agentStartTasks.values { task.cancel() }
+        agentStartTasks.removeAll()
+        agentStartTaskGenerations.removeAll()
+    }
+
+    private func flushPendingWorkspaceState() {
         guard let webView, let scriptEvaluator else { return }
         let flushGeneration = pageGeneration
+        nextTeardownWorkspaceStateCollectorID += 1
+        let collectorID = nextTeardownWorkspaceStateCollectorID
+        let collector = TeardownWorkspaceStateCollector(webView: webView, scriptEvaluator: scriptEvaluator)
+        teardownWorkspaceStateCollectors[collectorID] = collector
         outstandingTeardownFlushCount += 1
-        // Strongly captured (not `[weak webView]`): `webView` is about to be removed from `rootView`
-        // and have its message handler stripped by the rest of `teardownWebView()`, but its web
-        // process must stay alive long enough for this in-flight `evaluateJavaScript` call to actually
-        // finish and answer — an unretained `webView` here could be deallocated before that happens.
-        scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectEditorStateScript) { [weak self] result in
-            withExtendedLifetime(webView) {
-                self?.storeFlushedEditorState(CodePaneBridge.decodeCollectedEditorState(result), generation: flushGeneration)
-                self?.outstandingTeardownFlushCount -= 1
-                self?.clearCommittedFileWriteIfSettled()
-                // A `handleReady()` deferred behind this flush (see `deferredReadyGeneration`) can now
-                // go out — `editorState` above has just been settled for this flush's generation, so a
-                // now-built `spaces:init` payload reads whatever it actually was, not a stale pre-flush
-                // value.
-                self?.resumeDeferredReadyIfNeeded()
-            }
+        collector.scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectWorkspaceStateScript) { [self] result in
+            teardownWorkspaceStateCollectors.removeValue(forKey: collectorID)
+            self.storeFlushedWorkspaceState(CodePaneBridge.decodeCollectedWorkspaceState(result), generation: flushGeneration)
+            self.outstandingTeardownFlushCount -= 1
+            self.clearCommittedFileWriteIfSettled()
+            self.resumeDeferredReadyIfNeeded()
+            self.finishCloseIfReady()
         }
     }
 
-    /// round-16 Fix 1a: mirrors `flushPendingEditorState` exactly (see its doc comment for the
-    /// return-value-vs-message-channel reasoning), but pulls the web app's live comment-draft snapshot
-    /// instead — closes the same race for text typed into a comment textarea that hasn't blurred yet.
-    private func flushPendingReviewCommentState() {
-        guard let webView, let scriptEvaluator else { return }
-        let flushGeneration = pageGeneration
-        outstandingTeardownFlushCount += 1
-        scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectReviewCommentStateScript) { [weak self] result in
-            withExtendedLifetime(webView) {
-                self?.storeFlushedReviewCommentState(CodePaneBridge.decodeCollectedReviewCommentState(result), generation: flushGeneration)
-                self?.outstandingTeardownFlushCount -= 1
-                self?.clearCommittedFileWriteIfSettled()
-                self?.resumeDeferredReadyIfNeeded()
-            }
-        }
-    }
-
-    /// Mirrors `flushPendingReviewCommentState` exactly (see `flushPendingEditorState`'s doc comment
-    /// for the return-value-vs-message-channel reasoning), but pulls the web app's live sidebar
-    /// UI-state snapshot instead.
-    private func flushPendingEditorUIState() {
-        guard let webView, let scriptEvaluator else { return }
-        let flushGeneration = pageGeneration
-        outstandingTeardownFlushCount += 1
-        scriptEvaluator.evaluateCodePaneScript(CodePaneBridge.collectEditorUIStateScript) { [weak self] result in
-            withExtendedLifetime(webView) {
-                self?.storeFlushedEditorUIState(CodePaneBridge.decodeCollectedEditorUIState(result), generation: flushGeneration)
-                self?.outstandingTeardownFlushCount -= 1
-                self?.clearCommittedFileWriteIfSettled()
-                self?.resumeDeferredReadyIfNeeded()
-            }
-        }
-    }
-
-    /// Applies a teardown flush's result under the same ordering rule `handleEditorStateChanged`
-    /// writes under — see `editorStateGeneration`'s doc comment for the `>=` rule this enforces.
-    /// `.notReported` returns immediately without touching `editorState` or `editorStateGeneration`:
-    /// it carries no information (the page never got far enough to answer, or the evaluate call
-    /// itself failed — see `CollectedEditorState`'s doc comment), so it must not consume or advance
-    /// the generation-ordering slot — a later flush that DOES report something for the same or an
-    /// earlier generation must still be accepted.
-    private func storeFlushedEditorState(_ collected: CodePaneBridge.CollectedEditorState, generation: Int) {
-        guard generation >= editorStateGeneration else { return }
-        switch collected {
-        case .notReported: return
-        case .noFile: editorState = nil
-        case .file(let state): editorState = state
-        }
-        editorStateGeneration = generation
-        // round-10: a write can commit AFTER this flush already stored a snapshot at exactly the
-        // pre-write baseline — see `adoptCommittedWriteIntoEditorState`'s doc comment for why this call
-        // site, not just the write completion's own, is needed. A no-op when `editorState` is `nil`
-        // (the `.noFile` case above) or when nothing committed matches: the method's own guard handles
-        // both.
-        adoptCommittedWriteIntoEditorState()
-    }
-
-    /// round-10: folds a committed write into the flushed editor snapshot so a page rehydrated after
-    /// hibernation starts from the baseline its own save established, instead of treating that save as
-    /// an external change. CAS-chain guard: the snapshot is patched only when its `baseSHA256` equals
-    /// the base the write was issued against — a snapshot at that baseline provably predates the
-    /// write's landing, while any other baseline already reflects the write or something newer and must
-    /// be left alone. round-12: the record's lifetime is bounded separately by
+    /// Folds a committed write into either recovery buffer for the same file, so a page rehydrated
+    /// after hibernation starts from the baseline its save established instead of treating itself as an
+    /// external change. A matching CAS base proves the snapshot predates the write. A create write has
+    /// no disk base; it is admitted only for a snapshot from the same page generation, which is the
+    /// native proof that this is still the page that issued the write rather than a later replacement.
+    /// The record's lifetime is bounded separately by
     /// `clearCommittedFileWriteIfSettled()` (see its doc comment for why the CAS-chain guard alone is
-    /// not enough across time). Called from both the write completion and `storeFlushedEditorState`,
+    /// not enough across time). Called from both the write completion and `storeFlushedWorkspaceState`,
     /// because the flush and the write settle in either order — patching only at completion would be overwritten by
     /// a later-arriving flush that stored the pre-write snapshot; patching only at flush time would miss
     /// a write that completes and commits its baseline AFTER the flush already stored a snapshot at
     /// that exact pre-write baseline.
     ///
-    /// Known accepted gap: a write issued while the file was missing on disk sends a nil
-    /// `expectedSHA256` (see `editorView.ts`'s `diskMissing` handling) while the snapshot still carries
-    /// the old (non-nil) `baseSHA256` — the guard below then never matches, so a recreate-during-
-    /// hibernation is not adopted here; that compound case falls back to the ordinary
-    /// `handleExternalChange` reconcile on the rehydrated page.
     private func adoptCommittedWriteIntoEditorState() {
-        guard let write = lastCommittedFileWrite, let state = editorState, state.path == write.path, state.baseSHA256 == write.expectedBase else {
-            return
+        guard let write = lastCommittedFileWrite else { return }
+        func adoptEditor(_ state: CodePaneBridge.EditorState?) -> CodePaneBridge.EditorState? {
+            guard let state, state.path == write.path else { return state }
+            let matchesWrite = state.baseSHA256 == write.expectedBase ||
+                (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
+            guard matchesWrite else { return state }
+            var newDirty = state.dirty
+            var newConflict = state.conflict
+            if state.content == write.content {
+                // Nothing was typed after the save click: the buffer is exactly the committed content — a
+                // clean file at the new baseline (this also covers a Keep-mine write that was in flight at
+                // teardown: its snapshot's content IS the mine buffer it wrote).
+                newDirty = false
+                newConflict = false
+            }
+            // Post-click typing stays dirty against the committed baseline; this applies equally to
+            // the standalone Editor and an inline Diff editor.
+            return CodePaneBridge.EditorState(
+                path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty, conflict: newConflict)
         }
-        var newDirty = state.dirty
-        var newConflict = state.conflict
-        if state.content == write.content {
-            // Nothing was typed after the save click: the buffer is exactly the committed content — a
-            // clean file at the new baseline (this also covers a Keep-mine write that was in flight at
-            // teardown: its snapshot's content IS the mine buffer it wrote).
-            newDirty = false
-            newConflict = false
+        func adoptDiffEditor(_ state: CodePaneBridge.DiffEditorState?) -> CodePaneBridge.DiffEditorState? {
+            guard let state, state.path == write.path else { return state }
+            let matchesWrite = state.baseSHA256 == write.expectedBase ||
+                (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
+            guard matchesWrite else { return state }
+            var newDirty = state.dirty
+            var newConflict = state.conflict
+            if state.content == write.content {
+                newDirty = false
+                newConflict = false
+            }
+            // A successful write resolves any prior disk-vs-buffer comparison. If post-click
+            // typing leaves the diff buffer dirty, its future conflict target is obtained by a
+            // fresh comparison rather than carrying the old disk hash into a new baseline.
+            return CodePaneBridge.DiffEditorState(
+                path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty,
+                conflict: newConflict, conflictBaseSHA256: nil)
         }
-        // else: post-click typing stays dirty against the adopted baseline; `conflict` is left
-        // untouched (a conflicted snapshot's buffer is not editable, so content always equals the
-        // Keep-mine write's content and lands in the branch above).
-        editorState = CodePaneBridge.EditorState(
-            path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty, conflict: newConflict)
+        editorState = adoptEditor(editorState)
+        diffEditorState = adoptDiffEditor(diffEditorState)
     }
 
-    /// round-16 Fix 1a: mirrors `storeFlushedEditorState` exactly, against the independent
-    /// `pendingReviewCommentStateGeneration` guard (see its doc comment for why it is not shared with
-    /// `editorStateGeneration`). `.none` (the `'__none__'` sentinel) clears the stored snapshot, the
-    /// same way `.noFile` clears `editorState`.
-    private func storeFlushedReviewCommentState(_ collected: CodePaneBridge.CollectedReviewCommentState, generation: Int) {
-        guard generation >= pendingReviewCommentStateGeneration else { return }
+    private func storeFlushedWorkspaceState(_ collected: CodePaneBridge.CollectedWorkspaceState, generation: Int) {
+        guard generation >= workspaceStateGeneration else { return }
         switch collected {
         case .notReported: return
-        case .none: pendingReviewCommentState = nil
-        case .entries(let entries): pendingReviewCommentState = entries
+        case .none:
+            editorState = nil
+            diffEditorState = nil
+            pendingReviewCommentState = nil
+        case .state(let state): applyWorkspaceState(state)
         }
-        pendingReviewCommentStateGeneration = generation
-    }
-
-    /// Mirrors `storeFlushedReviewCommentState` exactly, against the independent
-    /// `editorUIStateGeneration` guard (see its doc comment for why it is not shared with the other
-    /// two). `.none` (the `'__none__'` sentinel) clears the stored snapshot, the same way `.none`
-    /// clears `pendingReviewCommentState` above.
-    private func storeFlushedEditorUIState(_ collected: CodePaneBridge.CollectedEditorUIState, generation: Int) {
-        guard generation >= editorUIStateGeneration else { return }
-        switch collected {
-        case .notReported: return
-        case .none: editorUIState = nil
-        case .state(let state): editorUIState = state
-        }
-        editorUIStateGeneration = generation
+        workspaceStateGeneration = generation
+        adoptCommittedWriteIntoEditorState()
+        persistWorkspaceState(fromOutgoingHandoff: true)
     }
 
     // MARK: - Bridge dispatch
@@ -706,8 +818,8 @@ enum CodePaneMode: Equatable {
     /// takes its three relevant fields directly so a test can drive the sender-identity guard without
     /// needing a real `WKScriptMessage`.
     ///
-    /// `senderWebView === webView` is checked once here, ahead of every kind of message (`ready`, an
-    /// editor-state/mode push, or an RPC request): WebKit can deliver a message a page queued before
+    /// `senderWebView === webView` is checked once here, ahead of every kind of message (`ready`, a
+    /// complete workspace-state push, or an RPC request): WebKit can deliver a message a page queued before
     /// it was itself torn down (a rapid deactivate→reactivate hibernation cycle is the case that
     /// matters — see the class doc comment) *after* its replacement page is already installed, and
     /// message ordering across that transition is not guaranteed. Sender identity is the only reliable
@@ -717,11 +829,6 @@ enum CodePaneMode: Equatable {
     /// being `nil` (no live page installed at all) also fails this comparison, correctly — there is
     /// nothing live to process for.
     ///
-    /// This makes the `senderWebView` checks inside `handleEditorStateChanged`/`handleModeChanged`
-    /// redundant for anything that arrives through this method — deliberately left in place rather
-    /// than removed, since those two are also driven directly by tests (and, in principle, could be
-    /// driven by other callers) that don't go through this guard at all; the overlap is intentional
-    /// defense-in-depth, not an oversight.
     func handleScriptMessage(name: String, body: Any, senderWebView: WKWebView?) {
         guard name == Self.messageHandlerName else { return }
         guard senderWebView != nil, senderWebView === webView else { return }
@@ -729,29 +836,30 @@ enum CodePaneMode: Equatable {
             handleReady()
             return
         }
-        switch CodePaneBridge.decodeEditorStateChanged(body: body) {
-        case .file(let state):
-            handleEditorStateChanged(state, senderWebView: senderWebView)
-            return
-        case .noFile:
-            handleEditorStateChanged(nil, senderWebView: senderWebView)
-            return
-        case .notThisMessage: break
-        }
-        if let mode = CodePaneBridge.decodeModeChanged(body: body) {
-            handleModeChanged(CodePaneMode(wireValue: mode), senderWebView: senderWebView)
-            return
-        }
         if let metric = CodePaneBridge.decodeRenderMetric(body: body) {
             let fetchDetail = metric.fetchElapsedMS.map { " fetch_ms=\($0)" } ?? ""
+            let detail: String
+            if metric.trigger == .workspaceStateRestored {
+                // Keep the restored-state dimensions ordered so the performance harness can compare
+                // workspace recovery runs without parsing a free-form diagnostic message.
+                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)" + [
+                    metric.mode.map { " mode=\($0)" }, metric.scope.map { " scope=\($0)" }, metric.layout.map { " layout=\($0)" },
+                    " path=\(metric.path ?? "")", metric.scrollTop.map { " scroll_top=\($0)" },
+                    metric.focusedLine.map { " focused_line=\($0)" }, metric.dirty.map { " dirty=\($0 ? 1 : 0)" },
+                ].compactMap { $0 }.joined()
+            } else {
+                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)" + [
+                    metric.path.map { " path=\($0)" }, metric.fileIndex.map { " file_index=\($0)" },
+                    metric.selectedPriority ? " selected_priority=1" : nil, metric.chunkCount.map { " chunk_count=\($0)" },
+                ].compactMap { $0 }.joined()
+            }
             TerminalPerformance.logWorkspaceMetric(
                 "code_pane_\(metric.kind.rawValue)_render", workspaceID: workspaceID, target: "trigger=\(metric.trigger.rawValue)",
-                elapsedMS: metric.elapsedMS, success: true,
-                detail: "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)")
+                elapsedMS: metric.elapsedMS, success: true, detail: detail)
             return
         }
-        if let state = CodePaneBridge.decodeEditorUIStateChanged(body: body) {
-            handleEditorUIStateChanged(state, senderWebView: senderWebView)
+        if let state = CodePaneBridge.decodeWorkspaceStateChanged(body: body) {
+            handleWorkspaceStateChanged(state, senderWebView: senderWebView)
             return
         }
         guard let request = CodePaneBridge.decodeRequest(body: body) else { return }
@@ -771,39 +879,82 @@ enum CodePaneMode: Equatable {
         // resets `isReady = false` before a replacement page can load, so this self-corrects across a
         // hibernation cycle.
         isReady = true
-        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0 else {
-            // A flush kicked off by tearing down the page before this one (see
-            // `flushPendingEditorState`/`flushPendingReviewCommentState`), a review-comment mutation
-            // RPC still in flight from before that (round-16 Fix 1b — see
-            // `outstandingReviewCommentMutationCount`'s doc comment), or a `workspaceFileWrite` RPC
-            // still in flight (round-10 — see `outstandingFileWriteCount`'s doc comment), may still be
-            // outstanding and could still change what `editorState`/`pendingReviewCommentState` should
-            // read right now. See `deferredReadyGeneration`'s doc comment for why sending `spaces:init`
-            // before that lands would lose content for good rather than merely delay it. Capture the
-            // generation this `ready` belongs to and let the outstanding work's completion resume this
-            // once settled (`resumeDeferredReadyIfNeeded`).
+        guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0,
+            outstandingStartWorkspaceCommandCount == 0
+        else {
+            // A complete-state flush kicked off by tearing down the page before this one, a review-comment mutation
+            // RPC still in flight from before that, or a `workspaceFileWrite` RPC still in flight, or a Start
+            // Agent RPC which can establish its durable terminal association after hibernation, may
+            // still refine the recovery document. See `deferredReadyGeneration`'s doc comment for why
+            // sending `spaces:init` before that lands would lose content for good rather than merely
+            // delay it. Capture the generation this `ready` belongs to and let the outstanding work's
+            // completion resume this once settled (`resumeDeferredReadyIfNeeded`).
             deferredReadyGeneration = pageGeneration
             return
         }
-        sendInitPayload(scriptEvaluator: scriptEvaluator, hosting: hosting)
+        sendInitPayloadAfterWorkspaceStateHandoff(scriptEvaluator: scriptEvaluator, hosting: hosting)
     }
 
     /// Fires the `handleReady()` continuation deferred while a teardown flush, review-comment mutation
-    /// RPC, or file-write RPC was outstanding (see `deferredReadyGeneration`), once every such
+    /// RPC, file-write RPC, or Start Agent RPC was outstanding (see `deferredReadyGeneration`), once every such
     /// flush/RPC has settled (`outstandingTeardownFlushCount`, `outstandingReviewCommentMutationCount`,
-    /// and `outstandingFileWriteCount` all back at zero — see their doc comments for why counts, not
-    /// flags). Re-verifies the deferred generation
+    /// `outstandingFileWriteCount`, and `outstandingStartWorkspaceCommandCount` all back at zero — see
+    /// their doc comments for why counts, not flags). Re-verifies the deferred generation
     /// is still the live page: the page that was waiting can itself have been torn down again (a second
     /// `deactivate()`/`activate()` cycle) before this flush's completion landed, in which case there is
     /// nothing to resume — that page is gone, `scriptEvaluator` no longer points at it, and whichever
     /// page is current now will get its own `ready` → `handleReady()` call in due course.
     private func resumeDeferredReadyIfNeeded() {
         guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0,
+            outstandingStartWorkspaceCommandCount == 0,
             let generation = deferredReadyGeneration
         else { return }
         deferredReadyGeneration = nil
         guard generation == pageGeneration, let scriptEvaluator, let hosting else { return }
+        sendInitPayloadAfterWorkspaceStateHandoff(scriptEvaluator: scriptEvaluator, hosting: hosting)
+    }
+
+    /// Makes a returning controller consume an outgoing instance's final collector before it sends
+    /// its sole init payload. The wait is main-actor-only and does not block UI or persistence work.
+    private func sendInitPayloadAfterWorkspaceStateHandoff(
+        scriptEvaluator: any CodePaneScriptEvaluator, hosting: any CodePaneHosting
+    ) {
+        guard !waitingForWorkspaceStateHandoff else { return }
+        if CodePaneWorkspaceStateHandoff.waitUntilCollectorFinishes(
+            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID,
+            { [weak self] in self?.resumeInitAfterWorkspaceStateHandoff() })
+        {
+            if preReadyRequestedMode == nil { preReadyRequestedMode = forcedInitialMode }
+            waitingForWorkspaceStateHandoff = true
+            return
+        }
+        mergePreReadyModeWithCompletedWorkspaceStateHandoff()
         sendInitPayload(scriptEvaluator: scriptEvaluator, hosting: hosting)
+    }
+
+    private func resumeInitAfterWorkspaceStateHandoff() {
+        waitingForWorkspaceStateHandoff = false
+        guard isReady, let scriptEvaluator, let hosting else { return }
+        let recovered = Self.loadWorkspaceState(from: workspaceStateStore, workspaceID: workspaceID)
+        if preReadyRequestedMode != nil {
+            mergePreReadyModeWithCompletedWorkspaceStateHandoff(recovered)
+        } else if let recovered {
+            applyWorkspaceState(recovered.bridgePayload)
+        }
+        sendInitPayloadAfterWorkspaceStateHandoff(scriptEvaluator: scriptEvaluator, hosting: hosting)
+    }
+
+    /// The delayed collector owns every field except a pre-ready navigation mode. Its snapshot is
+    /// loaded first so a fast A → B → A retarget keeps the fresher dirty buffer, then the user's
+    /// explicit mode request is applied and persisted as part of that complete state.
+    private func mergePreReadyModeWithCompletedWorkspaceStateHandoff(_ recovered: CodePaneWorkspaceState? = nil) {
+        guard let requestedMode = preReadyRequestedMode else { return }
+        if let recovered = recovered ?? Self.loadWorkspaceState(from: workspaceStateStore, workspaceID: workspaceID) {
+            applyWorkspaceState(recovered.bridgePayload)
+        }
+        currentMode = requestedMode
+        preReadyRequestedMode = nil
+        persistWorkspaceState()
     }
 
     /// Builds and sends `spaces:init` from the controller's current state. Split out of `handleReady()`
@@ -824,61 +975,103 @@ enum CodePaneMode: Equatable {
         // agree on the same value — matches `currentTheme`'s `??` fallback just above.
         let agents = currentAgents ?? hosting.codePaneRunningAgents(workspaceID: workspaceID)
         currentAgents = agents
+        if let selectedAgentSessionId, !agents.contains(where: { $0.sessionID == selectedAgentSessionId }) {
+            self.selectedAgentSessionId = nil
+            persistWorkspaceState()
+        }
         let payload = CodePaneBridge.InitPayload(
-            workspaceId: workspaceID, workspaceName: workspaceName,
-            // `currentMode`, not `initialMode`: after a hibernation cycle this is wherever the user
-            // last left the in-page toolbar (see `currentMode`'s doc comment), so a pane hibernated
-            // in Editor mode restores to Editor mode rather than resetting to its original entry point.
-            initialMode: currentMode.wireValue,
-            // Every code pane opens on the uncommitted-vs-HEAD scope; the toolbar's scope control
-            // (see CodePaneWeb's toolbar.ts) is what moves it from there.
-            initialScope: .init(kind: "uncommitted", refName: nil), theme: appearance.rawValue, baseBranch: baseBranch, editorState: editorState,
-            // round-16 Fix 1a: only present when a teardown flush actually captured something (mirrors
-            // `editorState`'s own nil-when-empty handling above) — `InitPayload`'s doc comment on this
-            // field explains why an omitted key, not an empty array, is the "nothing pending" wire shape.
-            pendingReviewComments: pendingReviewCommentState,
-            // Only present when a teardown flush (or a live push) actually captured something —
-            // mirrors `pendingReviewComments`'s own nil-when-empty handling above.
-            editorUIState: editorUIState, agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+            workspaceId: workspaceID, workspaceName: workspaceName, theme: appearance.rawValue, baseBranch: baseBranch,
+            workspaceState: workspaceStatePayload(), agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 
-    /// Stores the web app's latest editor snapshot (see `editorState`'s doc comment), or clears it
-    /// when the editor has no open file. Not `private`: a test drives this directly the same way it
-    /// drives `dispatch(_:)`, for the same reason (no public `WKScriptMessage` initializer to
-    /// construct a real message from).
-    ///
-    /// Guarded by `message.webView` identity rather than `pageGeneration`: unlike an RPC reply (an
-    /// async host completion that can land after a *later* generation without being tied to any one
-    /// `WKWebView` instance), this is a synchronous push from a specific page's own JS, and
-    /// `installWebView()` allocates a brand-new `WKWebViewConfiguration`/`WKWebView` on every fresh
-    /// load. So a debounced push still in flight when a tab switch tears its sender down (see
-    /// `teardownWebView()`) — and, rarely, still gets delivered afterward — always names that
-    /// now-defunct `WKWebView` as `senderWebView`, never the fresh one a reactivate may have already
-    /// installed; comparing it against the live `webView` catches exactly that case, with no
-    /// separate counter needed.
-    func handleEditorStateChanged(_ state: CodePaneBridge.EditorState?, senderWebView: WKWebView?) {
-        guard senderWebView != nil, senderWebView === webView else { return }
-        editorState = state
-        editorStateGeneration = pageGeneration
+    /// Writes only durable workspace-local state. Diff results and WebKit/DOM state are intentionally
+    /// absent: a restored page refetches and streams fresh patches, while this document preserves the
+    /// user's location and unsaved recovery data across an app restart or workspace retarget.
+    private func persistWorkspaceState(fromOutgoingHandoff: Bool = false) {
+        let mayPersist = if fromOutgoingHandoff {
+            CodePaneWorkspaceStateHandoff.outgoingCollectorMayPersistState(workspaceStateOwner)
+        } else {
+            CodePaneWorkspaceStateHandoff.ownerMayPersistState(workspaceStateOwner)
+        }
+        guard mayPersist else { return }
+        let state = CodePaneWorkspaceState(
+            mode: currentMode, scope: currentScope, diffLayout: diffLayout, diffSelectedPath: diffSelectedPath,
+            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath,
+            fileTreeExpandedPaths: fileTreeExpandedPaths, fileTreeSelectedPath: fileTreeSelectedPath,
+            editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths, diffScrollLine: diffScrollLine,
+            diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine, diffFocusedSide: diffFocusedSide,
+            editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
+            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState,
+            selectedAgentSessionId: selectedAgentSessionId, pendingAgentLaunch: pendingAgentLaunch)
+        CodePaneWorkspaceStateCache.store(state, storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        workspaceStatePersistence.enqueue(state, workspaceID: workspaceID)
     }
 
-    /// Updates `currentMode` from the web app's `modeChanged` push (see `currentMode`'s doc
-    /// comment). Not `private`, and guarded identically to `handleEditorStateChanged` above — same
-    /// staleness concern, same fix.
-    func handleModeChanged(_ mode: CodePaneMode, senderWebView: WKWebView?) {
-        guard senderWebView != nil, senderWebView === webView else { return }
-        currentMode = mode
+    private func workspaceStatePayload() -> CodePaneBridge.WorkspaceState {
+        .init(
+            mode: currentMode.wireValue, scope: currentScope, diffLayout: diffLayout, diffSelectedPath: diffSelectedPath,
+            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath,
+            fileTreeExpandedPaths: fileTreeExpandedPaths, fileTreeSelectedPath: fileTreeSelectedPath,
+            editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths, diffScrollLine: diffScrollLine,
+            diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine, diffFocusedSide: diffFocusedSide,
+            editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
+            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState,
+            selectedAgentSessionId: selectedAgentSessionId, pendingAgentLaunch: pendingAgentLaunch)
     }
 
-    /// Stores the web app's latest sidebar UI-state push (see `editorUIState`'s doc comment). Not
-    /// `private`, and guarded identically to `handleEditorStateChanged`/`handleModeChanged` above —
-    /// same staleness concern, same fix.
-    func handleEditorUIStateChanged(_ state: CodePaneBridge.EditorUIState, senderWebView: WKWebView?) {
-        guard senderWebView != nil, senderWebView === webView else { return }
-        editorUIState = state
-        editorUIStateGeneration = pageGeneration
+    private static func loadWorkspaceState(
+        from store: any CodePaneWorkspaceStateStoring, workspaceID: String
+    ) -> CodePaneWorkspaceState? {
+        if let state = CodePaneWorkspaceStateCache.state(storageKey: store.workspaceStateStorageKey, workspaceID: workspaceID) { return state }
+        do {
+            guard let stateJSON = try store.stateJSON(workspaceID: workspaceID),
+                let state = try? JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stateJSON.utf8)), state.isCurrentVersion,
+                state.isValid
+            else { return nil }
+            CodePaneWorkspaceStateCache.store(state, storageKey: store.workspaceStateStorageKey, workspaceID: workspaceID)
+            return state
+        } catch {
+            return nil
+        }
+    }
+
+    /// Stores every user-facing piece of workspace-local state in one operation. This is deliberately
+    /// not decomposed into individual callbacks: a web debounce may coalesce a mode switch, sidebar
+    /// selection, and a dirty line edit, and persisting a partial snapshot would restore an impossible
+    /// combination after a workspace retarget.
+    func handleWorkspaceStateChanged(_ state: CodePaneBridge.WorkspaceState, senderWebView: WKWebView?) {
+        guard senderWebView != nil, senderWebView === webView, CodePaneBridge.isValidWorkspaceState(state) else { return }
+        preReadyRequestedMode = nil
+        applyWorkspaceState(state)
+        workspaceStateGeneration = pageGeneration
+        persistWorkspaceState()
+    }
+
+    private func applyWorkspaceState(_ state: CodePaneBridge.WorkspaceState) {
+        currentMode = CodePaneMode(wireValue: state.mode)
+        currentScope = state.scope
+        diffLayout = state.diffLayout
+        diffSelectedPath = state.diffSelectedPath
+        diffTreeExpandedPaths = state.diffTreeExpandedPaths
+        diffTreeSelectedPath = state.diffTreeSelectedPath
+        fileTreeExpandedPaths = state.fileTreeExpandedPaths
+        fileTreeSelectedPath = state.fileTreeSelectedPath
+        editorSidebarMode = state.editorSidebarMode
+        editorRecentPaths = state.editorRecentPaths
+        diffScrollLine = state.diffScrollLine
+        diffScrollSide = state.diffScrollSide
+        diffFocusedPath = state.diffFocusedPath
+        diffFocusedLine = state.diffFocusedLine
+        diffFocusedSide = state.diffFocusedSide
+        editorScrollLine = state.editorScrollLine
+        editorFocusedLine = state.editorFocusedLine
+        editorState = state.editorState
+        diffEditorState = state.diffEditorState
+        pendingReviewCommentState = state.pendingReviewComments
+        selectedAgentSessionId = state.selectedAgentSessionId
+        pendingAgentLaunch = state.pendingAgentLaunch
     }
 
     /// Not `private`: a test drives this directly (bypassing `WKScriptMessageHandler`, which can't be
@@ -903,7 +1096,19 @@ enum CodePaneMode: Equatable {
         switch plan {
         case .workspaceFileList: performFileList(id: id, generation: generation, hosting: hosting)
         case .workspaceRefList: performRefList(id: id, generation: generation, hosting: hosting)
-        case .workspaceDiff(let scope): performWorkspaceDiff(scope: scope, id: id, generation: generation, hosting: hosting)
+        case .workspaceDiffManifestChunk(let scope, let manifestID, let fileIndex):
+            performWorkspaceDiffManifestChunk(
+                scope: scope, manifestID: manifestID, fileIndex: fileIndex, id: id, generation: generation, hosting: hosting)
+        case .workspaceDiffFileChunk(let scope, let manifestID, let relativePath, let byteOffset, let transferID):
+            performWorkspaceDiffFileChunk(
+                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id, generation: generation,
+                hosting: hosting)
+        case .workspaceDiffFileChunkCancel(let scope, let manifestID, let relativePath, let byteOffset, let transferID):
+            performWorkspaceDiffFileChunkCancel(
+                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id, generation: generation,
+                hosting: hosting)
+        case .workspaceDiffManifestRelease(let scope, let manifestID):
+            performWorkspaceDiffManifestRelease(scope: scope, manifestID: manifestID, id: id, generation: generation, hosting: hosting)
         case .workspaceFileRead(let path): performFileRead(path: path, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256):
             performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
@@ -915,10 +1120,16 @@ enum CodePaneMode: Equatable {
         case .reviewCommentDelete(let commentID): performReviewCommentDelete(commentID: commentID, id: id, generation: generation, hosting: hosting)
         case .reviewCommentsSend(let sessionID, let text, let comments):
             performReviewCommentsSend(sessionID: sessionID, text: text, comments: comments, id: id, generation: generation, hosting: hosting)
+        case .startWorkspaceCommand(let command):
+            performStartWorkspaceCommand(command: command, id: id, generation: generation, hosting: hosting)
+        case .resumeWorkspaceCommandTracking(let sessionID):
+            performResumeWorkspaceCommandTracking(sessionID: sessionID, id: id, generation: generation, hosting: hosting)
         }
     }
 
-    private func performWorkspaceDiff(scope: CodePaneBridge.DiffScope, id: String, generation: Int, hosting: any CodePaneHosting) {
+    private func performWorkspaceDiffManifestChunk(
+        scope: CodePaneBridge.DiffScope, manifestID: String?, fileIndex: Int, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
                 id: id, generation: generation,
@@ -926,19 +1137,18 @@ enum CodePaneMode: Equatable {
             return
         }
         let (refName, lastCommit) = CodePaneBridge.refName(for: scope)
-        // Every workspaceDiff call claims "latest scope"; a completion that isn't the latest one
-        // anymore must not retarget the live diff-signature stream below (see
+        // Only an initial metadata chunk claims "latest scope"; continuations belong to that same
+        // web-side generation and must not invalidate the signature stream while the metadata list is read.
+        // A response for an earlier scope must not retarget the live diff-signature stream below (see
         // `latestDiffRequestToken`'s doc comment) even though its reply still always goes out.
-        latestDiffRequestToken += 1
+        if manifestID == nil { latestDiffRequestToken += 1 }
         let requestToken = latestDiffRequestToken
         // Invalidate a pending old-scope backoff retry HERE, at dispatch time, rather than
         // waiting for `resubscribeDiffSignature` to bump the same generation on this fetch's
         // completion below: a retry already scheduled for the scope this call is superseding
         // captured its generation before this dispatch, so without this it stays generation-
         // valid for the ENTIRE fetch window and is free to wake mid-fetch and resubscribe the
-        // now-stale ref — this was the real, deterministic cause of the intermittent
-        // `aScopeChangeDuringBackoffSupersedesThePendingRetryForTheOldScope` failure, not a
-        // parallel-load flake.
+        // now-stale ref.
         //
         // Conditional on an actual scope change, not unconditional: bumping on every dispatch
         // would also stale the LIVE stream's own `onDisconnect` handler (it closed over the
@@ -967,10 +1177,10 @@ enum CodePaneMode: Equatable {
         // because a failed file open actively RESTORES the previous path's monitoring instead — see
         // `restoreFileSignatureMonitoringAfterFailedOpen`, which reinstalls a live stream for
         // whatever file the pane is still showing. The diff side has no equivalent restore target:
-        // there's no "previous scope's stream" worth reinstalling here, so instead of restoring it
-        // tears down at dispatch and simply relies on the next `workspaceDiff` call — same scope or
-        // different — to resubscribe from a clean `.none` state.
-        if subscribedScope != .scope(refName: refName, lastCommit: lastCommit) {
+        // there is no "previous scope's stream" worth reinstalling, so it tears down at dispatch and
+        // relies on the next initial `workspaceDiffManifestChunk` call — same scope or different — to
+        // resubscribe from a clean `.none` state.
+        if manifestID == nil, subscribedScope != .scope(refName: refName, lastCommit: lastCommit) {
             diffSignatureSubscriptionGeneration += 1
             diffSignatureReconnectFailures = 0
             diffSignatureStream?.stop()
@@ -981,10 +1191,13 @@ enum CodePaneMode: Equatable {
         let deviceGateway = deviceGateway
         Task { [weak self] in
             do {
-                let result = try await deviceGateway.workspaceDiff(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device)
+                let result = try await deviceGateway.workspaceDiffManifestChunk(
+                    workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex, device: device)
                 guard let self else { return }
                 self.reply(id: id, generation: generation, result: result)
-                guard self.latestDiffRequestToken == requestToken else { return }
+                // The list is metadata-first: only its final page represents a complete sidebar and
+                // may establish the signature baseline/subscription for this generation.
+                guard result.nextFileIndex == nil, self.latestDiffRequestToken == requestToken else { return }
                 // Recorded before resubscribing, and only for a still-current request (a
                 // superseded fetch's result is not what the web app is actually showing, so it
                 // must not poison the dedupe baseline for whatever scope is current now).
@@ -994,6 +1207,79 @@ enum CodePaneMode: Equatable {
             } catch {
                 guard let self else { return }
                 self.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+            }
+        }
+    }
+
+    private func performWorkspaceDiffFileChunk(
+        scope: CodePaneBridge.DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String?, id: String, generation: Int,
+        hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let (refName, lastCommit) = CodePaneBridge.refName(for: scope)
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceDiffFileChunk(
+                    workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
+                    byteOffset: byteOffset, transferID: transferID, device: device)
+                self?.reply(id: id, generation: generation, result: result)
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+            }
+        }
+    }
+
+    private func performWorkspaceDiffFileChunkCancel(
+        scope: CodePaneBridge.DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String, id: String, generation: Int,
+        hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let (refName, lastCommit) = CodePaneBridge.refName(for: scope)
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                try await deviceGateway.cancelWorkspaceDiffFileChunk(
+                    workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
+                    byteOffset: byteOffset, transferID: transferID, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+            }
+        }
+    }
+
+    private func performWorkspaceDiffManifestRelease(
+        scope: CodePaneBridge.DiffScope, manifestID: String, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let (refName, lastCommit) = CodePaneBridge.refName(for: scope)
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                try await deviceGateway.cancelWorkspaceDiffManifest(
+                    workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
             }
         }
     }
@@ -1033,7 +1319,7 @@ enum CodePaneMode: Equatable {
         // See `latestFileNavigationToken`'s doc comment and the success arm below for why.
         if pathChanged { latestFileNavigationToken += 1 }
         let navToken = latestFileNavigationToken
-        // Mirrors `performWorkspaceDiff`'s `diffSignatureSubscriptionGeneration` bump: invalidate a
+        // Mirrors `performWorkspaceDiffManifestChunk`'s `diffSignatureSubscriptionGeneration` bump: invalidate a
         // pending old-path backoff retry HERE, at dispatch time, only on an actual path change — see
         // that call site's doc comment for why this must be conditional, not unconditional.
         if pathChanged {
@@ -1079,7 +1365,7 @@ enum CodePaneMode: Equatable {
                     } else {
                         guard self.subscribedFilePath == path else { return }
                     }
-                    // Recorded before resubscribing, mirroring `performWorkspaceDiff`'s
+                    // Recorded before resubscribing, mirroring `performWorkspaceDiffManifestChunk`'s
                     // `lastActedScopeSignature`/`lastActedScope` bookkeeping.
                     self.lastActedFileSignatureValue = FileSignatureValue(sha256: result.sha256, missing: false)
                     self.lastActedFilePath = path
@@ -1112,10 +1398,10 @@ enum CodePaneMode: Equatable {
     /// displayed). Restoring here re-arms it, and the fresh `resubscribeFileSignature` call below installs
     /// a current-generation `onDisconnect`/backoff closure, closing the stale-handler window too.
     ///
-    /// Deliberately asymmetric with `performWorkspaceDiff`'s twin scope-change bump, which tears down
+    /// Deliberately asymmetric with `performWorkspaceDiffManifestChunk`'s scope-change bump, which tears down
     /// the old subscription at dispatch time instead of restoring it (see the comment there): the diff
     /// side has no "previous scope's stream" worth reinstalling, so it simply relies on the next
-    /// `workspaceDiff` call to resubscribe from a clean `.none` state. The editor has no equivalent
+    /// initial `workspaceDiffManifestChunk` call to resubscribe from a clean `.none` state. The editor has no equivalent
     /// fetch-retry loop — nothing else will ever re-arm external-change monitoring for a file still open
     /// in the pane — so a failed open must proactively restore it here instead. See that comment for the
     /// reverse cross-reference.
@@ -1147,7 +1433,7 @@ enum CodePaneMode: Equatable {
             // leaving the pane with no live monitoring at all: the web side's resulting deleted-file
             // placeholder/conflict has no other way to learn the file reappears — its recovery contract
             // is "the same live-reload branch catches it," which needs a signature event to ever fire.
-            // The daemon's signature poll handles a missing path by design (that's how a
+            // The daemon's signature poll intentionally handles a missing path (that's how a
             // deleted-then-recreated file is caught at all), so subscribing to a currently-missing path
             // is the intended shape here, not a workaround.
             //
@@ -1221,7 +1507,7 @@ enum CodePaneMode: Equatable {
         let base64Data = Data(content.utf8).base64EncodedString()
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
-        // round-10: bumped before the RPC starts, decremented — unconditionally, success or failure —
+        // Bumped before the RPC starts, decremented — unconditionally, success or failure —
         // in its completion below. See `outstandingFileWriteCount`'s doc comment for why a deferred
         // `ready` also waits on this.
         outstandingFileWriteCount += 1
@@ -1231,32 +1517,29 @@ enum CodePaneMode: Equatable {
                     workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256, device: device)
                 switch CodePaneBridge.fileWritePayload(result) {
                 case .success(let payload):
-                    // round-10: only an actually-committed write (never a CAS conflict, which wrote
+                    // Only an actually-committed write (never a CAS conflict, which wrote
                     // nothing to disk) has a baseline worth adopting into a flushed snapshot. `sha256`
                     // is documented to be populated whenever `didWrite == true`, but the type is
                     // Optional — skip adoption defensively if it somehow isn't.
                     if result.didWrite, let sha = result.sha256 {
-                        self?.lastCommittedFileWrite = (path: path, expectedBase: baseSHA256, sha256: sha, content: content)
+                        self?.lastCommittedFileWrite = (path: path, expectedBase: baseSHA256, sha256: sha, content: content, pageGeneration: generation)
                         self?.adoptCommittedWriteIntoEditorState()
+                        self?.persistWorkspaceState()
                     }
                     self?.reply(id: id, generation: generation, result: payload)
                 case .failure(let error): self?.reply(id: id, generation: generation, error: error)
                 }
-                self?.outstandingFileWriteCount -= 1
-                self?.clearCommittedFileWriteIfSettled()
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleFileWrite()
             } catch {
                 self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-                self?.outstandingFileWriteCount -= 1
-                self?.clearCommittedFileWriteIfSettled()
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleFileWrite()
             }
         }
     }
 
     /// Lists every path in the workspace's checkout for the Editor pane's file tree and quick-open —
     /// mirrors `performReviewCommentList`'s shape exactly (no subscription-token tracking, unlike
-    /// `performFileRead`/`performWorkspaceDiff`, since this has no live-signature stream to repoint).
+    /// `performFileRead`/`performWorkspaceDiffManifestChunk`, since this has no live-signature stream to repoint).
     /// `SpacesDeviceWorkspaceFileListResult`'s own `{paths, truncated}` shape already matches the wire
     /// contract the web app expects, so the daemon result is replied directly with no bridge-owned
     /// payload struct in between.
@@ -1325,7 +1608,7 @@ enum CodePaneMode: Equatable {
         }
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
-        // round-16 Fix 1b: bumped before the RPC starts, decremented — unconditionally, success or
+        // Bumped before the RPC starts, decremented — unconditionally, success or
         // failure — in its completion below. See `outstandingReviewCommentMutationCount`'s doc comment
         // for why a deferred `ready` also waits on this, not just on `outstandingTeardownFlushCount`.
         outstandingReviewCommentMutationCount += 1
@@ -1339,12 +1622,10 @@ enum CodePaneMode: Equatable {
                 // teardown flush that snapshotted this same draft while it was still provisional — an
                 // UPDATE's snapshot entry, if any, was already non-provisional and needs no correction.
                 if commentID == nil { self?.reconcilePendingReviewCommentStateAfterCreate(comment: comment) }
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             } catch {
                 self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             }
         }
     }
@@ -1352,7 +1633,7 @@ enum CodePaneMode: Equatable {
     /// Corrects a stale `pendingReviewCommentState` snapshot after a CREATE upsert (never an UPDATE —
     /// see the call site) commits server-side, closing the race described on `pendingReviewCommentState`'s
     /// doc comment: a blur fires this CREATE, the same gesture (or an unrelated race) hibernates the pane
-    /// before the RPC replies, and `flushPendingReviewCommentState()` snapshots the still-provisional
+    /// before the RPC replies, and the complete-state collector snapshots the still-provisional
     /// entry because it looked unpersisted at that instant. Left uncorrected, the replacement page's
     /// `spaces:init` would restore that stale provisional entry *alongside* the new server row the
     /// replacement page's own `loadInitial()` already lists — two cards for one comment — and the
@@ -1401,13 +1682,13 @@ enum CodePaneMode: Equatable {
         pendingReviewCommentState = entries
     }
 
-    /// round-12: the DELETE-side analog of `reconcilePendingReviewCommentStateAfterCreate` — corrects a
+    /// The delete-side counterpart of `reconcilePendingReviewCommentStateAfterCreate` corrects a
     /// stale `pendingReviewCommentState` snapshot after a delete commits server-side. The race: a
     /// deleted comment's entry is still present in a teardown-flushed snapshot taken before the delete
     /// RPC replied (the page looked like it still had the row at that instant), the pane hibernates, and
     /// the delete then lands. Left uncorrected, the replacement page's `spaces:init` would restore that
     /// stale entry even though `loadInitial()` finds no server row for it — reviving an explicitly
-    /// deleted comment as a fresh provisional draft (the same round-10 Fix 1 path in
+    /// deleted comment as a fresh provisional draft (the same create-side reconciliation in
     /// `commentsController.ts` that a live page uses to keep unsaved local text alive across a reload),
     /// silently undoing the user's deletion.
     ///
@@ -1441,12 +1722,10 @@ enum CodePaneMode: Equatable {
                 _ = try await deviceGateway.workspaceReviewCommentDelete(workspaceID: workspaceID, id: commentID, device: device)
                 self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
                 self?.reconcilePendingReviewCommentStateAfterDelete(commentID: commentID)
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             } catch {
                 self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             }
         }
     }
@@ -1462,7 +1741,7 @@ enum CodePaneMode: Equatable {
         }
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
-        // round-16 Fix 1b: a send held up by this counter can hold `ready` for as long as the send's
+        // A send held up by this counter can hold `ready` for as long as the send's
         // own terminal-write timeout (~5s), if teardown happens right after the user hits send. Accepted:
         // the alternative — answering `ready` (and thus letting a `reviewCommentList` race it) before
         // the send lands — would show the just-sent draft as still present/unsent in the rehydrated
@@ -1473,23 +1752,267 @@ enum CodePaneMode: Equatable {
                 _ = try await deviceGateway.workspaceReviewCommentsSend(
                     workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments, device: device)
                 self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             } catch {
                 self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-                self?.outstandingReviewCommentMutationCount -= 1
-                self?.resumeDeferredReadyIfNeeded()
+                self?.settleReviewCommentMutation()
             }
         }
     }
 
+    private func performStartWorkspaceCommand(command: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        outstandingStartWorkspaceCommandCount += 1
+        Task { [weak self] in
+            do {
+                let response = try await deviceGateway.startWorkspaceCommand(workspaceID: workspaceID, command: command, device: device)
+                guard let self else { return }
+                guard response.ok, let sessionID = response.sessionID else {
+                    throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+                }
+                let deadlineEpochMilliseconds = self.nextAgentStartDeadlineEpochMilliseconds()
+                self.pendingAgentLaunch = .init(
+                    sessionId: sessionID, command: command, status: "starting", message: nil,
+                    deadlineEpochMilliseconds: deadlineEpochMilliseconds)
+                self.persistWorkspaceState()
+                // Establish the pending association before inserting the terminal. Inserting it can
+                // synchronously apply an overview whose hooks have already registered this session;
+                // `applyRunningAgents` uses the association to keep that session out of assignment
+                // until the keyed readiness observer confirms it.
+                hosting.codePaneInstallBackgroundCommandSession(workspaceID: workspaceID, deviceID: device.id, response: response)
+                self.reply(
+                    id: id, generation: generation,
+                    result: CodePaneBridge.StartWorkspaceCommandPayload(
+                        sessionId: sessionID, status: "starting", deadlineEpochMilliseconds: deadlineEpochMilliseconds))
+                // A hidden or closing pane persists this association through its handoff; only the
+                // live, ready page may own the observer. A returned page resumes it after installing
+                // its event listener, keeping one tracking lifetime instead of a hidden poller.
+                if self.isReady, !self.closeStarted {
+                    self.trackStartedWorkspaceCommand(
+                        sessionID: sessionID, device: device, deadlineEpochMilliseconds: deadlineEpochMilliseconds)
+                }
+                self.settleStartWorkspaceCommand()
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                self?.settleStartWorkspaceCommand()
+            }
+        }
+    }
+
+    /// Reattaches a recovery document's still-running Start Agent command after a page/controller/app
+    /// restart. The session id is accepted only when the current device overview proves it belongs to
+    /// this workspace; a stale document must not watch or assign some other workspace's terminal.
+    private func performResumeWorkspaceCommandTracking(
+        sessionID: String, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
+        guard let pending = pendingAgentLaunch, pending.sessionId == sessionID, pending.status == "starting" else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "There is no pending Start Agent command for this session."))
+            return
+        }
+        guard let deadlineEpochMilliseconds = pending.deadlineEpochMilliseconds else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "The pending Start Agent command has no readiness deadline."))
+            return
+        }
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let snapshot = try await deviceGateway.workspaceCommandStartSnapshot(
+                    workspaceID: workspaceID, sessionID: sessionID, device: device)
+                guard let self else { return }
+                guard snapshot.sessionFound else {
+                    self.reply(
+                        id: id, generation: generation,
+                        result: CodePaneBridge.StartWorkspaceCommandPayload(
+                            sessionId: sessionID, status: "starting", deadlineEpochMilliseconds: deadlineEpochMilliseconds))
+                    self.finishAgentStartTracking(
+                        sessionID: sessionID, taskGeneration: nil, status: "exited", agent: nil,
+                        message: "The command's terminal session is no longer running.")
+                    return
+                }
+                guard snapshot.belongsToWorkspace else {
+                    self.reply(
+                        id: id, generation: generation,
+                        error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "That terminal session does not belong to this workspace."))
+                    return
+                }
+                self.reply(
+                    id: id, generation: generation,
+                    result: CodePaneBridge.StartWorkspaceCommandPayload(
+                        sessionId: sessionID, status: "starting", deadlineEpochMilliseconds: deadlineEpochMilliseconds))
+                let deadline = Date(timeIntervalSince1970: TimeInterval(deadlineEpochMilliseconds) / 1_000)
+                // A resumed page gets one exact-session reconciliation even after the original
+                // deadline. A hook-backed row for that terminal is conclusive evidence that the
+                // launch succeeded while the Editor was hibernated or retargeted; without this,
+                // restarting the ordinary readiness tracker at an already-expired deadline would
+                // falsely report a timeout before it could assign the session.
+                if self.agentStartNow() >= deadline {
+                    if let agent = snapshot.agent, agent.sessionID == sessionID {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: nil, status: "detected", agent: agent, message: nil)
+                    } else {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: nil, status: "timedOut", agent: nil,
+                            message: "The command did not become a ready agent within 90 seconds.")
+                    }
+                    return
+                }
+                // Before its original deadline, the snapshot only proves ownership. It must pass
+                // through the same stable readiness gate as a freshly launched command before its
+                // hook-backed agent may be assigned.
+                self.trackStartedWorkspaceCommand(
+                    sessionID: sessionID, device: device, deadlineEpochMilliseconds: deadlineEpochMilliseconds, initialSnapshot: snapshot)
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+            }
+        }
+    }
+
+    /// Watches the one terminal created by Start Agent without ever inferring an agent from its command
+    /// text. A terminal must first pass the stable foreground/readiness gate shared with `spaces agent
+    /// spawn`, then have a hook-backed agent row for this exact session before the web surface can assign
+    /// it. The observer is local to this pane and session, so simultaneous starts cannot cross-assign.
+    private func nextAgentStartDeadlineEpochMilliseconds() -> Int64 {
+        Int64((agentStartNow().timeIntervalSince1970 * 1_000).rounded(.down)) + Int64(agentStartReadinessTimeout * 1_000)
+    }
+
+    private func trackStartedWorkspaceCommand(
+        sessionID: String, device: SpacesPairedDeviceRecord, deadlineEpochMilliseconds: Int64, initialSnapshot: CodePaneAgentStartSnapshot? = nil
+    ) {
+        agentStartTasks[sessionID]?.cancel()
+        nextAgentStartTaskGeneration += 1
+        let taskGeneration = nextAgentStartTaskGeneration
+        agentStartTaskGenerations[sessionID] = taskGeneration
+        let deadline = Date(timeIntervalSince1970: TimeInterval(deadlineEpochMilliseconds) / 1_000)
+        let pollInterval = agentStartPollInterval
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        agentStartTasks[sessionID] = Task { [weak self] in
+            var readiness = AgentSpawnReadiness.PollTracker(deadline: deadline)
+            var reachedStableReadiness = false
+            var nextSample = initialSnapshot
+            while !Task.isCancelled {
+                do {
+                    let sample: CodePaneAgentStartSnapshot
+                    if let initial = nextSample {
+                        nextSample = nil
+                        sample = initial
+                    } else {
+                        sample = try await deviceGateway.workspaceCommandStartSnapshot(
+                            workspaceID: workspaceID, sessionID: sessionID, device: device)
+                    }
+                    guard let self, self.agentStartTaskGenerations[sessionID] == taskGeneration else { return }
+                    let snapshot = AgentSpawnReadiness.SessionSnapshot(
+                        detectedKind: sample.detectedKind, bracketedPasteActive: sample.bracketedPasteActive, state: sample.state)
+
+                    if !reachedStableReadiness {
+                        if let outcome = readiness.observe(snapshot, at: self.agentStartNow()) {
+                            switch outcome {
+                            case .ready:
+                                reachedStableReadiness = true
+                            case .ended(let state):
+                                self.finishAgentStartTracking(
+                                    sessionID: sessionID, taskGeneration: taskGeneration, status: "exited", agent: nil,
+                                    message: "The command exited (\(state.rawValue)) before an agent was detected.")
+                                return
+                            case .timedOut:
+                                self.finishAgentStartTracking(
+                                    sessionID: sessionID, taskGeneration: taskGeneration, status: "timedOut", agent: nil,
+                                    message: "The command did not become a ready agent within 90 seconds.")
+                                return
+                            }
+                        }
+                    }
+
+                    if reachedStableReadiness, let agent = sample.agent, agent.sessionID == sessionID {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: taskGeneration, status: "detected", agent: agent, message: nil)
+                        return
+                    }
+
+                    // A hook can arrive just after the stable foreground sample. Keep checking the
+                    // session state during that narrow period: a command that exits after becoming
+                    // stable still needs to report a concrete failure rather than waiting out 90s.
+                    if let state = sample.state, !state.isInteractive {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: taskGeneration, status: "exited", agent: nil,
+                            message: "The command exited (\(state.rawValue)) before its agent hooks registered.")
+                        return
+                    }
+                    if self.agentStartNow() >= deadline {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: taskGeneration, status: "timedOut", agent: nil,
+                            message: "The command became ready but its agent hooks did not register within 90 seconds.")
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // A temporary device failure must not turn a still-running command into a false
+                    // "exited" result. Continue until the same fixed readiness deadline; the next
+                    // ordinary overview poll may have recovered the local or remote device.
+                    guard let self, self.agentStartTaskGenerations[sessionID] == taskGeneration else { return }
+                    if self.agentStartNow() >= deadline {
+                        self.finishAgentStartTracking(
+                            sessionID: sessionID, taskGeneration: taskGeneration, status: "timedOut", agent: nil,
+                            message: "Could not confirm that the command became an agent within 90 seconds.")
+                        return
+                    }
+                }
+                try? await Task.sleep(for: pollInterval)
+            }
+        }
+    }
+
+    private func finishAgentStartTracking(
+        sessionID: String, taskGeneration: Int?, status: String, agent: CodePaneRunningAgent?, message: String?
+    ) {
+        if let taskGeneration, agentStartTaskGenerations[sessionID] != taskGeneration { return }
+        agentStartTasks.removeValue(forKey: sessionID)
+        agentStartTaskGenerations.removeValue(forKey: sessionID)
+        if status == "detected", let agent {
+            selectedAgentSessionId = agent.sessionID
+            pendingAgentLaunch = nil
+        } else if let pendingAgentLaunch, pendingAgentLaunch.sessionId == sessionID {
+            self.pendingAgentLaunch = .init(
+                sessionId: sessionID, command: pendingAgentLaunch.command, status: "failed", message: message,
+                deadlineEpochMilliseconds: nil)
+        }
+        // Persist before checking page liveness. A command can resolve while its Editor is hibernated;
+        // its recovered page must still see the final status and typed command after restart.
+        persistWorkspaceState()
+        guard isReady, let scriptEvaluator else { return }
+        let payload = CodePaneBridge.AgentStartStatusPayload(
+            sessionId: sessionID, status: status,
+            agent: agent.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) }, message: message)
+        guard let script = CodePaneBridge.dispatchEventScript(name: Self.agentStartStatusEventName, detail: payload) else { return }
+        scriptEvaluator.evaluateCodePaneScript(script)
+    }
+
     /// (Re)points the live diff-signature stream at `refName` if it isn't already there. A repeat
-    /// `workspaceDiff` call for the same resolved scope is a no-op here — only an actual scope
-    /// change tears down and reopens the stream.
+    /// `workspaceDiffManifestChunk` call for the same resolved scope is a no-op here — only an actual
+    /// scope change tears down and reopens the stream.
     private func resubscribeDiffSignature(refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord) {
         guard subscribedScope != .scope(refName: refName, lastCommit: lastCommit) else { return }
         // Defensive: in the normal flow `lastActedScopeSignature` is already refreshed for `refName`
-        // before this runs (`performWorkspaceDiff` sets it, then calls this), including for a
+        // before this runs (`performWorkspaceDiffManifestChunk` sets it, then calls this), including for a
         // disconnect-driven reconnect to the SAME scope (nothing here touches it, so a connect frame
         // repeating an unchanged signature is still correctly suppressed — see
         // `handleDiffSignatureFrame`). This only guards a hypothetical future caller that resubscribes
@@ -1570,7 +2093,7 @@ enum CodePaneMode: Equatable {
     }
 
     /// Clears `subscribedScope`/`diffSignatureStream` after a real disconnect (daemon restart,
-    /// network drop) so the next same-scope `workspaceDiff` call resubscribes instead of skipping
+    /// network drop) so the next same-scope `workspaceDiffManifestChunk` call resubscribes instead of skipping
     /// forever via `resubscribeDiffSignature`'s `guard subscribedScope != .scope(refName:lastCommit:)`, and starts
     /// a bounded-backoff retry loop (see `scheduleDiffSignatureReconnect`) so a pane's live updates
     /// recover on their own instead of staying dead until the user happens to change scope (see
@@ -1612,7 +2135,7 @@ enum CodePaneMode: Equatable {
     /// `generation` is the subscription generation that just failed/disconnected. When the delay
     /// elapses, the attempt only proceeds if nothing newer has taken over in the meantime —
     /// `deactivate()`/`close()` (via `teardownWebView` bumping the generation), a user-triggered
-    /// `workspaceDiff` for a different scope, or an earlier retry already succeeding all bump
+    /// `workspaceDiffManifestChunk` for a different scope, or an earlier retry already succeeding all bump
     /// `diffSignatureSubscriptionGeneration`, which makes this check fail and the attempt a no-op.
     private func scheduleDiffSignatureReconnect(refName: String?, lastCommit: Bool, generation: Int) {
         diffSignatureReconnectFailures += 1
@@ -1637,11 +2160,12 @@ enum CodePaneMode: Equatable {
 
     /// Invariant: a frame is forwarded iff its `scopeSignature` differs from the last diff the web
     /// app is known to have fetched for the current scope (`lastActedScopeSignature`). Every scope
-    /// change (an ordinary `workspaceDiff` fetch, or a stream reconnect after an outage — see
+    /// change (an ordinary `workspaceDiffManifestChunk` fetch, or a stream reconnect after an outage — see
     /// `resubscribeDiffSignature`'s doc comment) opens with a connect-time frame carrying that scope's
-    /// current signature; forwarding it unconditionally would trigger a second, redundant full
-    /// `workspaceDiff` fetch (up to 8 MiB) the web app just performed a moment ago (a scope switch) or
-    /// doesn't need (a reconnect where nothing changed while disconnected). Err toward forwarding: any
+    /// current signature; forwarding it unconditionally would trigger a second, redundant metadata
+    /// manifest fetch plus its separately scheduled file-patch chunks the web app just performed a
+    /// moment ago (a scope switch) or doesn't need (a reconnect where nothing changed while disconnected).
+    /// Err toward forwarding: any
     /// doubt must forward, since a spurious refetch is cheap but a wrongly suppressed real change
     /// leaves the view stale until the next signature change.
     private func handleDiffSignatureFrame(_ frame: SpacesDeviceWorkspaceDiffSignatureFrame) {
@@ -1799,14 +2323,14 @@ extension CodePaneContentController: WKScriptMessageHandler {
 }
 
 extension CodePaneMode {
-    fileprivate var wireValue: String {
+    var wireValue: String {
         switch self {
         case .diff: "diff"
         case .editor: "editor"
         }
     }
 
-    /// Inverse of `wireValue` — decodes a `modeChanged` push's `mode` string. `decodeModeChanged`
-    /// already restricts this to `"diff"`/`"editor"`, so the default arm is unreachable in practice.
-    fileprivate init(wireValue: String) { self = wireValue == "editor" ? .editor : .diff }
+    /// Inverse of `wireValue` — decodes a complete workspace state's mode string. The web contract
+    /// restricts this to `"diff"`/`"editor"`, so the default arm is only defensive.
+    init(wireValue: String) { self = wireValue == "editor" ? .editor : .diff }
 }

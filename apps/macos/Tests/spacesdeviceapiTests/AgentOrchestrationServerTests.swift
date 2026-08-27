@@ -12,6 +12,104 @@
     /// spawn gate, the row shape carried over the wire, note sanitization, how a renamed row is named
     /// across overview builds, and the injected-killer routing for remote kill.
     final class AgentOrchestrationServerTests: XCTestCase {
+        /// Editor's Start Agent dialog accepts a command rather than a preset coding-agent kind. The
+        /// daemon therefore creates an ordinary workspace terminal and lets the foreground reconciler
+        /// promote it if the command actually runs a supported coding agent. This keeps arbitrary
+        /// commands useful while avoiding a client-side guess about what executable will run.
+        func testStartWorkspaceCommandSessionAcceptsArbitraryCommandAndUsesInteractiveLoginShell() throws {
+            try withTemporaryProfile { _ in
+                try seedWorkspace()
+                let launches = TerminalLaunchRecorder()
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    builtInTerminalSessionLauncher: { configuration in launches.launch(configuration) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")),
+                        authToken: token, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let configurations = launches.configurations()
+                XCTAssertEqual(configurations.count, 1)
+                let launch = try XCTUnwrap(configurations.first)
+                XCTAssertEqual(launch.workspaceID, "workspace-1")
+                XCTAssertEqual(launch.kind, .shell)
+                XCTAssertTrue(launch.command?.contains("my-agent --review") == true)
+                XCTAssertTrue(launch.command?.contains(" -l -i -c ") == true)
+                XCTAssertEqual(response.sessionID, launch.sessionID)
+            }
+        }
+
+        func testStartingWorkspaceCommandDoesNotBlockAnUnrelatedOverview() throws {
+            try withTemporaryProfile { _ in
+                try seedWorkspace()
+                let launches = TerminalLaunchRecorder()
+                let launchArrived = DispatchSemaphore(value: 0)
+                let releaseLaunch = DispatchSemaphore(value: 0)
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    builtInTerminalSessionLauncher: { configuration in
+                        launchArrived.signal()
+                        releaseLaunch.wait()
+                        return launches.launch(configuration)
+                    })
+                defer {
+                    releaseLaunch.signal()
+                    client.cancel()
+                    server.stop()
+                }
+
+                let startFinished = expectation(description: "The blocked workspace command eventually returns.")
+                DispatchQueue.global().async {
+                    _ = try? client.send(
+                        SpacesDeviceAPIRequest(
+                            command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")),
+                            authToken: token, clientApp: clientApp))
+                    startFinished.fulfill()
+                }
+                XCTAssertEqual(launchArrived.wait(timeout: .now() + 5), .success, "The terminal launcher must be reached.")
+
+                let overviewClient = try SpacesDeviceAPIRequestClient(
+                    resolver: SpacesDeviceEndpointResolver(
+                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: server.certificateFingerprint),
+                    timeoutSeconds: 2)
+                let startedAt = Date()
+                let overview = try overviewClient.request(
+                    SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))
+                let elapsed = Date().timeIntervalSince(startedAt)
+
+                XCTAssertTrue(overview.ok, overview.message)
+                XCTAssertLessThan(elapsed, 1.5, "An overview must not wait behind a terminal launch.")
+                releaseLaunch.signal()
+                wait(for: [startFinished], timeout: 10)
+            }
+        }
+
+        func testStartWorkspaceCommandSessionRejectsBlankCommandBeforeLaunching() throws {
+            try withTemporaryProfile { _ in
+                let launches = TerminalLaunchRecorder()
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    builtInTerminalSessionLauncher: { configuration in launches.launch(configuration) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: " \n\t ")),
+                        authToken: token, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "command is required.")
+                XCTAssertTrue(launches.configurations().isEmpty)
+            }
+        }
+
         func testSpawnAgentSessionRejectsUnsupportedCommandWithoutTouchingWorkspace() throws {
             try withTemporaryProfile { _ in
                 let (server, client, clientApp, token) = try startServerAndClient()
@@ -463,6 +561,19 @@
             return agent
         }
 
+        private func seedWorkspace() throws {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
+                    processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false,
+                    isRunning: false, lastLaunchedAt: nil))
+        }
+
         @discardableResult private func seedPreSignalAgentTerminal(terminalSessionID: String, runStatus: AutomationRunStatus) throws -> AutomationRun
         {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
@@ -507,13 +618,14 @@
         }
 
         private func startServerAndClient(
-            agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil
+            agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
+            builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
         ) throws -> (server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String) {
             let identity = try agentOrchestrationTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedAgentOrchestrationPairingStore()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller,
-                automationOperations: automationOperations)
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, agentSessionKiller: agentSessionKiller, automationOperations: automationOperations)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
                 resolver: SpacesDeviceEndpointResolver(
@@ -552,6 +664,28 @@
 
         private func agentOrchestrationTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalServiceTLSIdentityStore.loadOrCreate(root: agentOrchestrationTestTLSRoot)
+        }
+    }
+
+    private final class TerminalLaunchRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedConfigurations: [TerminalSessionLaunchConfiguration] = []
+
+        func launch(_ configuration: TerminalSessionLaunchConfiguration) -> TerminalServiceSessionSummary {
+            lock.lock()
+            storedConfigurations.append(configuration)
+            lock.unlock()
+            return TerminalServiceSessionSummary(
+                id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                launchConfiguration: configuration)
+        }
+
+        func configurations() -> [TerminalSessionLaunchConfiguration] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedConfigurations
         }
     }
 

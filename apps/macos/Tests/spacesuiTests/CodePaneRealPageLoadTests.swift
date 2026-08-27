@@ -15,6 +15,7 @@ import spacesterminalcore
     func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { nil }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
+    func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
 }
 
 /// Drives a REAL `WKWebView` through `CodePaneContentController`'s real `activate()`/`deactivate()`

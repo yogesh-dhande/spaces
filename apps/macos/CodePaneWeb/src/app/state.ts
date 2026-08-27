@@ -15,8 +15,7 @@ export type CodePaneAction =
   | { type: "setMode"; mode: CodePaneMode }
   | { type: "setScope"; scope: DiffScope }
   | { type: "setLayout"; layout: DiffLayout }
-  | { type: "openFile"; path: string }
-  | { type: "closeFile" };
+  | { type: "openFile"; path: string };
 
 /**
  * Pure state transition function for the pane's top-level mode/scope/layout,
@@ -34,8 +33,6 @@ export function codePaneReducer(state: CodePaneState, action: CodePaneAction): C
       return { ...state, layout: action.layout };
     case "openFile":
       return { ...state, editorPath: action.path };
-    case "closeFile":
-      return { ...state, editorPath: undefined };
     default:
       return state;
   }

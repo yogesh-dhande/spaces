@@ -16,6 +16,31 @@
     /// on-disk git fixture (mirroring `SpacesDeviceWorkspaceGitTests.makeRepo`) and a real workspace
     /// row pointed at it, rather than mocking the git client.
     final class WorkspaceGitServerTests: XCTestCase {
+        private final class ManualDiffTransferClock: @unchecked Sendable {
+            private var value: Date
+
+            init(now: Date) { value = now }
+
+            func now() -> Date { value }
+
+            func advance(by interval: TimeInterval) { value = value.addingTimeInterval(interval) }
+        }
+
+        private final class ManualDiffTransferExpiryReaper: SpacesDeviceAPIServer.WorkspaceDiffTransferStore.ExpiryReaper, @unchecked Sendable {
+            private var action: (@Sendable () -> Void)?
+            private(set) var scheduledInterval: TimeInterval?
+
+            func start(interval: TimeInterval, action: @escaping @Sendable () -> Void) {
+                precondition(self.action == nil, "A test expiry reaper can only be started once.")
+                scheduledInterval = interval
+                self.action = action
+            }
+
+            func stop() { action = nil }
+
+            func fire() { action?() }
+        }
+
         func testWorkspaceFileReadReturnsContentSHAAndSize() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
@@ -699,23 +724,369 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: nil)), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
-                let result = try XCTUnwrap(response.workspaceDiff)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
                 let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
                 XCTAssertEqual(file.status, .modified)
-                XCTAssertTrue(file.patch?.contains("edited content") == true)
                 XCTAssertFalse(result.scopeSignature.isEmpty)
             }
+        }
+
+        func testWorkspaceDiffManifestReturnsIdentityBeforeFetchingItsPatch() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try "untracked content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(manifest.files.map(\.path), ["README.md", "NEW.md"])
+                XCTAssertEqual(manifest.files.first?.status, .modified)
+                XCTAssertEqual(manifest.files.last?.status, .untracked)
+
+                let fileResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "NEW.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(fileResponse.ok, fileResponse.message)
+                let file = try XCTUnwrap(fileResponse.workspaceDiffFileChunk)
+                XCTAssertEqual(file.scopeSignature, manifest.scopeSignature)
+                XCTAssertEqual(file.file.path, "NEW.md")
+                XCTAssertEqual(file.file.status, .untracked)
+                let patch = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(file.patchBase64Data)))
+                XCTAssertTrue(String(data: patch, encoding: .utf8)?.contains("untracked content") == true)
+                XCTAssertNil(file.transferID)
+                XCTAssertNil(file.nextByteOffset)
+
+                // Both files use the one manifest plan. File patch generation may run git once per tracked
+                // file, but it must never rebuild the full status/name-status plan for each visible row.
+                let trackedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(trackedResponse.ok, trackedResponse.message)
+                XCTAssertEqual(try XCTUnwrap(trackedResponse.workspaceDiffFileChunk).file.status, .modified)
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1, "all file patches must reuse one enumeration session")
+            }
+        }
+
+        func testWorkspaceDiffManifestMetadataChunksKeepTheEntireEncodedResponseWithinFourMiB() throws {
+            try withWorkspaceFixture { _, _, server, _, _, _ in
+                let plans = (0..<30_000).map { index in
+                    SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified,
+                        source: .untracked)
+                }
+                let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
+                let firstResponse = try server.workspaceDiffManifestChunkResponse(manifestID: "manifest", snapshot: snapshot, fileIndex: 0)
+                XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(firstResponse).count, 4 * 1024 * 1024)
+                let first = try XCTUnwrap(firstResponse.workspaceDiffManifestChunk)
+                let nextFileIndex = try XCTUnwrap(first.nextFileIndex)
+                XCTAssertGreaterThan(nextFileIndex, 0)
+                XCTAssertLessThan(nextFileIndex, plans.count)
+
+                let secondResponse = try server.workspaceDiffManifestChunkResponse(
+                    manifestID: "manifest", snapshot: snapshot, fileIndex: nextFileIndex)
+                XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(secondResponse).count, 4 * 1024 * 1024)
+                XCTAssertEqual(try XCTUnwrap(secondResponse.workspaceDiffManifestChunk).files.first?.path, plans[nextFileIndex].path)
+            }
+        }
+
+        func testSlashHeavyPatchBase64ExpandsInsideTheEncodedTransportEnvelope() throws {
+            let raw = Data(repeating: 0xff, count: 3 * 1024 * 1024)
+            let response = SpacesDeviceAPIResponse(
+                ok: true, message: "Loaded workspace diff patch chunk.",
+                result: .workspaceDiffFileChunk(
+                    .init(
+                        scopeSignature: "signature", file: .init(path: "README.md", status: .modified), transferID: "transfer",
+                        patchBase64Data: raw.base64EncodedString(), nextByteOffset: raw.count)))
+
+            let encodedLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
+            XCTAssertTrue(String(decoding: encodedLine, as: UTF8.self).contains("\\/\\/\\/\\/"))
+            XCTAssertGreaterThan(encodedLine.count, 4 * 1024 * 1024)
+        }
+
+        func testWorkspaceDiffFileChunksReuseOnePatchTransferAndReplayALostEOFResponse() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // A textual patch just over one 4 MiB range proves that resuming reads the already-generated
+                // patch file. The assertion on the daemon creation metric is stronger and less flaky than a
+                // wall-clock comparison: a replay implementation necessarily mints/runs a second producer.
+                // U+FFFF encodes as EF BF BF; its base64 representation contains `/` densely enough
+                // to exercise a slash-heavy payload in the full line-framed transport envelope.
+                let largeText = String(repeating: "\u{FFFF}\n", count: 1_100_000)
+                XCTAssertGreaterThan(largeText.utf8.count, 4 * 1024 * 1024)
+                try largeText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1)
+
+                let firstStart = Date()
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                let firstDuration = Date().timeIntervalSince(firstStart)
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                XCTAssertLessThanOrEqual(
+                    try SpacesDeviceAPICodec.encodeResponseLine(firstResponse).count, 4 * 1024 * 1024,
+                    "The base64 patch payload and its complete Device API envelope share the 4 MiB transport bound.")
+                var chunk = try XCTUnwrap(firstResponse.workspaceDiffFileChunk)
+                XCTAssertGreaterThan(try XCTUnwrap(chunk.patchBase64Data).filter { $0 == "/" }.count, 10_000)
+                let signature = chunk.scopeSignature
+                var received = Data(base64Encoded: try XCTUnwrap(chunk.patchBase64Data)) ?? Data()
+                var transferID = try XCTUnwrap(chunk.transferID)
+                var nextOffset = try XCTUnwrap(chunk.nextByteOffset)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1)
+
+                // The first response can be lost before a client learns transferID. Its retry is another
+                // offset-zero request, so it must find this manifest/path's active patch instead of creating
+                // an orphaned second transfer.
+                let initialReplayResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(initialReplayResponse.ok, initialReplayResponse.message)
+                let initialReplay = try XCTUnwrap(initialReplayResponse.workspaceDiffFileChunk)
+                XCTAssertEqual(initialReplay.transferID, transferID)
+                XCTAssertEqual(initialReplay.patchBase64Data, chunk.patchBase64Data)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1, "a lost initial response must not orphan another active patch")
+
+                var resumedDurations: [TimeInterval] = []
+                var lastRequestOffset: Int?
+                while true {
+                    lastRequestOffset = nextOffset
+                    let resumedStart = Date()
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceDiffFileChunk(
+                                SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                    workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                    transferID: transferID)),
+                            authToken: authToken, clientApp: clientApp))
+                    resumedDurations.append(Date().timeIntervalSince(resumedStart))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
+                    chunk = try XCTUnwrap(response.workspaceDiffFileChunk)
+                    XCTAssertEqual(chunk.scopeSignature, signature)
+                    received.append(Data(base64Encoded: try XCTUnwrap(chunk.patchBase64Data)) ?? Data())
+                    if let next = chunk.nextByteOffset {
+                        transferID = try XCTUnwrap(chunk.transferID)
+                        nextOffset = next
+                    } else {
+                        XCTAssertNil(chunk.transferID)
+                        break
+                    }
+                }
+
+                XCTAssertTrue(String(data: received, encoding: .utf8)?.contains("\u{FFFF}") == true)
+                XCTAssertGreaterThan(received.count, 4 * 1024 * 1024)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1, "later chunks must not replay the full git diff")
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1, "retain the final range for an ambiguous EOF replay")
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1, "later files/ranges must reuse the original enumeration")
+                XCTAssertFalse(resumedDurations.isEmpty)
+                XCTAssertGreaterThanOrEqual(firstDuration, 0, "capture the first-producer timing alongside resumed chunk timings")
+                XCTAssertTrue(resumedDurations.allSatisfy { $0 >= 0 }, "capture each resumed range timing without a flaky absolute threshold")
+
+                // Simulate a client that sent the final request but lost the response. It still has the
+                // request's transfer ID and offset, so the daemon must resend the exact final bytes without
+                // re-running git or reporting a spurious not-found.
+                let replayResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md",
+                                byteOffset: try XCTUnwrap(lastRequestOffset), transferID: transferID)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(replayResponse.ok, replayResponse.message)
+                let replayedChunk = try XCTUnwrap(replayResponse.workspaceDiffFileChunk)
+                XCTAssertNil(replayedChunk.nextByteOffset)
+                XCTAssertEqual(replayedChunk.patchBase64Data, chunk.patchBase64Data)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1, "an EOF replay must use the retained patch file")
+
+                let releaseResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestRelease(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(releaseResponse.ok, releaseResponse.message)
+                XCTAssertEqual(server.workspaceDiffManifestSessionActiveCount, 0, "explicit release removes the compact manifest plan")
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "manifest release removes the retained EOF patch")
+
+                let repeatedRelease = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestRelease(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(repeatedRelease.ok, repeatedRelease.message)
+            }
+        }
+
+        func testWorkspaceDiffFileChunkCancellationAndChurnKeepTheTransferSnapshotUsable() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // Leave more than two ranges so the resumed chunk remains incomplete and can exercise
+                // explicit cancellation after proving that churn did not reject it.
+                let initialText = String(repeating: "initial diff line 0123456789abcdefghijklmnopqrstuvwxyz\n", count: 200_000)
+                try initialText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                let first = try XCTUnwrap(firstResponse.workspaceDiffFileChunk)
+                let transferID = try XCTUnwrap(first.transferID)
+                let nextOffset = try XCTUnwrap(first.nextByteOffset)
+
+                // An agent can keep changing the worktree while a pane downloads. The established snapshot
+                // remains readable; its signature tells the client generation that it is the old view.
+                try "churned content\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let resumedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(resumedResponse.ok, resumedResponse.message)
+                XCTAssertEqual(try XCTUnwrap(resumedResponse.workspaceDiffFileChunk).scopeSignature, first.scopeSignature)
+
+                let cancelResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID, cancel: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(cancelResponse.ok, cancelResponse.message)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "explicit cancel must release an unfinished transfer")
+
+                let repeatedCancel = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md",
+                                byteOffset: nextOffset, transferID: transferID, cancel: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(repeatedCancel.ok, repeatedCancel.message)
+
+                let currentManifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(currentManifestResponse.ok, currentManifestResponse.message)
+                let currentManifest = try XCTUnwrap(currentManifestResponse.workspaceDiffManifestChunk)
+
+                let currentResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: currentManifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(currentResponse.ok, currentResponse.message)
+                let current = try XCTUnwrap(currentResponse.workspaceDiffFileChunk)
+                XCTAssertNotEqual(current.scopeSignature, first.scopeSignature)
+                let currentPatch = Data(base64Encoded: try XCTUnwrap(current.patchBase64Data))
+                XCTAssertTrue(String(data: try XCTUnwrap(currentPatch), encoding: .utf8)?.contains("churned content") == true)
+            }
+        }
+
+        func testWorkspaceDiffManifestTTLRemovesItsAbandonedChildTemporaryFile() throws {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-transfer-ttl-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let outputURL = directory.appendingPathComponent("patch")
+            XCTAssertTrue(FileManager.default.createFile(atPath: outputURL.path, contents: Data("patch".utf8)))
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 1)
+            let start = Date(timeIntervalSince1970: 1_000)
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
+            let manifestID = store.createManifest(
+                scope: scope, workspaceDir: directory.path,
+                snapshot: .init(scopeSignature: "signature", plans: []), now: start).manifestID
+            _ = store.createPatch(
+                manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
+                file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: start)
+
+            store.reapExpired(now: start.addingTimeInterval(1))
+            XCTAssertEqual(store.activeManifestCount, 0)
+            XCTAssertEqual(store.activePatchCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "manifest TTL cleanup removes child private transfer directories")
+        }
+
+        func testManifestCreationReturnsItsSessionWhenCapacityEvictsItImmediately() throws {
+            let clock = ManualDiffTransferClock(now: Date())
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 120, clock: { clock.now() }, reaper: ManualDiffTransferExpiryReaper())
+            let targetScope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "target", refName: nil)
+            let created = store.createManifest(
+                scope: targetScope, workspaceDir: "/target", snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
+
+            for index in 1..<16 {
+                clock.advance(by: 1)
+                _ = store.createManifest(
+                    scope: .init(workspaceID: "other-\(index)", refName: nil), workspaceDir: "/other", snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
+            }
+            clock.advance(by: 1)
+            _ = store.createManifest(
+                scope: .init(workspaceID: "evictor", refName: nil), workspaceDir: "/evictor", snapshot: .init(scopeSignature: "evictor", plans: []), now: clock.now())
+
+            XCTAssertEqual(created.session.scope, targetScope)
+            XCTAssertEqual(created.session.snapshot.scopeSignature, "target-signature")
+            XCTAssertEqual(store.activeManifestCount, 16)
+        }
+
+        func testWorkspaceDiffManifestTTLReapsAnAbandonedChildWithoutAnotherStoreCall() throws {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-transfer-autoreap-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let outputURL = directory.appendingPathComponent("patch")
+            XCTAssertTrue(FileManager.default.createFile(atPath: outputURL.path, contents: Data("patch".utf8)))
+
+            let clock = ManualDiffTransferClock(now: Date())
+            let reaper = ManualDiffTransferExpiryReaper()
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 10, clock: { clock.now() }, reaper: reaper)
+            XCTAssertNotNil(reaper.scheduledInterval, "the store must schedule autonomous expiry at construction")
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
+            let manifestID = store.createManifest(
+                scope: scope, workspaceDir: directory.path,
+                snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()).manifestID
+            _ = store.createPatch(
+                manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
+                file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: clock.now())
+
+            clock.advance(by: 10)
+            reaper.fire()
+
+            XCTAssertEqual(store.activeManifestCount, 0)
+            XCTAssertEqual(store.activePatchCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "the scheduled TTL reap must clean an abandoned transfer without another request")
         }
 
         func testWorkspaceDiffOnAnUnknownWorkspaceReturnsNotFound() throws {
             try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: "no-such-workspace", refName: nil)),
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: "no-such-workspace", refName: nil, fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -736,7 +1107,7 @@
 
                 let diffResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: nil)), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertFalse(diffResponse.ok)
@@ -759,7 +1130,7 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "no-such-ref")),
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "no-such-ref", fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -775,11 +1146,11 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "main")), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
-                XCTAssertNotNil(response.workspaceDiff)
+                XCTAssertNotNil(response.workspaceDiffManifestChunk)
             }
         }
 
@@ -799,8 +1170,8 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(
-                            SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "unrelated-base")), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "unrelated-base", fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -821,15 +1192,14 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, lastCommit: true)), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
-                let result = try XCTUnwrap(response.workspaceDiff)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
                 XCTAssertEqual(result.files.map(\.path), ["README.md"])
                 let file = try XCTUnwrap(result.files.first)
                 XCTAssertEqual(file.status, .modified)
-                XCTAssertTrue(file.patch?.contains("committed content") == true)
             }
         }
 
@@ -839,11 +1209,11 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, lastCommit: true)), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
-                let result = try XCTUnwrap(response.workspaceDiff)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
                 let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
                 XCTAssertEqual(file.status, .added)
                 XCTAssertFalse(result.scopeSignature.isEmpty)
@@ -857,23 +1227,23 @@
             try withUnbornWorkspaceFixture { workspaceID, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, lastCommit: true)), authToken: authToken,
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
-                let result = try XCTUnwrap(response.workspaceDiff)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
                 XCTAssertTrue(result.files.isEmpty)
                 XCTAssertFalse(result.scopeSignature.isEmpty)
             }
         }
 
-        /// `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffRequest`'s
+        /// `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffManifestChunkRequest`'s
         /// doc comment) — sending both is a client bug, rejected up front.
         func testWorkspaceDiffRejectsLastCommitCombinedWithRefName() throws {
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, refName: "main", lastCommit: true)),
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", lastCommit: true, fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -889,10 +1259,10 @@
                 func fetchSignature() throws -> String {
                     let response = try requestClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .workspaceDiff(SpacesDeviceWorkspaceDiffRequest(workspaceID: workspaceID, lastCommit: true)),
+                            command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
                             authToken: authToken, clientApp: clientApp))
                     XCTAssertTrue(response.ok, response.message)
-                    return try XCTUnwrap(response.workspaceDiff).scopeSignature
+                    return try XCTUnwrap(response.workspaceDiffManifestChunk).scopeSignature
                 }
 
                 let beforeChurn = try fetchSignature()
@@ -1084,7 +1454,7 @@
             // round-9/12 comments on why this engine has no configurable-deadline test seam).
             let expiredDeadlineStart = Date().addingTimeInterval(-1000)
             XCTAssertThrowsError(
-                try SpacesDeviceWorkspaceDiffEngine.buildDiff(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
                     workspaceDir: repo.path, refName: nil, gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
             ) { error in
                 guard case .gitCommandFailed = error as? SpacesRuntimeError else {
@@ -1125,51 +1495,9 @@
             try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
                 workspaceDir: repo.path, refName: "main", gitClient: client, deadlineStart: sharedDeadlineStart)
 
-            let result = try SpacesDeviceWorkspaceDiffEngine.buildDiff(
+            let result = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
                 workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: sharedDeadlineStart)
-            let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
-            XCTAssertFalse(file.truncated)
-            XCTAssertNotNil(file.patch)
-        }
-
-        /// `buildCoalescedDeletedButUntrackedFile` (see `SpacesDeviceWorkspaceGitTests.swift`'s round-13
-        /// coverage for the coalescing behavior itself) is the one file builder in this engine that spawns
-        /// two git commands for a single file: `update-index --add` stages the recreated worktree content
-        /// into a scratch index, then `diff` compares that scratch index against `compareRef`. Both used to
-        /// share the exact same already-shrunk `timeout` value, so a slow-but-successful `update-index` could
-        /// hand the second command a stale budget as if no time had passed since the first ran.
-        ///
-        /// This isolates the second command's own deadline recompute by giving the two new parameters
-        /// deliberately different values: `timeout` is a generous 10s so the FIRST command (`update-index
-        /// --add`) runs and succeeds normally, with no risk of a spurious timeout of its own; `deadlineStart`
-        /// is already 1000s in the past, a value with NO effect on the first command (which only ever sees
-        /// `timeout`) but that the second command's `remainingTimeout(start: deadlineStart)` recompute sees as
-        /// exhausted. The fix must degrade to the same truncated shape every other cap in this engine uses
-        /// (mirroring the per-file loop's own entry gate in `buildDiff`), not throw a request-level error.
-        func testCoalescedDeletedButUntrackedFileDegradesToTruncatedWhenDeadlineStartIsAlreadyExpired() throws {
-            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
-                "spaces-coalesced-deleted-untracked-expired-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: repo) }
-            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
-            try "content A\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
-            try runGit(["add", "f.txt"], cwd: repo.path)
-            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add f"], cwd: repo.path)
-
-            // `git rm --cached` untracks the file from the index without touching its worktree content, then
-            // the recreated content differs from the committed blob — exactly the `.deletedButUntrackedInWorktree`
-            // scenario `buildDiff`'s coalescing exists for (see `SpacesDeviceWorkspaceGitTests.swift` round-13).
-            try runGit(["rm", "--cached", "f.txt"], cwd: repo.path)
-            try "content B\nshared\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
-
-            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
-            let file = try SpacesDeviceWorkspaceDiffEngine.buildCoalescedDeletedButUntrackedFile(
-                path: "f.txt", compareRef: "HEAD", workspaceDir: repo.path, gitClient: RemoteWorkspaceGitClient(), timeout: 10.0,
-                deadlineStart: expiredDeadlineStart)
-
-            XCTAssertTrue(file.truncated, "an expired deadlineStart at the second command's recompute must degrade to the truncated shape")
-            XCTAssertEqual(file.status, .modified)
-            XCTAssertNil(file.patch, "a truncated entry must carry no patch")
+            XCTAssertTrue(result.plans.contains { $0.path == "README.md" })
         }
 
         /// round-17 Fix B1: `assertIsGitRepository` now calls `isRepoStrict` (which throws on a could-not-run
@@ -1258,7 +1586,7 @@
             let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
             let deadlineStart = Date().addingTimeInterval(-44)
             XCTAssertThrowsError(
-                try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
             ) { error in
                 guard case .gitCommandFailed = error as? SpacesRuntimeError else {
                     XCTFail("expected the HEAD-probe execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
@@ -1311,7 +1639,7 @@
             let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
             let deadlineStart = Date().addingTimeInterval(-44)
             XCTAssertThrowsError(
-                try SpacesDeviceWorkspaceDiffEngine.buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
             ) { error in
                 guard case .gitCommandFailed = error as? SpacesRuntimeError else {
                     XCTFail("expected the show-prefix execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")

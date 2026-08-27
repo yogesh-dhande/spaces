@@ -125,6 +125,17 @@ extension SpacesDeviceAPICommand {
         }
     }
 
+    /// `.startWorkspaceCommandSession` synchronously creates a terminal and waits for the injected
+    /// terminal launcher to return. Keep that startup wait off the shared state queue so a stalled launch
+    /// cannot delay unrelated overview or ping requests. The workspace lifecycle lock inside the
+    /// orchestrator still serializes this launch against mutations for the same workspace.
+    fileprivate var runsOnWorkspaceTerminalLaunchQueue: Bool {
+        switch self {
+        case .startWorkspaceCommandSession: true
+        default: false
+        }
+    }
+
     /// Commands that wait on a terminal session's engine. The control commands each make a synchronous
     /// round trip over that session's control socket and get no answer until the engine drains what it is
     /// already working on; `.state` waits on the same engine from the other side, since a session this
@@ -164,7 +175,9 @@ extension SpacesDeviceAPICommand {
     /// check, so neither ever needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList: true
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceFileList,
+            .workspaceRefList:
+            true
         default: false
         }
     }
@@ -604,6 +617,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnWorkspaceSetupQueue {
                         server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnWorkspaceTerminalLaunchQueue {
+                        server.handleStartWorkspaceCommandSessionAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnTerminalControlLane {
                         server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else if request.command.runsOnWorkspaceGitQueue {
@@ -880,6 +895,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                                 try server.authorize(request)
                             }
                             response = try server.handleWorkspaceSetupRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnWorkspaceTerminalLaunchQueue {
+                            try server.syncOnQueue {
+                                try server.admitOnQueue()
+                                try server.authorize(request)
+                            }
+                            response = try server.handleStartWorkspaceCommandSessionOnWorkerQueue(request)
                         } else if request.command.runsOnTerminalControlLane {
                             try server.syncOnQueue {
                                 try server.admitOnQueue()
@@ -1169,6 +1190,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// behind it. Serial, like the teardown queue, so two explicit setup re-runs still serialize among
     /// themselves instead of racing the same workspace's setup state.
     private let workspaceSetupQueue = DispatchQueue(label: "spaces.device.api.workspace-setup", qos: .userInitiated)
+    /// Arbitrary command sessions wait synchronously for terminal startup, so run them independently of
+    /// the shared request queue while retaining serial ordering among explicit starts.
+    private let workspaceTerminalLaunchQueue = DispatchQueue(label: "spaces.device.api.workspace-terminal-launch", qos: .userInitiated)
     /// Terminal input and control round trips block on the target session's engine (see
     /// `runsOnTerminalControlLane`). They run on a serial lane per session (`TerminalControlLaneRegistry`)
     /// so a stalled engine holds up only that session's own controls: never another session's, and never
@@ -1241,7 +1265,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         switch request.command {
         case .workspaceFileRead(let payload): return payload.workspaceID
         case .workspaceFileWrite(let payload): return payload.workspaceID
-        case .workspaceDiff(let payload): return payload.workspaceID
+        case .workspaceDiffManifestChunk(let payload): return payload.workspaceID
+        case .workspaceDiffManifestRelease(let payload): return payload.workspaceID
+        case .workspaceDiffFileChunk(let payload): return payload.workspaceID
         case .workspaceFileList(let payload): return payload.workspaceID
         case .workspaceRefList(let payload): return payload.workspaceID
         default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on a workspace-git queue.")
@@ -1250,6 +1276,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
     /// polling, both of which run off the serial state queue.
     private let workspaceGitClient = RemoteWorkspaceGitClient()
+    /// Manifests retain a compact plan; child transfers retain generated patch files. One short TTL is
+    /// refreshed on every range so a healthy remote download survives while abandoned generations do not
+    /// retain plan memory or private files indefinitely.
+    private let workspaceDiffTransfers = WorkspaceDiffTransferStore(ttl: 120)
+    /// Test-visible counters prove a generation enumerates once and later ranges reuse one generated patch.
+    /// They intentionally expose no transfer ids, manifest ids, or filesystem paths.
+    var workspaceDiffManifestSessionActiveCount: Int { workspaceDiffTransfers.activeManifestCount }
+    var workspaceDiffManifestSessionCreationCount: Int { workspaceDiffTransfers.manifestCreationCount }
+    var workspaceDiffPatchTransferActiveCount: Int { workspaceDiffTransfers.activePatchCount }
+    var workspaceDiffPatchTransferCreationCount: Int { workspaceDiffTransfers.patchCreationCount }
     /// Producer + 2s poll timer per subscribed (workspace, ref) scope for `subscribeWorkspaceDiffSignature`,
     /// keyed by `WorkspaceDiffScope`. Entries are `queue`-confined: created on a scope's first subscriber
     /// and removed when its last relay closes (see
@@ -1713,7 +1749,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             self.workspaceID = workspaceID
             // Shares `SpacesDeviceWorkspaceDiffEngine.normalizedRefName` (same target) rather than
             // duplicating the empty/whitespace-to-nil rule: this scope's identity must normalize a ref
-            // exactly the way `buildDiff`/`scopeSignature` do, or a blank-ref subscription could resolve to
+            // exactly the way `buildDiffPlanSnapshot`/`scopeSignature` do, or a blank-ref subscription could resolve to
             // the uncommitted scope here while every pull against that same blank ref fails on the engine
             // side with a merge-base error on an empty argument.
             self.refName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(refName)
@@ -1721,6 +1757,291 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// A manifest retains one compact changed-file plan for a streaming Editor generation. Its child patch
+    /// transfers retain only generated patch files. One store owns both lifetimes so releasing or expiring
+    /// a manifest also removes every child file, including a final range retained for replay.
+    final class WorkspaceDiffTransferStore: @unchecked Sendable {
+        struct ManifestSession {
+            let scope: WorkspaceDiffScope
+            let workspaceDir: String
+            let snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot
+            var expiresAt: Date
+        }
+
+        struct CreatedManifest {
+            let manifestID: String
+            let session: ManifestSession
+        }
+
+        struct PatchSession {
+            let manifestID: String
+            let scope: WorkspaceDiffScope
+            let relativePath: String
+            let scopeSignature: String
+            let file: SpacesDeviceWorkspaceDiffFileMetadata
+            let outputURL: URL
+            let byteCount: Int64
+            /// The final range was sent. Keep this one completed file until another file begins so an
+            /// ambiguous EOF response can be replayed byte-for-byte without running git again.
+            var isComplete: Bool
+            var expiresAt: Date
+        }
+
+        enum Lookup<T> {
+            case found(T)
+            case missing
+            case mismatched
+        }
+
+        /// One store-owned timer drives expiry through `reapExpired`; it never owns transfer state itself.
+        /// Keeping the timer behind this small seam lets the lifecycle contract advance a deterministic test
+        /// clock without making production cleanup depend on a wall-clock sleep.
+        protocol ExpiryReaper: AnyObject {
+            func start(interval: TimeInterval, action: @escaping @Sendable () -> Void)
+            func stop()
+        }
+
+        final class DispatchExpiryReaper: ExpiryReaper {
+            private let queue = DispatchQueue(label: "spaces.workspace-diff-transfer-expiry", qos: .utility)
+            private var timer: DispatchSourceTimer?
+
+            func start(interval: TimeInterval, action: @escaping @Sendable () -> Void) {
+                precondition(timer == nil, "A workspace diff transfer reaper can only be started once.")
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(deadline: .now() + interval, repeating: interval)
+                timer.setEventHandler(handler: action)
+                self.timer = timer
+                timer.resume()
+            }
+
+            func stop() {
+                timer?.setEventHandler {}
+                timer?.cancel()
+                timer = nil
+            }
+
+            deinit { stop() }
+        }
+
+        private let lock = NSLock()
+        private var manifests: [String: ManifestSession] = [:]
+        private var patches: [String: PatchSession] = [:]
+        private var createdManifestCount = 0
+        private var createdPatchCount = 0
+        private let ttl: TimeInterval
+        private let clock: @Sendable () -> Date
+        private let expiryReaper: any ExpiryReaper
+        /// A daemon has only a small number of visible Editor generations. Bounding retained plans prevents
+        /// an unresponsive remote client from accumulating arbitrary changed-file metadata before TTL fires.
+        private static let maximumActiveManifests = 16
+
+        convenience init(ttl: TimeInterval) {
+            self.init(ttl: ttl, clock: { Date() }, reaper: DispatchExpiryReaper())
+        }
+
+        /// This initializer is internal for deterministic lifecycle tests. Production always uses the
+        /// dispatch reaper above; both paths invoke the same `reapExpired` cleanup operation.
+        init(ttl: TimeInterval, clock: @escaping @Sendable () -> Date, reaper: any ExpiryReaper) {
+            precondition(ttl > 0, "Workspace diff transfer TTL must be positive.")
+            self.ttl = ttl
+            self.clock = clock
+            expiryReaper = reaper
+            // Keep the normal 120s lifetime close to its advertised bound without polling every transfer:
+            // one daemon-wide timer reaps at most five seconds after an expiry (and proportionally sooner
+            // for short test lifetimes).
+            let interval = min(5, max(0.05, ttl / 2))
+            reaper.start(interval: interval) { [weak self] in
+                guard let self else { return }
+                self.reapExpired(now: self.clock())
+            }
+        }
+
+        deinit {
+            expiryReaper.stop()
+            removeAll()
+        }
+
+        func createManifest(
+            scope: WorkspaceDiffScope, workspaceDir: String, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, now: Date = Date()
+        ) -> CreatedManifest {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            while manifests.count >= Self.maximumActiveManifests,
+                let oldest = manifests.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key
+            {
+                removeManifestLocked(oldest)
+            }
+            let manifestID = UUID().uuidString.lowercased()
+            let session = ManifestSession(
+                scope: scope, workspaceDir: workspaceDir, snapshot: snapshot, expiresAt: now.addingTimeInterval(ttl))
+            manifests[manifestID] = session
+            createdManifestCount += 1
+            return CreatedManifest(manifestID: manifestID, session: session)
+        }
+
+        func lookupManifest(manifestID: String, scope: WorkspaceDiffScope, now: Date = Date()) -> Lookup<ManifestSession> {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            guard var session = manifests[manifestID] else { return .missing }
+            guard session.scope == scope else { return .mismatched }
+            session.expiresAt = now.addingTimeInterval(ttl)
+            manifests[manifestID] = session
+            return .found(session)
+        }
+
+        func releaseManifest(manifestID: String, scope: WorkspaceDiffScope, now: Date = Date()) -> Lookup<Void> {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            guard let session = manifests[manifestID] else { return .missing }
+            guard session.scope == scope else { return .mismatched }
+            removeManifestLocked(manifestID)
+            return .found(())
+        }
+
+        func createPatch(
+            manifestID: String, scope: WorkspaceDiffScope, relativePath: String, scopeSignature: String,
+            file: SpacesDeviceWorkspaceDiffFileMetadata, outputURL: URL, byteCount: Int64, now: Date = Date()
+        ) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            // A manifest normally streams files serially. Retain its last completed file for a lost EOF
+            // response, but drop it before starting the next file so a generation keeps only active files
+            // plus at most one completed transfer artifact.
+            for transferID in patches.filter({ $0.value.manifestID == manifestID && $0.value.isComplete }).keys {
+                _ = removePatchLocked(transferID)
+            }
+            let transferID = UUID().uuidString.lowercased()
+            patches[transferID] = PatchSession(
+                manifestID: manifestID, scope: scope, relativePath: relativePath, scopeSignature: scopeSignature, file: file, outputURL: outputURL,
+                byteCount: byteCount, isComplete: false, expiresAt: now.addingTimeInterval(ttl))
+            createdPatchCount += 1
+            return transferID
+        }
+
+        func lookupPatch(
+            manifestID: String, transferID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()
+        ) -> Lookup<PatchSession> {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            guard var manifest = manifests[manifestID] else { return .missing }
+            guard manifest.scope == scope else { return .mismatched }
+            guard var patch = patches[transferID] else { return .missing }
+            guard patch.manifestID == manifestID, patch.scope == scope, patch.relativePath == relativePath else { return .mismatched }
+            manifest.expiresAt = now.addingTimeInterval(ttl)
+            patch.expiresAt = now.addingTimeInterval(ttl)
+            manifests[manifestID] = manifest
+            patches[transferID] = patch
+            return .found(patch)
+        }
+
+        /// Offset-zero requests intentionally carry no transfer ID. If their response was lost, locate the
+        /// already-created child by the manifest-bound path so the retry returns the same first range rather
+        /// than allocating another active patch file.
+        func lookupPatchForInitialRange(
+            manifestID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()
+        ) -> (transferID: String, patch: PatchSession)? {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            guard var manifest = manifests[manifestID], manifest.scope == scope,
+                let pair = patches.first(where: {
+                    $0.value.manifestID == manifestID && $0.value.scope == scope && $0.value.relativePath == relativePath
+                })
+            else { return nil }
+            var patch = pair.value
+            manifest.expiresAt = now.addingTimeInterval(ttl)
+            patch.expiresAt = now.addingTimeInterval(ttl)
+            manifests[manifestID] = manifest
+            patches[pair.key] = patch
+            return (pair.key, patch)
+        }
+
+        @discardableResult func removePatch(transferID: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return removePatchLocked(transferID)
+        }
+
+        /// Marks the final range as replayable. The patch file still belongs to its manifest and is removed
+        /// by the next file, explicit cancellation/release, TTL, or daemon shutdown.
+        func markPatchComplete(transferID: String, now: Date = Date()) {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+            guard var patch = patches[transferID] else { return }
+            patch.isComplete = true
+            patch.expiresAt = now.addingTimeInterval(ttl)
+            patches[transferID] = patch
+        }
+
+        var activeManifestCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: Date())
+            return manifests.count
+        }
+
+        var activePatchCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: Date())
+            return patches.count
+        }
+
+        var manifestCreationCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return createdManifestCount
+        }
+
+        var patchCreationCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return createdPatchCount
+        }
+
+        func reapExpired(now: Date) {
+            lock.lock()
+            defer { lock.unlock() }
+            reapExpiredLocked(now: now)
+        }
+
+        private func removeAll() {
+            lock.lock()
+            let removedPatches = patches.values
+            manifests.removeAll()
+            patches.removeAll()
+            lock.unlock()
+            for patch in removedPatches { removeTransferFile(patch.outputURL) }
+        }
+
+        private func reapExpiredLocked(now: Date) {
+            for manifestID in manifests.filter({ $0.value.expiresAt <= now }).keys { removeManifestLocked(manifestID) }
+            for transferID in patches.filter({ $0.value.expiresAt <= now }).keys { _ = removePatchLocked(transferID) }
+        }
+
+        private func removeManifestLocked(_ manifestID: String) {
+            manifests.removeValue(forKey: manifestID)
+            for transferID in patches.filter({ $0.value.manifestID == manifestID }).keys { _ = removePatchLocked(transferID) }
+        }
+
+        @discardableResult private func removePatchLocked(_ transferID: String) -> Bool {
+            guard let patch = patches.removeValue(forKey: transferID) else { return false }
+            removeTransferFile(patch.outputURL)
+            return true
+        }
+
+        private func removeTransferFile(_ outputURL: URL) {
+            // Each output path is inside its own 0700 UUID directory; deleting that directory releases the
+            // private patch and its parent on EOF, explicit cancellation, manifest release, TTL, or shutdown.
+            try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent())
+        }
+    }
     /// Pure decision for whether the diff-signature poll timer's `tick`th invocation (1-indexed, one per
     /// 2s fire) should broadcast a frame: whenever the computed signature changed, or unconditionally every
     /// 10th tick (~20s) as a keepalive. The keepalive is disconnect detection, not a convenience: the Linux
@@ -1740,7 +2061,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// permanently silent never gets the write that would surface its dead TLS peer. This sentinel can never
     /// collide with a real signature, which is always a sha256 hex digest; its one broadcast on the
     /// transition into "unavailable" is also the correct signal for a live client, whose re-pull of
-    /// `workspaceDiff` then surfaces the workspace's actual 404.
+    /// `workspaceDiffManifestChunk` then surfaces the workspace's actual 404.
     static let workspaceDiffSignatureUnavailableSentinel = "unavailable"
 
     /// Producer + 2s poll timer for one (workspace, ref) scope's `subscribeWorkspaceDiffSignature` stream.
@@ -1898,7 +2219,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// Resolves `scope`'s workspace to its checkout directory and computes its `scopeSignature`
     /// (`SpacesDeviceWorkspaceDiffEngine.scopeSignature`), folding in `scope.refName`'s merge-base when
-    /// present. Used both by `handleWorkspaceDiffRequest` and by the diff-signature poll timer's
+    /// present. Used both by `handleWorkspaceDiffManifestRequest` and by the diff-signature poll timer's
     /// `signatureProvider`, which calls this on that scope's own dedicated `streamQueue` (see
     /// `addWorkspaceDiffSignatureSubscriber`) — a queue with no `RequestContext` of its own — so this opens
     /// its own `SQLiteStore` rather than sharing one, per the confinement rule: a store belongs to the queue
@@ -1918,13 +2239,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// repository. Without this, subscribing against a non-git workspace would sit in
     /// `WorkspaceDiffSignatureSubscription`'s poll loop silently producing nothing (`signatureProvider`
     /// swallows its own errors via `try?`), leaving the client to read "unavailable" with no renderable
-    /// reason instead of the same typed refusal `handleWorkspaceDiffRequest` gives for the same case. Opens
+    /// reason instead of the same typed refusal `handleWorkspaceDiffManifestRequest` gives for the same case. Opens
     /// its own `SQLiteStore`, matching `computeWorkspaceDiffScopeSignature`'s confinement rule, since callers
     /// run on `queue` before any per-scope `streamQueue` (and thus any `RequestContext`) exists yet.
     ///
     /// This runs synchronously on `queue` — the server's single serial state queue, shared by pings and
     /// every other client's requests — rather than hopping to the per-workspace git queue the way
-    /// `handleWorkspaceDiffRequest` and the diff-signature poll loop do for their own git work. That is a
+    /// `handleWorkspaceDiffManifestRequest` and the diff-signature poll loop do for their own git work. That is a
     /// deliberate, bounded exception: `isRepo`'s `rev-parse --is-inside-work-tree` probe runs on
     /// `metadataCommandTimeout` (2s), and if that expires against a stalled workspace filesystem,
     /// `runGitAndCapture` still bounds its post-timeout pipe drain to `drainGrace` (2s) rather than blocking
@@ -1938,10 +2259,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// this deliberately does NOT also probe `scope.refName`'s resolvability (see
     /// `SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable`) — that would add a second synchronous git
     /// subprocess call to this same bounded blocking window; an unresolvable ref instead surfaces
-    /// correctly once `handleWorkspaceDiffRequest`'s own check runs, when the pane's `workspaceDiff` pull
+    /// correctly once `handleWorkspaceDiffManifestRequest`'s own check runs, when the pane's manifest pull
     /// fires from the resulting signature event, and this subscribe path already treats failures here as
     /// best-effort/retry.
-    /// Rejects the same `lastCommit`+`refName` combination `handleWorkspaceDiffRequest` rejects on the pull
+    /// Rejects the same `lastCommit`+`refName` combination `handleWorkspaceDiffManifestRequest` rejects on the pull
     /// path (see that function's up-front check), before either subscribe transport registers a
     /// diff-signature subscription for it. Without this, a subscription for the combination would sit
     /// alongside a pull path that always 400s for the identical scope: the client could never successfully
@@ -2345,7 +2666,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert workspace file-read/write/diff/file-list/ref-list commands to
         // `workspaceGitQueue` before they reach here (see `runsOnWorkspaceGitQueue`), so this case only
         // keeps the switch exhaustive.
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiff, .workspaceFileList, .workspaceRefList:
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk,
+            .workspaceFileList,
+            .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
@@ -2366,6 +2689,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // lane instead (see `runsOnTerminalControlLane`).
         case .workspaceReviewCommentList(let payload): return try handleWorkspaceReviewCommentListRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
+        case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
         case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
@@ -2481,7 +2805,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         switch request.command {
         case .workspaceFileRead(let payload): return try handleWorkspaceFileReadRequest(payload, context: context)
         case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
-        case .workspaceDiff(let payload): return try handleWorkspaceDiffRequest(payload, context: context)
+        case .workspaceDiffManifestChunk(let payload): return try handleWorkspaceDiffManifestChunkRequest(payload, context: context)
+        case .workspaceDiffManifestRelease(let payload): return handleWorkspaceDiffManifestReleaseRequest(payload)
+        case .workspaceDiffFileChunk(let payload): return try handleWorkspaceDiffFileChunkRequest(payload, context: context)
         case .workspaceFileList(let payload): return try handleWorkspaceFileListRequest(payload, context: context)
         case .workspaceRefList(let payload): return try handleWorkspaceRefListRequest(payload, context: context)
         default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on the workspace-git queue.")
@@ -2536,6 +2862,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
+        private func handleStartWorkspaceCommandSessionAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            workspaceTerminalLaunchQueue.async { [weak self] in
+                guard let self else { return }
+                let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+                let result = Result {
+                    guard case .startWorkspaceCommandSession(let payload) = request.command else {
+                        preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
+                    }
+                    return try self.handleStartWorkspaceCommandSessionRequest(payload, context: context)
+                }
+                self.queue.async { completion(result) }
+            }
+        }
+
         private func handleWorkspaceGitRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
@@ -2575,6 +2917,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         private func handleWorkspaceSetupRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try workspaceSetupQueue.sync { try handleWorkspaceSetupRequest(request) }
+        }
+
+        private func handleStartWorkspaceCommandSessionOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try workspaceTerminalLaunchQueue.sync {
+                let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+                guard case .startWorkspaceCommandSession(let payload) = request.command else {
+                    preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
+                }
+                return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
+            }
         }
 
         private func handleWorkspaceGitRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3778,7 +4130,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// Lists every path in a workspace's checkout for the Editor pane's file tree/quick-open; see
     /// `SpacesDeviceWorkspaceFileListEngine.listFiles`. Read-only, so unlike the CAS file read/write handlers
-    /// above there is no path-escape or size guard to apply, and unlike `handleWorkspaceDiffRequest` there is
+    /// above there is no path-escape or size guard to apply, and unlike `handleWorkspaceDiffManifestRequest` there is
     /// no `assertIsGitRepository` gate here either: this endpoint deliberately serves both git and non-git
     /// workspaces, because a non-git workspace's Editor (docs/spec.md's non-git project rows still offer Open
     /// in Editor) has no other way to open a file — the tree and ⌘P quick-open ARE the file picker for it.
@@ -3943,35 +4295,361 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let existingPermissions { try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path) }
     }
 
-    private func handleWorkspaceDiffRequest(_ request: SpacesDeviceWorkspaceDiffRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
-        // `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffRequest`'s
-        // doc comment) — checked first, before any git or workspace-lookup work, since this is a pure
-        // request-shape error the client should never legitimately construct.
-        if request.lastCommit, SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil {
+    private func handleWorkspaceDiffManifestChunkRequest(
+        _ request: SpacesDeviceWorkspaceDiffManifestChunkRequest, context: RequestContext
+    ) throws -> SpacesDeviceAPIResponse {
+        guard request.fileIndex >= 0 else {
+            return SpacesDeviceAPIResponse(ok: false, message: "fileIndex must not be negative.", errorCode: .invalidArgument)
+        }
+        guard !(request.lastCommit && SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil) else {
             return SpacesDeviceAPIResponse(ok: false, message: "lastCommit and refName are mutually exclusive.", errorCode: .invalidArgument)
         }
-        // round-15: captured BEFORE `assertIsGitRepository` runs, so this one clock is the request-wide
-        // budget shared by repo validation, ref validation, and `buildDiff` — see `diffBuildDeadline`'s doc
-        // comment. The repo probe's own elapsed time is deliberately burned from this same shared budget
-        // (it keeps its own internal timeout via `RemoteWorkspaceGitClient.isRepo`; nothing here bounds it
-        // further), rather than each validation step getting its own fresh clock, which is exactly the bug
-        // this round fixes: stacked fresh clocks could add up to more wall-clock time than the client's
-        // ~60s request timeout, holding the workspace's serial git queue for a request already abandoned.
-        let deadlineStart = Date()
-        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
-        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
-        // A caller-supplied ref that doesn't resolve must be rejected as `invalidArgument`, distinct from
-        // `buildDiff`'s own ambiguous `.gitCommandFailed` (which also covers a transient git hang/timeout)
-        // — see `assertRefIsResolvable`'s doc comment for why the client's retry classification depends on
-        // this split. Skipped for `lastCommit`, which never takes a ref to validate.
-        if !request.lastCommit, let normalizedRefName = SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) {
-            try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
-                workspaceDir: workspaceDir, refName: normalizedRefName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
+        let scope = WorkspaceDiffScope(workspaceID: request.workspaceID, refName: request.refName, lastCommit: request.lastCommit)
+        let manifestID: String
+        let manifest: WorkspaceDiffTransferStore.ManifestSession
+        if let requestedManifestID = request.manifestID, !requestedManifestID.isEmpty {
+            manifestID = requestedManifestID
+            switch workspaceDiffTransfers.lookupManifest(manifestID: manifestID, scope: scope) {
+            case .found(let session): manifest = session
+            case .missing:
+                return SpacesDeviceAPIResponse(ok: false, message: "Workspace diff manifest expired or was released.", errorCode: .notFound)
+            case .mismatched:
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Workspace diff manifest does not match this workspace or scope.", errorCode: .invalidArgument)
+            }
+        } else {
+            guard request.fileIndex == 0 else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "manifestID is required after the initial metadata chunk.", errorCode: .invalidArgument)
+            }
+            let deadlineStart = Date()
+            let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+            try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+            if !scope.lastCommit, let refName = scope.refName {
+                try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                    workspaceDir: workspaceDir, refName: refName, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
+            }
+            let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                workspaceDir: workspaceDir, refName: scope.refName, lastCommit: scope.lastCommit, gitClient: workspaceGitClient,
+                deadlineStart: deadlineStart)
+            let createdManifest = workspaceDiffTransfers.createManifest(scope: scope, workspaceDir: workspaceDir, snapshot: snapshot)
+            manifestID = createdManifest.manifestID
+            let session = createdManifest.session
+            // The store may evict this manifest as another workspace request creates a generation before
+            // the response is encoded. Use the atomically returned session rather than looking it up again;
+            // the session is still valid for this response and retains the store's TTL/capacity decision.
+            manifest = session
         }
-        let diff = try SpacesDeviceWorkspaceDiffEngine.buildDiff(
-            workspaceDir: workspaceDir, refName: request.refName, lastCommit: request.lastCommit, gitClient: workspaceGitClient,
-            deadlineStart: deadlineStart)
-        return SpacesDeviceAPIResponse(ok: true, message: "Loaded workspace diff.", result: .workspaceDiff(diff))
+        return try workspaceDiffManifestChunkResponse(manifestID: manifestID, snapshot: manifest.snapshot, fileIndex: request.fileIndex)
+    }
+
+    /// Includes the Device API envelope in the cap, not just the metadata array. Individual file metadata
+    /// is encoded once to account for its exact JSON escaping; the empty-envelope baseline with `Int.max`
+    /// reserves the largest possible cursor encoding, so this linear pass never underestimates response size.
+    private static let workspaceDiffManifestChunkByteCap = 4 * 1024 * 1024
+
+    func workspaceDiffManifestChunkResponse(
+        manifestID: String, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, fileIndex: Int
+    ) throws -> SpacesDeviceAPIResponse {
+        guard fileIndex <= snapshot.plans.count else {
+            return SpacesDeviceAPIResponse(ok: false, message: "fileIndex is outside this workspace diff manifest.", errorCode: .invalidArgument)
+        }
+        let empty = SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded workspace diff manifest metadata chunk.",
+            result: .workspaceDiffManifestChunk(
+                .init(manifestID: manifestID, scopeSignature: snapshot.scopeSignature, files: [], nextFileIndex: Int.max)))
+        // The wire is line-framed, so include its trailing newline in the public 4 MiB bound too.
+        var encodedByteCount = try SpacesDeviceAPICodec.encodeResponseLine(empty).count
+        var chunk: [SpacesDeviceWorkspaceDiffManifestFile] = []
+        let metadataEncoder = JSONEncoder()
+        var nextIndex = fileIndex
+        while nextIndex < snapshot.plans.count {
+            let plan = snapshot.plans[nextIndex]
+            let file = SpacesDeviceWorkspaceDiffManifestFile(path: plan.path, oldPath: plan.oldPath, status: plan.status)
+            let encodedFileByteCount = try metadataEncoder.encode(file).count
+            let delimiterByteCount = chunk.isEmpty ? 0 : 1
+            guard encodedByteCount + delimiterByteCount + encodedFileByteCount <= Self.workspaceDiffManifestChunkByteCap else { break }
+            encodedByteCount += delimiterByteCount + encodedFileByteCount
+            chunk.append(file)
+            nextIndex += 1
+        }
+        guard !chunk.isEmpty || fileIndex == snapshot.plans.count else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "One workspace diff manifest file identity exceeds the metadata response limit.", errorCode: .payloadTooLarge)
+        }
+        let response = SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded workspace diff manifest metadata chunk.",
+            result: .workspaceDiffManifestChunk(
+                .init(
+                    manifestID: manifestID, scopeSignature: snapshot.scopeSignature, files: chunk,
+                    nextFileIndex: nextIndex < snapshot.plans.count ? nextIndex : nil)))
+        let encodedResponse = try SpacesDeviceAPICodec.encodeResponseLine(response)
+        precondition(
+            encodedResponse.count <= Self.workspaceDiffManifestChunkByteCap,
+            "Workspace diff manifest metadata response exceeded its byte cap.")
+        return response
+    }
+
+    private func handleWorkspaceDiffManifestReleaseRequest(
+        _ request: SpacesDeviceWorkspaceDiffManifestReleaseRequest
+    ) -> SpacesDeviceAPIResponse {
+        guard !request.manifestID.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "manifestID is required to release a diff manifest.", errorCode: .invalidArgument)
+        }
+        guard !(request.lastCommit && SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "lastCommit and refName are mutually exclusive.", errorCode: .invalidArgument)
+        }
+        let scope = WorkspaceDiffScope(workspaceID: request.workspaceID, refName: request.refName, lastCommit: request.lastCommit)
+        switch workspaceDiffTransfers.releaseManifest(manifestID: request.manifestID, scope: scope) {
+        case .found:
+            return SpacesDeviceAPIResponse(ok: true, message: "Released workspace diff manifest.")
+        case .missing:
+            // Release is an idempotent cleanup request. A client may retry after the daemon accepted the
+            // first release but lost its response, or release after TTL did the same work.
+            return SpacesDeviceAPIResponse(ok: true, message: "Workspace diff manifest was already released or expired.")
+        case .mismatched:
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Workspace diff manifest does not match this workspace or scope.", errorCode: .invalidArgument)
+        }
+    }
+
+    private func handleWorkspaceDiffFileChunkRequest(
+        _ request: SpacesDeviceWorkspaceDiffFileChunkRequest, context _: RequestContext
+    ) throws -> SpacesDeviceAPIResponse {
+        guard request.byteOffset >= 0 else {
+            return SpacesDeviceAPIResponse(ok: false, message: "byteOffset must not be negative.", errorCode: .invalidArgument)
+        }
+        guard !request.manifestID.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "manifestID is required for a workspace diff patch range.", errorCode: .invalidArgument)
+        }
+        guard !(request.lastCommit && SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "lastCommit and refName are mutually exclusive.", errorCode: .invalidArgument)
+        }
+        let scope = WorkspaceDiffScope(workspaceID: request.workspaceID, refName: request.refName, lastCommit: request.lastCommit)
+
+        if request.cancel {
+            guard let transferID = request.transferID, !transferID.isEmpty else {
+                return SpacesDeviceAPIResponse(ok: false, message: "transferID is required to cancel a patch transfer.", errorCode: .invalidArgument)
+            }
+            switch workspaceDiffTransfers.lookupPatch(
+                manifestID: request.manifestID, transferID: transferID, scope: scope, relativePath: request.relativePath)
+            {
+            case .found:
+                _ = workspaceDiffTransfers.removePatch(transferID: transferID)
+                return SpacesDeviceAPIResponse(ok: true, message: "Cancelled workspace diff patch transfer.")
+            case .missing:
+                // Cancellation is also idempotent: its only product effect is releasing a private file.
+                return SpacesDeviceAPIResponse(ok: true, message: "Workspace diff patch transfer was already cancelled or expired.")
+            case .mismatched:
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Workspace diff patch transfer does not match this manifest, workspace, scope, or file.",
+                    errorCode: .invalidArgument)
+            }
+        }
+
+        if request.byteOffset == 0 {
+            guard request.transferID == nil else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "The initial workspace diff patch range must not include transferID.", errorCode: .invalidArgument)
+            }
+            let manifest: WorkspaceDiffTransferStore.ManifestSession
+            switch workspaceDiffTransfers.lookupManifest(manifestID: request.manifestID, scope: scope) {
+            case .found(let session): manifest = session
+            case .missing:
+                return SpacesDeviceAPIResponse(ok: false, message: "Workspace diff manifest expired or was released.", errorCode: .notFound)
+            case .mismatched:
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Workspace diff manifest does not match this workspace or scope.", errorCode: .invalidArgument)
+            }
+
+            if let existing = workspaceDiffTransfers.lookupPatchForInitialRange(
+                manifestID: request.manifestID, scope: scope, relativePath: request.relativePath)
+            {
+                let transfer = SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer(
+                    scopeSignature: existing.patch.scopeSignature, file: existing.patch.file, patchByteCount: existing.patch.byteCount)
+                return try workspaceDiffPatchChunkResponse(
+                    transferID: existing.transferID, transfer: transfer, byteOffset: 0, outputURL: existing.patch.outputURL)
+            }
+
+            let outputURL = try makeWorkspaceDiffPatchTransferFile()
+            var retainedByTransfer = false
+            defer {
+                if !retainedByTransfer { try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent()) }
+            }
+            guard let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
+                snapshot: manifest.snapshot, workspaceDir: manifest.workspaceDir, relativePath: request.relativePath, outputURL: outputURL,
+                gitClient: workspaceGitClient, deadlineStart: Date())
+            else {
+                return SpacesDeviceAPIResponse(ok: false, message: "The requested file is not changed in this workspace diff manifest.", errorCode: .notFound)
+            }
+
+            // Binary and empty patches have complete metadata but no byte stream. Do not create a transfer
+            // that a client could only discover is already complete on a needless second request.
+            guard !transfer.file.isBinary, transfer.patchByteCount > 0 else {
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Loaded workspace diff patch metadata.",
+                    result: .workspaceDiffFileChunk(.init(scopeSignature: transfer.scopeSignature, file: transfer.file)))
+            }
+
+            let transferID = workspaceDiffTransfers.createPatch(
+                manifestID: request.manifestID, scope: scope, relativePath: request.relativePath, scopeSignature: transfer.scopeSignature,
+                file: transfer.file, outputURL: outputURL, byteCount: transfer.patchByteCount)
+            retainedByTransfer = true
+            do {
+                return try workspaceDiffPatchChunkResponse(transferID: transferID, transfer: transfer, byteOffset: 0, outputURL: outputURL)
+            } catch {
+                _ = workspaceDiffTransfers.removePatch(transferID: transferID)
+                throw error
+            }
+        }
+
+        guard let transferID = request.transferID, !transferID.isEmpty else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "transferID is required after the initial workspace diff patch range.", errorCode: .invalidArgument)
+        }
+        switch workspaceDiffTransfers.lookupPatch(
+            manifestID: request.manifestID, transferID: transferID, scope: scope, relativePath: request.relativePath)
+        {
+        case .found(let session):
+            let transfer = SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer(
+                scopeSignature: session.scopeSignature, file: session.file, patchByteCount: session.byteCount)
+            do {
+                return try workspaceDiffPatchChunkResponse(
+                    transferID: transferID, transfer: transfer, byteOffset: request.byteOffset, outputURL: session.outputURL)
+            } catch {
+                _ = workspaceDiffTransfers.removePatch(transferID: transferID)
+                throw error
+            }
+        case .missing:
+            return SpacesDeviceAPIResponse(ok: false, message: "Workspace diff patch transfer or manifest expired.", errorCode: .notFound)
+        case .mismatched:
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Workspace diff patch transfer does not match this manifest, workspace, scope, or file.",
+                errorCode: .invalidArgument)
+        }
+    }
+
+    /// Every line-framed Device API response, including base64 and its envelope, fits this transport bound.
+    private static let workspaceDiffPatchResponseByteCap = 4 * 1024 * 1024
+
+    private func workspaceDiffPatchChunkResponse(
+        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer, byteOffset: Int,
+        outputURL: URL
+    ) throws -> SpacesDeviceAPIResponse {
+        guard Int64(byteOffset) <= transfer.patchByteCount else {
+            return SpacesDeviceAPIResponse(ok: false, message: "byteOffset is outside this workspace diff patch.", errorCode: .invalidArgument)
+        }
+        let rawByteCap = try workspaceDiffPatchInitialRawByteCap(transferID: transferID, transfer: transfer)
+        var (bytes, nextByteOffset) = try readWorkspaceDiffPatchChunk(
+            at: outputURL, byteOffset: byteOffset, byteCount: transfer.patchByteCount, rawByteCap: rawByteCap)
+        var response = workspaceDiffPatchResponse(
+            transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
+        if try SpacesDeviceAPICodec.encodeResponseLine(response).count > Self.workspaceDiffPatchResponseByteCap {
+            let fittedByteCount = try workspaceDiffPatchFittingByteCount(
+                transferID: transferID, transfer: transfer, bytes: bytes, byteOffset: byteOffset)
+            bytes = Data(bytes.prefix(fittedByteCount))
+            nextByteOffset = Int64(byteOffset) + Int64(bytes.count) < transfer.patchByteCount ? byteOffset + bytes.count : nil
+            response = workspaceDiffPatchResponse(
+                transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
+        }
+        if nextByteOffset == nil { workspaceDiffTransfers.markPatchComplete(transferID: transferID) }
+        let encodedResponseByteCount = try SpacesDeviceAPICodec.encodeResponseLine(response).count
+        precondition(
+            encodedResponseByteCount <= Self.workspaceDiffPatchResponseByteCap,
+            "Workspace diff patch response exceeded its transport byte cap.")
+        return response
+    }
+
+    private func workspaceDiffPatchResponse(
+        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer, bytes: Data, nextByteOffset: Int?
+    ) -> SpacesDeviceAPIResponse {
+        let isComplete = nextByteOffset == nil
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded workspace diff patch chunk.",
+            result: .workspaceDiffFileChunk(
+                .init(
+                    scopeSignature: transfer.scopeSignature, file: transfer.file, transferID: isComplete ? nil : transferID,
+                    patchBase64Data: bytes.base64EncodedString(), nextByteOffset: nextByteOffset)))
+    }
+
+    /// This first read reserves base64 expansion. The exact serialized response below verifies the
+    /// complete transport representation and reduces the range through the same path when needed.
+    private func workspaceDiffPatchInitialRawByteCap(
+        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer
+    ) throws -> Int {
+        let reserved = SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded workspace diff patch chunk.",
+            result: .workspaceDiffFileChunk(
+                .init(
+                    scopeSignature: transfer.scopeSignature, file: transfer.file, transferID: transferID,
+                    patchBase64Data: "", nextByteOffset: Int.max)))
+        let envelopeBytes = try SpacesDeviceAPICodec.encodeResponseLine(reserved).count
+        let base64Groups = max(0, (Self.workspaceDiffPatchResponseByteCap - envelopeBytes) / 4)
+        return base64Groups * 3
+    }
+
+    /// Finds the largest prefix whose actual encoded response fits. Most base64 payloads fit the initial
+    /// budget without entering here; this handles any additional serialized representation overhead.
+    private func workspaceDiffPatchFittingByteCount(
+        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer, bytes: Data, byteOffset: Int
+    ) throws -> Int {
+        var lowerBound = 0
+        var upperBound = bytes.count
+        while lowerBound < upperBound {
+            let candidateByteCount = (lowerBound + upperBound + 1) / 2
+            let candidate = Data(bytes.prefix(candidateByteCount))
+            let nextByteOffset = Int64(byteOffset) + Int64(candidateByteCount) < transfer.patchByteCount
+                ? byteOffset + candidateByteCount
+                : nil
+            let response = workspaceDiffPatchResponse(
+                transferID: transferID, transfer: transfer, bytes: candidate, nextByteOffset: nextByteOffset)
+            if try SpacesDeviceAPICodec.encodeResponseLine(response).count <= Self.workspaceDiffPatchResponseByteCap {
+                lowerBound = candidateByteCount
+            } else {
+                upperBound = candidateByteCount - 1
+            }
+        }
+        return lowerBound
+    }
+
+    private func readWorkspaceDiffPatchChunk(at outputURL: URL, byteOffset: Int, byteCount: Int64, rawByteCap: Int) throws -> (Data, Int?) {
+        guard let handle = FileHandle(forReadingAtPath: outputURL.path) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Workspace diff patch transfer is no longer available."])
+        }
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(byteOffset))
+        let bytes = try handle.read(upToCount: rawByteCap) ?? Data()
+        guard !bytes.isEmpty || Int64(byteOffset) == byteCount else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Workspace diff patch transfer was truncated before its expected end."])
+        }
+        let nextOffset = Int64(byteOffset) + Int64(bytes.count)
+        return (bytes, nextOffset < byteCount ? Int(nextOffset) : nil)
+    }
+
+    /// Creates one 0700 UUID directory and one 0600 empty output file. `git diff --output` writes only to
+    /// that private, daemon-minted path; no client path is ever used for the transfer artifact.
+    private func makeWorkspaceDiffPatchTransferFile() throws -> URL {
+        let fileManager = FileManager.default
+        for _ in 0..<3 {
+            let directory = fileManager.temporaryDirectory.appendingPathComponent("spaces-workspace-diff-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            } catch {
+                continue  // UUID collision or transient temp-dir race: mint another unique directory.
+            }
+            let outputURL = directory.appendingPathComponent("patch", isDirectory: false)
+            if fileManager.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) {
+                return outputURL
+            }
+            try? fileManager.removeItem(at: directory)
+        }
+        throw NSError(
+            domain: "SpacesDeviceAPIServer", code: 500,
+            userInfo: [NSLocalizedDescriptionKey: "Could not create workspace diff patch transfer storage."])
     }
 
     private func handleUpdateProjectConfigRequest(_ request: SpacesDeviceProjectConfigUpdateRequest, context: RequestContext) throws
@@ -4285,6 +4963,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         finishReservedWorkspaceTerminalLaunchInBackground(reservation)
         return response
+    }
+
+    /// Starts an arbitrary command in a workspace-owned terminal. This is intentionally distinct from
+    /// `spawnAgentSession`: the latter is a CLI/MCP contract that rejects unrecognized commands, whereas
+    /// Editor's Start Agent dialog accepts the command the user supplies and waits for ordinary foreground
+    /// detection to decide whether it becomes an addressable coding agent.
+    private func handleStartWorkspaceCommandSessionRequest(
+        _ request: SpacesDeviceStartWorkspaceCommandSessionRequest, context: RequestContext
+    ) throws -> SpacesDeviceAPIResponse {
+        guard let command = normalizedString(request.command) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
+        }
+        let session = try context.orchestrator().createWorkspaceTerminalSession(
+            workspaceID: request.workspaceID, title: nil, command: command)
+        return try refreshedMutationResponse(
+            context: context, message: "Started workspace command session.", workspaceID: request.workspaceID, sessionID: session.id)
     }
 
     private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
@@ -5144,7 +5838,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func relayWorkspaceDiffSignatureSubscription(connection: NWConnection, scope: WorkspaceDiffScope, installationID: String) throws {
             // Refuse before taking a subscriber slot: a non-git workspace's poll loop would otherwise sit
             // silently producing nothing, leaving the client to read "unavailable" forever instead of the
-            // same typed refusal `workspaceDiff` gives for the same case.
+            // same typed refusal `workspaceDiffManifestChunk` gives for the same case.
             try assertWorkspaceDiffScopeIsGitRepository(scope: scope)
             let socketPath = try addWorkspaceDiffSignatureSubscriber(scope: scope)
             do {

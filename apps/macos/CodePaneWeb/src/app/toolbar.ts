@@ -23,6 +23,7 @@ export interface ToolbarCallbacks {
   onOpenRefSearch(mode: RefSearchMode): void;
   onLayoutChange(layout: DiffLayout): void;
   onAgentSelect(id: string): void;
+  onStartAgent(): void;
   onSendBatch(): void;
 }
 
@@ -43,6 +44,8 @@ export interface ToolbarState {
   /** `undefined` when zero agents run, or when more than one runs and none has been picked yet
    *  (see `reviewComments.ts`'s `selectDefaultAgentId`). */
   selectedAgentId: string | undefined;
+  /** A command has launched but agent hooks have not reported a running session yet. */
+  agentStarting?: boolean;
   /** Count of drafts with non-empty body — what "Send batch · n" sends and shows. */
   draftCount: number;
 }
@@ -87,26 +90,34 @@ function menuItem(label: string, isOn: boolean, onClick: () => void): HTMLButton
 }
 
 /**
- * The `.agent-slot` region's content: exactly one agent is a static label (no picking to do); more
- * than one is a `<select>`, defaulting to a disabled placeholder option until a pick is made (a
- * native `<select>` otherwise silently shows its first real option as "selected" without the
- * controller's own state agreeing one was actually chosen). "Send batch · n" is disabled, with a
- * `title` explaining why, whenever there is no agent to send to or nothing to send — the same rule
- * `commentsController.ts` applies to each card's own "Send to <label>" button.
+ * The `.agent-slot` has one compact assignment control: Start agent with no sessions, a running
+ * agent selector otherwise, or a temporary Starting agent label while a command is detected. The
+ * launch state replaces only that control; the independent Send batch action remains available to
+ * an already assigned running agent. A disabled assignment or empty batch explains itself with a
+ * title, matching `commentsController.ts`'s per-card send rule.
  */
 function buildAgentSlot(agentSlot: HTMLElement, state: ToolbarState, callbacks: ToolbarCallbacks): void {
-  if (state.agents.length === 1) {
-    const label = document.createElement("span");
-    label.className = "agent-label";
-    label.textContent = state.agents[0]!.label;
-    agentSlot.appendChild(label);
-  } else if (state.agents.length > 1) {
+  if (state.agentStarting) {
+    const starting = document.createElement("span");
+    starting.className = "agent-label";
+    starting.textContent = "Starting agent…";
+    agentSlot.appendChild(starting);
+  } else if (state.agents.length === 0) {
+    const start = document.createElement("button");
+    start.type = "button";
+    start.className = "btn";
+    start.id = "code-pane-start-agent";
+    start.textContent = "Start agent…";
+    start.addEventListener("click", callbacks.onStartAgent);
+    agentSlot.appendChild(start);
+  } else {
     const select = document.createElement("select");
     select.className = "agent-select";
+    select.id = "code-pane-agent-selector";
     if (state.selectedAgentId === undefined) {
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = "Select an agent…";
+      placeholder.textContent = "Assign agent…";
       placeholder.disabled = true;
       placeholder.selected = true;
       select.appendChild(placeholder);
@@ -114,11 +125,29 @@ function buildAgentSlot(agentSlot: HTMLElement, state: ToolbarState, callbacks: 
     for (const agent of state.agents) {
       const opt = document.createElement("option");
       opt.value = agent.id;
-      opt.textContent = agent.label;
+      opt.textContent = agent.id === state.selectedAgentId ? `Send to: ${agent.label}` : agent.label;
       opt.selected = agent.id === state.selectedAgentId;
       select.appendChild(opt);
     }
-    select.addEventListener("change", () => callbacks.onAgentSelect(select.value));
+    const separator = document.createElement("option");
+    separator.disabled = true;
+    separator.textContent = "────────";
+    select.appendChild(separator);
+    const startNew = document.createElement("option");
+    startNew.value = "__start_new_agent__";
+    startNew.textContent = "Start new…";
+    select.appendChild(startNew);
+    select.addEventListener("change", () => {
+      if (select.value === "__start_new_agent__") {
+        // Opening and then cancelling the command dialog must not leave this transient menu
+        // sentinel visually selected. Restore the durable assignment (or its placeholder) before
+        // the dialog takes focus; no toolbar render is required to repair it later.
+        select.value = state.selectedAgentId ?? "";
+        callbacks.onStartAgent();
+      } else {
+        callbacks.onAgentSelect(select.value);
+      }
+    });
     agentSlot.appendChild(select);
   }
 
@@ -206,8 +235,11 @@ export function renderToolbar(
     // Diff | Editor — visible in both modes.
     const modeSeg = document.createElement("span");
     modeSeg.className = "seg";
-    modeSeg.appendChild(segButton("Diff", state.mode === "diff", () => callbacks.onModeChange("diff")));
-    modeSeg.appendChild(segButton("Editor", state.mode === "editor", () => callbacks.onModeChange("editor")));
+    const diffMode = segButton("Diff", state.mode === "diff", () => callbacks.onModeChange("diff"));
+    diffMode.id = "code-pane-mode-diff";
+    const editorMode = segButton("Editor", state.mode === "editor", () => callbacks.onModeChange("editor"));
+    editorMode.id = "code-pane-mode-editor";
+    modeSeg.append(diffMode, editorMode);
     el.appendChild(modeSeg);
 
     if (state.mode === "diff") {
@@ -219,6 +251,7 @@ export function renderToolbar(
       const compareBtn = document.createElement("button");
       compareBtn.type = "button";
       compareBtn.className = "compare-btn";
+      compareBtn.id = "code-pane-scope-menu";
       compareBtn.textContent = compareLabel(state.scope);
       compareBtn.addEventListener("click", () => {
         compareMenuOpen = !compareMenuOpen;
@@ -237,12 +270,12 @@ export function renderToolbar(
             callbacks.onScopeChange({ kind: "uncommitted" });
           }),
         );
-        menu.appendChild(
-          menuItem("Last commit", kind === "lastCommit", () => {
+        const lastCommit = menuItem("Last commit", kind === "lastCommit", () => {
             closeCompareMenu();
             callbacks.onScopeChange({ kind: "lastCommit" });
-          }),
-        );
+          });
+        lastCommit.id = "code-pane-scope-last-commit";
+        menu.appendChild(lastCommit);
         if (state.baseBranch !== undefined) {
           const baseBranch = state.baseBranch;
           menu.appendChild(
@@ -294,10 +327,12 @@ export function renderToolbar(
 
       const layoutSeg = document.createElement("span");
       layoutSeg.className = "seg";
-      layoutSeg.appendChild(segButton("Split", state.layout === "split", () => callbacks.onLayoutChange("split")));
-      layoutSeg.appendChild(
-        segButton("Unified", state.layout === "unified", () => callbacks.onLayoutChange("unified")),
-      );
+      const split = segButton("Split", state.layout === "split", () => callbacks.onLayoutChange("split"));
+      split.id = "code-pane-layout-split";
+      layoutSeg.appendChild(split);
+      const unified = segButton("Unified", state.layout === "unified", () => callbacks.onLayoutChange("unified"));
+      unified.id = "code-pane-layout-unified";
+      layoutSeg.appendChild(unified);
       el.appendChild(layoutSeg);
     }
 

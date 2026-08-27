@@ -73,18 +73,21 @@ function makeBridge(): SpacesBridge & {
     releaseHeldDelete: undefined as (() => void) | undefined,
     holdNextSend: false,
     releaseHeldSend: undefined as (() => void) | undefined,
-    workspaceDiff: notUsed,
+    workspaceDiffManifestChunk: notUsed,
+    workspaceDiffFileChunk: notUsed,
+    workspaceDiffFileChunkCancel: notUsed,
+    workspaceDiffManifestRelease: notUsed,
     workspaceFileRead: notUsed,
     workspaceFileWrite: notUsed,
     workspaceFileList: notUsed,
     workspaceRefList: notUsed,
     subscribeDiffSignature: () => () => {},
     subscribeFileSignature: () => () => {},
-    notifyEditorStateChanged: () => {},
-    notifyEditorUIStateChanged: () => {},
-    notifyModeChanged: () => {},
+    notifyWorkspaceStateChanged: () => {},
     notifyRenderMetric: () => {},
     notifyReady: () => {},
+    startWorkspaceCommand: notUsed,
+    resumeWorkspaceCommandTracking: notUsed,
     async reviewCommentList() {
       if (bridge.failNextList) {
         const err = bridge.failNextList;
@@ -186,7 +189,6 @@ const FILE: DiffFileEntry = {
   path: "src/foo.ts",
   status: "modified",
   isBinary: false,
-  truncated: false,
   patch: `diff --git a/src/foo.ts b/src/foo.ts
 index 1111111..2222222 100644
 --- a/src/foo.ts
@@ -204,7 +206,6 @@ const SHIFTED_FILE: DiffFileEntry = {
   path: "src/foo.ts",
   status: "modified",
   isBinary: false,
-  truncated: false,
   patch: `diff --git a/src/foo.ts b/src/foo.ts
 index 1111111..3333333 100644
 --- a/src/foo.ts
@@ -216,19 +217,80 @@ index 1111111..3333333 100644
 `,
 };
 
-/** A minimal stand-in for `DiffView`'s public surface, cast to the real type — the controller
- *  only ever calls these three methods on it. */
+/** A minimal stand-in for `DiffView`'s public surface, cast to the real type. */
 function makeFakeDiffView() {
   const setComments = vi.fn();
+  const updateCommentsForFile = vi.fn();
   const scrollToLine = vi.fn();
   const scrollToFile = vi.fn();
-  const fake = { setComments, scrollToLine, scrollToFile } as unknown as DiffView;
-  return { fake, setComments, scrollToLine, scrollToFile };
+  const fake = { setComments, updateCommentsForFile, scrollToLine, scrollToFile } as unknown as DiffView;
+  return { fake, setComments, updateCommentsForFile, scrollToLine, scrollToFile };
 }
 
 function lastToolbarState(spy: ReturnType<typeof vi.fn>): CommentsToolbarState {
   return spy.mock.calls.at(-1)![0] as CommentsToolbarState;
 }
+
+describe("CommentsController — progressive patch updates", () => {
+  it("does not re-anchor or publish unchanged comment state for an unrelated completed file", () => {
+    const bridge = makeBridge();
+    const onToolbarStateChange = vi.fn<(state: CommentsToolbarState) => void>();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    const other = { ...FILE, path: "src/other.ts", patch: "@@ -1 +1 @@\n-old\n+new" };
+    controller.setFiles([FILE, other]);
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const renderedBefore = diffViewFake.setComments.mock.calls.length;
+    const toolbarBefore = onToolbarStateChange.mock.calls.length;
+
+    controller.updateFile({ ...other, patch: "@@ -1 +1 @@\n-old\n+newer" });
+
+    expect(diffViewFake.setComments).toHaveBeenCalledTimes(renderedBefore);
+    expect(onToolbarStateChange).toHaveBeenCalledTimes(toolbarBefore);
+  });
+
+  it("re-anchors only the completed file's affected comment when its line moves", () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+
+    controller.updateFile(SHIFTED_FILE);
+
+    expect(diffViewFake.setComments).toHaveBeenCalledTimes(2); // manifest + draft creation only
+    const anchored = diffViewFake.updateCommentsForFile.mock.calls.at(-1)![1] as { position?: { lineNumber: number } }[];
+    expect(anchored[0]!.position?.lineNumber).toBe(2);
+  });
+
+  it("preserves a completed anchor through queued and streaming manifest refreshes until ready", () => {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+
+    // A live refresh has already moved the comment to line 2. The next manifest only carries
+    // metadata, so it must not replace that confirmed position with the draft's original line 1.
+    controller.updateFile(SHIFTED_FILE);
+    const queued = { ...SHIFTED_FILE, patch: undefined, patchState: "queued" as const };
+    controller.setFiles([queued]);
+    const afterQueued = diffViewFake.setComments.mock.calls.at(-1)![0] as { position?: { lineNumber: number } }[];
+    expect(afterQueued[0]!.position?.lineNumber).toBe(2);
+
+    controller.updateFile({ ...queued, patchState: "streaming" });
+    const afterStreaming = diffViewFake.setComments.mock.calls.at(-1)![0] as { position?: { lineNumber: number } }[];
+    expect(afterStreaming[0]!.position?.lineNumber).toBe(2);
+
+    // Only the completed patch is authoritative enough to recompute the anchor.
+    controller.updateFile(FILE);
+    const afterReady = diffViewFake.updateCommentsForFile.mock.calls.at(-1)![1] as { position?: { lineNumber: number } }[];
+    expect(afterReady[0]!.position?.lineNumber).toBe(1);
+  });
+});
 
 describe("CommentsController — card create/edit/delete RPC round-trips", () => {
   let bridge: ReturnType<typeof makeBridge>;
@@ -3135,6 +3197,7 @@ describe("CommentsController — Fix 2 (round-2 P1): sendBatch drains persists r
     });
     await controller.loadInitial();
     const container = document.createElement("div");
+    document.body.appendChild(container);
     controller.mount(container);
 
     const cardX = controller.hooks.renderCard({ comment: x, position: { lineNumber: 1, outdated: false } });
@@ -3716,6 +3779,34 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
     expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeGesture);
 
     card.remove();
+  });
+
+  it("keeps a pressed tray remove button alive while a completed patch re-anchors its comment", async () => {
+    const { bridge, controller, diffViewFake } = setup();
+    const persisted = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "Remove this review note",
+    });
+    await controller.loadInitial();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    controller.mount(container);
+    const row = container.querySelector<HTMLElement>(".comment-tray-row")!;
+    const removeButton = row.querySelector<HTMLButtonElement>(".comment-tray-remove")!;
+
+    // The user has pressed the row's remove button. A completed patch arriving during this
+    // gesture must retain the pressed DOM node until the click is delivered.
+    removeButton.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    controller.updateFile(SHIFTED_FILE);
+    expect(container.querySelector(".comment-tray-row")).toBe(row);
+
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    removeButton.click();
+    await vi.waitFor(() => expect(bridge.drafts.has(persisted.id)).toBe(false));
+    expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(2);
   });
 });
 

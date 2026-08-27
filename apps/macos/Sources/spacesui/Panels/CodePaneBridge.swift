@@ -53,12 +53,12 @@ enum CodePaneBridge {
         return dict["id"] == nil && dict["method"] as? String == "ready"
     }
 
-    /// One editor's open-file snapshot: the wire shape of `editorStateChanged`'s `params` and of
-    /// `InitPayload`'s `editorState` field. Mirrors `CodePaneWeb/src/bridge/types.ts`'s
+    /// One editor's open-file snapshot inside the complete workspace state and `InitPayload`.
+    /// Mirrors `CodePaneWeb/src/bridge/types.ts`'s
     /// `CodePaneEditorState`: `baseContent` is the file's content as of `baseSHA256` (the merge
-    /// base for Phase 5's external-change reconciliation), and `conflict` is whether the web app's
+    /// base for external-change reconciliation), and `conflict` is whether the web app's
     /// own merge attempt left unresolved markers in `content`.
-    struct EditorState: Codable, Equatable {
+    struct EditorState: Codable, Equatable, Sendable {
         let path: String
         let baseSHA256: String
         let baseContent: String
@@ -74,75 +74,236 @@ enum CodePaneBridge {
             self.dirty = dirty
             self.conflict = conflict
         }
+    }
 
-        /// Custom decode so an older/partial snapshot missing `conflict` (a field added after
-        /// `baseContent`) still decodes rather than failing outright: `conflict` defaults to
-        /// `false` when absent, while every other field stays required — a snapshot with no path,
-        /// hash, base content, live content, or dirty flag isn't a usable `EditorState` at all.
-        init(from decoder: Decoder) throws {
+    /// Diff mode's inline editor snapshot. Unlike the regular Editor buffer, an inline conflict
+    /// needs the exact disk hash that the read-only comparison displays: Keep mine must CAS against
+    /// that snapshot after hibernation, while `nil` means the file was deleted and may be recreated.
+    struct DiffEditorState: Codable, Equatable, Sendable {
+        let path: String
+        let baseSHA256: String
+        let baseContent: String
+        let content: String
+        let dirty: Bool
+        let conflict: Bool
+        let conflictBaseSHA256: String?
+
+        init(
+            path: String, baseSHA256: String, baseContent: String, content: String, dirty: Bool, conflict: Bool = false,
+            conflictBaseSHA256: String? = nil
+        ) {
+            self.path = path
+            self.baseSHA256 = baseSHA256
+            self.baseContent = baseContent
+            self.content = content
+            self.dirty = dirty
+            self.conflict = conflict
+            self.conflictBaseSHA256 = conflictBaseSHA256
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case path, baseSHA256, baseContent, content, dirty, conflict, conflictBaseSHA256
+        }
+
+        /// This field is required-nullable on the web bridge. Decoding it with `decode`, rather
+        /// than `decodeIfPresent`, rejects stale partial snapshots instead of inventing a deletion.
+        init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             path = try container.decode(String.self, forKey: .path)
             baseSHA256 = try container.decode(String.self, forKey: .baseSHA256)
             baseContent = try container.decode(String.self, forKey: .baseContent)
             content = try container.decode(String.self, forKey: .content)
             dirty = try container.decode(Bool.self, forKey: .dirty)
-            conflict = try container.decodeIfPresent(Bool.self, forKey: .conflict) ?? false
+            conflict = try container.decode(Bool.self, forKey: .conflict)
+            conflictBaseSHA256 = try container.decode(String?.self, forKey: .conflictBaseSHA256)
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(path, forKey: .path)
+            try container.encode(baseSHA256, forKey: .baseSHA256)
+            try container.encode(baseContent, forKey: .baseContent)
+            try container.encode(content, forKey: .content)
+            try container.encode(dirty, forKey: .dirty)
+            try container.encode(conflict, forKey: .conflict)
+            if let conflictBaseSHA256 {
+                try container.encode(conflictBaseSHA256, forKey: .conflictBaseSHA256)
+            } else {
+                try container.encodeNil(forKey: .conflictBaseSHA256)
+            }
         }
     }
 
-    /// Evaluated by `CodePaneContentController.flushPendingEditorState()` at teardown to pull the web
-    /// app's live editor snapshot synchronously via the evaluate return value (see
-    /// `CodePaneScriptEvaluator.evaluateCodePaneScript(_:completion:)`), bypassing
-    /// `scheduleEditorStatePush`'s trailing debounce window entirely — the flush reads the editor's
-    /// live fields directly rather than waiting on the same timer that can otherwise still be pending
-    /// when a tab or workspace switch tears the page down. `typeof` distinguishes a page that hasn't
-    /// finished its own bootstrap yet (the global isn't defined — answers the `'__uninstalled__'`
-    /// sentinel) from an installed collector's own explicit "nothing open" answer (`null`, coalesced to
-    /// the `'__no_file__'` sentinel) — see `CollectedEditorState` for why that distinction matters.
-    static let collectEditorStateScript =
-        "typeof window.__spacesCollectEditorState === 'function' ? (window.__spacesCollectEditorState() ?? '__no_file__') : '__uninstalled__'"
+    /// The complete workspace-local Editor recovery snapshot. It is sent as one value at page
+    /// startup and whenever the web surface changes its location or an unsaved buffer. Keeping the
+    /// state together makes a retarget/restart atomic from the user's point of view: a restored
+    /// mode, scope, viewport, and dirty buffer always describe the same moment. Patches and DOM
+    /// state are deliberately absent; those are freshly streamed after restore.
+    struct WorkspaceState: Codable, Equatable, Sendable {
+        struct Scope: Codable, Equatable, Sendable {
+            let kind: String
+            let refName: String?
 
-    /// Result of decoding a teardown flush's collect-script return value (see
-    /// `collectEditorStateScript`). Three-way, not two-way: a pane reactivated with a dirty retained
-    /// buffer can be hibernated again before the bundle's JS finishes re-bootstrapping, so a teardown
-    /// flush can land before `__spacesCollectEditorState` even exists — that must NOT be treated as
-    /// "no file", or it would wipe the real snapshot the host is holding from the prior hibernation.
-    /// - `.notReported`: the page never got far enough to answer (collector not installed yet), or the
-    ///   evaluate call itself failed (folds to a `nil` result — see `CodePaneScriptEvaluator`'s doc
-    ///   comment), or the answer was a string that isn't one of the two sentinels and isn't valid JSON
-    ///   either (only this host's own trusted JS ever produces this argument, so this is purely
-    ///   defensive). The caller must leave whatever snapshot it already has untouched: worst case a
-    ///   stale snapshot survives a genuinely-now-empty page (harmless — restore just re-renders it),
-    ///   but destroying a real unsaved edit because the page hadn't booted yet is strictly worse.
-    /// - `.noFile`: an installed collector's own explicit "nothing open" answer. Clearing the stored
-    ///   snapshot for this case is correct.
-    /// - `.file`: the given state should be stored.
-    enum CollectedEditorState: Equatable {
-        case notReported
-        case noFile
-        case file(EditorState)
+            static let uncommitted = Scope(kind: "uncommitted", refName: nil)
+        }
+
+        let mode: String
+        let scope: Scope
+        let diffLayout: String
+        let diffSelectedPath: String?
+        /// `nil` means the user has not changed the diff tree, so the page should use its own
+        /// initial expansion. An empty array is an explicit choice to collapse every group.
+        let diffTreeExpandedPaths: [String]?
+        let diffTreeSelectedPath: String?
+        let fileTreeExpandedPaths: [String]
+        let fileTreeSelectedPath: String?
+        let editorSidebarMode: String
+        let editorRecentPaths: [String]
+        let diffScrollLine: Int?
+        let diffScrollSide: String?
+        let diffFocusedPath: String?
+        let diffFocusedLine: Int?
+        let diffFocusedSide: String?
+        let editorScrollLine: Int?
+        let editorFocusedLine: Int?
+        let editorState: EditorState?
+        let diffEditorState: DiffEditorState?
+        let pendingReviewComments: [ReviewCommentEntryPayload]?
+        let selectedAgentSessionId: String?
+        let pendingAgentLaunch: PendingAgentLaunch?
+
+        init(
+            mode: String, scope: Scope, diffLayout: String, diffSelectedPath: String?, diffTreeExpandedPaths: [String]?,
+            diffTreeSelectedPath: String?, fileTreeExpandedPaths: [String], fileTreeSelectedPath: String?, editorSidebarMode: String,
+            editorRecentPaths: [String], diffScrollLine: Int?, diffScrollSide: String?, diffFocusedPath: String?, diffFocusedLine: Int?, diffFocusedSide: String?,
+            editorScrollLine: Int?, editorFocusedLine: Int?,
+            editorState: EditorState?, diffEditorState: DiffEditorState?, pendingReviewComments: [ReviewCommentEntryPayload]?,
+            selectedAgentSessionId: String? = nil, pendingAgentLaunch: PendingAgentLaunch? = nil
+        ) {
+            self.mode = mode
+            self.scope = scope
+            self.diffLayout = diffLayout
+            self.diffSelectedPath = diffSelectedPath
+            self.diffTreeExpandedPaths = diffTreeExpandedPaths
+            self.diffTreeSelectedPath = diffTreeSelectedPath
+            self.fileTreeExpandedPaths = fileTreeExpandedPaths
+            self.fileTreeSelectedPath = fileTreeSelectedPath
+            self.editorSidebarMode = editorSidebarMode
+            self.editorRecentPaths = editorRecentPaths
+            self.diffScrollLine = diffScrollLine
+            self.diffScrollSide = diffScrollSide
+            self.diffFocusedPath = diffFocusedPath
+            self.diffFocusedLine = diffFocusedLine
+            self.diffFocusedSide = diffFocusedSide
+            self.editorScrollLine = editorScrollLine
+            self.editorFocusedLine = editorFocusedLine
+            self.editorState = editorState
+            self.diffEditorState = diffEditorState
+            self.pendingReviewComments = pendingReviewComments
+            self.selectedAgentSessionId = selectedAgentSessionId
+            self.pendingAgentLaunch = pendingAgentLaunch
+        }
     }
 
-    /// Decodes a teardown flush's collect-script return value into `CollectedEditorState`. See that
-    /// type's doc comment for the three-way split this enforces: only the `'__no_file__'` sentinel
-    /// (an installed collector's own explicit answer) maps to `.noFile` — everything else that isn't
-    /// well-formed `EditorState` JSON, including the `'__uninstalled__'` sentinel and a non-String
-    /// result (`nil`, or any other type — this is also what an evaluate error folds into), maps to
-    /// `.notReported`.
-    static func decodeCollectedEditorState(_ result: Any?) -> CollectedEditorState {
+    /// The durable portion of a Start Agent interaction. Its command is local-only recovery data,
+    /// never a daemon configuration; `sessionId` remains present after failure so the user can still
+    /// inspect the background terminal that ran it.
+    struct PendingAgentLaunch: Codable, Equatable, Sendable {
+        let sessionId: String?
+        let command: String
+        let status: String
+        let message: String?
+        /// Absolute Unix milliseconds. A relaunch resumes the original readiness budget instead of
+        /// giving one command a fresh timeout each time its Editor is rebuilt.
+        let deadlineEpochMilliseconds: Int64?
+    }
+
+    /// Reject malformed complete snapshots as a whole. There is no field-by-field recovery path:
+    /// persisting a partial state would restore a UI combination the page never produced.
+    static func isValidWorkspaceState(_ state: WorkspaceState) -> Bool {
+        guard ["diff", "editor"].contains(state.mode), ["unified", "split"].contains(state.diffLayout),
+            ["files", "changes"].contains(state.editorSidebarMode),
+            state.diffScrollLine.map({ $0 >= 0 }) ?? true,
+            state.diffScrollSide.map({ ["old", "new"].contains($0) }) ?? true,
+            state.diffFocusedLine.map({ $0 >= 0 }) ?? true,
+            state.diffFocusedSide.map({ ["old", "new"].contains($0) }) ?? true,
+            (state.diffSelectedPath == nil) == (state.diffScrollLine == nil),
+            (state.diffScrollLine == nil) == (state.diffScrollSide == nil),
+            (state.diffFocusedPath == nil) == (state.diffFocusedLine == nil),
+            (state.diffFocusedLine == nil) == (state.diffFocusedSide == nil),
+            state.editorScrollLine.map({ $0 >= 0 }) ?? true,
+            state.editorFocusedLine.map({ $0 >= 0 }) ?? true
+        else { return false }
+        switch state.scope.kind {
+        case "uncommitted", "lastCommit":
+            guard state.scope.refName == nil else { return false }
+        case "ref":
+            guard let refName = state.scope.refName, !refName.isEmpty else { return false }
+        default: return false
+        }
+        if let pending = state.pendingAgentLaunch {
+            guard ["starting", "failed"].contains(pending.status), !pending.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return false
+            }
+            switch pending.status {
+            case "starting":
+                guard let sessionID = pending.sessionId, !sessionID.isEmpty,
+                    let deadline = pending.deadlineEpochMilliseconds, deadline >= 0
+                else { return false }
+            case "failed":
+                guard pending.deadlineEpochMilliseconds == nil else { return false }
+            default: return false
+            }
+        }
+        if let diffEditorState = state.diffEditorState {
+            // A non-nil target means the conflict comparison read a particular disk version, and
+            // Keep mine must CAS against that exact version. A nil target is reserved for a
+            // deleted file (or an ordinary, non-conflicting inline buffer); it must never be
+            // invented for a malformed changed-file conflict.
+            guard diffEditorState.conflictBaseSHA256?.isEmpty != true,
+                diffEditorState.conflict || diffEditorState.conflictBaseSHA256 == nil
+            else { return false }
+        }
+        return true
+    }
+
+    /// The single collector superseding the independent editor/sidebar/comment collectors. A page
+    /// that has not installed the collector must never erase an older recovery document.
+    static let collectWorkspaceStateScript =
+        "typeof window.__spacesCollectWorkspaceState === 'function' ? (window.__spacesCollectWorkspaceState() ?? '__none__') : '__uninstalled__'"
+
+    enum CollectedWorkspaceState: Equatable {
+        case notReported
+        case none
+        case state(WorkspaceState)
+    }
+
+    static func decodeCollectedWorkspaceState(_ result: Any?) -> CollectedWorkspaceState {
         guard let jsonString = result as? String else { return .notReported }
         if jsonString == "__uninstalled__" { return .notReported }
-        if jsonString == "__no_file__" { return .noFile }
-        guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(EditorState.self, from: data) else {
+        if jsonString == "__none__" { return .none }
+        guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(WorkspaceState.self, from: data),
+            isValidWorkspaceState(state)
+        else {
             return .notReported
         }
-        return .file(state)
+        return .state(state)
     }
 
-    /// round-16 Fix 1a: one entry in a teardown comment-state snapshot, mirroring
-    /// `CodePaneWeb/src/bridge/types.ts`'s `PendingReviewCommentEntry` exactly. The wire shape of both
-    /// `collectReviewCommentStateScript`'s JSON entries and `InitPayload.pendingReviewComments`.
-    struct ReviewCommentEntryPayload: Codable, Equatable {
+    /// Decodes the complete live workspace-state notification. Its `params` is intentionally the
+    /// same object as `WorkspaceState`, so live persistence and teardown persistence cannot drift.
+    static func decodeWorkspaceStateChanged(body: Any) -> WorkspaceState? {
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "workspaceStateChanged",
+            let params = dict["params"], JSONSerialization.isValidJSONObject(params),
+            let data = try? JSONSerialization.data(withJSONObject: params)
+        else { return nil }
+        guard let state = try? JSONDecoder().decode(WorkspaceState.self, from: data), isValidWorkspaceState(state) else { return nil }
+        return state
+    }
+
+    /// One locally pending review-comment entry, carried as part of the complete workspace recovery
+    /// document rather than through a separate notification or collector.
+    struct ReviewCommentEntryPayload: Codable, Equatable, Sendable {
         let id: String
         let provisional: Bool
         let filePath: String
@@ -152,112 +313,15 @@ enum CodePaneBridge {
         let body: String
     }
 
-    /// Evaluated by `CodePaneContentController.flushPendingReviewCommentState()` at teardown — mirrors
-    /// `collectEditorStateScript` exactly (see its doc comment for the `typeof`/sentinel reasoning),
-    /// but for the comment surface: `'__none__'` is this method's "nothing pending" sentinel, standing
-    /// in for `collectEditorStateScript`'s `'__no_file__'`.
-    static let collectReviewCommentStateScript =
-        "typeof window.__spacesCollectReviewCommentState === 'function' ? (window.__spacesCollectReviewCommentState() ?? '__none__') : '__uninstalled__'"
-
-    /// Result of decoding a teardown flush's comment-state collect-script return value — mirrors
-    /// `CollectedEditorState` exactly (see its doc comment for the three-way discipline this
-    /// enforces), with `.none` (the `'__none__'` sentinel) standing in for `.noFile`.
-    enum CollectedReviewCommentState: Equatable {
-        case notReported
-        case none
-        case entries([ReviewCommentEntryPayload])
-    }
-
-    /// Decodes a teardown flush's comment-state collect-script return value into
-    /// `CollectedReviewCommentState` — mirrors `decodeCollectedEditorState` exactly, substituting the
-    /// `'__none__'` sentinel for `'__no_file__'` and a JSON array for a single JSON object.
-    static func decodeCollectedReviewCommentState(_ result: Any?) -> CollectedReviewCommentState {
-        guard let jsonString = result as? String else { return .notReported }
-        if jsonString == "__uninstalled__" { return .notReported }
-        if jsonString == "__none__" { return .none }
-        guard let data = jsonString.data(using: .utf8), let entries = try? JSONDecoder().decode([ReviewCommentEntryPayload].self, from: data) else {
-            return .notReported
-        }
-        return .entries(entries)
-    }
-
-    /// The Editor pane's sidebar UI state (which tab is showing, and the quick-open recency list),
-    /// persisted across pane hibernation exactly like `EditorState`. Mirrors
-    /// `CodePaneWeb/src/bridge/types.ts`'s `CodePaneEditorUIState`. Deliberately dumb: the web app
-    /// owns what values `sidebarMode` takes on and what `recentPaths` means, so this only needs to
-    /// decode, not validate, either field.
-    struct EditorUIState: Codable, Equatable {
-        let sidebarMode: String
-        let recentPaths: [String]
-    }
-
-    /// Evaluated by `CodePaneContentController.flushPendingEditorUIState()` at teardown — mirrors
-    /// `collectReviewCommentStateScript` exactly (see `collectEditorStateScript`'s doc comment for the
-    /// `typeof`/sentinel reasoning): `'__none__'` is this method's "nothing to report" sentinel.
-    static let collectEditorUIStateScript =
-        "typeof window.__spacesCollectEditorUIState === 'function' ? (window.__spacesCollectEditorUIState() ?? '__none__') : '__uninstalled__'"
-
-    /// Result of decoding a teardown flush's UI-state collect-script return value — mirrors
-    /// `CollectedReviewCommentState` exactly (see `CollectedEditorState`'s doc comment for the
-    /// three-way discipline this enforces), with `.state` standing in for `.entries`.
-    enum CollectedEditorUIState: Equatable {
-        case notReported
-        case none
-        case state(EditorUIState)
-    }
-
-    /// Decodes a teardown flush's UI-state collect-script return value into `CollectedEditorUIState`
-    /// — mirrors `decodeCollectedReviewCommentState` exactly, substituting a single JSON object for a
-    /// JSON array.
-    static func decodeCollectedEditorUIState(_ result: Any?) -> CollectedEditorUIState {
-        guard let jsonString = result as? String else { return .notReported }
-        if jsonString == "__uninstalled__" { return .notReported }
-        if jsonString == "__none__" { return .none }
-        guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(EditorUIState.self, from: data) else {
-            return .notReported
-        }
-        return .state(state)
-    }
-
-    /// Result of decoding a message body as the fire-and-forget `editorStateChanged` notification
-    /// (see `CodePaneWeb/README.md`'s wire protocol).
-    enum EditorStateChangedMessage: Equatable {
-        /// The body isn't this message at all (wrong method, or has an `id` and so is an RPC
-        /// `Request` instead) — the caller should try decoding it as something else.
-        case notThisMessage
-        /// The editor has no open file: `params` was `null`/absent (or, defensively, malformed).
-        case noFile
-        case file(EditorState)
-    }
-
-    /// Decodes a `{method:"editorStateChanged", params}` notification body.
-    static func decodeEditorStateChanged(body: Any) -> EditorStateChangedMessage {
-        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editorStateChanged" else { return .notThisMessage }
-        guard let params = dict["params"] as? [String: Any], !params.isEmpty else { return .noFile }
-        guard let path = params["path"] as? String, let baseSHA256 = params["baseSHA256"] as? String,
-            let baseContent = params["baseContent"] as? String, let content = params["content"] as? String, let dirty = params["dirty"] as? Bool
-        else { return .noFile }
-        let conflict = params["conflict"] as? Bool ?? false
-        return .file(EditorState(path: path, baseSHA256: baseSHA256, baseContent: baseContent, content: content, dirty: dirty, conflict: conflict))
-    }
-
-    /// Decodes a `{method:"modeChanged", params:{mode}}` notification body: the web app's push
-    /// whenever the user toggles the in-page Diff/Editor toolbar, so the host can restore the pane
-    /// to its live mode (not just the mode it was originally opened in) after hibernation. `nil`
-    /// when the body isn't this message, or `params.mode` isn't a recognized value.
-    static func decodeModeChanged(body: Any) -> String? {
-        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "modeChanged",
-            let params = dict["params"] as? [String: Any], let mode = params["mode"] as? String, mode == "diff" || mode == "editor"
-        else { return nil }
-        return mode
-    }
-
     /// One browser-complete milestone from the bundled page. Values are intentionally bounded at
     /// this trust boundary: this channel is diagnostic-only and must never become an unbounded log
     /// or formatting surface if a stale/corrupt page sends malformed data.
     struct RenderMetric: Equatable {
         enum Kind: String { case diff, editor }
-        enum Trigger: String { case initial, scope, workspaceChange, fileOpen }
+        enum Trigger: String {
+            case initial, scope, workspaceChange, fileOpen
+            case manifest, filePatch, complete, workspaceStateRestored, diffEdit, diffEditSave, diffEditCancel
+        }
 
         let kind: Kind
         let trigger: Trigger
@@ -265,6 +329,16 @@ enum CodePaneBridge {
         let fetchElapsedMS: Int?
         let fileCount: Int
         let contentBytes: Int
+        let path: String?
+        let fileIndex: Int?
+        let selectedPriority: Bool
+        let chunkCount: Int?
+        let mode: String?
+        let scope: String?
+        let layout: String?
+        let scrollTop: Int?
+        let focusedLine: Int?
+        let dirty: Bool?
     }
 
     static func decodeRenderMetric(body: Any) -> RenderMetric? {
@@ -272,26 +346,33 @@ enum CodePaneBridge {
             let params = dict["params"] as? [String: Any], let kindRaw = params["kind"] as? String, let kind = RenderMetric.Kind(rawValue: kindRaw),
             let triggerRaw = params["trigger"] as? String, let trigger = RenderMetric.Trigger(rawValue: triggerRaw),
             let elapsedMS = params["elapsedMs"] as? Int, (0...600_000).contains(elapsedMS), let fileCount = params["fileCount"] as? Int,
-            (0...10_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int, (0...(10 * 1024 * 1024)).contains(contentBytes)
+            (0...1_000_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int, (0...(4 * 1024 * 1024 * 1024)).contains(contentBytes)
         else { return nil }
         let fetchElapsedMS = params["fetchElapsedMs"] as? Int
-        guard (kind == .editor) == (trigger == .fileOpen), fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true else { return nil }
-        return RenderMetric(
-            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS, fileCount: fileCount, contentBytes: contentBytes)
-    }
-
-    /// Decodes a `{method:"editorUIStateChanged", params}` notification body: the web app's push
-    /// whenever the sidebar mode or quick-open recency list changes, so the host can hold the live
-    /// state across hibernation the same way `editorStateChanged` does for the open file. Unlike
-    /// `EditorState`, there is no "nothing open" case here — `params` is always the full snapshot —
-    /// so `nil` covers both "not this message" and a malformed/absent `params`, matching
-    /// `decodeModeChanged`'s two-way shape rather than `decodeEditorStateChanged`'s three-way one.
-    static func decodeEditorUIStateChanged(body: Any) -> EditorUIState? {
-        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editorUIStateChanged",
-            let params = dict["params"] as? [String: Any], let sidebarMode = params["sidebarMode"] as? String,
-            let recentPaths = params["recentPaths"] as? [String]
+        let path = params["path"] as? String
+        let fileIndex = params["fileIndex"] as? Int
+        let selectedPriority = params["selectedPriority"] as? Bool ?? false
+        let chunkCount = params["chunkCount"] as? Int
+        let mode = params["mode"] as? String
+        let scope = params["scope"] as? String
+        let layout = params["layout"] as? String
+        let scrollTop = params["scrollTop"] as? Int
+        let focusedLine = params["focusedLine"] as? Int
+        let dirty = params["dirty"] as? Bool
+        guard fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            path.map({ !$0.isEmpty && $0.utf8.count <= 4_096 }) ?? true,
+            fileIndex.map({ (0...1_000_000).contains($0) }) ?? true,
+            chunkCount.map({ (0...1_000_000).contains($0) }) ?? true,
+            mode.map({ $0 == "diff" || $0 == "editor" }) ?? true,
+            scope.map({ !$0.isEmpty && $0.utf8.count <= 1_024 }) ?? true,
+            layout.map({ $0 == "unified" || $0 == "split" }) ?? true,
+            scrollTop.map({ (0...10_000_000).contains($0) }) ?? true,
+            focusedLine.map({ (1...10_000_000).contains($0) }) ?? true
         else { return nil }
-        return EditorUIState(sidebarMode: sidebarMode, recentPaths: recentPaths)
+        return RenderMetric(
+            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS, fileCount: fileCount, contentBytes: contentBytes,
+            path: path, fileIndex: fileIndex, selectedPriority: selectedPriority, chunkCount: chunkCount,
+            mode: mode, scope: scope, layout: layout, scrollTop: scrollTop, focusedLine: focusedLine, dirty: dirty)
     }
 
     // MARK: - Diff scope
@@ -321,7 +402,7 @@ enum CodePaneBridge {
         }
     }
 
-    /// Resolves a `DiffScope` to the `(refName, lastCommit)` pair `workspaceDiff`/
+    /// Resolves a `DiffScope` to the `(refName, lastCommit)` pair `workspaceDiffManifestChunk`/
     /// `subscribeWorkspaceDiffSignature` take: `(nil, false)` for uncommitted-vs-HEAD, `(nil, true)` for
     /// the committed-only last-commit scope, or `(refName, false)` for the literal ref/SHA text of `.ref`.
     static func refName(for scope: DiffScope) -> (refName: String?, lastCommit: Bool) {
@@ -334,12 +415,19 @@ enum CodePaneBridge {
 
     // MARK: - RPC-to-client-call mapping
 
+    // The Editor is an unshipped feature, so these manifest/file-chunk methods are the singular
+    // diff wire protocol. There is intentionally no legacy `workspaceDiff` path or mixed-version
+    // capability negotiation to preserve here.
+
     /// What a decoded `Request` asks the host to do, in terms independent of `SpacesDeviceClient` —
     /// this is the pure "which call, with which arguments" mapping, so it's testable without a
     /// live device or network. `CodePaneContentController` switches over this to make the actual
     /// client call.
     enum Plan: Equatable {
-        case workspaceDiff(scope: DiffScope)
+        case workspaceDiffManifestChunk(scope: DiffScope, manifestID: String?, fileIndex: Int)
+        case workspaceDiffFileChunk(scope: DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String?)
+        case workspaceDiffFileChunkCancel(scope: DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String)
+        case workspaceDiffManifestRelease(scope: DiffScope, manifestID: String)
         case workspaceFileRead(path: String)
         /// `baseSHA256` is `nil` for the "create" convention (see `WorkspaceFileWriteOptions.baseSHA256`
         /// in `CodePaneWeb/src/bridge/types.ts`): the write must fail as a conflict unless the target
@@ -361,13 +449,55 @@ enum CodePaneBridge {
         /// `comments` pairs each id with the `revision` the web app's local mirror last saw for it —
         /// the daemon's stale-version check (see `SpacesDeviceWorkspaceReviewCommentsSendRequest`).
         case reviewCommentsSend(sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry])
+        case startWorkspaceCommand(command: String)
+        case resumeWorkspaceCommandTracking(sessionID: String)
     }
 
     /// Maps a decoded request to a `Plan`, or a `BridgeError` if its method is unrecognized or its
     /// params are missing/malformed. An unknown method is rejected with `invalidArgument`.
     static func plan(for request: Request) -> Result<Plan, BridgeError> {
         switch request.method {
-        case "workspaceDiff": return decodeDiffScope(request.params["scope"]).map { .workspaceDiff(scope: $0) }
+        case "workspaceDiffManifestChunk":
+            let manifestID = request.params["manifestID"] as? String
+            guard let fileIndex = request.params["fileIndex"] as? Int, fileIndex >= 0, manifestID?.isEmpty != true else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceDiffManifestChunk requires a non-negative fileIndex and a non-empty manifestID when supplied."))
+            }
+            return decodeDiffScope(request.params["scope"]).map {
+                .workspaceDiffManifestChunk(scope: $0, manifestID: manifestID, fileIndex: fileIndex)
+            }
+        case "workspaceDiffFileChunk":
+            guard let manifestID = request.params["manifestID"] as? String, !manifestID.isEmpty,
+                let relativePath = request.params["relativePath"] as? String, !relativePath.isEmpty,
+                let byteOffset = request.params["byteOffset"] as? Int, byteOffset >= 0
+            else {
+                return .failure(
+                    BridgeError(code: .invalidArgument, message: "workspaceDiffFileChunk requires manifestID, relativePath, and a non-negative byteOffset."))
+            }
+            return decodeDiffScope(request.params["scope"]).map {
+                .workspaceDiffFileChunk(
+                    scope: $0, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset,
+                    transferID: request.params["transferID"] as? String)
+            }
+        case "workspaceDiffFileChunkCancel":
+            guard let manifestID = request.params["manifestID"] as? String, !manifestID.isEmpty,
+                let relativePath = request.params["relativePath"] as? String, !relativePath.isEmpty,
+                let byteOffset = request.params["byteOffset"] as? Int, byteOffset >= 0,
+                let transferID = request.params["transferID"] as? String, !transferID.isEmpty
+            else {
+                return .failure(
+                    BridgeError(
+                        code: .invalidArgument,
+                        message: "workspaceDiffFileChunkCancel requires manifestID, relativePath, a non-negative byteOffset, and transferID."))
+            }
+            return decodeDiffScope(request.params["scope"]).map {
+                .workspaceDiffFileChunkCancel(
+                    scope: $0, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID)
+            }
+        case "workspaceDiffManifestRelease":
+            guard let manifestID = request.params["manifestID"] as? String, !manifestID.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceDiffManifestRelease requires manifestID."))
+            }
+            return decodeDiffScope(request.params["scope"]).map { .workspaceDiffManifestRelease(scope: $0, manifestID: manifestID) }
         case "workspaceFileRead":
             guard let path = request.params["path"] as? String else {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path."))
@@ -416,6 +546,16 @@ enum CodePaneBridge {
                 comments.append(SpacesDeviceReviewCommentSendEntry(id: id, revision: revision))
             }
             return .success(.reviewCommentsSend(sessionID: sessionID, text: text, comments: comments))
+        case "startWorkspaceCommand":
+            guard let command = request.params["command"] as? String, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "startWorkspaceCommand requires a command."))
+            }
+            return .success(.startWorkspaceCommand(command: command))
+        case "resumeWorkspaceCommandTracking":
+            guard let sessionID = request.params["sessionId"] as? String, !sessionID.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "resumeWorkspaceCommandTracking requires a sessionId."))
+            }
+            return .success(.resumeWorkspaceCommandTracking(sessionID: sessionID))
         default: return .failure(BridgeError(code: .invalidArgument, message: "Unknown method \"\(request.method)\"."))
         }
     }
@@ -506,6 +646,15 @@ enum CodePaneBridge {
     /// with nothing worth handing back beyond confirmation.
     struct AckPayload: Encodable, Equatable { let ok = true }
 
+    /// The immediate result of launching an arbitrary command. A session is always retained even
+    /// when it later exits or never identifies as an agent, so the web surface can keep the entered
+    /// command and show a useful failure without losing the terminal available for inspection.
+    struct StartWorkspaceCommandPayload: Encodable, Equatable {
+        let sessionId: String
+        let status: String
+        let deadlineEpochMilliseconds: Int64
+    }
+
     // MARK: - JS generation
 
     // `.sortedKeys` makes the emitted JS deterministic (Swift's default key order for synthesized
@@ -563,32 +712,16 @@ enum CodePaneBridge {
     /// `spaces:init`'s detail (`CodePaneWeb/src/bridge/types.ts`'s `CodePaneInitPayload`), dispatched once at
     /// startup after the web app's `ready` message arrives.
     struct InitPayload: Encodable, Equatable {
-        struct Scope: Encodable, Equatable {
-            let kind: String
-            let refName: String?
-        }
         let workspaceId: String
         let workspaceName: String
-        let initialMode: String
-        let initialScope: Scope
         let theme: String
         /// The workspace's configured base branch, nil-omitted when it has none. Drives the toolbar's
         /// one-click "vs <base>" preset and the ref dialog's base badge.
         let baseBranch: String?
-        /// The host-held editor-state snapshot from before this pane's most recent hibernation
-        /// cycle, nil-omitted when there is none (a pane's first-ever load, or one whose editor
-        /// never opened a file). See `CodePaneContentController.editorState`'s doc comment for the
-        /// persistence model this rehydrates.
-        let editorState: EditorState?
-        /// round-16 Fix 1a: the host-held snapshot of comment text typed but not yet persisted before
-        /// this pane's most recent teardown, nil-omitted when there is none. See
-        /// `CodePaneContentController.pendingReviewCommentState`'s doc comment for the persistence
-        /// model this rehydrates — mirrors `editorState` above but for the comment surface.
-        let pendingReviewComments: [ReviewCommentEntryPayload]?
-        /// The host-held sidebar UI-state snapshot from before this pane's most recent hibernation
-        /// cycle, nil-omitted when there is none. See `CodePaneContentController.editorUIState`'s doc
-        /// comment for the persistence model this rehydrates — mirrors `editorState` above.
-        let editorUIState: EditorUIState?
+        /// The client-local, durable recovery state for this workspace. This is the only restore
+        /// payload; independently-restored editor/sidebar/comment fields are deliberately not sent
+        /// so the page never combines values from different moments.
+        let workspaceState: WorkspaceState
         /// Coding agents running in this workspace right now, for the toolbar's assigned-agent
         /// dropdown (auto-default when exactly one, disabled sending with a reason when empty). Kept
         /// in sync after startup by `spaces:agents` (see `AgentsPayload` below).
@@ -608,10 +741,8 @@ enum CodePaneBridge {
     struct ThemePayload: Encodable, Equatable { let theme: String }
 
     /// `spaces:setMode`'s detail, dispatched to ask an already-loaded pane to switch its live
-    /// Diff/Editor mode. Counterpart to `modeChanged` (JS -> Swift): the JS listener dispatches the
-    /// same `setMode` action a toolbar click does, so `modeChanged` echoes back and
-    /// `CodePaneContentController.currentMode` still only ever changes from the page's own report —
-    /// see `requestMode`'s doc comment.
+    /// Diff/Editor mode. The following complete `workspaceStateChanged` notification is the single
+    /// authoritative acknowledgement persisted by `CodePaneContentController`.
     struct SetModePayload: Encodable, Equatable { let mode: String }
 
     /// `spaces:diffSignature`'s detail, dispatched whenever the subscribed scope's git state changes.
@@ -632,6 +763,19 @@ enum CodePaneBridge {
     /// startup (`spaces:init`'s `agents` field carries the set at page-load time).
     struct AgentsPayload: Encodable, Equatable { let agents: [AgentPayload] }
 
+    /// A terminal-command lifecycle event. The start RPC only reports `starting`, because returning
+    /// before the terminal exists would prevent its required background-tab insertion. Later events
+    /// are keyed by that exact terminal id so concurrent Editor panes never auto-assign one another's
+    /// newly detected agents.
+    struct AgentStartStatusPayload: Encodable, Equatable {
+        let sessionId: String
+        let status: String
+        let agent: AgentPayload?
+        let message: String?
+    }
+
+    struct WorkspaceStatePayload: Encodable, Equatable { let workspaceState: WorkspaceState }
+
     /// Builds the JS the host evaluates to dispatch one of the push events above. `nil` only if
     /// `detail` somehow fails to encode.
     static func dispatchEventScript<T: Encodable>(name: String, detail: T) -> String? {
@@ -645,8 +789,8 @@ enum CodePaneBridge {
 @MainActor protocol CodePaneScriptEvaluator: AnyObject {
     func evaluateCodePaneScript(_ script: String)
     /// Value-returning variant for scripts whose answer the host actually needs back — the teardown
-    /// flush's collect script (see `CodePaneBridge.collectEditorStateScript`) is this method's only
-    /// caller. `evaluateCodePaneScript(_:)` above is fire-and-forget and cannot answer.
+    /// complete workspace-state collector is its value-returning caller.
+    /// `evaluateCodePaneScript(_:)` above is fire-and-forget and cannot answer.
     func evaluateCodePaneScript(_ script: String, completion: @escaping @MainActor (Any?) -> Void)
 }
 
@@ -655,8 +799,8 @@ extension WKWebView: CodePaneScriptEvaluator {
     /// `evaluateJavaScript(_:completionHandler:)`'s completion handler is documented to run on the
     /// main thread, so `assumeIsolated` is a safe (non-crashing) bridge from that non-isolated
     /// callback type back onto the actor this protocol otherwise requires. A genuine JS error folds
-    /// into a `nil` result rather than being surfaced separately — see `CollectedEditorState`'s doc
-    /// comment for why its only caller treats that identically to the page answering `null`.
+    /// into a `nil` result rather than being surfaced separately, so the complete-state collector
+    /// leaves the last durable recovery document intact.
     func evaluateCodePaneScript(_ script: String, completion: @escaping @MainActor (Any?) -> Void) {
         evaluateJavaScript(script) { result, _ in MainActor.assumeIsolated { completion(result) } }
     }

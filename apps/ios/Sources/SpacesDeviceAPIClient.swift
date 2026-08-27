@@ -305,24 +305,6 @@ struct SpacesDeviceAPIClient: Sendable {
         return result
     }
 
-    /// Fetches a workspace's diff. `refName == nil, lastCommit == false` diffs uncommitted changes
-    /// against `HEAD`; `lastCommit == true` diffs `HEAD`'s own commit; a non-nil `refName` diffs the
-    /// merge-base of `refName` and `HEAD` against the working tree (see
-    /// `SpacesDeviceWorkspaceDiffRequest`). Wire parity with the Mac client; no iOS UI in v1.
-    func workspaceDiff(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws -> SpacesDeviceWorkspaceDiffResult
-    {
-        let response = try await sendRequest(
-            .init(
-                command: .workspaceDiff(.init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit)),
-                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), timeout: .seconds(60), commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
-        guard let result = response.workspaceDiff else {
-            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a workspace diff result.")
-        }
-        return result
-    }
-
     func runWorkspaceProcess(
         workspaceID: String, processKey: String, processTemplateID: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws -> SpacesDeviceAPIResponse {

@@ -13,8 +13,10 @@ import {
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
 import { afterBrowserPaint } from "./renderMetrics";
 
-/** Trailing debounce for the editorStateChanged push on buffer edits (see `scheduleEditorStatePush`'s doc comment). */
+/** Trailing debounce for recovery-state pushes on buffer edits (see `scheduleEditorStatePush`). */
 const EDITOR_STATE_DEBOUNCE_MS = 500;
+/** A broken editor attach must not leave a frame callback alive for the pane's lifetime. */
+const RESTORED_FOCUS_ATTACH_MAX_FRAMES = 120;
 /** Bounded-backoff floor/cap for `handleExternalChange`'s execution-failure retry (see
  *  `scheduleExternalChangeRetry`'s doc comment) — identical values to root.ts's
  *  `DIFF_RETRY_FLOOR_MS`/`DIFF_RETRY_CAP_MS`, mirrored here rather than imported: root.ts keeps
@@ -37,6 +39,11 @@ export interface EditorViewCallbacks {
    *  making it the real-system visible-render endpoint rather than the earlier read completion.
    *  A same-file signature reconcile does not cancel this milestone; only a newer file open does. */
   onFileRendered?(path: string, elapsedMs: number, contentUnits: number): void;
+  /** The owning pane folds this snapshot into its one atomic workspace-state document. */
+  onStateChanged?(state: CodePaneEditorState | undefined): void;
+  /** A discrete editor transition (open/save/external reconciliation) should flush the pane's
+   * recovery state immediately. Buffer typing still reaches this only after the editor debounce. */
+  onStateTransition?(): void;
 }
 
 /**
@@ -55,7 +62,7 @@ export interface EditorViewCallbacks {
  * the non-overlapping-edits case (see `EditorView.handleExternalChange`), so a partially-applied
  * merge is never shown to the user.
  */
-function diff3MergeLines(mine: string, base: string, theirs: string): { merged: string } | { conflict: true } {
+export function diff3MergeLines(mine: string, base: string, theirs: string): { merged: string } | { conflict: true } {
   const regions = diff3Merge(mine.split("\n"), base.split("\n"), theirs.split("\n"));
   const merged: string[] = [];
   for (const region of regions) {
@@ -85,10 +92,8 @@ function diff3MergeLines(mine: string, base: string, theirs: string): { merged: 
  *     the file deleted: conflict state — Save blocked, a read-only compare view (buffer vs. disk)
  *     with "Keep mine" / "Take disk" (or "Close without saving" when deleted) actions.
  *
- * Every open/edit/save/external-change transition pushes an `editorStateChanged` notification to
- * the host (see `pushEditorStateNow`/`scheduleEditorStatePush`), so this view's state can be
- * rebuilt from the host's snapshot via `restoreState` after this pane's WKWebView is torn down and
- * recreated by a hibernation cycle.
+ * Every open/edit/save/external-change transition updates the unified workspace recovery document
+ * through root's callback, so this view's state can be rebuilt after a hibernation cycle.
  */
 export class EditorView {
   private readonly bridge: SpacesBridge;
@@ -108,9 +113,9 @@ export class EditorView {
    *  disk side; kept distinct from `latestContent` (the live buffer, diff3's "mine"/"a" side). */
   private baseContent: string | undefined;
   private latestContent: string | undefined;
-  /** True from the first edit after an open/restore/save until the next successful save — mirrors
-   *  `editorStateChanged`'s `dirty` field so a hibernation snapshot knows whether the buffer can be
-   *  trusted over disk on rehydration (see `restoreState`'s doc comment). */
+  /** True from the first edit after an open/restore/save until the next successful save. The
+   *  recovery document records it so rehydration knows whether the buffer can be trusted over
+   *  disk (see `restoreState`). */
   private dirty = false;
   private conflict = false;
   /** True iff the current conflict is a "deleted on disk" one rather than a "changed on disk" one —
@@ -189,6 +194,9 @@ export class EditorView {
    *  indicator) that file has put up in the meantime. */
   private unreadableBannerVisible = false;
   private editorStatePushTimer: ReturnType<typeof setTimeout> | undefined;
+  private focusedLine: number | null = null;
+  /** Invalidates a pending restored-caret poll whenever a different editor document renders. */
+  private focusRestoreGeneration = 0;
   /** Unsubscribes the previous `subscribeFileSignature` listener; replaced (not layered) every time
    *  a new path becomes "the currently open file" — see `subscribeToFileSignature`. */
   private fileSignatureUnsubscribe: Unsubscribe | undefined;
@@ -228,6 +236,7 @@ export class EditorView {
     // absolutely-positioned `.banner` away with the content instead of keeping it docked.
     this.codeHost = document.createElement("div");
     this.codeHost.className = "diff-view-root";
+    this.codeHost.id = "code-pane-editor-scroll";
     codeArea.appendChild(this.codeHost);
 
     this.banner = document.createElement("div");
@@ -262,6 +271,7 @@ export class EditorView {
           this.latestContent = file.contents;
           this.dirty = true;
           this.bufferEditGeneration += 1;
+          this.focusedLine = this.readFocusedLine() ?? this.focusedLine;
           this.saveBtn.disabled = this.conflict;
           // A merge indicator's Undo only makes sense against the exact pre-merge buffer: an edit
           // made on top of the merge result would be silently discarded by an Undo that reverts to
@@ -284,6 +294,7 @@ export class EditorView {
    *  drift apart on how the buffer is (re)loaded. */
   private loadIntoCodeView(path: string, content: string): void {
     const codeView = this.ensureCodeView();
+    this.focusRestoreGeneration += 1;
     this.editGeneration += 1;
     const item: CodeViewItem = {
       id: path,
@@ -326,8 +337,81 @@ export class EditorView {
       }
       this.editGeneration += 1;
       codeView.updateItem({ ...item, version: this.editGeneration });
+      const editorElement = this.codeHost.querySelector<HTMLElement>("[contenteditable=true]");
+      if (editorElement) editorElement.id = "code-pane-editor-input";
     };
     requestAnimationFrame(poll);
+  }
+
+  /** Logical source-line recovery avoids retaining a stale pixel offset after virtualization. */
+  visibleLine(): number | null {
+    if (!this.codeHost.isConnected) return null;
+    const top = this.codeHost.getBoundingClientRect().top;
+    for (const node of this.codeHost.querySelectorAll<HTMLElement>("[data-line]")) {
+      if (node.getBoundingClientRect().bottom < top) continue;
+      const line = Number(node.dataset.line);
+      if (Number.isInteger(line) && line > 0) return line;
+    }
+    return null;
+  }
+
+  focusedLineNumber(): number | null {
+    // Caret movement is not an edit, so it does not flow through `onItemEditChange`. Sampling the
+    // live selection at the snapshot seam preserves keyboard/mouse navigation without attaching
+    // high-frequency global selection listeners to every editor document.
+    this.focusedLine = this.readFocusedLine() ?? this.focusedLine;
+    return this.focusedLine;
+  }
+
+  restorePosition(scrollLine: number | null | undefined, focusedLine: number | null | undefined): void {
+    this.focusedLine = focusedLine ?? null;
+    if (!this.currentPath) return;
+    if (scrollLine !== null && scrollLine !== undefined) {
+      this.codeView?.scrollTo({ type: "line", id: this.currentPath, lineNumber: scrollLine, behavior: "instant" });
+      this.codeHost.dataset.scrollLine = String(scrollLine);
+    }
+    if (focusedLine !== null && focusedLine !== undefined) {
+      // Conflict and deleted-file states deliberately render non-editable CodeView items. There is
+      // no caret to restore there, so polling `getEditor` would spin forever instead of waiting for
+      // a future user action that returns to an editable document.
+      if (this.conflict || this.latestContent === undefined) return;
+      const path = this.currentPath;
+      const restoreGeneration = ++this.focusRestoreGeneration;
+      let remainingAttachFrames = RESTORED_FOCUS_ATTACH_MAX_FRAMES;
+      const focusWhenAttached = () => {
+        if (
+          restoreGeneration !== this.focusRestoreGeneration ||
+          this.currentPath !== path ||
+          this.conflict ||
+          this.latestContent === undefined
+        ) return;
+        const editor = this.codeView?.getEditor(path) as { focus?(options: { lineNumber: number }): void } | undefined;
+        if (editor === undefined) {
+          if (remainingAttachFrames === 0) return;
+          remainingAttachFrames -= 1;
+          requestAnimationFrame(focusWhenAttached);
+          return;
+        }
+        editor.focus?.({ lineNumber: focusedLine });
+      };
+      requestAnimationFrame(focusWhenAttached);
+    }
+  }
+
+  private readFocusedLine(): number | null {
+    const selection = document.getSelection();
+    const node = selection?.focusNode;
+    if (!node || !this.codeHost.contains(node)) return null;
+    const editable = node.parentElement?.closest<HTMLElement>("[contenteditable=true]");
+    if (!editable) return null;
+    const range = document.createRange();
+    range.selectNodeContents(editable);
+    try {
+      range.setEnd(node, selection!.focusOffset);
+    } catch {
+      return null;
+    }
+    return range.toString().split("\n").length;
   }
 
   /**
@@ -337,7 +421,7 @@ export class EditorView {
    * directly with nothing at risk (that path only ever follows a fresh restore, never an
    * in-progress edit).
    *
-   * round-13 Fix 1: silently replacing the buffer here would violate the spec's unsaved-edit
+   * Silently replacing the buffer here would violate the spec's unsaved-edit
    * promise (README.md: "only quitting and reopening the app loses an unsaved edit") — a save-in-
    * progress buffer must not vanish just because a different file was opened. A modal confirmation
    * is out per this codebase's design rules (no new modal surfaces), so the existing non-blocking
@@ -345,7 +429,7 @@ export class EditorView {
    * way to abandon the current edit, distinct from the silent replace this gate refuses to do on
    * its own.
    *
-   * round-15 Fix (Bugs A+B): this upfront check is a fast path only, not the whole contract. It
+   * This upfront check is a fast path only, not the whole contract. It
    * runs before the read starts, so it cannot see dirty state that arises WHILE that read is in
    * flight (the user typing into the currently-open file during a slow remote read) —
    * `loadFile()` itself re-checks dirty at completion and raises the identical banner if the race
@@ -1124,28 +1208,29 @@ export class EditorView {
    *  or its diff3 merge base. */
   private pushEditorStateNow(): void {
     clearTimeout(this.editorStatePushTimer);
-    this.bridge.notifyEditorStateChanged(this.collectEditorState());
+    this.callbacks.onStateChanged?.(this.collectEditorState());
+    this.callbacks.onStateTransition?.();
   }
 
   /** Trailing debounce for the push on buffer edits: a keystroke-by-keystroke push would be wasted
    *  work between keystrokes, while the immediate pushes above already cover every transition that
    *  can't tolerate the delay. A buffer edit inside this window used to be at risk of loss if a
-   *  hibernating teardown landed before the timer fired; that race is closed by
-   *  `window.__spacesCollectEditorState` (wired to `collectStateForFlush` in root.ts), which the
-   *  Swift host pulls synchronously at teardown regardless of where this timer is. */
+   *  hibernating teardown landed before the timer fired; that race is closed by the unified
+   *  `window.__spacesCollectWorkspaceState` collector, which the Swift host pulls synchronously. */
   private scheduleEditorStatePush(): void {
     clearTimeout(this.editorStatePushTimer);
     this.editorStatePushTimer = setTimeout(() => this.pushEditorStateNow(), EDITOR_STATE_DEBOUNCE_MS);
   }
 
-  /** Host-pulled counterpart to the push path: called synchronously (no debounce, no async work)
-   *  by `window.__spacesCollectEditorState` at teardown, so it always reflects whatever the buffer
-   *  holds at that exact instant, including an edit still inside `scheduleEditorStatePush`'s window.
-   *  Returns the JSON-stringified `CodePaneEditorState`, or `null` when no file is open — matching
-   *  `decodeCollectedEditorState`'s expectations on the Swift side. */
+  /** Current open-file source state for the host-pulled unified workspace collector. */
   collectStateForFlush(): string | null {
     const state = this.collectEditorState();
     return state ? JSON.stringify(state) : null;
+  }
+
+  /** Current source-state snapshot for the pane-level persistence document. */
+  snapshot(): CodePaneEditorState | undefined {
+    return this.collectEditorState();
   }
 
   private async save(): Promise<void> {

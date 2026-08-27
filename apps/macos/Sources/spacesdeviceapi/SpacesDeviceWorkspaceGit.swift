@@ -184,73 +184,34 @@ enum SpacesDeviceWorkspaceBinaryGuess {
 }
 
 /// Git-backed support for the workspace file/diff Device API commands: uncommitted/against-ref diff
-/// building and the cheap `scopeSignature` change-detection token both `workspaceDiff` and
+/// building and the cheap `scopeSignature` change-detection token both the manifest endpoint and
 /// `subscribeWorkspaceDiffSignature`'s poll timer use. Pure functions over an explicit `workspaceDir` and
 /// `RemoteWorkspaceGitClient` so they need no server state and can run off any queue.
 enum SpacesDeviceWorkspaceDiffEngine {
-    /// Per-file and total unified-diff patch caps (see `SpacesDeviceWorkspaceDiffFile.truncated`). A file
-    /// over its own cap, or that would push the running total over the total cap, gets `patch = nil` and
-    /// `truncated = true` but is never dropped from the result.
-    static let perFilePatchByteCap = 1 * 1024 * 1024
-    static let totalPatchByteCap = 8 * 1024 * 1024
-    /// A small wave amortizes macOS process-launch latency for the common many-tracked-files case without
-    /// turning one visible Editor into an unbounded burst of git work while coding agents churn a worktree.
-    private static let trackedPatchFetchConcurrency = 4
-
-    /// `DispatchQueue.concurrentPerform` requires a synchronized result sink. Each slot has exactly one
-    /// writer, but Swift arrays do not make disjoint concurrent mutation safe, so the lock is intentional.
-    private final class TrackedPatchResults: @unchecked Sendable {
-        private let lock = NSLock()
-        private var values: [Result<SpacesDeviceWorkspaceDiffFile, any Error>?]
-
-        init(count: Int) { values = Array(repeating: nil, count: count) }
-
-        func store(_ result: Result<SpacesDeviceWorkspaceDiffFile, any Error>, at index: Int) {
-            lock.lock()
-            values[index] = result
-            lock.unlock()
-        }
-
-        func ordered() -> [Result<SpacesDeviceWorkspaceDiffFile, any Error>] {
-            lock.lock()
-            defer { lock.unlock() }
-            return values.map { value in
-                guard let value else { preconditionFailure("Every tracked patch worker must publish one result.") }
-                return value
-            }
-        }
-    }
-
     /// Bounds every git subprocess this engine spawns, so a wedged repository (a hung textconv/external
     /// diff helper, a stalled filesystem) cannot permanently occupy the workspace's serial queue or the
     /// diff-signature poll queue. 30s is far above any healthy repo operation.
     private static let gitCommandTimeout: TimeInterval = 30
 
-    /// Upper bound on the wall-clock time a `workspaceDiff` request spends validating and building its
-    /// diff, combined. round-15: this is a REQUEST-WIDE budget, not a `buildDiff`-only one — it is measured
-    /// from `deadlineStart`, a clock the caller (`SpacesDeviceAPIServer.handleWorkspaceDiffRequest`) starts
+    /// Upper bound on the wall-clock time a manifest or initial file-patch request spends validating and
+    /// building its immediate git work. It is measured from `deadlineStart`, a clock the caller starts
     /// BEFORE repository/ref validation even runs, and threads through both `assertRefIsResolvable` and
-    /// `buildDiff` unchanged. Before this, `assertRefIsResolvable` and `buildDiff` each started their own
+    /// `buildDiffPlanSnapshot` unchanged. Before this, `assertRefIsResolvable` and the plan builder each started their own
     /// fresh `Date()`, so validation and patch-building silently stacked into a COMBINED wall-clock time
     /// that could exceed this deadline several times over (repo probe + ref validation + a full fresh
-    /// `buildDiff` budget) while the client had already abandoned the request at its own ~60s timeout —
+    /// manifest/patch budget) while the client had already abandoned the request at its own ~60s timeout —
     /// holding the workspace's serial git queue for work nobody would read the answer to, with the client's
     /// retry then queued behind it. Sharing one clock across all three steps closes that gap: whatever
-    /// wall-clock time repo/ref validation already spent is deducted from what `buildDiff` gets, so the sum
+    /// wall-clock time repo/ref validation already spent is deducted from what the operation gets, so the sum
     /// of a request's git work can never outlive this single window.
     ///
-    /// Each file has its own capped git process; tracked files run in bounded waves, and every process in a
-    /// wave receives a timeout shrunk to whatever remains of this deadline (via `remainingTimeout`, never a
-    /// flat `gitCommandTimeout`) —
-    /// otherwise a file whose git only starts near the end of the budget would still get a fresh full
-    /// timeout, and total runtime would scale with file count with no ceiling of its own. Kept under the
-    /// client's ~60s request timeout so the daemon always finishes and answers — with the same truncated
-    /// shape the per-file/total byte caps already use for whatever files did not fit — rather than
-    /// continuing to spawn git for a request the client has already abandoned while still holding the
-    /// workspace's serial queue.
+    /// Each patch producer receives a timeout shrunk to whatever remains of this deadline (via
+    /// `remainingTimeout`, never a flat `gitCommandTimeout`). Kept under the client's ~60s request timeout
+    /// so the daemon never continues to occupy a workspace's serial queue for a request the client has
+    /// already abandoned.
     private static let diffBuildDeadline: TimeInterval = 45
 
-    /// Caps one of `buildDiff`'s up-front commands (`scopeSignature`'s own probes, the merge-base, the
+    /// Caps one of the manifest plan's up-front commands (`scopeSignature`'s own probes, the merge-base, the
     /// `--name-status` enumeration, the untracked `status` scan) to whatever remains of `diffBuildDeadline`
     /// from `start`, never more than `gitCommandTimeout`. `gitCommandTimeout` alone only guards a single
     /// hung git process; without this, several up-front commands each stalling for most of their own 30s
@@ -268,17 +229,10 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return min(gitCommandTimeout, remaining)
     }
 
-    /// A tracked patch can sit in a concurrent batch's scheduler after that batch has been admitted.
-    /// Resolve its deadline at the instant this worker starts, never at batch admission, so an expired
-    /// request produces the normal truncated entry without spawning another git process.
-    private static func trackedPatchWorkerTimeout(deadlineStart: Date) -> TimeInterval? {
-        try? remainingTimeout(start: deadlineStart)
-    }
-
     /// `git rev-parse --show-prefix` terminates its output with exactly one trailing newline, but a leading
     /// space or tab in its output is not incidental whitespace to discard — it is part of the subtree path
     /// itself (a repo-relative directory can legitimately be named e.g. `" sub"`). The shared scope
-    /// snapshot used by `scopeSignature` and `buildDiff` uses this instead of
+    /// snapshot used by `scopeSignature` and `buildDiffPlanSnapshot` uses this instead of
     /// `.trimmingCharacters(in: .whitespacesAndNewlines)`, which would strip that leading whitespace and
     /// make `subtreeScoped` compare porcelain paths against a mismatched prefix, silently rejecting the
     /// workspace's own entries as apparently outside its subtree.
@@ -289,7 +243,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     }
 
     /// Normalizes a client-supplied `refName` the same way for every pull-side consumer here
-    /// (`scopeSignature`, `buildDiff`) — nil, empty, or whitespace-only all mean "no ref: diff against
+    /// (`scopeSignature`, `buildDiffPlanSnapshot`) — nil, empty, or whitespace-only all mean "no ref: diff against
     /// HEAD", never an empty argument handed to `git merge-base`. This must agree with
     /// `WorkspaceDiffScope`'s own normalization in `SpacesDeviceAPIServer.swift`: that type decides which
     /// scope a `subscribeWorkspaceDiffSignature` client is subscribed to, and if the two normalizations ever
@@ -300,11 +254,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return trimmed
     }
 
-    /// The one shared refusal both `workspaceDiff` and `subscribeWorkspaceDiffSignature` need for a
+    /// The one shared refusal both `workspaceDiffManifestChunk` and `subscribeWorkspaceDiffSignature` need for a
     /// non-git workspace directory. A single workspace can be just a project directory with no `.git` (a
     /// supported product type, see docs/spec.md), yet the workspace picker offers Diff for every workspace
     /// regardless of whether it is one — so without this check, the first git invocation inside
-    /// `scopeSignature`/`buildDiff` (`rev-parse HEAD`, say) would fail and surface as a generic
+    /// `scopeSignature`/`buildDiffPlanSnapshot` (`rev-parse HEAD`, say) would fail and surface as a generic
     /// `gitCommandFailed`, giving the client no renderable reason to distinguish "not a repo" from any other
     /// git failure. `RemoteWorkspaceGitClient.isRepoStrict` runs the canonical `rev-parse
     /// --is-inside-work-tree` probe on its own `metadataCommandTimeout`, so this only translates a
@@ -329,8 +283,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         }
     }
 
-    /// Verifies a caller-supplied ref resolves to a real commit before `buildDiff` spends the rest of its
-    /// budget on it. `buildDiff`'s own ref-resolution step (`git merge-base <ref> HEAD`) throws the exact
+    /// Verifies a caller-supplied ref resolves to a real commit before `buildDiffPlanSnapshot` spends the rest of its
+    /// budget on it. The plan builder's ref-resolution step (`git merge-base <ref> HEAD`) throws the exact
     /// same `.gitCommandFailed` shape for "no such ref" as it does for a transient git failure (a wedged
     /// process, a timeout) — so without this separate, cheap probe up front, the wire-level `.internalError`
     /// mapping (`SpacesDeviceAPIServer.errorCode(for:)`) cannot tell a caller's typo from the daemon's own
@@ -370,7 +324,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// only touches ctime) even though it does produce a mode-change line in the diff. Recomputing this is
     /// the entire cost of one
     /// `subscribeWorkspaceDiffSignature` poll tick, so it deliberately never shells out to `git diff` for
-    /// the uncommitted-scope inputs (that is the expensive part `workspaceDiff` itself pays for, on
+    /// the uncommitted-scope inputs (that is the expensive part the manifest endpoint pays for, on
     /// demand) — `merge-base` is the one exception, since it is the only way to detect the diff base
     /// itself moving (e.g. the branch being reviewed gets merged into `refName` from elsewhere) rather than
     /// just the working tree changing. When `merge-base` fails (the ref was deleted, say), an error-marker
@@ -378,9 +332,9 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// than silently pinning to a stale value.
     /// `deadlineStart` is nil on the standalone poll path (`subscribeWorkspaceDiffSignature`'s timer calls
     /// this directly), which keeps today's behavior: each command gets its own flat `gitCommandTimeout` with
-    /// no request-wide budget, because a poll tick has no such budget to share. `buildDiff` passes its own
+    /// no request-wide budget, because a poll tick has no such budget to share. `buildDiffPlanSnapshot` passes its own
     /// `start` here so this call's commands are folded into the same request-wide deadline (`remainingTimeout`)
-    /// as `buildDiff`'s other up-front commands.
+    /// as the plan builder's other up-front commands.
     static func scopeSignature(
         workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil
     ) throws -> String {
@@ -389,7 +343,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         ).signature
     }
 
-    /// `buildDiff` needs the same HEAD/status/prefix facts that form the signature. Keeping them in this
+    /// `buildDiffPlanSnapshot` needs the same HEAD/status/prefix facts that form the signature. Keeping them in this
     /// request-local value avoids immediately spawning the same metadata commands again; subscription polls
     /// call `scopeSignature` above and discard the extra fields without retaining workspace state.
     private struct ScopeSnapshot {
@@ -429,7 +383,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // `--untracked-files=all` (rather than git's default `normal`) is required here: the default
         // collapses every file inside a wholly-untracked directory into one `?? dir/` record, so editing a
         // file inside an already-untracked directory would not change this signature (the directory's own
-        // mtime need not change when a file inside it is edited) even though `buildDiff` would show that
+        // mtime need not change when a file inside it is edited) even though the manifest plan would show that
         // edit once the client re-fetches. `all` reports each file individually, so per-file `size`/`mtime`
         // below sees it.
         let statusOutput = try gitClient.runGitAndCapture(
@@ -442,7 +396,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // status` has no `--relative` of its own (confirmed against real git: `error: unknown option
         // 'relative'`), unlike the `diff` invocations below. `--show-prefix` answers correctly even in an
         // unborn repo (no commits yet), since it is purely CWD-based.
-        // No `try?`/`?? ""` here: `assertIsGitRepository`/`buildDiff` have already confirmed this is a real repository
+        // No `try?`/`?? ""` here: `assertIsGitRepository`/`buildDiffPlanSnapshot` have already confirmed this is a real repository
         // by the time `scopeSignature` runs, so this probe should never legitimately fail — a genuine
         // failure here must propagate as a normal thrown error rather than being folded into an empty
         // prefix, which git also produces on a plain SUCCESS (a workspace rooted exactly at its repo root).
@@ -526,13 +480,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
     }
 
     /// One file identified by `git diff -M --name-status -z` (tracked) or by a `??` record in `git status
-    /// --porcelain -z` (untracked). `path`/`oldPath`/`status` here are authoritative for the returned
-    /// `SpacesDeviceWorkspaceDiffFile` — the per-file patch fetched via `source` is used only for its text
-    /// (and, for a binary file, the "Binary files ... differ" marker and blob SHAs), never for identity.
-    private struct DiffFilePlan {
+    /// --porcelain -z` (untracked). The plan intentionally retains only file identity and immutable git
+    /// references, not a patch body or full command array, so a short-lived manifest session is compact.
+    struct DiffFilePlan: Sendable {
         enum Source {
-            /// Arguments for `git -c core.quotepath=false diff -M <ref> -- [oldPath] path`.
-            case tracked(diffArguments: [String])
+            /// `baseRef` is compared with `targetRef` when non-nil (last-commit), otherwise with the
+            /// working tree (uncommitted/base-ref scopes).
+            case tracked(baseRef: String, targetRef: String?)
             case untracked
             /// A path `--name-status` reports `.deleted` relative to `compareRef` but that `git status`
             /// ALSO reports untracked (`git rm --cached f` followed by editing `f`; or, ref-scoped, a base
@@ -547,39 +501,58 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let source: Source
     }
 
-    /// Builds the structured diff for `workspaceDiff`. `refName == nil` diffs uncommitted changes against
+    /// A daemon-held manifest plan. Patch work is deferred until a client asks for a particular file, so a
+    /// large working tree can paint its sidebar before one slow/generated patch delays every other file.
+    /// It pins the enumeration and comparison refs, not live worktree bytes: each file body is captured when
+    /// its first range is requested, while the signature stream schedules a later manifest generation for
+    /// ordinary concurrent agent churn.
+    struct DiffPlanSnapshot: Sendable {
+        let scopeSignature: String
+        let plans: [DiffFilePlan]
+
+        /// Manifest requests arrive in viewport order, so resolving a file by repeatedly scanning the
+        /// plan would make a large manifest quadratic. Keep the first plan for a path: that preserves the
+        /// existing `first(where:)` behavior even if a raced enumeration ever contains a duplicate.
+        private let planIndexByPath: [String: Int]
+
+        init(scopeSignature: String, plans: [DiffFilePlan]) {
+            self.scopeSignature = scopeSignature
+            self.plans = plans
+            var indexByPath: [String: Int] = [:]
+            indexByPath.reserveCapacity(plans.count)
+            for (index, plan) in plans.enumerated() {
+                if indexByPath[plan.path] == nil {
+                    indexByPath[plan.path] = index
+                }
+            }
+            self.planIndexByPath = indexByPath
+        }
+
+        func plan(for relativePath: String) -> DiffFilePlan? {
+            guard let index = planIndexByPath[relativePath] else { return nil }
+            return plans[index]
+        }
+    }
+
+    /// Builds one manifest plan. `refName == nil` diffs uncommitted changes against
     /// `HEAD`; a non-nil `refName` diffs the merge-base of `refName` and `HEAD` against the working tree
     /// (so it also includes uncommitted changes — reviewing work against a base branch means "everything
     /// since it diverged, including what is not committed yet"). Untracked files never show up in `git
     /// diff` output regardless of the ref compared against, so they are enumerated separately via `git
     /// status` and synthesized as add-diffs.
     ///
-    /// Identity first, patches second, capped as they are fetched: `git diff -M --name-status -z` (cheap,
-    /// unbounded — its output is one line per changed file, never a patch body) enumerates every changed
-    /// tracked file's authoritative `path`/`oldPath`/`status` up front. Each file's patch is then fetched
-    /// with a per-invocation byte cap, so an oversized file's patch is never materialized in the first
-    /// place. Tracked patches are fetched in bounded waves of four to avoid paying macOS subprocess startup
-    /// serially for every changed file; ordering and cap accounting remain deterministic. Once the running
-    /// total reaches the aggregate cap, later waves are not spawned. At most the remainder of the current
-    /// four-file wave has been fetched speculatively, which bounds wasted work without changing results.
-    ///
-    /// round-15: `deadlineStart` defaults to `Date()` only so the ~30 existing call sites in
-    /// `SpacesDeviceWorkspaceGitTests.swift` (written before this parameter existed, with no deadline
-    /// concept of their own) keep compiling unchanged and keep measuring the deadline from their own call,
-    /// exactly as before. `handleWorkspaceDiffRequest`, the one production call site, MUST NOT rely on this
-    /// default — it passes its own shared `deadlineStart` explicitly, so this request-wide budget also
-    /// covers the repo/ref validation that ran before `buildDiff` was ever called (see `diffBuildDeadline`'s
-    /// doc comment).
-    static func buildDiff(
+    /// `deadlineStart` is supplied by the server before repository/ref validation so the whole immediate
+    /// operation shares one deadline.
+    static func buildDiffPlanSnapshot(
         workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()
-    ) throws -> SpacesDeviceWorkspaceDiffResult {
+    ) throws -> DiffPlanSnapshot {
         let start = deadlineStart
         let snapshot = try scopeSnapshot(
             workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: start)
         let signature = snapshot.signature
 
         if lastCommit {
-            return try buildLastCommitDiff(
+            return try buildLastCommitPlans(
                 workspaceDir: workspaceDir, gitClient: gitClient, signature: signature, headSHA: snapshot.headSHA, deadlineStart: start)
         }
 
@@ -645,7 +618,6 @@ enum SpacesDeviceWorkspaceDiffEngine {
             ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", compareRef],
             timeout: try remainingTimeout(start: start))
         var plans = parseNameStatusZ(nameStatusOutput).map { entry -> DiffFilePlan in
-            let diffArguments: [String]
             // `:(literal)` forces git to match each pathspec argument as an exact path rather than parsing
             // it for magic: a legal tracked filename that happens to start with `:` (e.g. `:foo` or
             // `:(glob)x`) would otherwise be interpreted as pathspec magic itself, silently matching nothing
@@ -659,18 +631,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // out workspace-relative rather than repo-root-relative (confirmed empirically: the pathspec
             // match succeeds either way, but only `--relative` also relativizes the `diff --git a/... b/...`
             // header text).
-            if let oldPath = entry.oldPath {
-                diffArguments = [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                    compareRef, "--", ":(literal)\(oldPath)", ":(literal)\(entry.path)",
-                ]
-            } else {
-                diffArguments = [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                    compareRef, "--", ":(literal)\(entry.path)",
-                ]
-            }
-            return DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(diffArguments: diffArguments))
+            return DiffFilePlan(
+                path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: compareRef, targetRef: nil))
         }
 
         // The signature has already read and subtree-scoped the same porcelain snapshot this request needs
@@ -703,27 +665,173 @@ enum SpacesDeviceWorkspaceDiffEngine {
             DiffFilePlan(path: path, oldPath: nil, status: .untracked, source: .untracked)
         }
 
-        let files = try buildFiles(plans: plans, workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: start)
-        return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: files)
+        return DiffPlanSnapshot(scopeSignature: signature, plans: plans)
+    }
+
+    /// The immutable metadata and patch-file length for one daemon-owned patch transfer. The patch itself
+    /// stays on disk; callers read it in bounded byte ranges instead of ever materializing it as a `String`.
+    struct FilePatchTransfer {
+        let scopeSignature: String
+        let file: SpacesDeviceWorkspaceDiffFileMetadata
+        let patchByteCount: Int64
+    }
+
+    /// Builds exactly one file patch from a plan retained by the manifest session. It deliberately accepts
+    /// the already-enumerated plan rather than rebuilding it: K streamed files therefore do one workspace
+    /// status/name-status walk plus K per-file diffs, not K complete workspace walks.
+    static func writeDiffFilePatch(
+        snapshot: DiffPlanSnapshot, workspaceDir: String, relativePath: String, outputURL: URL, gitClient: RemoteWorkspaceGitClient,
+        deadlineStart: Date
+    ) throws -> FilePatchTransfer? {
+        guard let plan = snapshot.plan(for: relativePath) else { return nil }
+
+        let wrotePatch = try writePatch(
+            for: plan, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient, deadlineStart: deadlineStart)
+        let patchByteCount = wrotePatch ? fileByteCount(at: outputURL) : 0
+        let metadata = wrotePatch ? patchMetadata(at: outputURL) : (isBinary: false, oldSHA: nil, newSHA: nil)
+        let file = SpacesDeviceWorkspaceDiffFileMetadata(
+            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary,
+            oldSHA: metadata.oldSHA, newSHA: metadata.newSHA)
+        return FilePatchTransfer(scopeSignature: snapshot.scopeSignature, file: file, patchByteCount: patchByteCount)
+    }
+
+    /// Writes a git diff to the caller's private temporary file. `git --output` leaves stdout empty, so
+    /// `runGitAndCapture` retains its established timeout/error handling without retaining the patch body in
+    /// daemon memory.
+    private static func writePatch(
+        for plan: DiffFilePlan, workspaceDir: String, outputURL: URL, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
+    ) throws -> Bool {
+        let timeout = try remainingTimeout(start: deadlineStart)
+        switch plan.source {
+        case .tracked(let baseRef, let targetRef):
+            _ = try gitClient.runGitAndCapture(
+                trackedDiffArguments(for: plan, workspaceDir: workspaceDir, baseRef: baseRef, targetRef: targetRef, outputURL: outputURL), timeout: timeout)
+            return true
+        case .untracked:
+            return try writeUntrackedPatch(
+                path: plan.path, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient, timeout: timeout)
+        case .deletedButUntrackedInWorktree(let compareRef):
+            return try writeCoalescedDeletedButUntrackedPatch(
+                path: plan.path, compareRef: compareRef, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient,
+                deadlineStart: deadlineStart)
+        }
+    }
+
+    private static func trackedDiffArguments(
+        for plan: DiffFilePlan, workspaceDir: String, baseRef: String, targetRef: String?, outputURL: URL
+    ) -> [String] {
+        var arguments = [
+            "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "-M", "--no-color", "--no-ext-diff",
+            "--no-textconv", "--relative", baseRef,
+        ]
+        if let targetRef { arguments.append(targetRef) }
+        arguments.append("--")
+        if let oldPath = plan.oldPath { arguments.append(":(literal)\(oldPath)") }
+        arguments.append(":(literal)\(plan.path)")
+        return arguments
+    }
+
+    private static func fileByteCount(at url: URL) -> Int64 {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+    }
+
+    /// Git's `index` and `Binary files ... differ` header lines always precede any hunk body. Sampling a
+    /// fixed prefix keeps binary/SHA classification bounded even when the textual patch is hundreds of MB.
+    private static func patchMetadata(at url: URL) -> (isBinary: Bool, oldSHA: String?, newSHA: String?) {
+        guard let handle = FileHandle(forReadingAtPath: url.path) else { return (false, nil, nil) }
+        defer { try? handle.close() }
+        let prefix: Data
+        do { prefix = try handle.read(upToCount: 128 * 1024) ?? Data() } catch { return (false, nil, nil) }
+        return parsePatchMetadata(String(decoding: prefix, as: UTF8.self))
+    }
+
+    /// The transfer path retains the old untracked safety rules but intentionally removes the old visible
+    /// patch-size cap: its output goes to a private file and reaches the client only through 4 MiB chunks.
+    private static func writeUntrackedPatch(
+        path: String, workspaceDir: String, outputURL: URL, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval
+    ) throws -> Bool {
+        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
+        let fileManager = FileManager.default
+        guard let attributes = try? fileManager.attributesOfItem(atPath: fullPath) else { return false }
+        let type = attributes[.type] as? FileAttributeType
+        guard type == .typeRegular || type == .typeSymbolicLink else { return false }
+        if type == .typeSymbolicLink {
+            var targetStat = stat()
+            if stat(fullPath, &targetStat) == 0, (targetStat.st_mode & S_IFMT) != S_IFREG { return false }
+        }
+        _ = try gitClient.runGitAndCapture(
+            [
+                "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
+                "--no-textconv", "--no-index", "--", "/dev/null", path,
+            ], timeout: timeout, allowedExitCodes: [0, 1])
+        return true
+    }
+
+    /// A deleted-plus-untracked collision needs a scratch index to make Git describe the worktree file
+    /// against the comparison ref as one coherent patch. `git update-index` hashes the worktree file, so
+    /// the scratch index also gets a scratch object directory with the repository's objects as read-only
+    /// alternates; otherwise merely viewing a diff would permanently add the recreated file's blob to the
+    /// user's repository. The patch body is written directly to the transfer file, so the extra Git
+    /// operation adds neither an in-memory size cap nor repeated work per range.
+    private static func writeCoalescedDeletedButUntrackedPatch(
+        path: String, compareRef: String, workspaceDir: String, outputURL: URL, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
+    ) throws -> Bool {
+        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
+        let fileManager = FileManager.default
+        guard let attributes = try? fileManager.attributesOfItem(atPath: fullPath) else { return false }
+        let type = attributes[.type] as? FileAttributeType
+        guard type == .typeRegular || type == .typeSymbolicLink else { return false }
+
+        let objectDirectoryOutput = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--git-path", "objects"], timeout: try remainingTimeout(start: deadlineStart))
+        let objectDirectoryPath = objectDirectoryOutput.hasSuffix("\n") ? String(objectDirectoryOutput.dropLast()) : objectDirectoryOutput
+        guard !objectDirectoryPath.isEmpty else {
+            throw SpacesRuntimeError.gitCommandFailed(message: "git rev-parse --git-path objects returned an empty path.")
+        }
+        let objectDirectoryURL = URL(
+            fileURLWithPath: objectDirectoryPath, isDirectory: true,
+            relativeTo: URL(fileURLWithPath: workspaceDir, isDirectory: true)
+        ).standardizedFileURL
+        let scratchDirectoryURL = URL(
+            fileURLWithPath: NSTemporaryDirectory(), isDirectory: true
+        ).appendingPathComponent("spaces-workspacediff-\(UUID().uuidString)", isDirectory: true)
+        let scratchObjectsURL = scratchDirectoryURL.appendingPathComponent("objects", isDirectory: true)
+        try fileManager.createDirectory(at: scratchObjectsURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: scratchDirectoryURL) }
+        let scratchIndexEnvironment = [
+            "GIT_INDEX_FILE": scratchDirectoryURL.appendingPathComponent("index").path,
+            "GIT_OBJECT_DIRECTORY": scratchObjectsURL.path,
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": objectDirectoryURL.path,
+        ]
+        _ = try gitClient.runGitAndCapture(
+            ["-C", workspaceDir, "update-index", "--add", "--", path], timeout: try remainingTimeout(start: deadlineStart),
+            environmentOverrides: scratchIndexEnvironment)
+        let diffTimeout = try remainingTimeout(start: deadlineStart)
+        _ = try gitClient.runGitAndCapture(
+            [
+                "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
+                "--no-textconv", "--relative", compareRef, "--", ":(literal)\(path)",
+            ], timeout: diffTimeout, environmentOverrides: scratchIndexEnvironment)
+        return true
     }
 
     /// The lastCommit scope's diff: committed-only, `git diff <parent> HEAD` with the exact same flags as
     /// every other diff invocation in this engine, and no working-tree or untracked involvement at all — no
     /// `git status`, no `deletedButUntrackedInWorktree` coalescing, since neither concept applies to a diff
-    /// between two commits. Root commit and unborn HEAD are the same two special cases `buildDiff`'s
+    /// between two commits. Root commit and unborn HEAD are the same two special cases the manifest plan's
     /// nil-`refName` path already handles, probed the same way, but note the base case flips: THIS scope has
     /// no working tree to fall back on, so an unborn HEAD only ever has one legitimate outcome —
     /// nothing has been committed yet, so the "last commit" is empty.
-    private static func buildLastCommitDiff(
+    private static func buildLastCommitPlans(
         workspaceDir: String, gitClient: RemoteWorkspaceGitClient, signature: String, headSHA: String, deadlineStart: Date
     ) throws
-        -> SpacesDeviceWorkspaceDiffResult
+        -> DiffPlanSnapshot
     {
         guard !headSHA.isEmpty else {
             // No commits exist yet, so there is no "last commit" to diff — an empty file list, not an
-            // error, matching `buildDiff`'s own treatment of an unborn HEAD as a supported state rather than
+            // error, matching the manifest plan's treatment of an unborn HEAD as a supported state rather than
             // a failure.
-            return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: [])
+            return DiffPlanSnapshot(scopeSignature: signature, plans: [])
         }
 
         // `<headSHA>^` resolves the snapshotted commit's first parent; `--verify --quiet` +
@@ -737,7 +845,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let parent: String
         if parentProbe.isEmpty {
         // Root commit: diff the empty tree against the snapshotted HEAD so every file it introduces reports as an
-            // addition — see `buildDiff`'s identical empty-tree comment for why this is computed per call
+            // addition — see the manifest plan's identical empty-tree handling for why this is computed per call
             // rather than hardcoded as the well-known SHA-1 constant.
             parent = try gitClient.runGitAndCapture(
                 ["-C", workspaceDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: deadlineStart)
@@ -746,327 +854,19 @@ enum SpacesDeviceWorkspaceDiffEngine {
             parent = parentProbe
         }
 
-        // Same flags as every other diff invocation in this engine — see `buildDiff`'s comment block above
+        // Same flags as every other diff invocation in this engine — see the manifest plan's comment block above
         // for the full rationale for each one. Two explicit positional refs (`parent headSHA`), not a single
         // `compareRef` against the working tree, is what makes this diff committed-only.
         let nameStatusOutput = try gitClient.runGitAndCapture(
             ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", parent, headSHA],
             timeout: try remainingTimeout(start: deadlineStart))
-        let plans = parseNameStatusZ(nameStatusOutput).map { entry -> DiffFilePlan in
-            let diffArguments: [String]
-            if let oldPath = entry.oldPath {
-                diffArguments = [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                    parent, headSHA, "--", ":(literal)\(oldPath)", ":(literal)\(entry.path)",
-                ]
-            } else {
-                diffArguments = [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                    parent, headSHA, "--", ":(literal)\(entry.path)",
-                ]
-            }
-            return DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(diffArguments: diffArguments))
+        let plans = parseNameStatusZ(nameStatusOutput).map { entry in
+            DiffFilePlan(
+                path: entry.path, oldPath: entry.oldPath, status: entry.status,
+                source: .tracked(baseRef: parent, targetRef: headSHA))
         }
 
-        let files = try buildFiles(plans: plans, workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
-        return SpacesDeviceWorkspaceDiffResult(scopeSignature: signature, files: files)
-    }
-
-    /// Fetches each plan's patch, capped as it goes: shared by `buildDiff`'s normal (uncommitted/ref) scope
-    /// and `buildLastCommitDiff`'s committed-only scope, since the per-file byte cap, the aggregate byte
-    /// cap, and the deadline-truncation shape are identical for both — only how `plans` gets built differs.
-    private static func buildFiles(plans: [DiffFilePlan], workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
-        -> [SpacesDeviceWorkspaceDiffFile]
-    {
-        var totalPatchBytes = 0
-        var overTotalCap = false
-        // Checked once per iteration, before spawning git for that file, so a file already in flight when
-        // the deadline passes still finishes cleanly rather than being cut off mid-process. Sticky like
-        // `overTotalCap`: once tripped, every remaining file reports the same truncated shape with no git
-        // spawned for it — an elapsed check does not un-trip on its own.
-        var pastDeadline = false
-        var files: [SpacesDeviceWorkspaceDiffFile] = []
-        files.reserveCapacity(plans.count)
-        var planIndex = 0
-        while planIndex < plans.count {
-            let plan = plans[planIndex]
-            if overTotalCap || pastDeadline {
-                files.append(SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true))
-                planIndex += 1
-                continue
-            }
-            // This admission check stops later waves once the request expires. Every worker in an admitted
-            // tracked wave rechecks the same deadline immediately before launching git, because scheduler
-            // delay can make the batch-time result stale. An expiry here is a file-level truncation, never a
-            // request-level error: only the up-front commands have no file identity to truncate onto.
-            guard trackedPatchWorkerTimeout(deadlineStart: deadlineStart) != nil else {
-                pastDeadline = true
-                files.append(SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true))
-                planIndex += 1
-                continue
-            }
-
-            let batchPlans: [DiffFilePlan]
-            switch plan.source {
-            case .tracked:
-                var endIndex = planIndex
-                while endIndex < plans.count, endIndex - planIndex < trackedPatchFetchConcurrency {
-                    guard case .tracked = plans[endIndex].source else { break }
-                    endIndex += 1
-                }
-                batchPlans = Array(plans[planIndex..<endIndex])
-            case .untracked, .deletedButUntrackedInWorktree:
-                // These paths inspect the filesystem and, for the delete/recreate collision, use a scratch
-                // index that writes a loose object. Keep them serial; the measured hotspot is the ordinary
-                // tracked-file path, and speculative side effects are not an acceptable optimization.
-                batchPlans = [plan]
-            }
-
-            let batchFiles = try buildFileBatch(
-                plans: batchPlans, workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
-            for (batchPlan, file) in zip(batchPlans, batchFiles) {
-                if overTotalCap {
-                    files.append(
-                        SpacesDeviceWorkspaceDiffFile(
-                            path: batchPlan.path, oldPath: batchPlan.oldPath, status: batchPlan.status, truncated: true))
-                    continue
-                }
-                if let patch = file.patch {
-                    let patchBytes = patch.utf8.count
-                    guard totalPatchBytes + patchBytes <= totalPatchByteCap else {
-                        overTotalCap = true
-                        files.append(
-                            SpacesDeviceWorkspaceDiffFile(
-                                path: batchPlan.path, oldPath: batchPlan.oldPath, status: batchPlan.status, isBinary: file.isBinary, truncated: true))
-                        continue
-                    }
-                    totalPatchBytes += patchBytes
-                }
-                files.append(file)
-            }
-            planIndex += batchPlans.count
-        }
-        return files
-    }
-
-    private static func buildFileBatch(
-        plans: [DiffFilePlan], workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
-    ) throws -> [SpacesDeviceWorkspaceDiffFile] {
-        guard plans.count > 1 else {
-            return [try buildFileOrTruncateAfterDeadline(
-                for: plans[0], workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)]
-        }
-        let results = TrackedPatchResults(count: plans.count)
-        DispatchQueue.concurrentPerform(iterations: plans.count) { index in
-            results.store(
-                Result {
-                    try buildFileOrTruncateAfterDeadline(
-                        for: plans[index], workspaceDir: workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
-                }, at: index)
-        }
-        return try results.ordered().map { try $0.get() }
-    }
-
-    private static func buildFileOrTruncateAfterDeadline(
-        for plan: DiffFilePlan, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
-    ) throws -> SpacesDeviceWorkspaceDiffFile {
-        guard let timeout = trackedPatchWorkerTimeout(deadlineStart: deadlineStart) else {
-            return SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true)
-        }
-        return try buildFile(for: plan, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout, deadlineStart: deadlineStart)
-    }
-
-    /// `timeout` is resolved immediately before this file's git work starts (by
-    /// `buildFileOrTruncateAfterDeadline`), never a flat `gitCommandTimeout` or a stale batch-time value.
-    /// A file whose git starts near the end of `diffBuildDeadline` therefore cannot get a fresh full timeout
-    /// or launch at all after expiry. `timeout` only budgets the FIRST git command a file builder issues: a
-    /// builder that spawns a second command (`buildCoalescedDeletedButUntrackedFile`'s `update-index` +
-    /// `diff` pair) re-derives that second command's own remaining budget from `deadlineStart` rather than
-    /// reusing `timeout` as-is, so a slow-but-successful first command cannot hand the second command a
-    /// stale budget as if no time had passed.
-    ///
-    /// `runGitAndCapture`'s `maxOutputBytes: perFilePatchByteCap + 1` caps RAW captured bytes, but every
-    /// engine call site decodes that raw output with a lossy `String(decoding:as:)` (see the doc comment on
-    /// `RemoteWorkspaceGitClient.runGitAndCapture`) that turns each invalid UTF-8 byte into a 3-byte U+FFFD
-    /// replacement. A patch built mostly of invalid bytes can therefore pass the raw cap comfortably and
-    /// still decode to roughly 3x that size, reaching the client with no `truncated` flag even though it is
-    /// well over the per-file contract — the 8-MiB aggregate cap in `buildDiff` still holds regardless, since
-    /// it sums post-decode `utf8.count`, but the per-file guarantee would be silently broken. Rechecking the
-    /// decoded size here (skipped for a binary patch, whose short "Binary files ... differ" marker is never
-    /// large regardless of the raw content's byte validity, and whose `patch` field is discarded anyway)
-    /// keeps the per-file cap honest post-decode, not just pre-decode.
-    private static func exceedsPerFilePatchByteCapAfterDecode(_ patchText: String, isBinary: Bool) -> Bool {
-        !isBinary && patchText.utf8.count > perFilePatchByteCap
-    }
-
-    /// A timeout that fires mid-capture is *not* mapped to a truncated entry here: `runGitAndCapture`
-    /// throws the same `.gitCommandFailed` shape for a deadline-shortened timeout and for a genuinely hung
-    /// git process under the ordinary 30s budget, and there is no clean signal here to tell those two apart
-    /// without a message-string heuristic. Rather than guess, this keeps the pre-existing behavior for that
-    /// case (propagate as a whole-request failure) and only fixes the timeout *value* passed in above; only
-    /// the byte-cap overrun below degrades to a truncated file, exactly as before.
-    private static func buildFile(
-        for plan: DiffFilePlan, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval, deadlineStart: Date
-    ) throws -> SpacesDeviceWorkspaceDiffFile {
-        switch plan.source {
-        case .tracked(let diffArguments):
-            // Exactly one git command, so there is nothing to re-derive a second budget from —
-            // `deadlineStart` is threaded through the switch uniformly but unused on this branch.
-            do {
-                let patchText = try gitClient.runGitAndCapture(diffArguments, timeout: timeout, maxOutputBytes: perFilePatchByteCap + 1)
-                let metadata = parsePatchMetadata(patchText)
-                if exceedsPerFilePatchByteCapAfterDecode(patchText, isBinary: metadata.isBinary) {
-                    return SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true)
-                }
-                return SpacesDeviceWorkspaceDiffFile(
-                    path: plan.path, oldPath: plan.oldPath, status: plan.status, patch: metadata.isBinary ? nil : patchText,
-                    isBinary: metadata.isBinary, truncated: false, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA)
-            } catch SpacesRuntimeError.outputExceededCap {
-                return SpacesDeviceWorkspaceDiffFile(path: plan.path, oldPath: plan.oldPath, status: plan.status, truncated: true)
-            }
-        case .untracked:
-            // Also exactly one git command (`diff --no-index`) — no second budget to re-derive here either.
-            return try buildUntrackedFile(path: plan.path, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout)
-        case .deletedButUntrackedInWorktree(let compareRef):
-            return try buildCoalescedDeletedButUntrackedFile(
-                path: plan.path, compareRef: compareRef, workspaceDir: workspaceDir, gitClient: gitClient, timeout: timeout,
-                deadlineStart: deadlineStart)
-        }
-    }
-
-    /// Builds the single coalesced entry for a `.deletedButUntrackedInWorktree` plan (see that case's
-    /// comment): a path `--name-status` reports `.deleted` relative to `compareRef` while `git status`
-    /// separately reports it untracked, because the worktree file is not staged for it. Diffing that
-    /// directly would either compare against nothing (git has no tracked content to diff `--no-index`
-    /// style two ways at once) or require hand-assembling a patch header — this instead stages the
-    /// worktree file into a scratch index scoped to this one call via `GIT_INDEX_FILE`, so an ordinary
-    /// `git diff <compareRef>` sees `path` as a tracked, modified file and emits a native patch with
-    /// correct `a/`/`b/` headers and real blob SHAs (empirically verified against real git: `update-index
-    /// --add` under a temp `GIT_INDEX_FILE` followed by `diff <compareRef> -- path` reproduces exactly the
-    /// base-blob-vs-worktree patch, including the `index <old>..<new> <mode>` line `parsePatchMetadata`
-    /// already parses for every other tracked capture).
-    ///
-    /// `update-index --add` also writes the worktree content as a loose object into the repository's real
-    /// object store (the same side effect `git add` has) — accepted here rather than avoided: this is a
-    /// same-user local repository, the object store is content-addressed so re-diffing the same content
-    /// never grows it, and an unreferenced loose object is exactly what `git gc` already prunes. That write
-    /// is bounded by `perFilePatchByteCap`: the pre-stat gate below truncates an over-cap regular file
-    /// before ever calling `update-index`, so this never hashes/writes more than that cap's worth of content
-    /// regardless of the recreated file's actual on-disk size.
-    ///
-    /// The scratch index is a bare per-call temp file (never a real index git would otherwise recognize),
-    /// created empty by the first `update-index --add` and removed in `defer` regardless of outcome.
-    ///
-    /// This is the one file builder that spawns two git commands (`update-index --add`, then `diff` against
-    /// the scratch index), so it is the one builder that needs its own `deadlineStart` in addition to
-    /// `timeout`: `timeout` (the per-file loop's own `remainingTimeout` snapshot) budgets only the first
-    /// command, `update-index --add`, unchanged from before this parameter existed. The second command
-    /// re-derives its own remaining budget from `deadlineStart` immediately before it runs, so a
-    /// slow-but-successful `update-index` cannot hand `diff` the same stale `timeout` value as if the first
-    /// command had taken no time. Internal (not `private`) access, like `buildDiff` and
-    /// `assertRefIsResolvable` in this same type, exists solely so `WorkspaceGitServerTests.swift` can call
-    /// this directly with a manufactured `deadlineStart`.
-    static func buildCoalescedDeletedButUntrackedFile(
-        path: String, compareRef: String, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval, deadlineStart: Date
-    ) throws -> SpacesDeviceWorkspaceDiffFile {
-        // Mirrors `buildUntrackedFile`'s pre-stat gate (lstat via `attributesOfItem`, never `open`), run
-        // BEFORE any git invocation — this builder has none of that guard otherwise, and `update-index --add`
-        // unconditionally reads and SHA-hashes whatever is at `path` to write it as a loose object. Kept as
-        // its own duplicated-but-commented gate rather than sharing a helper with `buildUntrackedFile`: the
-        // two return incompatible shapes (`.untracked` there, `.modified` here) and only the untracked path
-        // needs the binary pre-sniff (a sub-cap binary here is cheap to stage, and the existing
-        // `parsePatchMetadata.isBinary` handling downstream already classifies it correctly), so a shared
-        // helper would mostly be a parameterized fork rather than a real reduction in duplication.
-        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
-        let fileManager = FileManager.default
-        guard let attributes = try? fileManager.attributesOfItem(atPath: fullPath), let size = attributes[.size] as? Int else {
-            // Raced with a delete between the status scan and this stat. The plan already replaced the
-            // tracked `.deleted` name-status entry with this coalesced one, so there is no tracked delete
-            // left to fall back to — report a bare modified entry (nil patch, not truncated) rather than
-            // attempting to reconstruct a delete patch for a file that vanished mid-request. Same honesty
-            // rationale as `buildUntrackedFile`'s own raced-delete branch.
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified)
-        }
-        let type = attributes[.type] as? FileAttributeType
-        guard type == .typeRegular || type == .typeSymbolicLink else {
-            // A recreated FIFO/socket/device must never reach `update-index --add`. Empirically verified
-            // against real git (2.50.1): contrary to the naive "git must open it to hash it, so it blocks"
-            // assumption, `update-index --add` on a bare FIFO fails IMMEDIATELY ("error: unsupported file
-            // type" / "fatal: Unable to process path") — git's own lstat-based type check refuses it before
-            // any open/hash attempt, so this specific command does not hang. The guard is still required,
-            // though: that immediate failure is an ordinary nonzero-exit `gitCommandFailed` this switch
-            // branch has no truncation path for, so left unguarded it would abort the WHOLE `buildDiff`
-            // request over one recreated special file instead of degrading just this one entry — the same
-            // failure mode `buildUntrackedFile`'s own non-regular guard exists to avoid, just via a fast
-            // failure here rather than a hang.
-            //
-            // In practice this branch is defense-in-depth rather than the common case: `git status`'s own
-            // untracked-file scan silently omits a bare non-regular path (empirically confirmed — a `.deleted`
-            // tracked entry recreated as a bare FIFO shows only as `D  path`, never paired with `?? path`), so
-            // `deletedButUntrackedPaths` never contains one and this coalescing path is not invoked for it at
-            // all; the reachable case here is the same scan-to-build race the unstattable guard above handles,
-            // just for a type change (regular/symlink at scan time, replaced by a non-regular file before this
-            // runs) instead of a delete.
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified)
-        }
-        if type == .typeRegular {
-            guard size <= perFilePatchByteCap else {
-                // Without this, `update-index --add` below would read and SHA-hash the entire file and write
-                // it as a loose object into the repository's real object store regardless of size — a
-                // read-only diff request writing a multi-GB object into `.git/objects`, and re-paying the
-                // full hash cost on every subsequent pull of the same oversized recreated file.
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
-            }
-        } else {
-            // type == .typeSymbolicLink. Unlike `buildUntrackedFile`'s equivalent branch, this needs no
-            // followed-`stat()` guard for a symlink whose target is itself a FIFO: empirically verified
-            // against real git (2.50.1) that BOTH `update-index --add` on such a symlink AND the subsequent
-            // `diff <compareRef>` against the scratch index below complete immediately and never touch the
-            // target — `update-index --add` records a mode-120000 entry from the link text alone (lstat +
-            // readlink, no open), and the resulting diff is the ordinary "link text changed" patch, exactly
-            // as `buildUntrackedFile`'s own no-index diff treats an untracked symlink. A symlink's own
-            // content (the link text) is always tiny regardless of what it resolves to, so it is let through
-            // here unconditionally.
-        }
-
-        let scratchIndexPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("spaces-workspacediff-\(UUID().uuidString).idx")
-        defer { try? FileManager.default.removeItem(atPath: scratchIndexPath) }
-        let scratchIndexEnvironment = ["GIT_INDEX_FILE": scratchIndexPath]
-
-        _ = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "update-index", "--add", "--", path], timeout: timeout, environmentOverrides: scratchIndexEnvironment)
-        // The first command above just spent an unknown share of `timeout`'s already-shrunk budget, so this
-        // second command must not reuse that same (now stale) value as though no time had passed — it
-        // re-derives its own remaining budget from the shared `deadlineStart` instead. See the per-file
-        // loop's identical rule above `buildDiff`'s per-file loop (this file, ~line 514-522): expiry here
-        // maps to the same truncated shape every other cap in this engine uses, never a thrown request-level
-        // error, so `try?` deliberately discards the thrown case rather than propagating it.
-        guard let diffTimeout = try? remainingTimeout(start: deadlineStart) else {
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
-        }
-        do {
-            // `--relative`: see `buildDiff`'s comment on the same flag — keeps this patch's own headers
-            // workspace-relative for a subtree-rooted workspace, a no-op otherwise. `path` (from `plan.path`,
-            // already workspace-relative via the `--relative`-scoped `--name-status` enumeration) resolves
-            // against CWD (`workspaceDir`) the same way regardless.
-            let patch = try gitClient.runGitAndCapture(
-                [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                    compareRef, "--", ":(literal)\(path)",
-                ], timeout: diffTimeout, maxOutputBytes: perFilePatchByteCap + 1, environmentOverrides: scratchIndexEnvironment)
-            let metadata = parsePatchMetadata(patch)
-            if exceedsPerFilePatchByteCapAfterDecode(patch, isBinary: metadata.isBinary) {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true)
-            }
-            // An empty patch means the worktree content is byte-identical to the base blob — the only way
-            // `git rm --cached f` (or the ref-scoped equivalent) can leave `f` reporting dirty with no
-            // actual content difference. `nil` here (never the empty string) rather than folding it back
-            // into `.deleted`: `git status` itself still calls this path modified/dirty, so `.modified`
-            // with nothing to show is the more honest of the two mischaracterizations.
-            let patchValue: String? = patch.isEmpty || metadata.isBinary ? nil : patch
-            return SpacesDeviceWorkspaceDiffFile(
-                path: path, status: .modified, patch: patchValue, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA)
-        } catch SpacesRuntimeError.outputExceededCap { return SpacesDeviceWorkspaceDiffFile(path: path, status: .modified, truncated: true) }
+        return DiffPlanSnapshot(scopeSignature: signature, plans: plans)
     }
 
     // MARK: - `git status --porcelain -z` parsing
@@ -1102,10 +902,10 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
     /// Scopes `entries` (parsed from a repo-root-relative `git status --porcelain -z`) down to just the
     /// subtree a workspace rooted below its repository root owns, and strips `prefix` from every path field
-    /// so the result is workspace-relative — matching what `buildDiff`'s own `--relative`-scoped tracked
+    /// so the result is workspace-relative — matching the manifest plan's `--relative`-scoped tracked
     /// enumeration reports for the same files. `git status` has no `--relative` of its own (confirmed
     /// against real git: `error: unknown option 'relative'`), so this is the client-side equivalent, shared
-    /// by both `scopeSignature` and `buildDiff`'s untracked-file discovery — the one definition both must
+    /// by both `scopeSignature` and the manifest plan's untracked-file discovery — the one definition both must
     /// use, per the fix this implements.
     ///
     /// An entry is kept when its current path (`path` — the *new* path for a rename, see `changedEntries`'s
@@ -1213,91 +1013,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return (isBinary, oldSHA, newSHA)
     }
 
-    /// Synthesizes an add-diff for one untracked file via `git diff --no-index /dev/null <path>` (per the
-    /// Phase 2 spec's recipe). `--no-index` uses `--exit-code` semantics — exit 1 whenever the compared
-    /// paths differ, which is always true here since one side is `/dev/null` — so `allowedExitCodes: [0,
-    /// 1]` tells `runGitAndCapture` that is expected, not a failure.
-    ///
-    /// Bounded at every step so a large untracked file is never fully materialized: size is checked before
-    /// any read, the binary guess reads only its first `sniffLength` bytes, and the patch capture itself is
-    /// capped at `perFilePatchByteCap`.
-    private static func buildUntrackedFile(path: String, workspaceDir: String, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval) throws
-        -> SpacesDeviceWorkspaceDiffFile
-    {
-        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
-        let fileManager = FileManager.default
-        guard let attributes = try? fileManager.attributesOfItem(atPath: fullPath), let size = attributes[.size] as? Int else {
-            // Raced with a delete/rename between the status scan and this stat; report it as an empty
-            // untracked addition rather than failing the whole diff for one file that vanished mid-request.
-            return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked)
-        }
-
-        // `attributesOfItem` has lstat semantics: for a symlink it reports the link's own type and size,
-        // never the target's. Opening the path for the sniff below, though, follows the link (`FileHandle`
-        // uses stat semantics) — so the two disagree about what "this file" is. That asymmetry is the trap:
-        // `git diff --no-index` itself treats an untracked symlink as its own tiny text content (a one-line
-        // mode-120000 patch naming the target path), so sniffing what the link *resolves to* would
-        // misreport a symlink-to-binary-content as `isBinary` with no patch. A symlink therefore skips the
-        // regular-file size cap and byte sniff entirely (its own "content" is always small text). Anything
-        // else non-regular (FIFO, socket, device, ...) must never be opened or handed to `git` at all:
-        // opening a FIFO here blocks indefinitely waiting for a writer with no timeout, and even the bounded
-        // git subprocess timeout would still stall this whole `workspaceDiff` pull for up to 30s over one
-        // special file. Such a path is reported as a bare untracked entry with no patch instead.
-        let type = attributes[.type] as? FileAttributeType
-        guard type == .typeRegular || type == .typeSymbolicLink else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked) }
-
-        if type == .typeRegular {
-            guard size <= perFilePatchByteCap else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true) }
-
-            guard let handle = FileHandle(forReadingAtPath: fullPath) else { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked) }
-            defer { try? handle.close() }
-            let sniff = (try? handle.read(upToCount: SpacesDeviceWorkspaceBinaryGuess.sniffLength)) ?? Data()
-            guard !SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(sniff) else {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, isBinary: true)
-            }
-        } else {
-            // type == .typeSymbolicLink. Naively handing every symlink straight to `git diff --no-index`
-            // (as the "diffs the link itself, never its target" behavior above would suggest) is not
-            // actually safe: empirically, `git diff --no-index` still blocks indefinitely on a symlink
-            // whose target is a FIFO, regardless of output format or which side of the compare it is on —
-            // its no-index diff machinery does not stop at lstat either. So this independently confirms,
-            // via a *followed* `stat` (never `open`, so it cannot itself block even against a FIFO), that
-            // the link's ultimate target is either a regular file or does not exist (a dangling symlink,
-            // which git safely reports as link text without ever touching a target) before it is safe to
-            // hand to git. Any other resolved type (FIFO, socket, device, directory, ...) is refused the
-            // same way a directly non-regular untracked path is: a bare entry with no patch, without ever
-            // invoking git on it.
-            var targetStat = stat()
-            if stat(fullPath, &targetStat) == 0, (targetStat.st_mode & S_IFMT) != S_IFREG {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked)
-            }
-        }
-
-        do {
-            let patch = try gitClient.runGitAndCapture(
-                [
-                    "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--",
-                    "/dev/null", path,
-                ], timeout: timeout, allowedExitCodes: [0, 1], maxOutputBytes: perFilePatchByteCap + 1)
-            // The sniff above is only an advisory early-out that avoids spawning git for obvious binaries —
-            // it sees at most `sniffLength` bytes and knows nothing of `.gitattributes` (a `-diff` attribute
-            // forces git to treat even plain-text content as binary). Git's own "Binary files ... differ"
-            // marker in the captured patch is authoritative, so run it through the same `parsePatchMetadata`
-            // the tracked path uses and defer to it.
-            let metadata = parsePatchMetadata(patch)
-            if exceedsPerFilePatchByteCapAfterDecode(patch, isBinary: metadata.isBinary) {
-                return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true)
-            }
-            return SpacesDeviceWorkspaceDiffFile(
-                path: path, status: .untracked, patch: metadata.isBinary ? nil : patch, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA,
-                newSHA: metadata.newSHA)
-        } catch SpacesRuntimeError.outputExceededCap { return SpacesDeviceWorkspaceDiffFile(path: path, status: .untracked, truncated: true) }
-    }
 }
 
 /// Enumerates every path inside a workspace's checkout the user would consider part of the workspace.
 /// Backs the `workspaceFileList` Device API command (the Editor pane's file tree and quick-open), which
-/// — unlike `workspaceDiff` — must serve BOTH product workspace types (see docs/spec.md on non-git
+/// — unlike the manifest/chunk diff API — must serve BOTH product workspace types (see docs/spec.md on non-git
 /// projects): a non-git workspace's Editor has no other way to open a file now that the old direct-path
 /// input is gone, so this engine picks one of two listing strategies per call rather than refusing the
 /// non-git case:
@@ -1488,7 +1208,7 @@ enum SpacesDeviceWorkspaceFileListEngine {
 /// Backs the read-only `workspaceRefList` Device API command: the branch and recent-commit lists the
 /// Compare dialog's ref search offers when building a `ref`/`lastCommit` diff scope. Local-only — no
 /// `ls-remote` — since this only needs to offer refs the workspace already knows about, not discover new
-/// ones from origin; the diff itself (`buildDiff`) already requires no network access either.
+/// ones from origin; the manifest plan itself already requires no network access either.
 enum SpacesDeviceWorkspaceRefListEngine {
     /// Mirrors `SpacesDeviceWorkspaceDiffEngine.gitCommandTimeout`'s reasoning: a wedged repository must
     /// not permanently occupy the workspace's serial git queue.

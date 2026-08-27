@@ -33,7 +33,7 @@ index 1111111..2222222 100644
 `;
 
 function file(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
-  return { path: "src/foo.ts", status: "modified", patch: PATCH, isBinary: false, truncated: false, ...overrides };
+  return { path: "src/foo.ts", status: "modified", patch: PATCH, isBinary: false, ...overrides };
 }
 
 // The default lineNumber (12) deliberately does not match PATCH's actual line for lineText (which
@@ -99,6 +99,15 @@ describe("reanchorComments", () => {
     expect(anchored!.position).toBeUndefined();
   });
 
+  it("keeps its original anchor while a present file is still queued or streaming", () => {
+    const draft = comment({ lineNumber: 47 });
+
+    for (const patchState of ["queued", "streaming"] as const) {
+      const [anchored] = reanchorComments([draft], [file({ patch: undefined, patchState })]);
+      expect(anchored!.position).toEqual({ lineNumber: 47, outdated: false });
+    }
+  });
+
   it("breaks a distance tie toward the smaller line number", () => {
     // New-side lines: 1 "other", 2 "dup", 3 "other2", 4 "dup" — two lines with text "dup"
     // equidistant (1 line away) from a comment originally anchored to line 3 ("other2", no
@@ -123,6 +132,12 @@ index 1111111..2222222 100644
 describe("selectDefaultAgentId", () => {
   it("auto-selects the only running agent when there is exactly one", () => {
     expect(selectDefaultAgentId([{ id: "a1", label: "L1", sessionId: "s1" }], undefined)).toBe("a1");
+  });
+
+  it("does not auto-select a launch session until its keyed readiness event", () => {
+    const launching = { id: "launching", label: "Starting Claude", sessionId: "launch-session" };
+    expect(selectDefaultAgentId([launching], undefined, launching.sessionId)).toBeUndefined();
+    expect(selectDefaultAgentId([launching], launching.id, launching.sessionId)).toBeUndefined();
   });
 
   it("selects nothing when zero agents run", () => {

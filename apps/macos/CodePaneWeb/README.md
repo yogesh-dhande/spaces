@@ -28,8 +28,8 @@ never requires node — only editing this web bundle does, which then requires r
 
 `npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) instead of the real
 WKWebView bridge, seeded with a realistic fixture diff (`src/bridge/fixtures.ts`: a modified
-file, a rename, an addition, a deletion, an untracked file, a binary file, and a
-daemon-truncated file). A floating "Simulate remote change" button
+file, a rename, an addition, a deletion, an untracked file, and a binary file). A floating
+"Simulate remote change" button
 (`src/dev/harnessControls.ts`) fires a `spaces:diffSignature` event so the live-refresh path
 (preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. The
 harness controls and the mock bridge/fixtures are dev-only: `src/bridge/index.ts` dynamically
@@ -40,8 +40,14 @@ production build.
 
 `window.spaces` (typed in `src/bridge/types.ts`) is the plugin's only way to reach the host:
 
-- `workspaceDiff(scope)` — a `DiffScope` (`{kind:"uncommitted"}` / `{kind:"baseBranch"}` /
-  `{kind:"ref", refName}`) in, a file list plus an opaque `scopeSignature` out.
+- `workspaceDiffManifestChunk(scope, {manifestID?, fileIndex})` — one bounded metadata page for the
+  requested `DiffScope`, plus its `manifestID` and `scopeSignature`. The initial page creates the
+  manifest; later pages echo its id and semantic file-index cursor until no next cursor remains. The
+  manifest freezes the file enumeration and comparison plan for one refresh; it does not contain patch bytes.
+- `workspaceDiffFileChunk(scope, {manifestID, relativePath, byteOffset, transferID?})` — one bounded
+  raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
+  later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
+  transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers.
 - `workspaceFileRead(path)` — content, `sha256`, size.
 - `workspaceFileWrite(path, content, {baseSHA256})` — compare-and-swap write; returns
   `{ok:true, sha256}` (the hash of exactly what was just written, adopted directly as the next
@@ -57,7 +63,7 @@ production build.
   `invalidate()` therefore never starts a request of its own while one is in flight, instead
   marking it stale and letting any number of `invalidate()`/`get()`/`getFresh()` calls that arrive
   before it settles collapse into exactly one trailing refetch, fired the instant it does. It is
-  invalidated on every diff-signature push, but that push only ever fires once a `workspaceDiff`
+  invalidated on every diff-signature push, but that push only ever fires once a `workspaceDiffManifestChunk`
   fetch has succeeded — a non-git workspace or a pane still on its first Editor render never gets
   one — so `getFresh()` additionally revalidates in the background, stale-while-revalidate style, at
   the moments the listing is actually shown (⌘P opening, the Files tab becoming visible): callers
@@ -115,186 +121,90 @@ branch on `.code`.
 - **Ready (JS -> Swift, fire-and-forget):** the same message handler with `{method:"ready"}`
   and no `id`, sent once after the plugin's `spaces:init` listener is attached. The host must
   wait for this before dispatching `spaces:init` — the plugin renders nothing until it arrives.
-- **State pushes (JS -> Swift, fire-and-forget):** the same message handler, no `id`, sent so the
-  host can rebuild a hibernated pane without losing what the user was doing:
-  - `{method:"editorStateChanged", params}` — the Editor mode's open-file snapshot,
-    `{path, baseSHA256, content, dirty}` (`CodePaneEditorState`), or `params: null` when the
-    editor has no open file. Sent immediately on open/save/conflict, and debounced (~500ms
-    trailing) on every buffer edit — see `src/app/editorView.ts`'s class doc comment.
-  - `{method:"modeChanged", params:{mode}}` — the live Diff/Editor mode, sent immediately on
-    every toolbar toggle.
-  - `{method:"editorUIStateChanged", params}` — Editor mode's sidebar toggle and recent-files
-    list, `{sidebarMode, recentPaths}` (`CodePaneEditorUIState`). Owned by `root.ts` (not
-    `EditorView`), since every event that changes it — the Files/Changes toggle, a successful open
-    from any of the three entry points (⌘P overlay, Files tree, Changes list) — is already routed
-    through there. Sent immediately, with no debounce, since this state changes only on discrete
-    user actions rather than continuous typing.
-  - `{method:"renderMetric", params}` — a validated diagnostic milestone after the diff or editor
-    has committed DOM work and crossed two animation frames. `params` is `{kind, trigger,
-    elapsedMs, fileCount, contentBytes}`; the native host records it only in the existing DEBUG
-    performance log. `contentBytes` is exact for the ASCII E2E scale fixtures and an intentionally
-    constant-time JavaScript string-unit approximation for arbitrary Unicode patches, avoiding an
-    up-to-8 MiB re-encode on the UI thread merely for observability.
+- **State pushes (JS -> Swift, fire-and-forget):** the same message handler receives
+  `{method:"workspaceStateChanged", params: CodePaneWorkspaceState}`. The web app debounces
+  continuous edits and immediately reports discrete changes through one complete, self-contained
+  workspace document; the host persists the latest document keyed by `(deviceID, workspaceID)`.
+  There are no separate Editor, mode, or Editor-UI state notification streams.
+- **Render metrics (JS -> Swift, fire-and-forget):** `{method:"renderMetric", params}` reports
+  validated post-render diagnostics to the native DEBUG performance log. It contains only bounded
+  timing and aggregate-size metadata, not source text.
+- **Teardown pull (Swift -> JS, synchronous):**
+  `window.__spacesCollectWorkspaceState` returns the current complete workspace-state document as
+  JSON text. The host uses it before hibernation or close to capture edits inside the debounce window;
+  rendered patches and DOM state are not included. The persisted document is sent back in the next
+  `spaces:init`.
+- **Push events (Swift -> JS):** `window.dispatchEvent(new CustomEvent(name, {detail}))`
+  carries:
+  - `spaces:init` once, after the page sends `ready`. Its `CodePaneInitPayload` includes
+    `workspaceId`, `workspaceName`, the restored `workspaceState`, current `theme`, optional
+    `baseBranch`, and the workspace's running `agents`. The restored state is applied before the
+    initial manifest and file-list requests, so the page can restore selection, tree context,
+    scroll/focus, buffers, comments, and agent/launch state while fresh patch bytes stream in.
+  - `spaces:agents` whenever the workspace's running-agent set changes; the full replacement
+    `{agents}` list lets the comments controller preserve a valid selection or reapply its
+    default-agent rule.
+  - `spaces:agentStartStatus` for a started command's session, with `detected`, `exited`, or
+    `timedOut` status. A detected hook-backed agent becomes assignable; an exited or timed-out
+    command remains available to retry and is shown as not detected.
+  - `spaces:setMode` when the native host asks the page to switch modes, and `spaces:theme`
+    when effective appearance changes.
+  - `spaces:diffSignature` when the active scope's git signature changes. The page refreshes by
+    requesting a new manifest; stale responses are ignored and transient typed/untyped failures use
+    the bounded retry path, while durable request errors remain visible.
 
-  The host holds only the latest of each in memory on the pane's controller (which survives
-  hibernation, unlike the `WKWebView`), and hands all three back through the next `spaces:init`
-  (see below) — see docs/implementation.md's hibernation section for the full rehydration model.
-- **Teardown pull (Swift -> JS, synchronous):** `window.__spacesCollectEditorState` — a global
-  function the host calls via `evaluateJavaScript`'s return value (not the message handler) at
-  teardown, to flush whatever the editor holds at that exact instant into the snapshot above.
-  This closes the one gap the debounced push above can't cover: a buffer edit still inside its
-  ~500ms window when the page is torn down. Returns the `CodePaneEditorState` JSON-stringified,
-  or `null` when no file is open — see `EditorView.collectStateForFlush` and
-  docs/implementation.md's hibernation section.
-  - `window.__spacesCollectEditorUIState` mirrors the mechanism, for `editorUIStateChanged`'s
-    state: since `root.ts` owns that state directly with no debounce, this simply reads its live
-    in-memory value synchronously (no async race to close) and returns it JSON-stringified —
-    never `null`, since `{sidebarMode: "files", recentPaths: []}` is always a valid value.
-  - `window.__spacesCollectReviewCommentState` mirrors the mechanism exactly, for comment drafts:
-    there is no continuous push for draft text (unlike `editorStateChanged` above), so this
-    synchronous teardown pull is the only way a not-yet-blurred keystroke reaches the host at all.
-    Returns a JSON-stringified `PendingReviewCommentEntry[]` (one entry per draft with unsaved
-    live text — a still-provisional card with non-empty text, or a persisted draft whose live text
-    differs from its last save), or `null` when nothing qualifies — see
-    `CommentsController.collectStateForFlush` and docs/implementation.md's hibernation section.
-- **Push events (Swift -> JS):** `window.dispatchEvent(new CustomEvent(name, {detail}))` for:
-  - `spaces:init` (once, at startup, listened for with `{once: true}`): detail is
-    `CodePaneInitPayload` — `workspaceId`, `workspaceName`, `initialMode` (`"diff"` \|
-    `"editor"`, the pane's live mode — see `modeChanged` above), `initialScope` (a `DiffScope`),
-    `theme` (`"light"` \| `"dark"`, the appearance in effect at startup; nothing here reads
-    `prefers-color-scheme`), `baseBranch` (the workspace's configured base branch name, omitted
-    for a workspace with none), `editorState` (a `CodePaneEditorState`, omitted when the host
-    holds no snapshot for this pane — see `editorStateChanged` above), `editorUIState` (a
-    `CodePaneEditorUIState`, omitted when the host holds no snapshot — defaults to
-    `{sidebarMode: "files", recentPaths: []}` when absent; see `editorUIStateChanged` above), and
-    `pendingReviewComments`
-    (a `PendingReviewCommentEntry[]`, omitted when the host holds no such snapshot — see
-    `__spacesCollectReviewCommentState` above; seeded into `CommentsController` via
-    `restorePendingState` before `loadInitial()`'s network call, so a teardown racing that call
-    can't discard the seeded text). The toolbar's "vs base
-    branch" scope option is disabled, rather than hidden, when `baseBranch` is absent. `agents`
-    is the array of currently running agents in the workspace (`CodePaneAgentSummary`:
-    `{id, label, sessionId}`), seeding the toolbar's assigned-agent picker at startup.
-  - `spaces:agents` (any time the workspace's set of running agents changes thereafter): detail is
-    `{agents}`, the full replacement list (no web-side dedupe). If the currently selected agent id
-    is no longer present, `CommentsController` re-runs the same auto-default rule used at init
-    (`selectDefaultAgentId`); if it is still present, the selection is left alone.
-  - `spaces:setMode` (any time the host wants an already-open pane to switch its live Diff/Editor
-    mode, e.g. reusing the pane for a different navigation gesture): detail is `{mode}`. The
-    counterpart to `modeChanged` (JS -> Swift, see above): the listener dispatches the exact same
-    `setMode` action a toolbar click does, so `notifyModeChanged` echoes back out to the host the
-    same way, keeping the host's own mirror of this pane's mode a read of the page's own report
-    rather than something the host sets speculatively. A no-op when `mode` already matches the
-    pane's current mode.
-  - `spaces:theme` (any time the host's effective appearance changes thereafter): detail is
-    `{theme}` (`"light"` \| `"dark"`). A separate event from `spaces:init` because the plugin's
-    `spaces:init` listener is one-shot; a later appearance change re-dispatching `spaces:init`
-    itself would have no listener left to receive it.
-  - `spaces:diffSignature` (any time the active scope's git state changes): detail is
-    `{scopeSignature}`. The host dedupes this end-to-end (it never re-announces a signature it
-    already delivered for the current scope), so a `workspaceDiff` pull that fails after one of
-    these events is never retried by anything upstream unless `refreshDiff` in `root.ts` decides to
-    retry it itself. It classifies the rejection first: a typed `SpacesBridgeError` means the
-    daemon decoded the request and rejected it for a durable reason (a bad/deleted ref, a gone
-    workspace, ...), so the identical request would fail the identical way on every retry —
-    `refreshDiff` renders that message in place of the file list instead, and does not retry. The
-    two exceptions within that typed set are the `unavailable` and `internalError` codes. The Swift
-    host's `CodePaneBridge.mapClientError` collapses every not-reachable/not-ready client failure
-    (device offline, daemon mid-restart, connection not yet established) into `unavailable`; the
-    daemon returns `internalError` for its own transient git trouble (a wedged or timed-out git
-    subprocess) while a caller-supplied ref that simply does not resolve is validated separately and
-    rejected as `invalidArgument` instead (see `assertRefIsResolvable` in
-    `SpacesDeviceWorkspaceGit.swift`), so `internalError` is never used for a bad ref. Unlike every
-    other typed code, both describe a transient condition rather than a durable rejection of this
-    request — `refreshDiff` renders either one (so the user sees why the pane is empty) but also
-    retries it with the same bounded backoff as an untyped failure. Any other (untyped) rejection is
-    treated as a transport-level hiccup that retrying might resolve, and gets the bounded exponential
-    backoff (1s floor, doubling, 30s cap, reset on the next success or on a rendered permanent error)
-    guarded by the same latest-wins request token the stale-response guard uses. Either way, a later
-    scope switch or `spaces:diffSignature` event calls `refreshDiff` fresh on its own, which is what
-    recovers a pane out of the rendered-error state — for the retried `unavailable`/`internalError`
-    cases, the background retry loop can also recover it without waiting for either of those.
+## Editor changes view
 
-## Diff mode
-
-A file-list sidebar plus a single `@pierre/diffs` `CodeView` holding every changed file, in
-order, as one virtualized scrolling region (`src/app/diffView.ts`) — not a two-region layout.
-Diffable files become `CodeViewDiffItem`s via `processFile()`; binary, truncated, and
-unparseable files become synthetic plaintext placeholder items instead, so every sidebar row
-(diffable or not) can jump to its file the same way. Untracked files arrive from the bridge as
-git's own synthetic "new file" patches, so they render as pure additions with no `oldFile`
-side. A scope switch clears the file list and diff area to a loading state synchronously (comments
-collapse to the tray, re-anchoring once the new files land) before its `refreshDiff` fetch
-replaces the file set outright; a `spaces:diffSignature` event re-fetches and re-renders while
-preserving scroll position. Split/unified is `diffStyle` on `CodeView`, not
-the `layout` option (that one only controls padding/gap).
+The Editor's Changes view has a file-list sidebar and one `@pierre/diffs` `CodeView` holding
+all changed files in order as one virtualized scrolling region (`src/app/diffView.ts`). A
+complete `workspaceDiffManifestChunk` metadata sequence paints the sidebar and queued file rows. Patches
+then arrive through per-file `workspaceDiffFileChunk` transfers: one file streams at a time in
+bounded 4 MiB chunks, the selected queued file can be promoted, and incoming UTF-8 bytes are
+decoded incrementally. A binary entry has an explicit non-commentable placeholder; textual
+patches have no daemon truncation or aggregate UI cap. Untracked files render as additions with
+no old side. Scope/signature refreshes release the old manifest and replace it with a new
+metadata-first generation while preserving the relevant selection and scroll context.
 
 ## Editor mode
 
-A read-only open-file bar (`src/app/editorView.ts`, `.editor-path`, showing the open path or a
-"⌘P to open a file" hint) feeding a single-item, edit-mode `CodeView`, plus a sidebar
-(`src/app/editorSidebar.ts`) sharing the same `.file-list` element Diff mode's changed-files list
-occupies (Design K). The sidebar's Files/Changes segmented header toggles between a full workspace
-listing (`filesTree.ts`, lazily fetched through `WorkspaceFileListCache`, no per-file status since
-every listed file is unchanged by definition) and the SAME changed-files DOM node Diff mode
-renders — reparented, not re-rendered, so its click behavior carries over untouched. Unlike Diff
-mode's small changed-files tree, which renders fully expanded, the Files tree's directories start
-collapsed and materialize a directory's `.dir-children` DOM only on that directory's first expand —
-a listing capped at 50,000 paths can't afford to build every row and listener up front.
-`renderFilesTree` returns a `FilesTreeHandle`; `EditorSidebar.setSelectedPath` calls its
-`setSelected(path)` on every file open to move the highlight in place (expanding and materializing
-just the new path's ancestor chain), instead of re-rendering the whole tree. `EditorSidebar`'s
-constructor never starts that listing fetch itself — every pane constructs one, including a
-diff-only pane that never shows it, and firing the fetch there would send an up-to-50,000-path
-`workspaceFileList` RPC down the daemon's shared per-workspace serial git queue for nothing. The
-fetch starts the first time the sidebar is actually shown instead: `reattach()` (root.ts calls it on
-every Diff→Editor mode transition, and once more right after the initial render for a pane that
-starts or is rehydrated directly into Editor mode) and the Files/Changes toggle's own `setMode()`.
+A read-only open-file bar (`src/app/editorView.ts`, `.editor-path`) feeds a single-item,
+edit-mode `CodeView`, with an Editor sidebar sharing the Changes list element.
+Files uses a lazily fetched full workspace listing and a collapsed, lazy-materialized directory
+tree; that listing is sorted and capped at 50,000 paths with a `truncated` flag. Changes
+reparents the existing changed-files list, so toggling the sidebar does not rebuild its rows.
+The shared tree state and selected file are restored from the workspace document.
 
-The only way to open a file is `EditorView.open(path)` (Design O), called from three entry points:
-the ⌘P quick-open overlay (`src/app/quickOpen.ts`, a centered floating panel available in both Diff
-and Editor mode — before typing it lists `recentPaths` most-recently-opened first, filtered against
-the workspace listing unless that listing is truncated (a recent path's absence from a partial
-listing isn't evidence the file is gone); while typing it fuzzy-matches the full listing via
-`fuzzyMatch.ts` and highlights the matched characters), the Files tree, or the Changes list. In Diff
-mode, opening a file already in the current diff stays in Diff mode and jumps to it there; a file
-outside the diff switches to Editor mode. Opening a DIFFERENT file while the buffer is dirty shows a
-non-blocking discard-consent banner instead of silently replacing it; re-picking the file that's
-already open while dirty (its own row again, or ⌘P again) is a no-op instead — nothing to open that
-isn't already showing, and the banner's accept action would otherwise reread disk and destroy the
-very edit it claims to protect. A standing conflict (dirty for as long as it stands) is a no-op the
-same way. Every successful open records into
-`recentPaths` (deduped, most-recent-first, capped at 12): for an Editor-mode open this is driven by
-`EditorView`'s `onFileOpened` callback, which only fires once `loadFile()` actually completes —
-never for a refused (dirty-buffer) or failed open — while a Diff-mode jump records inline, since a
-jump to a file already in the diff is synchronous and cannot fail.
+The ⌘P quick-open overlay, Files tree, and Changes list all call `EditorView.open(path)`.
+Opening a file already in the current Changes set keeps the Changes view and focuses that file;
+opening any other file uses Editor mode. A different-file open while the buffer is dirty shows
+discard consent, while reselecting the already-open file is a no-op. Successful opens update the
+most-recent-first recent-path list.
 
-Save goes through the CAS `workspaceFileWrite`; on a conflict the UI shows a non-blocking banner
-(`.banner.error`, the same element opening a missing/unreadable file also uses) and disables Save
-without discarding the user's edits — resolving a conflict (full merge UI) is Phase 5's scope, out
-of scope here. A successful save adopts the write result's own `sha256` directly as the CAS
-baseline for the next save, with no re-read round trip.
+The new/right side of a changed file is editable through the library's line editor. Save and
+Cancel are explicit. Save uses the captured CAS baseline and adopts the returned hash on success.
+A concurrent change produces the merge/conflict UI without discarding the user's buffer: clean
+buffers reload, non-overlapping edits merge with Undo, overlapping or deleted-file edits show
+the compare view with Keep mine and Take disk/Close without saving actions.
 
-An open file's path, CAS baseline, and buffer survive the pane hibernating (a tab or workspace
-switch away and back): `editorView.ts` pushes `editorStateChanged` to the host on every discrete
-transition and (debounced) on buffer edits, and the host additionally pulls the live snapshot
-synchronously at teardown via `window.__spacesCollectEditorState`, so an edit still inside the
-debounce window is never lost to a hibernation racing the timer. The host rehydrates the result
-through the next `spaces:init` — see the wire protocol section above and docs/implementation.md's
-hibernation section. An app restart, not just hibernation, does lose an unsaved buffer: the
-snapshot is memory-only on the host side, with no disk persistence.
+The complete workspace document is collected through `window.__spacesCollectWorkspaceState` and
+persisted by the host per `(deviceID, workspaceID)`; it includes mode, scope, layout, tree and
+file selection/scroll/focus (with each diff position paired to its old/new side), open buffers and
+baselines, review-comment drafts, agent selection, and pending agent launch. Patch bodies and rendered DOM remain ephemeral, so restored Editor
+state is combined with a fresh manifest and fresh file transfers.
 
 ## Toolbar
 
-One 30pt strip (`src/app/toolbar.ts`), Variant A from the picked mockup: a Diff|Editor toggle
-visible in both modes; in Diff mode, a scope segmented control (Uncommitted / vs base branch /
-vs ref…, the last opening an inline ref/SHA input) and a Split|Unified toggle. The trailing
-region (`.agent-slot`, empty in Editor mode — comments are diff-mode only) renders the
-assigned-agent picker and "Send batch · n" button: a static label when exactly one agent runs, a
-`<select>` (with a disabled placeholder option) when more than one runs, and nothing sendable when
-zero run. "Send batch" is disabled, with an explanatory `title`, whenever there is no running
-agent, no agent selected, or zero drafts with a non-empty body; otherwise it sends every current
-draft via `CommentsController.sendBatch()`.
+One compact strip (`src/app/toolbar.ts`) provides the Editor mode toggle and, in the Changes
+view, scope and split/unified controls. The agent slot stays compact: with no running agent it
+shows a `Start agent…` button; with running agents it shows the assigned-agent selector plus a
+separated `Start new…` action. The command dialog accepts an arbitrary command and Run starts it
+in a background workspace terminal without moving Editor focus. It reports Starting while waiting
+for hook-backed detection, then clears on detection or shows `No agent detected` after exit or
+timeout while retaining the command and failure feedback for retry, including after app restart.
+
+The comment send action is disabled unless a running agent is assigned and there is sendable draft
+text. The composer and send controls explain that comments require a running, assigned agent;
+starting an agent from the toolbar does not implicitly send comments.
 
 ## Comments
 
@@ -354,19 +264,11 @@ end to end by `CommentsController`:
   called from both `handleSendFailure` and `deleteDraft`'s failure path). Every other rejection —
   a non-typed transport failure, or a `SpacesBridgeError` coded `internalError`/`unavailable` —
   proves nothing about staleness and skips the re-fetch.
-- **Drafts survive a pane hibernating or closing, not just a live diff refresh.** On top of the
-  in-progress-text/focus survival above (which only covers a refresh while the page stays alive),
-  a not-yet-blurred keystroke also survives the page itself being torn down: the host's teardown
-  pull (`__spacesCollectReviewCommentState`, see the wire protocol section above) asks
-  `CommentsController.collectStateForFlush` for a snapshot right before the `WKWebView` goes away,
-  and the replacement page's `root.ts` seeds it back via `restorePendingState` before its own
-  `loadInitial()` call. A still-provisional card is recreated as a fresh local draft under a new id
-  (the pre-teardown id is never reused); a persisted draft's live text is seeded into `liveBodies`
-  ahead of the list response, so the card renders the in-progress text immediately and the next
-  blur persists it through the normal path. Mirrors `editorState`'s own hibernation-survival model
-  in Editor mode above — see docs/implementation.md's hibernation section for the full mechanism
-  (generation-guarded flush, the three-way sentinel decode, and the mutation-RPC counter that also
-  defers `ready` behind an in-flight send/upsert/delete).
+- **Drafts survive a pane hibernating or closing, not just a live diff refresh.** The unified
+  workspace-state collector includes pending comment text, including a focused card whose textarea
+  has not blurred. The native host persists that document per workspace and restores it before the
+  replacement page loads its daemon draft list; provisional cards receive fresh local ids, while
+  persisted drafts overlay their in-progress body until the normal blur path saves it.
 - **A context-line click always anchors to the new side.** Split layout's gutter reports a
   context row's click as the old (deletions) side even though the line is unchanged;
   `reviewComments.ts`'s `canonicalizeContextAnchor` (used by `diffView.ts`'s `requestNewComment`)
@@ -424,10 +326,10 @@ banner to the newer path); re-picking the file already open while dirty is a no-
 banner, no re-read, the edit left intact — the same way during a standing conflict; its error
 surfacing on a rejected read via the `.banner.error` element,
 a save adopting the write result's own hash as the next CAS baseline with no intervening file
-read, the `editorStateChanged` push firing immediately on open/save/conflict and debounced on
-edits, and `restoreState` rehydrating a dirty snapshot without a disk re-read versus re-reading a
-clean one from `path`, and `collectStateForFlush` returning the latest buffer (including an edit
-still inside the debounce window) or `null` with no file open (`@pierre/diffs`' `CodeView`/`Editor`
+read, the unified `workspaceStateChanged` snapshot being updated immediately for discrete changes
+and debounced for edits, and `restoreState` rehydrating a dirty snapshot without a disk re-read versus re-reading a
+clean one from `path`, with the workspace-state collector capturing an edit still inside the
+debounce window (`@pierre/diffs`' `CodeView`/`Editor`
 are stubbed out — these tests are about `EditorView`'s own logic, not the diff-rendering library).
 `test/pathTree.test.ts` and `test/filesTree.test.ts` cover the Files tab's directory-tree builder
 and renderer (root-level files, nesting, single-child-chain compaction, compaction stopping at a
@@ -478,8 +380,8 @@ and the typed `unavailable` and `internalError` codes are the exceptions that bo
 retry, while a typed `invalidArgument` — e.g. a ref the daemon could not resolve — still renders
 with no retry scheduled); its
 bounded-backoff retry on a transient failure (floor, doubling, cap, reset-on-success, and a scope
-switch superseding a pending retry); the `modeChanged` push
-firing on every toolbar toggle, and the `spaces:agents` listener re-running the auto-default rule
+switch superseding a pending retry); the unified workspace-state snapshot reflecting every toolbar
+toggle, and the `spaces:agents` listener re-running the auto-default rule
 and updating the toolbar; a diff-signature push while the pane is in Diff mode invalidates the
 shared file-listing cache without fetching a fresh listing for the Files tab, with that fetch
 instead happening on the next transition into Editor mode (a pane sitting in Diff mode never
@@ -491,8 +393,8 @@ goes through the mode-toggle dispatch that would otherwise trigger it; and a Cha
 survives a Diff→Editor round trip instead of coming back blank (Diff mode's own render reparents the
 shared list node out of the sidebar without the sidebar ever re-rendering on that reparent). A
 further `test/root.test.ts` suite
-covers Design K/O's Files/Changes sidebar and recent-files recording: opening a file from the Files
-tree records it as `recentPaths`' sole entry and pushes the update via `notifyEditorUIStateChanged`;
+covers the Files/Changes sidebar and recent-files recording: opening a file from the Files
+tree records it as `recentPaths`' sole entry and updates the unified workspace-state snapshot;
 opening a second, different file puts it first without dropping the one already recorded; re-opening
 an already-recent path moves it to the front instead of duplicating it; the list is capped at 12
 entries, dropping the oldest; toggling Files/Changes pushes the updated `sidebarMode` independent of
@@ -515,15 +417,8 @@ blur-only persistence and silent discard of an empty draft), send-one and send-b
 rejected send leaving drafts unchanged and surfacing the error banner), the no-running-agent
 disabled state, and `onAgentsChanged` re-running the auto-default rule.
 
-## Open items (Swift-host integration)
+## Open items
 
-- **`workspaceFileList`'s daemon endpoint is owned on the Swift host side.** The web bundle's
-  `realBridge.ts` sends it as a plain RPC passthrough with no fallback or degraded rendering of
-  its own (see `WorkspaceFileListCache`'s failed-fetch-is-not-cached contract) — the Files tab
-  and the ⌘P overlay simply retry on the next trigger if a call fails. Confirming the host-side
-  endpoint itself is implemented and wired is outside this bundle's scope.
-- **Phase 5** (merge conflict resolution UI) is out of scope here; the editor's conflict banner
-  is the only hook left for it.
 - **The file-list sidebar is not in Variant A's literal mockup markup** — Variant A's own
   markup has no file-picker chrome, so this bundle borrows Variant B's `.rail`/`.rr` token and
   metric vocabulary for it (see comments in `src/styles/app.css`), since a file list is a hard

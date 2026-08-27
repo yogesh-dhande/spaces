@@ -44,6 +44,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // one load at a time and applies before starting the next, so a plain instance field
                 // carries this safely from here to the apply site.
                 self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
+                self?.capturedLocalOverviewInstallGeneration = self?.host.localOverviewInstallGeneration
                 switch scope {
                 case .terminalOverview:
                     let result =
@@ -166,6 +167,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// replacement from one that postdates it: see `PanelCoordinator.paneReplacementEpoch` and the guard
     /// around the retarget/prune block in `applySidebarDataSnapshot`.
     private var capturedLocalReloadEpoch = 0
+    /// A local reload can read the database while a mutation response installs a newer overview on the
+    /// main actor. The stale snapshot must not become the basis for destructive workspace recovery.
+    private var capturedLocalOverviewInstallGeneration: Int?
     /// The strongest reload scope requested while the user is mid-edit; flushed at idle points so a
     /// deferred database or terminal-runtime change is not lost.
     private var pendingReloadScope: ReloadScope?
@@ -405,6 +409,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func applyLocalDeviceSidebarSnapshot(_ snapshot: LocalDeviceSidebarSnapshot, preserveDetailPane: Bool = false) {
+        if let capturedGeneration = capturedLocalOverviewInstallGeneration,
+            capturedGeneration != host.localOverviewInstallGeneration
+        {
+            DeviceLinkTrace.log(
+                deviceID: snapshot.localDeviceID, event: "local_snapshot_superseded",
+                detail: "captured_generation=\(capturedGeneration) current_generation=\(host.localOverviewInstallGeneration)")
+            capturedLocalOverviewInstallGeneration = nil
+            return
+        }
+        capturedLocalOverviewInstallGeneration = nil
+        host.localOverviewInstallGeneration += 1
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         host.commandPalette.invalidateCommandPaletteCache()
         // Update the local device's section in place and keep already-loaded remote
@@ -480,6 +495,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // placeholder overview (mirroring the remote path's `load.overview == nil` branch), and absence
         // of a real overview is never evidence a session's product row was removed.
         if AppKitController.localSnapshotAuthorizesPanePrune(loadState: localLoadState, compatibility: snapshot.localCompatibility) {
+            host.removeCodePaneRecoveryStateForDeletedWorkspaces(
+                deviceID: snapshot.localDeviceID,
+                liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)),
+                previousWorkspaceIDs: Set(previousLocalSection?.overview?.workspaces.map(\.id) ?? []))
             // Hand over the panes whose runtime target merely swapped sessions before pruning could close
             // them: a start or restart replaces the session a row names, and the predecessor is exactly
             // what the keep-set below no longer retains. Runs unconditionally, even against a snapshot
@@ -1273,6 +1292,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // resolver lookup for this device is taken from. Dropping it there would hand the endpoint
             // resolver a narrower candidate list than the one just learned.
             host.deviceSections[index].device = overview.device
+            host.removeCodePaneRecoveryStateForDeletedWorkspaces(
+                deviceID: deviceID,
+                liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)),
+                previousWorkspaceIDs: Set(host.deviceSections[index].overview?.workspaces.map(\.id) ?? []))
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return

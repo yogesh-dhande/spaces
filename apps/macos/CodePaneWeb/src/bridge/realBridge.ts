@@ -1,8 +1,6 @@
 import {
-  CodePaneEditorState,
-  CodePaneEditorUIState,
   CodePaneRenderMetric,
-  CodePaneMode,
+  CodePaneWorkspaceState,
   DiffScope,
   DiffSignatureEvent,
   DiffSignatureListener,
@@ -15,7 +13,9 @@ import {
   SpacesErrorCode,
   SpacesReviewComment,
   Unsubscribe,
-  WorkspaceDiffResult,
+  StartWorkspaceCommandResult,
+  WorkspaceDiffFileChunkResult,
+  WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
   WorkspaceFileWriteOptions,
@@ -56,13 +56,9 @@ import {
  *     message for it.
  *
  *   JS -> Swift (state pushes, fire-and-forget): the same message handler,
- *     no `id`. `{ method: "editorStateChanged", params: state ?? null }`
- *     tells the host the editor's current open-file snapshot so it survives
- *     this pane's next hibernation cycle (see README.md "Editor state
- *     survives hibernation"); `{ method: "modeChanged", params: { mode } }`
- *     tells the host which mode (Diff/Editor) is live, for the same reason;
- *     `{ method: "editorUIStateChanged", params: state }` tells the host
- *     Editor mode's sidebar toggle and recent-files list.
+ *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
+ *     recovery state, including mode, editor source state, sidebar state,
+ *     diff edit state, comments, and agent launch tracking.
  */
 
 type PendingCall = {
@@ -149,26 +145,11 @@ class RealSpacesBridge implements SpacesBridge {
     handler?.postMessage({ method: "ready" });
   }
 
-  /** Fire-and-forget state push; see class doc comment. `undefined` (no open file) is sent as
-   *  `null` since `postMessage`'s structured-clone step drops `undefined`-valued properties
-   *  entirely, and the Swift decoder treats "no params" the same as "explicit null". */
-  notifyEditorStateChanged(state: CodePaneEditorState | undefined): void {
+  /** Persists one complete workspace-local recovery document. Nullability is normalized here so
+   * WKWebView's structured clone cannot drop a meaningful "no state" field. */
+  notifyWorkspaceStateChanged(state: CodePaneWorkspaceState): void {
     const handler = window.webkit?.messageHandlers?.spacesBridge;
-    handler?.postMessage({ method: "editorStateChanged", params: state ?? null });
-  }
-
-  /** Fire-and-forget state push; see class doc comment. */
-  notifyModeChanged(mode: CodePaneMode): void {
-    const handler = window.webkit?.messageHandlers?.spacesBridge;
-    handler?.postMessage({ method: "modeChanged", params: { mode } });
-  }
-
-  /** Fire-and-forget state push; see class doc comment. Unlike `notifyEditorStateChanged`, `state`
-   *  always has real defaults (see `CodePaneEditorUIState`'s doc comment), so there is no
-   *  `undefined` case here to normalize to `null`. */
-  notifyEditorUIStateChanged(state: CodePaneEditorUIState): void {
-    const handler = window.webkit?.messageHandlers?.spacesBridge;
-    handler?.postMessage({ method: "editorUIStateChanged", params: state });
+    handler?.postMessage({ method: "workspaceStateChanged", params: state });
   }
 
   /** Fire-and-forget browser render milestone; the host writes it to the existing DEBUG perf log. */
@@ -177,8 +158,29 @@ class RealSpacesBridge implements SpacesBridge {
     handler?.postMessage({ method: "renderMetric", params: metric });
   }
 
-  async workspaceDiff(scope: DiffScope): Promise<WorkspaceDiffResult> {
-    return (await this.post("workspaceDiff", { scope })) as WorkspaceDiffResult;
+  async workspaceDiffManifestChunk(
+    scope: DiffScope,
+    request: { manifestID?: string; fileIndex: number },
+  ): Promise<WorkspaceDiffManifestChunkResult> {
+    return (await this.post("workspaceDiffManifestChunk", { scope, ...request })) as WorkspaceDiffManifestChunkResult;
+  }
+
+  async workspaceDiffFileChunk(
+    scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID?: string },
+  ): Promise<WorkspaceDiffFileChunkResult> {
+    return (await this.post("workspaceDiffFileChunk", { scope, ...request })) as WorkspaceDiffFileChunkResult;
+  }
+
+  async workspaceDiffFileChunkCancel(
+    scope: DiffScope,
+    request: { manifestID: string; relativePath: string; byteOffset: number; transferID: string },
+  ): Promise<void> {
+    await this.post("workspaceDiffFileChunkCancel", { scope, ...request });
+  }
+
+  async workspaceDiffManifestRelease(scope: DiffScope, request: { manifestID: string }): Promise<void> {
+    await this.post("workspaceDiffManifestRelease", { scope, ...request });
   }
 
   async workspaceFileRead(path: string): Promise<WorkspaceFileReadResult> {
@@ -191,7 +193,7 @@ class RealSpacesBridge implements SpacesBridge {
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
     // `baseSHA256: undefined` (the "create" convention) is normalized to `null` here for the same
-    // reason `notifyEditorStateChanged` normalizes its whole payload: postMessage's structured-clone
+    // reason workspace-state JSON normalizes nullable values: postMessage's structured-clone
     // step drops `undefined`-valued properties entirely, which would make "create" indistinguishable
     // from "the params object never had this key" on the Swift side.
     return (await this.post("workspaceFileWrite", {
@@ -224,6 +226,14 @@ class RealSpacesBridge implements SpacesBridge {
 
   async reviewCommentsSend(sessionId: string, text: string, comments: ReviewCommentSendEntry[]): Promise<void> {
     await this.post("reviewCommentsSend", { sessionId, text, comments });
+  }
+
+  async startWorkspaceCommand(command: string): Promise<StartWorkspaceCommandResult> {
+    return (await this.post("startWorkspaceCommand", { command })) as StartWorkspaceCommandResult;
+  }
+
+  async resumeWorkspaceCommandTracking(sessionId: string): Promise<StartWorkspaceCommandResult> {
+    return (await this.post("resumeWorkspaceCommandTracking", { sessionId })) as StartWorkspaceCommandResult;
   }
 
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {
