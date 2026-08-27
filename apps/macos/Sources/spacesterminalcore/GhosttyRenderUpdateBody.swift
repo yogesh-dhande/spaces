@@ -1,15 +1,28 @@
 import Foundation
 
+public struct GhosttyRenderUpdateEncodingResult: Sendable, Equatable {
+    public let byteCount: Int
+    public let elapsedMS: Int
+    public let succeeded: Bool
+
+    public init(byteCount: Int, elapsedMS: Int, succeeded: Bool) {
+        self.byteCount = byteCount
+        self.elapsedMS = elapsedMS
+        self.succeeded = succeeded
+    }
+}
+
+public typealias GhosttyRenderUpdateEncodingObserver = @Sendable (GhosttyRenderUpdateEncodingResult) -> Void
+
 /// The render update a `GhosttyRemoteSessionStatePayload` carries, held in whichever form its
 /// producer already has it.
 ///
-/// A payload that arrived over a wire, came off disk, or was exported by a session core holds the
-/// encoded blob. A payload a client materialized locally holds the decoded update: `TerminalRemoteStateReducer`
-/// applies each incoming delta to its baseline and stores the resulting full frame, and every read the
-/// client then makes of that stored payload (`decodedRenderUpdate`, `renderSnapshot`, `renderOwnerEpoch`,
-/// `renderText`) wants the decoded value. Serializing the materialized frame back to bytes on the spot
-/// cost a full grid encode per applied update per session under streaming output, for bytes no client
-/// read.
+/// A payload that arrived over a wire or came off disk holds the encoded blob. A payload built from live
+/// terminal state or materialized by a client locally holds the decoded update. Live producers can then
+/// leave serialization to their per-session transport queue, while `TerminalRemoteStateReducer` can
+/// apply each incoming delta to its baseline and store the resulting full frame without encoding bytes
+/// no client reads. Every client-side read of that stored payload (`decodedRenderUpdate`,
+/// `renderSnapshot`, `renderOwnerEpoch`, `renderText`) wants the decoded value.
 ///
 /// The bytes themselves are unchanged: `encodedData` runs the same binary codec, so a materialized
 /// payload that is JSON-encoded for a device subscriber or written to disk puts exactly the blob on the
@@ -22,15 +35,22 @@ final class GhosttyRenderUpdateBody: @unchecked Sendable {
     }
 
     private let source: Source
+    private let encodingObserver: GhosttyRenderUpdateEncodingObserver?
     private let lock = NSLock()
     private var encodedCache: Data?
+    private var didAttemptEncoding = false
 
     init(encoded data: Data) {
         source = .encoded(data)
+        encodingObserver = nil
         encodedCache = data
+        didAttemptEncoding = true
     }
 
-    init(materialized update: GhosttyRenderUpdate) { source = .materialized(update) }
+    init(materialized update: GhosttyRenderUpdate, encodingObserver: GhosttyRenderUpdateEncodingObserver? = nil) {
+        source = .materialized(update)
+        self.encodingObserver = encodingObserver
+    }
 
     /// The update's kind without decoding its grid: the value's own kind for a materialized body, a
     /// header read for an encoded one (see `GhosttyRenderUpdateBinaryCodec.encodedKind(of:)`). Nil when an
@@ -54,18 +74,42 @@ final class GhosttyRenderUpdateBody: @unchecked Sendable {
     /// The wire bytes, encoding a materialized update on first read.
     ///
     /// Encoding can only fail on a frame whose dimensions or cell count overflow the wire's fixed-width
-    /// fields. A materialized update is always a full frame built by applying decoded wire input to a
-    /// decoded baseline, so every one of those fields already came through the same fixed-width wire and
-    /// is in range: nil here means the payload carries no render update, which is what the reducer
-    /// produced when it encoded eagerly and the encode failed.
+    /// fields. Client-reduced updates inherit those fields from decoded wire input; live producers use
+    /// terminal grids constrained far below the same limits. Nil here means the serialized payload carries
+    /// no render update, which is what eager producer and reducer encoding yielded on failure.
     var encodedData: Data? {
         lock.lock()
-        defer { lock.unlock() }
-        if let encodedCache { return encodedCache }
-        guard case .materialized(let update) = source else { return nil }
+        if didAttemptEncoding {
+            let encoded = encodedCache
+            lock.unlock()
+            return encoded
+        }
+        guard case .materialized(let update) = source else {
+            lock.unlock()
+            return nil
+        }
+        let startedAt = encodingObserver == nil ? nil : Date()
         let encoded = try? GhosttyRenderUpdateBinaryCodec.encode(update)
         encodedCache = encoded
+        didAttemptEncoding = true
+        let observer = encodingObserver
+        let result = startedAt.map {
+            GhosttyRenderUpdateEncodingResult(
+                byteCount: encoded?.count ?? 0, elapsedMS: TerminalPerformance.elapsedMS(since: $0), succeeded: encoded != nil)
+        }
+        lock.unlock()
+        if let result { observer?(result) }
         return encoded
+    }
+
+    /// Whether a materialized update is still waiting for its first wire serialization. Kept internal
+    /// so focused tests can enforce the performance contract without reading `encodedData` and thereby
+    /// performing the very encode they are checking was deferred.
+    var isEncodingDeferred: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .materialized = source else { return false }
+        return !didAttemptEncoding
     }
 }
 

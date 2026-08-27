@@ -64,6 +64,10 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     /// Whether the payload carries a render update, without decoding or encoding one.
     public var hasRenderUpdate: Bool { renderUpdateBody != nil }
 
+    /// Test-visible performance invariant: a producer supplied a materialized update and no consumer has
+    /// serialized it yet. Reading this never triggers the grid-sized binary encode.
+    var isRenderUpdateEncodingDeferred: Bool { renderUpdateBody?.isEncodingDeferred == true }
+
     /// Folds an incoming payload onto the client's stored state. Every field here is carried forward
     /// when the update omits it — EXCEPT `clipboardWrite`, which is deliberately absent from the
     /// result: it is a one-shot event, not state. Inheriting it would make every later payload look
@@ -171,11 +175,20 @@ extension GhosttyRemoteSessionStatePayload {
         replacingRenderUpdateBody(renderUpdate.map(GhosttyRenderUpdateBody.init(encoded:)), screenStateRevision: screenStateRevision)
     }
 
-    /// Rebuilds the payload around a render update the caller already holds decoded, which is what a
-    /// client's reducer produces for every applied update. The update is encoded only if the payload is
-    /// later serialized; see `GhosttyRenderUpdateBody`.
+    /// Rebuilds the payload around a render update the caller already holds decoded, whether from a live
+    /// terminal export or a client's reducer. The update is encoded only if the payload is later
+    /// serialized; see `GhosttyRenderUpdateBody`.
     public func replacingRenderUpdate(materialized update: GhosttyRenderUpdate) -> Self {
         replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update), screenStateRevision: nil)
+    }
+
+    /// Producer-side form of `replacingRenderUpdate(materialized:)` that observes the one lazy binary
+    /// encode. The observer runs on whichever transport first serializes the payload, never while the
+    /// producer merely constructs or inspects it.
+    public func replacingRenderUpdate(
+        materialized update: GhosttyRenderUpdate, encodingObserver: @escaping GhosttyRenderUpdateEncodingObserver
+    ) -> Self {
+        replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update, encodingObserver: encodingObserver), screenStateRevision: nil)
     }
 
     /// The payload with its attachment snapshot reduced to what a subscriber needs, per

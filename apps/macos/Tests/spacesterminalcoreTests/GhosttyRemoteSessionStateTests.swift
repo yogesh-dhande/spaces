@@ -1,6 +1,24 @@
 import Foundation
 import XCTest
-import spacesterminalcore
+
+@testable import spacesterminalcore
+
+private final class RenderUpdateEncodingResultRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResults: [GhosttyRenderUpdateEncodingResult] = []
+
+    func record(_ result: GhosttyRenderUpdateEncodingResult) {
+        lock.lock()
+        storedResults.append(result)
+        lock.unlock()
+    }
+
+    var results: [GhosttyRenderUpdateEncodingResult] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedResults
+    }
+}
 
 final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testMergedPayloadCarriesOutputPositionWithoutRawBytes() throws {
@@ -499,7 +517,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let stored = reducer.reduce(incomingPayload: payload, previousPayload: nil).storedPayload
 
         XCTAssertTrue(stored.hasRenderUpdate)
+        XCTAssertTrue(stored.isRenderUpdateEncodingDeferred, "building a payload around a materialized grid must not encode it")
         let bytes = try XCTUnwrap(stored.renderUpdate)
+        XCTAssertFalse(stored.isRenderUpdateEncodingDeferred, "the first wire read should populate the shared encoded cache")
         XCTAssertEqual(
             bytes, try GhosttyRenderUpdateBinaryCodec.encode(.full(.init(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha")))))
         XCTAssertEqual(try GhosttyRenderUpdateBinaryCodec.decode(bytes), stored.decodedRenderUpdate)
@@ -507,6 +527,43 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(stored.renderSnapshot, snapshot(text: "alpha"))
         XCTAssertEqual(stored.renderText, "alpha")
         XCTAssertEqual(stored.renderOwnerEpoch, 4)
+    }
+
+    /// A daemon producer can hand its already-built update to the payload without changing the wire.
+    /// Construction remains grid-work-free; the state codec performs the encode when the per-session
+    /// transport serializes the payload.
+    func testMaterializedProducerPayloadDefersEncodingAndKeepsExactWireBytes() throws {
+        let update = GhosttyRenderUpdate.full(.init(sessionRevision: 7, ownerEpoch: 9, snapshot: snapshot(text: "alpha")))
+        let metadata = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 7, sessionStateFlags: 1, screenStateRevision: 7, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil)
+        let encodingResults = RenderUpdateEncodingResultRecorder()
+        let materialized = metadata.replacingRenderUpdate(materialized: update, encodingObserver: encodingResults.record)
+        let eager = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 7, sessionStateFlags: 1, screenStateRevision: 7, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
+
+        XCTAssertTrue(materialized.hasRenderUpdate)
+        XCTAssertTrue(materialized.isRenderUpdateEncodingDeferred)
+        XCTAssertTrue(encodingResults.results.isEmpty)
+        XCTAssertEqual(materialized.decodedRenderUpdate, update)
+        XCTAssertTrue(materialized.isRenderUpdateEncodingDeferred, "decoded access to a materialized update must not request wire bytes")
+        XCTAssertTrue(encodingResults.results.isEmpty)
+
+        let materializedBytes = try XCTUnwrap(materialized.renderUpdate)
+        XCTAssertEqual(materializedBytes, eager.renderUpdate, "lazy and eager producers must emit the identical render-update blob")
+        XCTAssertEqual(encodingResults.results.count, 1)
+        let encodingResult = try XCTUnwrap(encodingResults.results.first)
+        XCTAssertEqual(encodingResult.byteCount, materializedBytes.count)
+        XCTAssertTrue(encodingResult.succeeded)
+        XCTAssertGreaterThanOrEqual(encodingResult.elapsedMS, 0)
+        let materializedLine = try GhosttyRemoteSessionStateCodec.encodeLine(materialized)
+        let eagerLine = try GhosttyRemoteSessionStateCodec.encodeLine(eager)
+        XCTAssertEqual(try GhosttyRemoteSessionStateCodec.decodeLine(materializedLine), try GhosttyRemoteSessionStateCodec.decodeLine(eagerLine))
+        XCTAssertFalse(materialized.isRenderUpdateEncodingDeferred)
+        XCTAssertEqual(encodingResults.results.count, 1, "memoized wire bytes must not emit a second encoding observation")
     }
 
     /// A metadata-only update inherits the stored screen state, and inherits it as the same render

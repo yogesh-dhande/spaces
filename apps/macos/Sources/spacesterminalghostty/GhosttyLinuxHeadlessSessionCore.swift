@@ -1964,30 +1964,39 @@
             guard !suppressBroadcastsForHandoff else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let startedAt = performanceLoggingEnabled ? Date() : nil
-            guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed, clipboardWrite: clipboardWrite) else { return }
+            guard
+                let payload = makeStatePayload(
+                    reason: reason, exportMode: .streamDeltaAllowed, clipboardWrite: clipboardWrite,
+                    payloadPublishStartedAt: startedAt)
+            else { return }
             stateStreamServer?.broadcast(payload)
-            guard performanceLoggingEnabled, let startedAt else { return }
+            // A render-carrying payload reports these events from its lazy-encoding observer on the
+            // transport queue. Frameless payloads never invoke that observer, so retain their immediate
+            // publish metrics here.
+            guard performanceLoggingEnabled, let startedAt, !payload.hasRenderUpdate else { return }
             let decodedUpdate = payload.decodedRenderUpdate
-            let attributes = GhosttyRenderFrameMetrics.attributes(
+            var attributes = GhosttyRenderFrameMetrics.attributes(
                 reason: payload.reason, frame: decodedUpdate?.fullFrame, outputByteCount: outputByteCount,
                 screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+            attributes["render_update_bytes"] = "0"
+            attributes["render_update_encode_ms"] = "0"
             logMobileTakeoverPerformance(
-                name: "remote_state_publish", count: payload.renderUpdate?.count,
+                name: "remote_state_publish",
                 attributes: [
                     "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil",
-                    "render_update": payload.renderUpdate == nil ? "0" : "1", "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
+                    "render_update": "0", "render_update_bytes": "0", "render_update_encode_ms": "0",
                 ])
             logMobileTakeoverPerformance(
-                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payload.renderUpdate?.count,
-                attributes: attributes)
+                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: attributes)
         }
 
         private func makeStatePayload(
             reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil
+            markNextBroadcastFull: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil,
+            payloadPublishStartedAt: Date? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // A nil read here (cache empty, reseed currently failing) rides straight into the payload below:
             // `attachmentSnapshot` on the wire is itself optional, and a subscriber merging updates keeps its
@@ -2010,7 +2019,7 @@
             }
             let frame: GhosttyRenderFrame?
             let renderUpdateValue: GhosttyRenderUpdate?
-            let renderUpdate: Data?
+            var encodingObserver: GhosttyRenderUpdateEncodingObserver?
             if includeScreenState {
                 let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
                 let snapshotExportStartedAt = performanceLoggingEnabled ? Date() : nil
@@ -2023,15 +2032,14 @@
                     pendingSelectionGarbagePinBroadcast = false
                     Task { @TerminalEngineActor [weak self] in self?.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection) }
                 }
-                let renderUpdateEncodeStartedAt = performanceLoggingEnabled ? Date() : nil
+                let renderUpdateConstructionStartedAt = performanceLoggingEnabled ? Date() : nil
                 renderUpdateValue = capturedFrame.map {
                     makeRenderUpdate(
                         for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, nativeScrollRectsOverflowed: $0.scrollRectsOverflowed,
                         exportMode: exportMode)
                 }
-                renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
-                if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateEncodeStartedAt {
-                    let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
+                if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateConstructionStartedAt {
+                    let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
                     var attributes = GhosttyRenderFrameMetrics.attributes(
                         reason: reason, frame: frame, outputByteCount: outputByteCount, screenStateRevision: screenStateRevision,
                         frameKind: renderUpdateValue?.frameKindMetricValue, baseRevision: renderUpdateValue?.baseRevision,
@@ -2039,24 +2047,60 @@
                         changedCellCount: renderUpdateValue?.changedCellCount, scrollOperationCount: renderUpdateValue?.scrollOperationCount,
                         fullFrameFallbackReason: renderUpdateValue?.fallbackReason)
                     attributes["owner_kind"] = ownerKind?.rawValue ?? "nil"
-                    attributes["render_update_bytes"] = String(renderUpdate?.count ?? 0)
-                    attributes["render_update_encode_ms"] = String(renderUpdateEncodeMS)
-                    logMobileTakeoverPerformance(
-                        name: "render_frame_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt),
-                        count: renderUpdate?.count, attributes: attributes)
+                    attributes["render_update_construct_ms"] = String(renderUpdateConstructionMS)
+                    if renderUpdateValue == nil {
+                        attributes["render_update_bytes"] = "0"
+                        attributes["render_update_encode_ms"] = "0"
+                        logMobileTakeoverPerformance(
+                            name: "render_frame_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt),
+                            attributes: attributes)
+                    } else {
+                        let sessionID = launchConfiguration.sessionID
+                        let ownerKindValue = ownerKind?.rawValue ?? "nil"
+                        let unencodedAttributes = attributes
+                        encodingObserver = { result in
+                            var encodedAttributes = unencodedAttributes
+                            encodedAttributes["render_update_bytes"] = String(result.byteCount)
+                            encodedAttributes["render_update_encode_ms"] = String(result.elapsedMS)
+                            SpacesDeviceTerminalPerformanceLogger.emit(
+                                .init(
+                                    sessionID: sessionID, source: "linux-host", name: "render_frame_export_end",
+                                    elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt), count: result.byteCount,
+                                    attributes: encodedAttributes))
+                            if let payloadPublishStartedAt {
+                                SpacesDeviceTerminalPerformanceLogger.emit(
+                                    .init(
+                                        sessionID: sessionID, source: "linux-host", name: "remote_state_publish", count: result.byteCount,
+                                        attributes: [
+                                            "reason": reason, "owner_kind": ownerKindValue, "render_update": "1",
+                                            "render_update_bytes": String(result.byteCount),
+                                            "render_update_encode_ms": String(result.elapsedMS),
+                                        ]))
+                                SpacesDeviceTerminalPerformanceLogger.emit(
+                                    .init(
+                                        sessionID: sessionID, source: "linux-host", name: "render_frame_payload_publish",
+                                        elapsedMS: TerminalPerformance.elapsedMS(since: payloadPublishStartedAt), count: result.byteCount,
+                                        attributes: encodedAttributes))
+                            }
+                        }
+                    }
                 }
             } else {
                 frame = nil
                 renderUpdateValue = nil
-                renderUpdate = nil
             }
-            if renderUpdate != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
-            return GhosttyRemoteSessionStatePayload(
+            if renderUpdateValue != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
+            let payload = GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: nowISO8601(), sessionStateRevision: nil, sessionStateFlags: nil,
                 screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
-                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
+                outputEndByteOffset: outputByteCount, clipboardWrite: clipboardWrite)
+            guard let renderUpdateValue else { return payload }
+            if let encodingObserver {
+                return payload.replacingRenderUpdate(materialized: renderUpdateValue, encodingObserver: encodingObserver)
+            }
+            return payload.replacingRenderUpdate(materialized: renderUpdateValue)
         }
 
         private func makeRenderUpdate(
