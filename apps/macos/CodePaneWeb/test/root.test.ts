@@ -1443,6 +1443,101 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     );
   });
 
+  it("treats a disk refresh matching the saved buffer as clean before the CAS reply", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
+      .mockResolvedValueOnce({ content: "saved\n", sha256: "sha-saved", size: 6 });
+    let resolveWrite: ((result: { ok: true; sha256: string }) => void) | undefined;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveWrite = resolve;
+      }),
+    );
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved\n" });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
+      "editable.ts",
+      "saved\n",
+      { baseSHA256: "sha-before" },
+    ));
+
+    // The write has landed on disk, but its reply is still in flight. A file-signature refresh
+    // therefore reconciles the exact saved buffer before saveDiffEdit can process the CAS result.
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "saved-signature");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
+      expect(snapshot.diffEditorState).toMatchObject({
+        path: "editable.ts",
+        content: "saved\n",
+        baseSHA256: "sha-saved",
+        baseContent: "saved\n",
+        dirty: false,
+        conflict: false,
+      });
+    });
+
+    // The late success belongs to the same write and must not resurrect a dirty editor or a
+    // conflict after reconciliation already established that disk and the buffer agree.
+    resolveWrite!({ ok: true, sha256: "sha-saved" });
+    await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toBeNull());
+  });
+
+  it("ignores a late save failure after a matching disk refresh proved the write landed", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
+      .mockResolvedValueOnce({ content: "saved\n", sha256: "sha-saved", size: 6 });
+    let rejectWrite: ((error: unknown) => void) | undefined;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () => new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved\n" });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
+      "editable.ts",
+      "saved\n",
+      { baseSHA256: "sha-before" },
+    ));
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "saved-before-rejection");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "saved\n",
+      baseSHA256: "sha-saved",
+      dirty: false,
+      conflict: false,
+    }));
+
+    // The RPC response was lost after the signature read observed the write on disk. That late
+    // rejection is superseded by the stronger disk observation and must not show a false failure.
+    rejectWrite!(new SpacesBridgeError("unavailable", "response lost"));
+    await vi.waitFor(() => {
+      expect(container.querySelector<HTMLElement>("#code-pane-diff-edit-error")?.style.display).toBe("none");
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+        content: "saved\n",
+        baseSHA256: "sha-saved",
+        dirty: false,
+        conflict: false,
+      });
+    });
+  });
+
   it("keeps reconciled content when an older in-flight save resolves afterward", async () => {
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\nline 4\n", sha256: "sha-before", size: 28 })
@@ -1486,6 +1581,58 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
         conflict: false,
       });
     });
+  });
+
+  it("clears an already-conflicted editor when its Keep mine write lands before the reply", async () => {
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
+      .mockResolvedValueOnce({ content: "disk version\n", sha256: "sha-disk", size: 13 })
+      .mockResolvedValueOnce({ content: "my version\n", sha256: "sha-mine", size: 11 });
+    let resolveWrite: ((result: { ok: true; sha256: string }) => void) | undefined;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveWrite = resolve;
+      }),
+    );
+    const setConflictSpy = vi.spyOn(DiffView.prototype, "setEditConflict");
+    await mountEditableDiff();
+    startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts"));
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "my version\n" });
+
+    // First refresh establishes the read-only conflict comparison.
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [editableFile], "conflict-before-keep-mine");
+    await vi.waitFor(() => expect(setConflictSpy).toHaveBeenCalledWith(
+      "editable.ts",
+      { kind: "changed", diskContent: "disk version\n" },
+    ));
+    const conflictHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    conflictHeader.querySelector<HTMLButtonElement>("button:last-of-type")!.click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
+      "editable.ts",
+      "my version\n",
+      { baseSHA256: "sha-disk" },
+    ));
+
+    // Keep mine has landed, but its reply is still in flight. The next signature refresh observes
+    // disk == the frozen buffer and must rebuild the normal editable renderer before that reply.
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3));
+    resolveDiff(2, [editableFile], "conflict-resolved-before-reply");
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => {
+      const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(header.textContent).toContain("Editing");
+      expect(header.textContent).not.toContain("Workspace changed");
+      expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(header.querySelector<HTMLButtonElement>("button")?.textContent).toBe("Cancel");
+    });
+
+    resolveWrite!({ ok: true, sha256: "sha-mine" });
+    await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toBeNull());
+    setConflictSpy.mockRestore();
   });
 
   it("keeps dirty A when discarding it to open B fails", async () => {

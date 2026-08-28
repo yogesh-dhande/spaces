@@ -100,6 +100,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let diffEditSessionToken = diffEditorState === undefined ? 0 : 1;
   /** A stale save must not block the editor that replaced its session. */
   let diffEditSaveInFlightSession: number | undefined;
+  /** A signature read can prove an in-flight save landed before its RPC settles. */
+  let diffEditDiskConfirmedSave: { session: number; contentGeneration: number } | undefined;
   let diffEditRequestToken = 0;
   /** Advances only for user typing in the inline diff editor. A successful CAS write adopts its
    * returned baseline only when this value still matches the content it sent. */
@@ -1442,6 +1444,19 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       }
     } catch (error) {
       if (!ownsEdit()) return;
+      if (
+        diffEditDiskConfirmedSave?.session === editSession &&
+        diffEditDiskConfirmedSave.contentGeneration === diffEditContentGeneration &&
+        diffEditorState?.content === edit.content &&
+        diffEditorState.dirty === false &&
+        diffEditorState.conflict === false
+      ) {
+        // The signature read already proved this exact submitted buffer is on disk. A lost or
+        // rejected RPC response is therefore superseded; preserve the clean editor and avoid a
+        // misleading save error. A later edit changes the generation and cannot take this path.
+        diffView.clearEditError();
+        return;
+      }
       if (error instanceof SpacesBridgeError && error.code === "notFound") {
         diffEditorState = { ...edit, conflict: true, conflictBaseSHA256: null };
         diffView.setEditConflict(path, { kind: "deleted" });
@@ -1465,24 +1480,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       const disk = await bridge.workspaceFileRead(path);
       if (diffEditorState !== edit) return;
       if (disk.sha256 === edit.baseSHA256) return;
-      // Reconciliation can replace the live document or move it into a conflict comparison while
-      // a CAS save is still in flight. Advance the content generation so that an older success
-      // cannot close the editor and discard the reconciled state when it settles.
-      diffEditContentGeneration += 1;
-      if (edit.conflict) {
-        // A later external write must refresh the frozen comparison and its CAS baseline, not
-        // rerun auto-merge and silently unlock editing before an explicit conflict decision.
+      if (disk.content === edit.content) {
+        // The workspace write can land before its CAS reply reaches this pane. Disk already holds
+        // exactly the live buffer, so this refresh is the successful-save observation: adopt its
+        // hash and mark the editor clean without advancing the content generation. Leaving the
+        // generation unchanged lets the in-flight write reply take its normal success arm and
+        // close this now-clean editor; a later keystroke still advances it and remains protected
+        // by the existing newer-content branch.
         diffEditorState = {
           ...edit,
-          baseSHA256: disk.sha256,
-          baseContent: disk.content,
-          conflict: true,
-          conflictBaseSHA256: disk.sha256,
-        };
-        diffView.setEditConflict(path, { kind: "changed", diskContent: disk.content });
-      } else if (!edit.dirty) {
-        diffEditorState = {
-          path,
           baseSHA256: disk.sha256,
           baseContent: disk.content,
           content: disk.content,
@@ -1490,23 +1496,21 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           conflict: false,
           conflictBaseSHA256: null,
         };
+        if (diffEditSaveInFlightSession === diffEditSessionToken) {
+          diffEditDiskConfirmedSave = {
+            session: diffEditSessionToken,
+            contentGeneration: diffEditContentGeneration,
+          };
+        }
         diffView.replaceEditContent(path, disk.content, false);
       } else {
-        const merged = diff3MergeLines(edit.content, edit.baseContent, disk.content);
-        if ("merged" in merged) {
-          diffEditorState = {
-            path,
-            baseSHA256: disk.sha256,
-            baseContent: disk.content,
-            content: merged.merged,
-            dirty: true,
-            conflict: false,
-            conflictBaseSHA256: null,
-          };
-          diffView.replaceEditContent(path, merged.merged);
-        } else {
-          // Persist the exact disk snapshot displayed in the comparison. Keep mine uses the same
-          // hash, so neither state restoration nor a later write can target a stale baseline.
+        // Reconciliation can replace the live document or move it into a conflict comparison while
+        // a CAS save is still in flight. Advance the content generation so that an older success
+        // cannot close the editor and discard the reconciled state when it settles.
+        diffEditContentGeneration += 1;
+        if (edit.conflict) {
+          // A later external write must refresh the frozen comparison and its CAS baseline, not
+          // rerun auto-merge and silently unlock editing before an explicit conflict decision.
           diffEditorState = {
             ...edit,
             baseSHA256: disk.sha256,
@@ -1515,6 +1519,42 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             conflictBaseSHA256: disk.sha256,
           };
           diffView.setEditConflict(path, { kind: "changed", diskContent: disk.content });
+        } else if (!edit.dirty) {
+          diffEditorState = {
+            path,
+            baseSHA256: disk.sha256,
+            baseContent: disk.content,
+            content: disk.content,
+            dirty: false,
+            conflict: false,
+            conflictBaseSHA256: null,
+          };
+          diffView.replaceEditContent(path, disk.content, false);
+        } else {
+          const merged = diff3MergeLines(edit.content, edit.baseContent, disk.content);
+          if ("merged" in merged) {
+            diffEditorState = {
+              path,
+              baseSHA256: disk.sha256,
+              baseContent: disk.content,
+              content: merged.merged,
+              dirty: true,
+              conflict: false,
+              conflictBaseSHA256: null,
+            };
+            diffView.replaceEditContent(path, merged.merged);
+          } else {
+            // Persist the exact disk snapshot displayed in the comparison. Keep mine uses the same
+            // hash, so neither state restoration nor a later write can target a stale baseline.
+            diffEditorState = {
+              ...edit,
+              baseSHA256: disk.sha256,
+              baseContent: disk.content,
+              conflict: true,
+              conflictBaseSHA256: disk.sha256,
+            };
+            diffView.setEditConflict(path, { kind: "changed", diskContent: disk.content });
+          }
         }
       }
     } catch (error) {

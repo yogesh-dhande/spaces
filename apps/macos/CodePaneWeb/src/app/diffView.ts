@@ -332,16 +332,26 @@ export class DiffView {
 
   /** Rebuilds the single editable item from a disk adoption or clean diff3 merge without creating
    * a second edit session. A fresh session cache key makes Pierre adopt supplied source content
-   * instead of retaining the old editor document. */
+   * instead of retaining the old editor document. Replacing content also exits conflict mode: the
+   * caller is supplying a normal editable document, so retaining the old read-only comparison
+   * would leave the header and renderer out of sync with the root state. */
   replaceEditContent(path: string, content: string, dirty = true): void {
     if (this.editing?.path !== path || !this.codeView) return;
-    this.editing = { ...this.editing, content, dirty, session: ++this.editSessionGeneration };
+    this.editing = { ...this.editing, content, dirty, conflict: undefined, session: ++this.editSessionGeneration };
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     const file = this.filesByPath.get(path);
     if (!file) return;
+    const priorType = this.itemTypes.get(path);
     const item = this.cacheItem(file);
-    this.codeView.updateItem(item);
+    if (priorType !== item.type) {
+      // Conflict mode is a FileDiff item while normal editing is a File item. Pierre cannot
+      // change that renderer through updateItem, so rebuild the cached item list for this one
+      // transition just as updateFile does when a streamed file changes type.
+      this.codeView.setItems(this.cachedRenderedItems());
+    } else {
+      this.codeView.updateItem(item);
+    }
     this.completeEditorAttach(item);
   }
 
