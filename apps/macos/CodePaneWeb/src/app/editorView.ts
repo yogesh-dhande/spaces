@@ -523,7 +523,7 @@ export class EditorView {
     const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
     try {
-      result = await this.bridge.workspaceFileRead(path);
+      result = await this.bridge.workspaceFileRead(path, "editor");
     } catch (err) {
       if (generation !== this.openGeneration) return; // a later loadFile() already won
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
@@ -658,7 +658,7 @@ export class EditorView {
 
     let disk: { content: string; sha256: string } | undefined;
     try {
-      const result = await this.bridge.workspaceFileRead(path);
+      const result = await this.bridge.workspaceFileRead(path, "editor");
       disk = { content: result.content, sha256: result.sha256 };
     } catch (err) {
       // Superseded before this failure even landed (a newer loadFile() or a newer external-change fetch

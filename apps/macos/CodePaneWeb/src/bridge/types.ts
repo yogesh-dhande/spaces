@@ -90,6 +90,9 @@ export interface WorkspaceFileReadResult {
   size: number;
 }
 
+/** Identifies whether a file read owns the native editor file-signature watcher. */
+export type WorkspaceFileReadPurpose = "editor" | "inlineDiff";
+
 export interface WorkspaceFileWriteOptions {
   /**
    * The sha256 the caller last read. The write is rejected as a conflict if the file's current
@@ -321,7 +324,9 @@ export interface SpacesBridge {
     request: { manifestID: string; relativePath: string; byteOffset: number; transferID: string },
   ): Promise<void>;
   workspaceDiffManifestRelease(scope: DiffScope, request: { manifestID: string }): Promise<void>;
-  workspaceFileRead(path: string): Promise<WorkspaceFileReadResult>;
+  /** Reads a workspace file. The default editor purpose owns the native file-signature watcher;
+   * inline diff reads explicitly use `inlineDiff` and do not retarget it. */
+  workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult>;
   workspaceFileWrite(path: string, content: string, options: WorkspaceFileWriteOptions): Promise<WorkspaceFileWriteResult>;
   /**
    * The full workspace file listing, backing Editor mode's Files tree and the ⌘P quick-open
@@ -350,7 +355,8 @@ export interface SpacesBridge {
    * Subscribe to file-signature-changed push events for the editor's currently open file. The
    * returned function unsubscribes. Only one path is observed at a time (mirroring
    * `subscribeDiffSignature`'s one-scope-at-a-time model) — the host decides which path the
-   * underlying stream points at, driven by `workspaceFileRead` completions, so there is no
+   * underlying stream points at, driven by completions of `workspaceFileRead` calls with the
+   * `editor` purpose; inline-diff reads use `inlineDiff` and never retarget it. There is no
    * explicit subscribe/unsubscribe RPC here; see README.md for the event-delivery mechanism.
    */
   subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;

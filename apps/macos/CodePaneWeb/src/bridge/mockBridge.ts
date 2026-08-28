@@ -26,6 +26,7 @@ import {
   WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
+  WorkspaceFileReadPurpose,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
   WorkspaceRefListResult,
@@ -55,10 +56,10 @@ export class MockSpacesBridge implements SpacesBridge {
   private version = 0;
   private readonly listeners = new Set<DiffSignatureListener>();
   private readonly fileSignatureListeners = new Set<FileSignatureListener>();
-  /** The path most recently passed to `workspaceFileRead`: this is what the harness's "currently
-   *  open in the editor" file is, for `simulateFileChange`/`simulateFileDeleted` to act against —
-   *  mirroring how the real host tracks which path its one live `spaces:fileSignature` stream
-   *  points at (driven by `workspaceFileRead` completions, per types.ts's doc comment). */
+  /** The path most recently passed to an editor-purpose `workspaceFileRead`: this is what the
+   *  harness's "currently open in the editor" file is, for `simulateFileChange`/
+   *  `simulateFileDeleted` to act against. Inline-diff reads do not retarget this stream, matching
+   *  the native host's single standalone-editor watcher. */
   private currentReadPath: string | undefined;
   private readonly files = new Map<string, { content: string; sha256: string }>(
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
@@ -165,11 +166,10 @@ export class MockSpacesBridge implements SpacesBridge {
     await delay(undefined);
   }
 
-  async workspaceFileRead(path: string): Promise<WorkspaceFileReadResult> {
-    // Track this as the harness's "currently open" path regardless of outcome below, mirroring
-    // the real host: a read attempt (even one that turns out notFound) is what points the one
-    // live file-signature stream at this path.
-    this.currentReadPath = path;
+  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult> {
+    // Only standalone Editor reads own the harness's live watcher. Inline diff reads fetch content
+    // for a separate transient editor and must not move external-change monitoring off the open file.
+    if (purpose === "editor") this.currentReadPath = path;
     const entry = this.files.get(path);
     if (!entry) {
       throw new SpacesBridgeError("notFound", `No such file in the mock workspace: ${path}`);

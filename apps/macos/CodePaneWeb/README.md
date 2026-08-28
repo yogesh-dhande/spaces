@@ -48,7 +48,9 @@ production build.
   raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
   later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
   transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers.
-- `workspaceFileRead(path)` — content, `sha256`, size.
+- `workspaceFileRead(path, purpose)` — content, `sha256`, size. `editor` makes the native host's
+  single file-signature watcher follow the standalone editor; `inlineDiff` does not retarget that
+  watcher. Every caller must identify one of these purposes.
 - `workspaceFileWrite(path, content, {baseSHA256})` — compare-and-swap write; returns
   `{ok:true, sha256}` (the hash of exactly what was just written, adopted directly as the next
   save's CAS baseline) or `{conflict:true, currentSHA256}` (`currentSHA256` omitted and

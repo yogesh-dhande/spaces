@@ -442,7 +442,9 @@ enum CodePaneBridge {
         case workspaceDiffFileChunk(scope: DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String?)
         case workspaceDiffFileChunkCancel(scope: DiffScope, manifestID: String, relativePath: String, byteOffset: Int, transferID: String)
         case workspaceDiffManifestRelease(scope: DiffScope, manifestID: String)
-        case workspaceFileRead(path: String)
+        /// `ownsFileSignature` is true only for the standalone Editor's read; inline diff reads must
+        /// not retarget the one native file-signature watcher away from that Editor file.
+        case workspaceFileRead(path: String, ownsFileSignature: Bool)
         /// `baseSHA256` is `nil` for the "create" convention (see `WorkspaceFileWriteOptions.baseSHA256`
         /// in `CodePaneWeb/src/bridge/types.ts`): the write must fail as a conflict unless the target
         /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
@@ -513,10 +515,17 @@ enum CodePaneBridge {
             }
             return decodeDiffScope(request.params["scope"]).map { .workspaceDiffManifestRelease(scope: $0, manifestID: manifestID) }
         case "workspaceFileRead":
-            guard let path = request.params["path"] as? String else {
-                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path."))
+            // Every caller identifies whether this read belongs to the standalone Editor or to the
+            // transient inline diff editor. Keeping that intent on the wire prevents the latter's
+            // workspace-file lookup from stealing the Editor's sole native signature stream.
+            guard let path = request.params["path"] as? String, let purpose = request.params["purpose"] as? String else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path and purpose."))
             }
-            return .success(.workspaceFileRead(path: path))
+            switch purpose {
+            case "editor": return .success(.workspaceFileRead(path: path, ownsFileSignature: true))
+            case "inlineDiff": return .success(.workspaceFileRead(path: path, ownsFileSignature: false))
+            default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead purpose must be editor or inlineDiff."))
+            }
         case "workspaceFileWrite":
             // `options.baseSHA256` is optional: absent or JSON `null` (the wire's "create" convention
             // — see realBridge.ts's `workspaceFileWrite`) both fall out of `as? String` as `nil` here,

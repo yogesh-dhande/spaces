@@ -1000,7 +1000,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     private func fileReadRequest(id: String, path: String) -> CodePaneBridge.Request {
-        CodePaneBridge.Request(id: id, method: "workspaceFileRead", params: ["path": path])
+        CodePaneBridge.Request(id: id, method: "workspaceFileRead", params: ["path": path, "purpose": "editor"])
     }
 
     /// Waits out a window without asserting anything, so a "this must NOT happen" test can give the
@@ -1896,6 +1896,29 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForFileSubscribeCallCount(1)
         let path = await gateway.subscribedFilePath(at: 0)
         #expect(path == "foo.ts")
+    }
+
+    @Test func anInlineDiffFileReadDoesNotRetargetTheEditorFileSignatureStream() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.dispatch(CodePaneBridge.Request(
+            id: "req-2", method: "workspaceFileRead", params: ["path": "bar.ts", "purpose": "inlineDiff"]))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 1, "an inline diff read must not replace the Editor's watcher")
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts")
     }
 
     @Test func lateFileReadResponseDoesNotRetargetTheStreamToASupersededPath() async {

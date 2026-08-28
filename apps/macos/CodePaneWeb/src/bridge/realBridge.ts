@@ -18,6 +18,7 @@ import {
   WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
+  WorkspaceFileReadPurpose,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
   WorkspaceRefListResult,
@@ -52,8 +53,8 @@ import {
  *     `spaces:fileSignature` (any time the editor's currently open file
  *     changes or is deleted on disk, detail: FileSignatureEvent). The host
  *     decides which path `spaces:fileSignature` tracks based on
- *     `workspaceFileRead` completions — there is no explicit subscribe
- *     message for it.
+ *     `workspaceFileRead` completions marked with the `editor` purpose; inline
+ *     diff reads use `inlineDiff` and never retarget that watcher.
  *
  *   JS -> Swift (state pushes, fire-and-forget): the same message handler,
  *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
@@ -183,8 +184,8 @@ class RealSpacesBridge implements SpacesBridge {
     await this.post("workspaceDiffManifestRelease", { scope, ...request });
   }
 
-  async workspaceFileRead(path: string): Promise<WorkspaceFileReadResult> {
-    return (await this.post("workspaceFileRead", { path })) as WorkspaceFileReadResult;
+  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult> {
+    return (await this.post("workspaceFileRead", { path, purpose })) as WorkspaceFileReadResult;
   }
 
   async workspaceFileWrite(
@@ -252,9 +253,9 @@ class RealSpacesBridge implements SpacesBridge {
 
   subscribeFileSignature(_path: string, listener: FileSignatureListener): Unsubscribe {
     // Mirrors subscribeDiffSignature exactly: the host, not this call, decides which path the
-    // one live `spaces:fileSignature` stream tracks (driven by workspaceFileRead completions —
-    // see types.ts doc comment), so this never messages Swift, it only listens for the one
-    // global event.
+    // one live `spaces:fileSignature` stream tracks (driven by editor-purpose workspaceFileRead
+    // completions — see types.ts doc comment), so this never messages Swift, it only listens for
+    // the one global event.
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<FileSignatureEvent>).detail;
       if (detail && typeof detail.path === "string" && typeof detail.missing === "boolean") {

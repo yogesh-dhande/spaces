@@ -19,8 +19,8 @@ describe("RealSpacesBridge", () => {
   it("correlates each call's reply by id, even when replies arrive out of order", async () => {
     const bridge = createRealBridge();
 
-    const first = bridge.workspaceFileRead("a.ts");
-    const second = bridge.workspaceFileRead("b.ts");
+    const first = bridge.workspaceFileRead("a.ts", "editor");
+    const second = bridge.workspaceFileRead("b.ts", "editor");
 
     expect(postMessage).toHaveBeenCalledTimes(2);
     const firstId = (postMessage.mock.calls[0]![0] as { id: string }).id;
@@ -37,7 +37,7 @@ describe("RealSpacesBridge", () => {
 
   it("rejects with a SpacesBridgeError carrying the reported code and message", async () => {
     const bridge = createRealBridge();
-    const call = bridge.workspaceFileRead("missing.ts");
+    const call = bridge.workspaceFileRead("missing.ts", "editor");
     const id = (postMessage.mock.calls[0]![0] as { id: string }).id;
 
     window.__spacesBridge!.reject(id, { code: "notFound", message: "no such file" });
@@ -48,7 +48,7 @@ describe("RealSpacesBridge", () => {
 
   it("normalizes an unrecognized error code to internalError rather than passing it through", async () => {
     const bridge = createRealBridge();
-    const call = bridge.workspaceFileRead("x.ts");
+    const call = bridge.workspaceFileRead("x.ts", "editor");
     const id = (postMessage.mock.calls[0]![0] as { id: string }).id;
 
     window.__spacesBridge!.reject(id, { code: "somethingTheHostInventedLater", message: "boom" });
@@ -64,7 +64,7 @@ describe("RealSpacesBridge", () => {
   it("rejects immediately with 'unavailable' when the WKWebView message handler is not installed", async () => {
     delete window.webkit;
     const bridge = createRealBridge();
-    await expect(bridge.workspaceFileRead("a.ts")).rejects.toMatchObject({ code: "unavailable" });
+    await expect(bridge.workspaceFileRead("a.ts", "editor")).rejects.toMatchObject({ code: "unavailable" });
   });
 
   it("sends the ready lifecycle notification with no id", () => {
@@ -172,13 +172,13 @@ describe("RealSpacesBridge", () => {
 describe("MockSpacesBridge", () => {
   it("rejects workspaceFileRead for a path outside the fixture set with a notFound SpacesBridgeError", async () => {
     const bridge = createMockBridge();
-    await expect(bridge.workspaceFileRead("does/not/exist.ts")).rejects.toBeInstanceOf(SpacesBridgeError);
-    await expect(bridge.workspaceFileRead("does/not/exist.ts")).rejects.toMatchObject({ code: "notFound" });
+    await expect(bridge.workspaceFileRead("does/not/exist.ts", "editor")).rejects.toBeInstanceOf(SpacesBridgeError);
+    await expect(bridge.workspaceFileRead("does/not/exist.ts", "editor")).rejects.toMatchObject({ code: "notFound" });
   });
 
   it("returns a conflict shape (not a throw) when the write's baseSHA256 is stale", async () => {
     const bridge = createMockBridge();
-    const read = await bridge.workspaceFileRead("notes/TODO.md");
+    const read = await bridge.workspaceFileRead("notes/TODO.md", "editor");
 
     const result = await bridge.workspaceFileWrite("notes/TODO.md", "# TODO\n\n- changed elsewhere\n", {
       baseSHA256: "stale-hash-not-matching-current",
@@ -190,7 +190,7 @@ describe("MockSpacesBridge", () => {
 
   it("accepts a write whose baseSHA256 matches the current content, and the next read reflects it", async () => {
     const bridge = createMockBridge();
-    const read = await bridge.workspaceFileRead("notes/TODO.md");
+    const read = await bridge.workspaceFileRead("notes/TODO.md", "editor");
 
     const result = await bridge.workspaceFileWrite("notes/TODO.md", "# TODO\n\n- done\n", {
       baseSHA256: read.sha256,
@@ -199,7 +199,7 @@ describe("MockSpacesBridge", () => {
     // baseline, with no re-read) rather than a bare `{ ok: true }`.
     expect(result).toEqual({ ok: true, sha256: expect.any(String) });
 
-    const reread = await bridge.workspaceFileRead("notes/TODO.md");
+    const reread = await bridge.workspaceFileRead("notes/TODO.md", "editor");
     expect(reread.content).toBe("# TODO\n\n- done\n");
     expect(reread.sha256).not.toBe(read.sha256);
   });

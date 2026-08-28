@@ -106,6 +106,9 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   /** Advances only for user typing in the inline diff editor. A successful CAS write adopts its
    * returned baseline only when this value still matches the content it sent. */
   let diffEditContentGeneration = 0;
+  /** Only the newest disk reconciliation may apply; typing keeps the same edit session and is
+   * reconciled against the latest buffer when that read completes. */
+  let diffEditReconcileToken = 0;
   let workspaceStatePushTimer: ReturnType<typeof setTimeout> | undefined;
   let initialDiffScrollRestored = false;
   let pendingAgentLaunch: PendingAgentLaunch | undefined = initPayload.workspaceState.pendingAgentLaunch ?? undefined;
@@ -1335,7 +1338,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     const startedAt = performance.now();
     diffView.clearEditError();
     try {
-      const disk = await bridge.workspaceFileRead(path);
+      const disk = await bridge.workspaceFileRead(path, "inlineDiff");
       const fetchElapsedMs = Math.round(Math.max(performance.now() - startedAt, 0));
       // File reads are asynchronous. A newer line click or a fresh diff generation owns the one
       // edit surface, even when this older read happens to resolve after it.
@@ -1361,7 +1364,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     const startedAt = performance.now();
     diffView.clearEditError();
     try {
-      const disk = await bridge.workspaceFileRead(nextPath);
+      const disk = await bridge.workspaceFileRead(nextPath, "inlineDiff");
       const fetchElapsedMs = Math.round(Math.max(performance.now() - startedAt, 0));
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       if (diffEditorState?.path !== currentPath) return;
@@ -1474,11 +1477,22 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   /** Applies the same three-way rules as EditorView: clean local edits silently adopt disk, dirty
    * non-overlaps merge, and overlaps/deletions require an explicit Keep mine/Take disk choice. */
   async function reconcileDiffEditWithDisk(path: string): Promise<void> {
-    const edit = diffEditorState;
-    if (!edit || edit.path !== path) return;
+    const startingEdit = diffEditorState;
+    if (!startingEdit || startingEdit.path !== path) return;
+    // Typing is intentionally allowed to continue while this read is in flight, but a successful
+    // save can replace the CAS baseline underneath it. In that case this snapshot was requested
+    // against an older baseline and must not move the newly adopted baseline backward. Comparing
+    // both fields also covers the missing-file (`undefined` hash) convention.
+    const startingBaseSHA256 = startingEdit.baseSHA256;
+    const startingBaseContent = startingEdit.baseContent;
+    const editSession = diffEditSessionToken;
+    const reconcileToken = ++diffEditReconcileToken;
     try {
-      const disk = await bridge.workspaceFileRead(path);
-      if (diffEditorState !== edit) return;
+      const disk = await bridge.workspaceFileRead(path, "inlineDiff");
+      if (reconcileToken !== diffEditReconcileToken || diffEditSessionToken !== editSession) return;
+      const edit = diffEditorState;
+      if (!edit || edit.path !== path) return;
+      if (edit.baseSHA256 !== startingBaseSHA256 || edit.baseContent !== startingBaseContent) return;
       if (disk.sha256 === edit.baseSHA256) return;
       if (disk.content === edit.content) {
         // The workspace write can land before its CAS reply reaches this pane. Disk already holds
@@ -1558,7 +1572,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         }
       }
     } catch (error) {
-      if (diffEditorState !== edit) return;
+      if (reconcileToken !== diffEditReconcileToken || diffEditSessionToken !== editSession) return;
+      const edit = diffEditorState;
+      if (!edit || edit.path !== path) return;
+      if (edit.baseSHA256 !== startingBaseSHA256 || edit.baseContent !== startingBaseContent) return;
       if (error instanceof SpacesBridgeError && error.code === "notFound") {
         diffEditContentGeneration += 1;
         diffEditorState = { ...edit, conflict: true, conflictBaseSHA256: null };

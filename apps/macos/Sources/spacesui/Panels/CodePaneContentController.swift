@@ -187,10 +187,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// The workspace-relative path the live file-signature stream is pointed at, or `nil` when nothing
     /// is subscribed. Unlike `DiffSignatureScope`, a plain `String?` is enough here: a path (unlike a
     /// `refName`) is never itself a legitimate "no scope" value, so `nil` unambiguously means "not
-    /// subscribed" rather than needing a wrapper case. Every `workspaceFileRead` call is the signal to
-    /// (re)point this — mirrors `subscribedScope`'s doc comment exactly, substituting
-    /// `subscribeFileSignature`'s architecture (the web app's bridge method never messages Swift; see
-    /// `CodePaneWeb/src/bridge/realBridge.ts`'s doc comment) for `subscribeDiffSignature`'s.
+    /// subscribed" rather than needing a wrapper case. A standalone Editor `workspaceFileRead` is the
+    /// signal to (re)point this; inline diff reads explicitly opt out because they inspect a transient
+    /// second editor and must not steal the Editor's watcher. This mirrors `subscribedScope`'s doc
+    /// comment exactly, substituting `subscribeFileSignature`'s architecture (the web app's bridge
+    /// method never messages Swift; see `CodePaneWeb/src/bridge/realBridge.ts`'s doc comment) for
+    /// `subscribeDiffSignature`'s.
     private var subscribedFilePath: String?
 
     /// Mirrors `SpacesDeviceAPIServer.WorkspaceFileSignatureValue`: Swift tuples aren't `Equatable`, and
@@ -1113,7 +1115,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 hosting: hosting)
         case .workspaceDiffManifestRelease(let scope, let manifestID):
             performWorkspaceDiffManifestRelease(scope: scope, manifestID: manifestID, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileRead(let path): performFileRead(path: path, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileRead(let path, let ownsFileSignature):
+            performFileRead(path: path, ownsFileSignature: ownsFileSignature, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256):
             performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
         case .reviewCommentList: performReviewCommentList(id: id, generation: generation, hosting: hosting)
@@ -1288,7 +1291,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
-    private func performFileRead(path: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+    private func performFileRead(path: String, ownsFileSignature: Bool, id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
                 id: id, generation: generation,
@@ -1300,7 +1303,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         // just tore down the previous path's monitoring in the first place (see
         // `restoreFileSignatureMonitoringAfterFailedOpen`'s doc comment), and the success arm further
         // down uses it to pick which "am I still current" guard applies.
-        let pathChanged = subscribedFilePath != path
+        let pathChanged = ownsFileSignature && subscribedFilePath != path
         // Known accepted gap: a return-navigation to this same path, dispatched while a DIFFERENT
         // file's navigation is still in flight (open A → open B → re-open A within B's read RTT), is
         // indistinguishable here from a same-path reread of A — both arrive with `pathChanged == false`,
@@ -1343,6 +1346,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 switch CodePaneBridge.fileReadPayload(result) {
                 case .success(let payload):
                     self.reply(id: id, generation: generation, result: payload)
+                    guard ownsFileSignature else { return }
                     // Subscription ownership keys off the latest NAVIGATION, not the latest arbitrary
                     // read: a same-path reread of the file already open (dispatched with
                     // `pathChanged == false`) can complete after a *different* file's navigation has

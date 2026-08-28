@@ -113,7 +113,7 @@ describe("EditorView — open() reads and opens a file directly", () => {
     const view = new EditorView(container, bridge);
 
     view.open("src/app/root.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
 
     expect(container.querySelector(".banner.error")).toBeNull();
     expect(container.querySelector(".editor-path")!.textContent).toBe("src/app/root.ts");
@@ -127,7 +127,7 @@ describe("EditorView — open() reads and opens a file directly", () => {
     const view = new EditorView(container, bridge);
 
     view.open("missing.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("missing.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("missing.ts", "editor"));
 
     const errorBanner = await vi.waitFor(() => {
       const el = container.querySelector(".banner.error") as HTMLElement;
@@ -172,7 +172,7 @@ describe("EditorView — save() catches a rejected write (round-8 Fix 2)", () =>
     const view = new EditorView(container, bridge);
 
     view.open("src/app/root.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "export {}\nedited\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -250,7 +250,7 @@ describe("EditorView — save() catches a rejected write (round-8 Fix 2)", () =>
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -264,7 +264,7 @@ describe("EditorView — save() catches a rejected write (round-8 Fix 2)", () =>
     // opening directly.
     view.open("b.ts");
     (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect(saveBtn.disabled).toBe(true); // open()'s post-open state for B: nothing edited yet
 
     // A's write now fails. Same await-ordering guarantee as the sibling generation tests above:
@@ -296,7 +296,7 @@ describe("EditorView — CAS baseline from the write result (round-4 Fix 1)", ()
     const view = new EditorView(container, bridge);
 
     view.open("src/app/root.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.disabled = false;
@@ -470,7 +470,7 @@ describe("EditorView — save() CAS conflict routes into external-change handlin
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: edited });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -578,7 +578,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
       dirty: true,
       conflict: false,
     });
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
     expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(false);
@@ -604,7 +604,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
       dirty: true,
       conflict: false,
     });
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     const merge = await vi.waitFor(() => {
       const el = container.querySelector(".banner.merge") as HTMLElement;
@@ -629,7 +629,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
       dirty: true,
       conflict: true,
     });
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     const conflictBanner = await vi.waitFor(() => {
       const el = container.querySelector(".banner.conflict") as HTMLElement;
@@ -659,7 +659,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
       conflict: false,
     });
 
-    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts");
+    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor");
     await vi.waitFor(() =>
       expect(view.collectStateForFlush()).toBe(
         JSON.stringify({
@@ -782,7 +782,7 @@ describe("EditorView — save() serialization (Fix 2)", () => {
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -815,7 +815,7 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
     settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }>;
   } {
     const settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }> = {};
-    const workspaceFileRead = vi.fn((path: string) => {
+    const workspaceFileRead = vi.fn((path: string, _purpose: "editor") => {
       let resolve!: (result: WorkspaceFileReadResult) => void;
       let reject!: (err: unknown) => void;
       const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
@@ -833,9 +833,9 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     view.open("b.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
     await settle["b.ts"]!.promise;
@@ -853,9 +853,9 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     view.open("b.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
     await settle["b.ts"]!.promise;
@@ -904,7 +904,7 @@ describe("EditorView — save() completion is generation-guarded against a later
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -925,7 +925,7 @@ describe("EditorView — save() completion is generation-guarded against a later
     // opening directly.
     view.open("b.ts");
     (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
     expect(saveBtn.disabled).toBe(true); // open()'s post-open state for B: nothing edited yet
 
@@ -954,7 +954,7 @@ describe("EditorView — save() completion is generation-guarded against a later
     // (round-13 Fix 1) rather than opening directly.
     view.open("b.ts");
     (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect(saveBtn.disabled).toBe(true);
 
     resolveWrite({ conflict: true, currentSHA256: "sha-remote" });
@@ -990,7 +990,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     // Mine: edits line1 only, so a later non-overlapping "theirs" appending line3 auto-merges cleanly.
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
 
@@ -1044,7 +1044,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -1080,7 +1080,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -1128,7 +1128,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
    *  `dirty` true — same technique as the other describe blocks above that bypass the real editor. */
   async function openAndEdit(view: EditorView, bridge: SpacesBridge, path: string): Promise<void> {
     view.open(path);
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path, "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: `${path} content edited` });
   }
 
@@ -1140,7 +1140,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
 
     view.open("b.ts");
 
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts");
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     expect(banner).not.toBeNull();
     expect(banner.style.display).toBe("flex");
@@ -1163,10 +1163,10 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
     workspaceFileRead.mockClear();
 
     view.open("b.ts");
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts");
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
 
     view.open("c.ts");
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("c.ts");
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("c.ts", "editor");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     expect(banner.style.display).toBe("flex");
     expect(banner.textContent).toContain("discard them to open c.ts");
@@ -1182,7 +1182,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
     const discardBtn = banner.querySelector("button") as HTMLButtonElement;
     discardBtn.click();
 
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
     expect(banner.style.display).toBe("none"); // open()'s success path hides the banner
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -1202,7 +1202,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
 
     view.open("b.ts");
 
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
     expect(container.querySelector(".banner.conflict")?.textContent ?? "").not.toContain("Unsaved changes");
   });
@@ -1231,7 +1231,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
       dirty: false,
       conflict: false,
     });
-    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"); // reconcile read already started
+    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"); // reconcile read already started
 
     // The user types into the now-live restored buffer while that read is still in flight.
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
@@ -1278,7 +1278,7 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
 
   async function openAndEdit(view: EditorView, bridge: SpacesBridge, path: string): Promise<void> {
     view.open(path);
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path, "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: `${path} content edited` });
   }
 
@@ -1309,7 +1309,7 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
 
     view.open("b.ts");
 
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts");
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     expect(banner.style.display).toBe("flex");
     expect(banner.querySelector("button")!.textContent).toBe("Discard edits and open");
@@ -1327,7 +1327,7 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -1366,7 +1366,7 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }>;
   } {
     const settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }> = {};
-    const workspaceFileRead = vi.fn((path: string) => {
+    const workspaceFileRead = vi.fn((path: string, _purpose: "editor") => {
       let resolve!: (result: WorkspaceFileReadResult) => void;
       let reject!: (err: unknown) => void;
       const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
@@ -1386,13 +1386,13 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
 
     // Open A cleanly.
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
 
     // A is clean, so open()'s upfront dirty check lets B's open proceed directly — no banner yet.
     view.open("b.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
 
     // While B's read is in flight, the user types into A (still the loaded buffer — B hasn't
@@ -1445,7 +1445,7 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
@@ -1454,7 +1454,7 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     expect(banner.style.display).toBe("flex");
     (banner.querySelector("button") as HTMLButtonElement).click(); // discard: read for b.ts starts, held
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     // While the reopen is held, nothing about A's buffer has moved: the discard is committed only
@@ -1479,7 +1479,7 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
@@ -1487,7 +1487,7 @@ describe("EditorView — completion recheck + discard-flag interplay (round-15 F
     view.open("b.ts");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     settle["b.ts"]!.reject(new SpacesBridgeError("notFound", "no such file: b.ts"));
     await settle["b.ts"]!.promise.catch(() => {});
@@ -1540,7 +1540,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
@@ -1548,7 +1548,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     view.open("b.ts"); // dirty: gated, banner shown, no read yet
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     (banner.querySelector("button") as HTMLButtonElement).click(); // discard consent captured at THIS click's bufferEditGeneration
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     // A further keystroke lands into the still-live A buffer while B's read is still held — this is
     // new unsaved work the click's consent never covered.
@@ -1575,7 +1575,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
@@ -1583,7 +1583,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     view.open("b.ts");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     (banner.querySelector("button") as HTMLButtonElement).click(); // first discard click, consent gen 1
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited further" }); // intervening edit bumps to gen 2
     settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
     await settle["b.ts"]!.promise;
@@ -1613,7 +1613,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
     await settle["a.ts"]!.promise;
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a content edited" });
@@ -1621,7 +1621,7 @@ describe("EditorView — discard consent is scoped to the edit-generation at cli
     view.open("b.ts");
     const banner = container.querySelector(".banner.conflict") as HTMLElement;
     (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
 
     // No edit happens while the read is held this time — the original, unraced discard shape.
     settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
@@ -1701,7 +1701,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -1731,7 +1731,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-1", missing: false });
     await Promise.resolve();
@@ -1761,7 +1761,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     fireFileSignature({ path: "a.ts", sha256: undefined, missing: true });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -1792,7 +1792,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     // Mine: edits line1 only. Theirs: appends line3 only. Non-overlapping.
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
 
@@ -1830,7 +1830,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -1864,7 +1864,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -1902,7 +1902,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2052,7 +2052,7 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     const bridge = makeBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     await vi.waitFor(() => expect(container.querySelector(".banner.error")).not.toBeNull());
 
     expect(workspaceFileRead).toHaveBeenCalledTimes(1);
@@ -2081,7 +2081,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -2137,7 +2137,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
@@ -2182,7 +2182,7 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "v1\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -2255,7 +2255,7 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "world\n" });
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
@@ -2302,7 +2302,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
@@ -2326,7 +2326,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2360,7 +2360,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2393,7 +2393,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
     const view = new EditorView(container, bridge);
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: undefined, missing: true });
 
@@ -2435,7 +2435,7 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2505,7 +2505,7 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2569,7 +2569,7 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -2962,7 +2962,7 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     // Mine: edits line1 only. Theirs: appends line3 only. Non-overlapping — auto-merges cleanly.
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 edited\nline2\n" });
 
@@ -3101,7 +3101,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "line1 mine\nline2\nline3\n" });
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
@@ -3142,7 +3142,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
     const view = new EditorView(container, bridge);
 
     view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited\n" });
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
 
@@ -3193,7 +3193,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
 
   async function openFile(view: EditorView, bridge: SpacesBridge, path: string): Promise<void> {
     view.open(path);
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path, "editor"));
   }
 
   it("polls until the editor attaches, then forces exactly one version-bumped re-render", async () => {
@@ -3275,7 +3275,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
       dirty: true,
       conflict: true,
     });
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/conflict.ts"));
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/conflict.ts", "editor"));
 
     const requestFrame = vi.spyOn(window, "requestAnimationFrame");
     view.restorePosition(null, 2);
@@ -3388,7 +3388,7 @@ describe("EditorView focused-line recovery", () => {
     });
     const view = new EditorView(container, bridge);
     view.open("src/a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/a.ts"));
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/a.ts", "editor"));
 
     fakeCodeViewControl.editorSelection = { start: { line: 2 }, end: { line: 2 }, direction: 0 };
 

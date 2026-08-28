@@ -466,9 +466,9 @@ import spacesterminalcore
     }
 
     @Test func planForWorkspaceFileRead() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: ["path": "src/a.swift"])
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: ["path": "src/a.swift", "purpose": "editor"])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileRead(path: "src/a.swift")))
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileRead(path: "src/a.swift", ownsFileSignature: true)))
     }
 
     @Test func planForWorkspaceFileReadRequiresAPath() {
