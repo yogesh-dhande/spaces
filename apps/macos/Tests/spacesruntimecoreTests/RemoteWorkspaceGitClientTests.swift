@@ -286,6 +286,100 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         XCTAssertFalse(output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
+    func testRunGitWithFileOutputWritesGitDiffWithoutCapturingStdout() throws {
+        let fixture = try makeRemoteFixture()
+        let changedFile = fixture.source.appendingPathComponent("README.md")
+        try "changed".write(to: changedFile, atomically: true, encoding: .utf8)
+        let output = fixture.root.appendingPathComponent("diff.patch")
+        let client = RemoteWorkspaceGitClient()
+
+        try client.runGitWithFileOutput(
+            ["-C", fixture.source.path, "diff", "--output=\(output.path)", "--no-color", "--", "README.md"], timeout: 5)
+
+        let patch = try String(contentsOf: output, encoding: .utf8)
+        XCTAssertTrue(patch.contains("-initial"))
+        XCTAssertTrue(patch.contains("+changed"))
+    }
+
+    func testRunGitWithFileOutputAllowsGitNoIndexDifferenceExitCode() throws {
+        let fixture = try makeRemoteFixture()
+        let untracked = fixture.source.appendingPathComponent("UNTRACKED.md")
+        try "untracked".write(to: untracked, atomically: true, encoding: .utf8)
+        let output = fixture.root.appendingPathComponent("untracked.patch")
+
+        try RemoteWorkspaceGitClient().runGitWithFileOutput(
+            [
+                "-C", fixture.source.path, "diff", "--no-index", "--output=\(output.path)", "--no-color", "--", "/dev/null", "UNTRACKED.md",
+            ], timeout: 5, allowedExitCodes: [0, 1])
+
+        XCTAssertTrue(try String(contentsOf: output, encoding: .utf8).contains("+untracked"))
+    }
+
+    func testRunGitWithFileOutputPreservesStderrForRejectedExitCodeAndEnvironmentOverrides() throws {
+        let root = try makeTempDirectory()
+        let output = root.appendingPathComponent("env.txt")
+        let client = RemoteWorkspaceGitClient(gitExecutable: "/bin/sh")
+
+        XCTAssertThrowsError(
+            try client.runGitWithFileOutput(
+                ["-c", "printf '%s' \"$SPACES_TEST_FILE_OUTPUT\" > \"$SPACES_TEST_OUTPUT_PATH\"; printf '%s' 'expected stderr' >&2; exit 7"],
+                timeout: 5, environmentOverrides: ["SPACES_TEST_FILE_OUTPUT": "from environment", "SPACES_TEST_OUTPUT_PATH": output.path]))
+        { error in
+            guard case .gitCommandFailed(let message)? = error as? SpacesRuntimeError else {
+                XCTFail("Expected a git command failure, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("expected stderr"), "Expected stderr in failure, got: \(message)")
+        }
+
+        XCTAssertEqual(try String(contentsOf: output, encoding: .utf8), "from environment")
+    }
+
+    func testRunGitWithFileOutputEnforcesTimeoutAndReapsChild() throws {
+        let client = RemoteWorkspaceGitClient(gitExecutable: "/bin/sleep")
+        let markerSeconds = "784513"
+        let start = Date()
+
+        XCTAssertThrowsError(try client.runGitWithFileOutput([markerSeconds], timeout: 1)) { error in
+            guard case .gitCommandFailed(let message)? = error as? SpacesRuntimeError else {
+                XCTFail("Expected a timeout failure, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("timed out"), "Expected a timeout message, got: \(message)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "the timeout path must reap the child promptly")
+
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", "sleep \(markerSeconds)"]
+        pgrep.standardOutput = Pipe()
+        pgrep.standardError = Pipe()
+        try pgrep.run()
+        pgrep.waitUntilExit()
+        XCTAssertNotEqual(pgrep.terminationStatus, 0, "the sleep child must not survive the timeout")
+    }
+
+    func testRunGitWithFileOutputDoesNotHangOnADetachedDescendantHoldingStderrOpen() throws {
+        let root = try makeTempDirectory()
+        let scriptURL = root.appendingPathComponent("stub-file-output-descendant.sh")
+        let pidFileURL = root.appendingPathComponent("child.pid")
+        let script = """
+            #!/bin/sh
+            sleep 30 >&2 &
+            echo $! > "$SPACES_TEST_FILE_OUTPUT_DRAIN_PIDFILE"
+            exit 0
+            """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        defer { Self.killLingeringChild(pidFileURL: pidFileURL) }
+
+        let start = Date()
+        try RemoteWorkspaceGitClient(
+            gitExecutable: scriptURL.path, environmentOverrides: ["SPACES_TEST_FILE_OUTPUT_DRAIN_PIDFILE": pidFileURL.path]
+        ).runGitWithFileOutput([], timeout: 3)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "a detached stderr writer must not block file-output completion")
+    }
+
     private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
         let root = try makeTempDirectory()
         let source = root.appendingPathComponent("source", isDirectory: true)

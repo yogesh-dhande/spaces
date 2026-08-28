@@ -23,7 +23,7 @@ const capturedCodeViewOptions = vi.hoisted(() => ({
     | undefined
     | {
         onItemEditChange: (item: { id?: string; type?: string } | undefined, file: { contents: string }) => void;
-        onLineClick?: (range: { start: number; side?: string }, context: { type: string; item: { id: string } }) => void;
+        onLineClick?: (event: { type: "diff-line"; lineNumber: number; annotationSide?: string }, context: { type: string; item: { id: string } }) => void;
         renderHeaderMetadata?: (file: { name: string }) => HTMLElement | undefined;
         onPostRender?: (node: HTMLElement, ...args: unknown[]) => void;
       },
@@ -60,6 +60,9 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     addItem(): void {}
     setSelectedLines(input: unknown): void {
       capturedCodeViewOptions.selectedLineCalls.push(input);
+    }
+    clearSelectedLines(): void {
+      capturedCodeViewOptions.selectedLineCalls.push(null);
     }
   }
   return { ...actual, CodeView: FakeCodeView };
@@ -413,6 +416,7 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     hoisted.pendingDiffCalls.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
+    hoisted.notifyRenderMetric.mockClear();
     container = document.createElement("div");
   });
 
@@ -655,6 +659,39 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     expect(hoisted.subscribeDiffSignature).toHaveBeenCalledTimes(1);
   });
 
+  it("does not clean up a completion paint from a superseded stream", async () => {
+    const file = makeFile("superseded-stream.ts");
+    let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+    );
+    const finishRestoredStream = vi.spyOn(DiffView.prototype, "finishRestoredStream");
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    const pendingPaints: FrameRequestCallback[] = [];
+    try {
+      const mounted = mountRoot(container);
+      await vi.advanceTimersByTimeAsync(0);
+      resolveDiff(0, [file], "superseded-stream-sig");
+      await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+
+      // Hold the completion paint so a newer signature can invalidate the stream before its
+      // callback runs. The stale callback must not clear restoration state for the new generation.
+      window.requestAnimationFrame = (callback) => {
+        pendingPaints.push(callback);
+        return pendingPaints.length;
+      };
+      resolveChunk!({ scopeSignature: "superseded-stream-sig", file });
+      await mounted;
+      fireDiffSignature();
+
+      while (pendingPaints.length > 0) pendingPaints.shift()!(performance.now());
+      expect(finishRestoredStream).not.toHaveBeenCalled();
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+      finishRestoredStream.mockRestore();
+    }
+  });
+
   it("keeps completed work visible, releases the interrupted lease, and retries a recoverable notFound chunk", async () => {
     // A replayed/lost EOF can surface as notFound from the per-file transfer. It is not a bad
     // comparison scope, so the scheduler must use the same bounded retry path as a manifest
@@ -838,6 +875,19 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     expect(updateFileSpy).toHaveBeenLastCalledWith(
       expect.objectContaining({ path: "chunked.ts", patch: "first second", patchState: "ready" }),
     );
+    await vi.waitFor(() => {
+      const metric = hoisted.notifyRenderMetric.mock.calls
+        .map(([value]) => value as { trigger?: string })
+        .find((value) => value.trigger === "filePatch") as
+        | ({ trigger: "filePatch"; bridgeElapsedMs?: unknown; decodeElapsedMs?: unknown; updateElapsedMs?: unknown; paintElapsedMs?: unknown })
+        | undefined;
+      expect(metric).toEqual(expect.objectContaining({
+        bridgeElapsedMs: expect.any(Number),
+        decodeElapsedMs: expect.any(Number),
+        updateElapsedMs: expect.any(Number),
+        paintElapsedMs: expect.any(Number),
+      }));
+    });
     updateFileSpy.mockRestore();
   });
 
@@ -858,7 +908,9 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     releaseFirst!({ scopeSignature: "sig-priority", file: files[0]! });
     await mounted;
 
-    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(3);
+    // The explicit sidebar navigation is the only public scrollToFile call. Subsequent streaming
+    // reveals use DiffView's internal non-clearing path so they cannot erase a pending restore.
+    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(1);
     expect(finalizeOrder).toHaveBeenCalledTimes(1);
     scrollToFile.mockRestore();
     finalizeOrder.mockRestore();
@@ -893,7 +945,7 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     await mounted;
 
     expect(hoisted.workspaceDiffFileChunk.mock.calls[1]![1]).toEqual(expect.objectContaining({ relativePath: "50.ts" }));
-    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(3);
+    expect(scrollToFile.mock.calls.filter(([path]) => path === "50.ts")).toHaveLength(1);
     expect(finalizeOrder).toHaveBeenCalledTimes(1);
     hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
     scrollToFile.mockRestore();
@@ -936,6 +988,7 @@ describe("mountRoot's persisted diff position recovery", () => {
   });
 
   it("defers persisted line restoration until the saved path's delayed textual patch post-renders", async () => {
+    const finishRestoredStream = vi.spyOn(DiffView.prototype, "finishRestoredStream");
     const delayedFile: DiffFileEntry = {
       path: "restored.ts",
       status: "modified",
@@ -973,6 +1026,9 @@ describe("mountRoot's persisted diff position recovery", () => {
 
     resolveChunk!({ scopeSignature: "restore-sig", file: delayedFile });
     await mounted;
+    // The final streamed update schedules Pierre's FileDiff render. The restoration guard must
+    // remain active until that render's callback can apply the saved line.
+    expect(finishRestoredStream).not.toHaveBeenCalled();
     // This no-op test double does not automatically invoke library post-render callbacks. Drive
     // the callback exactly as Pierre does after the textual FileDiff is attached.
     capturedCodeViewOptions.current!.onPostRender!(document.createElement("div"), { item: { id: "restored.ts" } });
@@ -984,13 +1040,56 @@ describe("mountRoot's persisted diff position recovery", () => {
       side: "deletions",
       behavior: "instant",
     });
-    expect(capturedCodeViewOptions.selectedLineCalls).toContainEqual({
+    expect(capturedCodeViewOptions.selectedLineCalls).toEqual([null]);
+    finishRestoredStream.mockRestore();
+  });
+
+  it("does not replace a delayed restored source line with the selected patch's first line", async () => {
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        diffScrollLine: 203,
+        diffScrollSide: "new",
+      },
+    };
+    const delayedFile: DiffFileEntry = {
+      path: "restored.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/restored.ts b/restored.ts\n--- a/restored.ts\n+++ b/restored.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    let resolveChunk: ((result: { scopeSignature: string; file: DiffFileEntry }) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveChunk = resolve; }),
+    );
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [delayedFile], "restore-selected-stream");
+    await vi.waitFor(() => expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1));
+    resolveChunk!({ scopeSignature: "restore-selected-stream", file: delayedFile });
+    await mounted;
+
+    // A selected queued row becomes scrollable as its patch arrives. That reveal must not replace
+    // the restored source location with the file's first line before Pierre post-renders it.
+    expect(capturedCodeViewOptions.scrollCalls).not.toContainEqual({
+      type: "item",
       id: "restored.ts",
-      range: { start: 8, end: 8, side: "deletions", endSide: "deletions" },
+      align: "start",
+      behavior: "smooth",
+    });
+    capturedCodeViewOptions.current!.onPostRender!(document.createElement("div"), { item: { id: "restored.ts" } });
+    expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+      type: "line",
+      id: "restored.ts",
+      lineNumber: 203,
+      side: "additions",
+      behavior: "instant",
     });
   });
 
-  it("keeps the queued restored position in a teardown snapshot until a concrete visible line supersedes it", async () => {
+  it("keeps the restored position in a teardown snapshot while an earlier streamed patch is visible", async () => {
     document.body.appendChild(container);
     const delayedFile: DiffFileEntry = {
       path: "restored.ts",
@@ -1017,8 +1116,8 @@ describe("mountRoot's persisted diff position recovery", () => {
       diffScrollSide: "old",
     });
 
-    // Once a concrete rendered line is visible it is authoritative, independent of sidebar
-    // selection or focus. This is the value a later state collection must carry forward.
+    // An earlier streamed file can render before the restored target. Its first visible line is
+    // not the restored viewport, so a teardown during this stream must retain the exact target.
     const scrollRoot = container.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
     const visibleLine = document.createElement("div");
     visibleLine.dataset.line = "3";
@@ -1030,12 +1129,40 @@ describe("mountRoot's persisted diff position recovery", () => {
 
     snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     expect(snapshot).toMatchObject({
-      diffSelectedPath: "concrete.ts",
-      diffScrollLine: 3,
-      diffScrollSide: "new",
+      diffSelectedPath: "restored.ts",
+      diffScrollLine: 7,
+      diffScrollSide: "old",
     });
 
     resolveChunk!({ scopeSignature: "restore-snapshot-sig", file: delayedFile });
+    await mounted;
+  });
+
+  it("reports the durable pending diff position before its delayed patch renders", async () => {
+    document.body.appendChild(container);
+    const delayedFile: DiffFileEntry = {
+      path: "restored.ts",
+      status: "modified",
+      isBinary: false,
+      patch: "diff --git a/restored.ts b/restored.ts\n--- a/restored.ts\n+++ b/restored.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    };
+    let resolveChunk: ((result: { scopeSignature: string; file: DiffFileEntry }) => void) | undefined;
+    hoisted.workspaceDiffFileChunk.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveChunk = resolve; }),
+    );
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      const metric = hoisted.notifyRenderMetric.mock.calls
+        .map(([value]) => value as { trigger?: string; path?: string; scrollTop?: number; focusedLine?: number })
+        .find((value) => value.trigger === "workspaceStateRestored" && value.path === "restored.ts");
+      expect(metric).toEqual(expect.objectContaining({ scrollTop: 7, focusedLine: 8 }));
+    });
+
+    resolveDiff(0, [delayedFile], "restore-metric-sig");
+    await vi.waitFor(() => expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1));
+    resolveChunk!({ scopeSignature: "restore-metric-sig", file: delayedFile });
     await mounted;
   });
 });
@@ -1080,7 +1207,7 @@ describe("mountRoot's queued live diff refresh position recovery", () => {
     Object.defineProperty(visibleLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
     diffRoot.appendChild(visibleLine);
     capturedCodeViewOptions.current!.onLineClick!(
-      { start: 12, side: "deletions" },
+      { type: "diff-line", lineNumber: 12, annotationSide: "deletions" },
       { type: "diff", item: { id: file.path } },
     );
     capturedCodeViewOptions.scrollCalls = [];
@@ -1119,10 +1246,7 @@ describe("mountRoot's queued live diff refresh position recovery", () => {
       side: "additions",
       behavior: "instant",
     });
-    expect(capturedCodeViewOptions.selectedLineCalls).toContainEqual({
-      id: file.path,
-      range: { start: 12, end: 12, side: "deletions", endSide: "deletions" },
-    });
+    expect(capturedCodeViewOptions.selectedLineCalls).toEqual([null]);
   });
 });
 
@@ -1258,7 +1382,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
   function startEdit(path = editableFile.path): void {
     capturedCodeViewOptions.current!.onLineClick!(
-      { start: 1, side: "additions" },
+      { type: "diff-line", lineNumber: 1, annotationSide: "additions" },
       { type: "diff", item: { id: path } },
     );
   }
@@ -2650,6 +2774,62 @@ describe("mountRoot's spaces:agents wiring", () => {
     }
   });
 
+  it("keeps the Editor focused when a started command reports no agent", async () => {
+    const defaultInitPayload = INIT_PAYLOAD;
+    INIT_PAYLOAD = defaultInitPayload;
+    hoisted.startWorkspaceCommand.mockResolvedValueOnce({
+      sessionId: "command-no-agent",
+      status: "starting",
+      deadlineEpochMilliseconds: 90_000,
+    });
+    try {
+      document.body.appendChild(container);
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [], "start-no-agent-focus-sig");
+      await mounted;
+      const codeBody = container.querySelector<HTMLElement>(".code-body")!;
+      expect(container.querySelectorAll("#code-pane-editor-focus")).toHaveLength(1);
+      expect(container.querySelector("#code-pane-editor-focus")).toBe(codeBody.lastElementChild);
+
+      const startButton = container.querySelector<HTMLButtonElement>("#code-pane-start-agent")!;
+      startButton.click();
+      const status = container.querySelector<HTMLElement>("#code-pane-start-agent-status")!;
+      expect(status.getAttribute("role")).toBe("status");
+      expect(status.getAttribute("aria-live")).toBe("polite");
+      expect(status.getAttribute("aria-atomic")).toBe("true");
+      const input = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+      input.value = "sleep 1";
+      input.dispatchEvent(new Event("input"));
+      input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(hoisted.startWorkspaceCommand).toHaveBeenCalledWith("sleep 1"));
+      await vi.waitFor(() => expect(container.querySelector<HTMLElement>("#code-pane-start-agent-dialog")?.hidden).toBe(true));
+      expect(document.activeElement).toBe(container.querySelector<HTMLElement>("#code-pane-editor-focus"));
+
+      window.dispatchEvent(
+        new CustomEvent("spaces:agentStartStatus", {
+          detail: { sessionId: "command-no-agent", status: "failed", message: "No agent detected" },
+        }),
+      );
+      await vi.waitFor(() => expect(container.querySelector<HTMLElement>("#code-pane-start-agent-dialog")?.hidden).toBe(false));
+      expect(document.activeElement).toBe(container.querySelector<HTMLElement>("#code-pane-editor-focus"));
+      expect(status.getAttribute("aria-label")).toContain("No agent detected");
+
+      window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "editor" } }));
+      expect(container.querySelectorAll("#code-pane-editor-focus")).toHaveLength(1);
+      expect(container.querySelector("#code-pane-editor-focus")).toBe(codeBody.lastElementChild);
+      container.querySelector<HTMLButtonElement>("#code-pane-start-agent-cancel")!.click();
+      expect(document.activeElement).toBe(container.querySelector<HTMLElement>("#code-pane-editor-focus"));
+
+      window.dispatchEvent(new CustomEvent("spaces:setMode", { detail: { mode: "diff" } }));
+      expect(container.querySelectorAll("#code-pane-editor-focus")).toHaveLength(1);
+      expect(container.querySelector("#code-pane-editor-focus")).toBe(codeBody.lastElementChild);
+    } finally {
+      container.remove();
+      INIT_PAYLOAD = defaultInitPayload;
+    }
+  });
+
   it("persists the host-minted readiness deadline when a command starts", async () => {
     const deadlineEpochMilliseconds = 1_756_420_000_000;
     hoisted.startWorkspaceCommand.mockResolvedValueOnce({
@@ -2985,7 +3165,7 @@ describe("mountRoot's mode-switch position persistence", () => {
     await mounted;
 
     capturedCodeViewOptions.current!.onLineClick!(
-      { start: 10, side: "deletions" },
+      { type: "diff-line", lineNumber: 10, annotationSide: "deletions" },
       { type: "diff", item: { id: "old-scope.ts" } },
     );
 
@@ -3088,6 +3268,34 @@ describe("mountRoot's spaces:setMode wiring", () => {
     // above: every mount overwrites it to point at that exact instance (see its wiring in root.ts).
     const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     expect(collected.editorState).toEqual(dirtyEditorState);
+  });
+
+  it("reports the restored Editor path instead of a stale diff selection", async () => {
+    const editorState: CodePaneEditorState = {
+      path: ".spaces-e2e-stream/stream-state.txt",
+      baseSHA256: "deadbeef",
+      baseContent: "let x = 0;\n",
+      content: "let x = 1;\n",
+      dirty: true,
+      conflict: false,
+    };
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        mode: "editor",
+        diffSelectedPath: ".spaces-e2e-stream/stream-edit.txt",
+        editorState,
+      },
+    };
+
+    await mountRoot(container);
+    await vi.waitFor(() => {
+      const metric = hoisted.notifyRenderMetric.mock.calls
+        .map(([value]) => value as { trigger?: string; mode?: string; path?: string; dirty?: boolean })
+        .find((value) => value.trigger === "workspaceStateRestored" && value.mode === "editor");
+      expect(metric).toEqual(expect.objectContaining({ path: editorState.path, dirty: true }));
+    });
   });
 });
 

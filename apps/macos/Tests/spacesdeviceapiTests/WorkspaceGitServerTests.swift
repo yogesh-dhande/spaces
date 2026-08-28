@@ -781,6 +781,56 @@
             }
         }
 
+        /// An untracked text file larger than one transport response must be generated once and streamed
+        /// through the real pinned-TLS request path. This is the same shape as the code-pane streaming
+        /// fixture: the manifest is cheap, while the file request exercises Git output, the private
+        /// transfer file, base64 expansion, and the response-size fitting loop together.
+        func testWorkspaceDiffFileChunkStreamsLargeUntrackedFileOverTLS() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let content = Data((0..<500_000).flatMap { _ in Array("agent churn\n".utf8) })
+                XCTAssertGreaterThan(content.count, 5 * 1024 * 1024)
+                try content.write(to: repo.appendingPathComponent("large-untracked.txt"), options: .atomic)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(manifest.files.map(\.path), ["large-untracked.txt"])
+
+                var byteOffset = 0
+                var transferID: String?
+                var patchData = Data()
+                var chunkCount = 0
+                while true {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceDiffFileChunk(.init(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "large-untracked.txt",
+                                byteOffset: byteOffset, transferID: transferID)),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
+                    let chunk = try XCTUnwrap(response.workspaceDiffFileChunk)
+                    XCTAssertEqual(chunk.file.path, "large-untracked.txt")
+                    if let encoded = chunk.patchBase64Data {
+                        patchData.append(try XCTUnwrap(Data(base64Encoded: encoded)))
+                    }
+                    chunkCount += 1
+                    guard let nextByteOffset = chunk.nextByteOffset else {
+                        XCTAssertNil(chunk.transferID)
+                        break
+                    }
+                    XCTAssertGreaterThan(nextByteOffset, byteOffset)
+                    transferID = try XCTUnwrap(chunk.transferID)
+                    byteOffset = nextByteOffset
+                }
+                XCTAssertGreaterThan(chunkCount, 1, "large patch must be delivered in multiple ranges")
+                XCTAssertTrue(patchData.range(of: Data("agent churn".utf8)) != nil)
+            }
+        }
+
         func testWorkspaceDiffManifestMetadataChunksKeepTheEntireEncodedResponseWithinFourMiB() throws {
             try withWorkspaceFixture { _, _, server, _, _, _ in
                 let plans = (0..<30_000).map { index in

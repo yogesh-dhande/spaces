@@ -23,6 +23,7 @@ const capturedCodeViewOptions = vi.hoisted(() => ({ current: undefined as undefi
 // records every forced re-render the poll issues.
 const fakeCodeViewControl = vi.hoisted(() => ({
   editor: {} as object | undefined,
+  editorSelection: undefined as { start: { line: number }; end: { line: number }; direction: number } | undefined,
   updateItemCalls: [] as Array<{ id: string; version: number }>,
 }));
 
@@ -36,7 +37,10 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     setItems(): void {}
     cleanUp(): void {}
     getEditor(): object | undefined {
-      return fakeCodeViewControl.editor;
+      if (fakeCodeViewControl.editor === undefined) return undefined;
+      return fakeCodeViewControl.editorSelection === undefined
+        ? fakeCodeViewControl.editor
+        : { getState: () => ({ selections: [fakeCodeViewControl.editorSelection] }) };
     }
     updateItem(item: { id: string; version: number }): void {
       fakeCodeViewControl.updateItemCalls.push({ id: item.id, version: item.version });
@@ -3358,6 +3362,24 @@ describe("EditorView focused-line recovery", () => {
     expect(view.visibleLine()).toBeNull();
   });
 
+  it("does not report a line whose bottom is exactly at the viewport top", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new EditorView(container, makeBridge());
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const preceding = document.createElement("div");
+    preceding.dataset.line = "3";
+    const visible = document.createElement("div");
+    visible.dataset.line = "4";
+    Object.defineProperty(host, "getBoundingClientRect", { value: () => ({ top: 100 }) });
+    Object.defineProperty(preceding, "getBoundingClientRect", { value: () => ({ bottom: 100 }) });
+    Object.defineProperty(visible, "getBoundingClientRect", { value: () => ({ bottom: 101 }) });
+    host.append(preceding, visible);
+
+    expect(view.visibleLine()).toBe(4);
+    container.remove();
+  });
+
   it("samples the live caret line for a workspace snapshot even when no edit occurred", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -3368,20 +3390,12 @@ describe("EditorView focused-line recovery", () => {
     view.open("src/a.ts");
     await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/a.ts"));
 
-    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    editable.textContent = "one\ntwo\nthree\n";
-    host.appendChild(editable);
-    const text = editable.firstChild!;
-    const selection = document.getSelection()!;
-    const range = document.createRange();
-    range.setStart(text, "one\ntwo\n".length);
-    range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    fakeCodeViewControl.editorSelection = { start: { line: 2 }, end: { line: 2 }, direction: 0 };
 
     expect(view.focusedLineNumber()).toBe(3);
+    fakeCodeViewControl.editorSelection = { start: { line: 1 }, end: { line: 2 }, direction: -1 };
+    expect(view.focusedLineNumber()).toBe(2);
+    fakeCodeViewControl.editorSelection = undefined;
     container.remove();
   });
 });

@@ -838,17 +838,21 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
         if let metric = CodePaneBridge.decodeRenderMetric(body: body) {
             let fetchDetail = metric.fetchElapsedMS.map { " fetch_ms=\($0)" } ?? ""
+            let phaseDetail = [
+                metric.bridgeElapsedMS.map { " bridge_ms=\($0)" }, metric.decodeElapsedMS.map { " decode_ms=\($0)" },
+                metric.updateElapsedMS.map { " update_ms=\($0)" }, metric.paintElapsedMS.map { " paint_ms=\($0)" },
+            ].compactMap { $0 }.joined()
             let detail: String
             if metric.trigger == .workspaceStateRestored {
                 // Keep the restored-state dimensions ordered so the performance harness can compare
                 // workspace recovery runs without parsing a free-form diagnostic message.
-                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)" + [
+                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)" + [
                     metric.mode.map { " mode=\($0)" }, metric.scope.map { " scope=\($0)" }, metric.layout.map { " layout=\($0)" },
                     " path=\(metric.path ?? "")", metric.scrollTop.map { " scroll_top=\($0)" },
                     metric.focusedLine.map { " focused_line=\($0)" }, metric.dirty.map { " dirty=\($0 ? 1 : 0)" },
                 ].compactMap { $0 }.joined()
             } else {
-                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)" + [
+                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)" + [
                     metric.path.map { " path=\($0)" }, metric.fileIndex.map { " file_index=\($0)" },
                     metric.selectedPriority ? " selected_priority=1" : nil, metric.chunkCount.map { " chunk_count=\($0)" },
                 ].compactMap { $0 }.joined()

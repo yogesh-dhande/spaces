@@ -35,13 +35,10 @@ const control = vi.hoisted(() => ({
   // — used by the "clears the stuck gutter selection" tests below (see defect 1's doc comment on
   // `DiffView.requestNewComment`). `null` is exactly what a selection-clear call passes.
   setSelectedLinesCalls: [] as Array<unknown>,
-  // The options object each `FakeCodeView` was constructed with — lets a test reach in and invoke
-  // `onGutterUtilityClick` directly, the same way the real library's `InteractionManager` would on a
-  // gutter pointerup.
+  // The options object each `FakeCodeView` was constructed with — lets tests exercise the rendered
+  // comment utility without coupling them to the library's internal pointer handling.
   lastOptions: undefined as Record<string, unknown> | undefined,
-  // The most recently constructed `FakeCodeView` instance — lets a test call `setSelectedLines`
-  // directly on it to simulate the library's own post-hook re-assert (see the "keeps the selection
-  // cleared" test below).
+  // The most recently constructed `FakeCodeView` instance — used by selection-clear assertions.
   lastInstance: undefined as { setSelectedLines(selection: unknown): void } | undefined,
   setItemsCalls: [] as Array<ReadonlyArray<FakeCodeViewInput>>,
   addItemCalls: [] as FakeCodeViewInput[],
@@ -249,8 +246,8 @@ describe("DiffView progressive patch replacement", () => {
     Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 0 }) });
     Object.defineProperty(visibleLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
     root.appendChild(visibleLine);
-    (control.lastOptions?.onLineClick as ((range: { start: number; side: string }, context: { type: string; item: { id: string } }) => void) | undefined)?.(
-      { start: 12, side: "additions" },
+    (control.lastOptions?.onLineClick as ((event: { type: "diff-line"; lineNumber: number; annotationSide: string }, context: { type: string; item: { id: string } }) => void) | undefined)?.(
+      { type: "diff-line", lineNumber: 12, annotationSide: "additions" },
       { type: "diff", item: { id: current.path } },
     );
     control.scrollCalls = [];
@@ -276,10 +273,7 @@ describe("DiffView progressive patch replacement", () => {
       side: "additions",
       behavior: "instant",
     });
-    expect(control.setSelectedLinesCalls).toContainEqual({
-      id: current.path,
-      range: { start: 12, end: 12, side: "additions", endSide: "additions" },
-    });
+    expect(control.setSelectedLinesCalls).toEqual([null]);
     host.remove();
   });
 
@@ -358,7 +352,10 @@ describe("DiffView progressive patch replacement", () => {
     visibleLine.dataset.line = "3";
     visibleLine.dataset.diffPath = selected.path;
     visibleLine.dataset.diffSide = "new";
-    host.querySelector("#code-pane-diff-scroll")!.appendChild(visibleLine);
+    const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    root.appendChild(visibleLine);
+    Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(visibleLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
 
     diffView.finalizeStreamOrder();
 
@@ -374,6 +371,34 @@ describe("DiffView progressive patch replacement", () => {
 });
 
 describe("DiffView inline edit", () => {
+  it("assigns the stable editor identifier inside Pierre's shadow-root container", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/shadow-editor.ts";
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    let frame: FrameRequestCallback | undefined;
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frame = callback;
+      return 1;
+    });
+
+    diffView.beginEdit(path, "editable\n");
+    const rendered = document.createElement("div");
+    const shadowRoot = rendered.attachShadow({ mode: "open" });
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    editable.setAttribute("role", "textbox");
+    editable.setAttribute("aria-multiline", "true");
+    shadowRoot.appendChild(editable);
+    host.querySelector("#code-pane-diff-scroll")!.appendChild(rendered);
+    frame?.(0);
+
+    expect(editable.id).toBe("code-pane-diff-edit-input");
+    requestFrame.mockRestore();
+    host.remove();
+  });
+
   it("removes a recovery-only editor item without rebuilding unchanged diff items", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     const unchanged = file({ path: "src/unchanged.ts" });
@@ -610,6 +635,97 @@ describe("DiffView inline edit", () => {
 });
 
 describe("DiffView visible recovery position", () => {
+  function renderedShadowContainer(path: string, lineNumber = 1): {
+    host: HTMLElement;
+    oldLine: HTMLElement;
+    newLine: HTMLElement;
+  } {
+    // Use an ordinary host in jsdom: Pierre's registered `diffs-container` custom element installs
+    // adoptedStyleSheets, which jsdom does not implement, while the production contract we test
+    // here is the open shadow root that carries the rendered lines.
+    const host = document.createElement("div");
+    const shadowRoot = host.attachShadow({ mode: "open" });
+    const oldCode = document.createElement("code");
+    oldCode.setAttribute("data-deletions", "");
+    const oldLine = document.createElement("div");
+    oldLine.dataset.line = String(lineNumber);
+    oldLine.dataset.lineType = "change-deletion";
+    oldCode.appendChild(oldLine);
+    const newCode = document.createElement("code");
+    newCode.setAttribute("data-additions", "");
+    const newLine = document.createElement("div");
+    newLine.dataset.line = String(lineNumber);
+    newLine.dataset.lineType = "change-addition";
+    newCode.appendChild(newLine);
+    shadowRoot.append(oldCode, newCode);
+    return { host, oldLine, newLine };
+  }
+
+  function invokePostRender(host: HTMLElement, path: string): void {
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(host, { item: { id: path } });
+  }
+
+  it("decorates old and new lines inside Pierre's shadow-root container", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/shadow.ts";
+    const diffView = new DiffView(host, "split", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    const rendered = renderedShadowContainer(path);
+    host.querySelector("#code-pane-diff-scroll")!.appendChild(rendered.host);
+
+    invokePostRender(rendered.host, path);
+
+    expect(rendered.oldLine.id).toBe(`code-pane-diff-old-line-${encodeURIComponent(path)}-1`);
+    expect(rendered.newLine.id).toBe(`code-pane-diff-new-line-${encodeURIComponent(path)}-1`);
+    host.remove();
+  });
+
+  it("samples visible state from lines inside Pierre's shadow-root container", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/shadow-visible.ts";
+    const diffView = new DiffView(host, "split", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    const rendered = renderedShadowContainer(path, 7);
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    scrollRoot.appendChild(rendered.host);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(rendered.oldLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    invokePostRender(rendered.host, path);
+
+    expect(diffView.visiblePosition()).toEqual({ path, line: 7, side: "old" });
+    expect(diffView.durableScrollPosition()).toEqual({ path, line: 7, side: "old" });
+    host.remove();
+  });
+
+  it("focuses a restored decorated line inside Pierre's shadow-root container", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/shadow-focus.ts";
+    const diffView = new DiffView(host, "split", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    const rendered = renderedShadowContainer(path, 9);
+    host.querySelector("#code-pane-diff-scroll")!.appendChild(rendered.host);
+    invokePostRender(rendered.host, path);
+    let frame: FrameRequestCallback | undefined;
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frame = callback;
+      return 1;
+    });
+
+    diffView.restorePosition(null, null, null, path, 9, "old");
+    frame?.(0);
+
+    expect(rendered.host.shadowRoot?.activeElement).toBe(rendered.oldLine);
+    expect(rendered.oldLine.tabIndex).toBe(-1);
+    requestFrame.mockRestore();
+    host.remove();
+  });
+
   it("pairs the visible source line with its rendered file path rather than sidebar selection state", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -620,8 +736,32 @@ describe("DiffView visible recovery position", () => {
     line.dataset.diffPath = "src/visible.ts";
     line.dataset.diffSide = "old";
     root.appendChild(line);
+    Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(line, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
 
     expect(diffView.visiblePosition()).toEqual({ path: "src/visible.ts", line: 42, side: "old" });
+    host.remove();
+  });
+
+  it("does not treat a preceding line flush with the diff viewport as visible", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const diffView = new DiffView(host, "unified", makeHooks());
+    const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const preceding = document.createElement("div");
+    preceding.dataset.line = "202";
+    preceding.dataset.diffPath = "src/restored.ts";
+    preceding.dataset.diffSide = "new";
+    const restored = document.createElement("div");
+    restored.dataset.line = "203";
+    restored.dataset.diffPath = "src/restored.ts";
+    restored.dataset.diffSide = "new";
+    root.append(preceding, restored);
+    Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 100 }) });
+    Object.defineProperty(preceding, "getBoundingClientRect", { value: () => ({ bottom: 100 }) });
+    Object.defineProperty(restored, "getBoundingClientRect", { value: () => ({ bottom: 101 }) });
+
+    expect(diffView.visiblePosition()).toEqual({ path: "src/restored.ts", line: 203, side: "new" });
     host.remove();
   });
 
@@ -635,10 +775,148 @@ describe("DiffView visible recovery position", () => {
     line.dataset.diffPath = "src/visible.ts";
     line.dataset.diffSide = "old";
     root.appendChild(line);
+    Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(line, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
 
     expect(diffView.visiblePosition()).toEqual({ path: "src/visible.ts", line: 42, side: "old" });
     host.remove();
     expect(diffView.visiblePosition()).toBeNull();
+  });
+
+  it("keeps a restored source line durable while an earlier patch is the only rendered file", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const first = file({ path: "src/first.ts", patchState: "ready" });
+    const target = file({ path: "src/restored.ts", patch: undefined, patchState: "queued" });
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([first, target], false);
+    diffView.restorePosition(target.path, 203, "new", target.path, 1, "new");
+    const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const visibleFirstLine = document.createElement("div");
+    visibleFirstLine.dataset.line = "1";
+    visibleFirstLine.dataset.diffPath = first.path;
+    visibleFirstLine.dataset.diffSide = "new";
+    root.appendChild(visibleFirstLine);
+    Object.defineProperty(root, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(visibleFirstLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+
+    expect(diffView.durableScrollPosition()).toEqual({ path: target.path, line: 203, side: "new" });
+    diffView.finishRestoredStream();
+    expect(diffView.durableScrollPosition()).toEqual({ path: first.path, line: 1, side: "new" });
+    host.remove();
+  });
+
+  it("clears a restored source line when a non-preserving scope reset starts loading", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([file({ path: "src/old-scope.ts" })], false);
+    diffView.restorePosition("src/old-scope.ts", 203, "new", null, null, null);
+
+    expect(diffView.durableScrollPosition()).toEqual({ path: "src/old-scope.ts", line: 203, side: "new" });
+
+    diffView.setLoading();
+
+    expect(diffView.durableScrollPosition()).toBeNull();
+    host.remove();
+  });
+
+  it("keeps a pending restored target when another streamed file is revealed first", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const earlier = file({ path: "src/earlier.ts", patchState: "ready" });
+    const target = file({ path: "src/restored.ts", patch: undefined, patchState: "queued" });
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([earlier, target], false);
+    diffView.restorePosition(target.path, 203, "new", null, null, null);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(earlier.path);
+    diffView.updateFile(file({ path: target.path, patchState: "ready" }));
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: target.path } });
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: earlier.path,
+      align: "start",
+      behavior: "smooth",
+    });
+    expect(control.scrollCalls).toContainEqual({
+      type: "line",
+      id: target.path,
+      lineNumber: 203,
+      side: "additions",
+      behavior: "instant",
+    });
+    host.remove();
+  });
+
+  it("allows a live viewport to supersede the restored line after the target post-renders", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/restored-live-scroll.ts";
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    diffView.restorePosition(path, 203, "new", null, null, null);
+
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const liveLine = document.createElement("div");
+    liveLine.dataset.line = "241";
+    liveLine.dataset.diffPath = path;
+    liveLine.dataset.diffSide = "new";
+    scrollRoot.appendChild(liveLine);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(liveLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+
+    expect(diffView.durableScrollPosition()).toEqual({ path, line: 241, side: "new" });
+    host.remove();
+  });
+
+  it("does not let a late selected-file reveal undo the live viewport during the stream", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/restored-final-reveal.ts";
+    const diffView = new DiffView(host, "unified", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    diffView.restorePosition(path, 203, "new", null, null, null);
+
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const liveLine = document.createElement("div");
+    liveLine.dataset.line = "241";
+    liveLine.dataset.diffPath = path;
+    liveLine.dataset.diffSide = "new";
+    scrollRoot.appendChild(liveLine);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(liveLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+    expect(diffView.durableScrollPosition()).toEqual({ path, line: 241, side: "new" });
+
+    control.scrollCalls = [];
+    diffView.revealStreamedFile(path);
+    expect(control.scrollCalls).toEqual([]);
+    expect(diffView.durableScrollPosition()).toEqual({ path, line: 241, side: "new" });
+
+    diffView.finishRestoredStream();
+    diffView.revealStreamedFile(path);
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
   });
 
   it("waits for the persisted target's textual patch post-render before restoring its line and focus", () => {
@@ -665,10 +943,30 @@ describe("DiffView visible recovery position", () => {
       side: "deletions",
       behavior: "instant",
     });
-    expect(control.setSelectedLinesCalls).toContainEqual({
-      id: queued.path,
-      range: { start: 12, end: 12, side: "deletions", endSide: "deletions" },
+    expect(control.setSelectedLinesCalls).toEqual([null]);
+  });
+
+  it("lets explicit file navigation supersede a pending restored line during streaming", () => {
+    const target = file({ path: "src/target.ts", patch: undefined, patchState: "queued" });
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([target], false);
+    diffView.restorePosition(target.path, 203, "new", null, null, null);
+    control.scrollCalls = [];
+
+    diffView.scrollToFile(target.path);
+    diffView.updateFile(file({ path: target.path, patchState: "ready" }));
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: target.path } });
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: target.path,
+      align: "start",
+      behavior: "smooth",
     });
+    expect(control.scrollCalls).not.toContainEqual(expect.objectContaining({ lineNumber: 203 }));
   });
 
   it("does not infer the additions side from an incomplete recovered position", () => {
@@ -723,27 +1021,107 @@ describe("DiffView.setComments forceCardRender", () => {
   });
 });
 
+describe("DiffView line clicks", () => {
+  it("does not request an edit when Pierre reports a deletion-side click", () => {
+    const onRequestEdit = vi.fn();
+    const hooks = makeHooks();
+    hooks.onRequestEdit = onRequestEdit;
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+
+    const onLineClick = control.lastOptions?.onLineClick as
+      | ((event: { type: "diff-line"; lineNumber: number; annotationSide: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => void)
+      | undefined;
+    expect(onLineClick).toBeDefined();
+    onLineClick!({ type: "diff-line", lineNumber: 11, annotationSide: "deletions" }, { type: "diff", item: { id: "src/foo.ts" } });
+
+    expect(onRequestEdit).not.toHaveBeenCalled();
+    expect(diffView.focusedPosition()).toEqual({ path: "src/foo.ts", line: 11, side: "old" });
+  });
+});
+
 describe("DiffView gutter-utility click", () => {
-  // Regression: `@pierre/diffs`' `InteractionManager` sets its own `selectedRange` on a
-  // gutter-utility pointerdown and never clears it in this configuration (line-selection mode is
-  // off) — see `dist/managers/InteractionManager.js`'s `handleDocumentPointerUp` "gutterSelecting"
-  // case. Left unhandled, the clicked line stays highlighted forever and a later gutter click
-  // re-anchors to that stale selection instead of the newly clicked line — reported as "the line
-  // stays highlighted... and I cannot add any other comments in that file." `DiffView.
-  // requestNewComment` must clear the selection itself once the draft is created. The clear is
-  // deferred to a microtask (see that method's doc comment), so these assertions run after a
-  // microtask flush.
+  function renderUtility(): HTMLButtonElement {
+    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
+      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
+        item: { type: string; item: { id: string } }) => HTMLElement | undefined)
+      | undefined;
+    expect(renderGutterUtility).toBeDefined();
+    const button = renderGutterUtility!(
+      () => ({ lineNumber: 11, side: "additions" }),
+      { type: "diff", item: { id: "src/foo.ts" } },
+    );
+    expect(button).toBeInstanceOf(HTMLButtonElement);
+    return button as HTMLButtonElement;
+  }
+
+  it("renders a stable comment utility and requests a new comment when clicked", () => {
+    const onRequestNewComment = vi.fn();
+    const onRequestEdit = vi.fn();
+    const hooks = makeHooks();
+    hooks.onRequestNewComment = onRequestNewComment;
+    hooks.onRequestEdit = onRequestEdit;
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+
+    const button = renderUtility();
+    expect(button.id).toBe("code-pane-add-comment-src%2Ffoo.ts");
+    const onLineClick = control.lastOptions?.onLineClick as ((event: unknown, context: unknown) => void) | undefined;
+    expect(onLineClick).toBeDefined();
+    const bubbledClick = vi.fn(() =>
+      onLineClick!({ type: "diff-line", annotationSide: "additions", lineNumber: 11 }, { type: "diff", item: { id: "src/foo.ts" } }),
+    );
+    const parent = document.createElement("div");
+    parent.addEventListener("click", bubbledClick);
+    parent.appendChild(button);
+    button.click();
+
+    expect(onRequestNewComment).toHaveBeenCalledTimes(1);
+    expect(onRequestNewComment).toHaveBeenCalledWith({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 11,
+      lineText: "const b = newHelper();",
+    });
+    expect(onRequestEdit).not.toHaveBeenCalled();
+    expect(bubbledClick).not.toHaveBeenCalled();
+  });
+
+  it("renders the utility before hover and resolves the hovered line when clicked", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([file()], false);
+
+    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
+      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
+          item: { type: string; item: { id: string } }) => HTMLElement | undefined)
+      | undefined;
+    expect(renderGutterUtility!(() => undefined, { type: "diff", item: { id: "src/foo.ts" } })?.id).toBe(
+      "code-pane-add-comment-src%2Ffoo.ts",
+    );
+  });
+
+  it("does not render a comment utility for non-diff items", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([file()], false);
+    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
+      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
+        item: { type: string; item: { id: string } }) => HTMLElement | undefined)
+      | undefined;
+    expect(renderGutterUtility).toBeDefined();
+
+    expect(renderGutterUtility!(() => undefined, { type: "file", item: { id: "src/foo.ts" } })).toBeUndefined();
+    expect(renderGutterUtility!(() => undefined, { type: "placeholder", item: { id: "src/foo.ts" } })).toBeUndefined();
+  });
+
+  // Regression: the clicked line must not remain selected after requesting a new comment. The
+  // clear is deferred to a microtask (see `DiffView.requestNewComment`), so this assertion runs
+  // after the click handler's task has completed.
   it("clears the gutter selection after requesting a new comment", async () => {
     const hooks = makeHooks();
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
 
-    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
-      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
-      | undefined;
-    expect(onGutterUtilityClick).toBeDefined();
-
-    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    renderUtility().click();
     await Promise.resolve(); // flush the queued microtask clear
 
     expect(control.setSelectedLinesCalls).toEqual([null]);
@@ -756,44 +1134,18 @@ describe("DiffView gutter-utility click", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
 
-    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
-      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
-      | undefined;
-    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    renderUtility().click();
     await Promise.resolve(); // flush the queued microtask clear
 
     expect(onRequestNewComment).toHaveBeenCalledTimes(1);
     expect(control.setSelectedLinesCalls).toEqual([null]);
   });
 
-  // Regression: the library doesn't just leave the old selection alone after our hook runs — it
-  // actively re-asserts it. `InteractionManager`'s "gutterSelecting" pointerup case calls our
-  // `onGutterUtilityClick` hook and THEN, still in the same synchronous pointerup dispatch, calls
-  // `notifySelectionCommitted`, which fires `CodeView`'s wrapped `onLineSelected` ->
-  // `applySelectedLines` and re-sets the same selection. A clear issued synchronously from inside
-  // our hook (the original, buggy implementation) runs BEFORE that re-assert and gets overwritten
-  // by it, so the highlight never actually goes away. Queuing the clear as a microtask lets it run
-  // after the whole pointerup dispatch — including the re-assert simulated here — has finished.
-  it("keeps the selection cleared even when the library re-asserts it synchronously afterward", async () => {
-    const hooks = makeHooks();
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+  it("does not pass both mutually-exclusive Pierre gutter APIs", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
 
-    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
-      | ((range: { start: number; end: number; side: "additions" | "deletions" }, context: unknown) => void)
-      | undefined;
-    const fakeCodeView = control.lastInstance;
-    expect(onGutterUtilityClick).toBeDefined();
-    expect(fakeCodeView).toBeDefined();
-
-    onGutterUtilityClick!({ start: 11, end: 11, side: "additions" }, { type: "diff", item: { id: "src/foo.ts" } });
-    // Simulate the library's own re-assert, which happens synchronously right after our hook
-    // returns (still within the pointerup dispatch, before any queued microtask gets a turn).
-    fakeCodeView!.setSelectedLines({ start: 11, end: 11, side: "additions" });
-    expect(control.setSelectedLinesCalls.at(-1)).not.toBeNull(); // re-asserted, not yet cleared
-
-    await Promise.resolve(); // flush the queued microtask clear, which runs after the re-assert
-
-    expect(control.setSelectedLinesCalls.at(-1)).toBeNull();
+    expect(control.lastOptions?.onGutterUtilityClick).toBeUndefined();
+    expect(control.lastOptions?.renderGutterUtility).toBeDefined();
   });
 });

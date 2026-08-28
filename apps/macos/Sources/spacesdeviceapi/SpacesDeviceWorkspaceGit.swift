@@ -704,7 +704,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let timeout = try remainingTimeout(start: deadlineStart)
         switch plan.source {
         case .tracked(let baseRef, let targetRef):
-            _ = try gitClient.runGitAndCapture(
+            try gitClient.runGitWithFileOutput(
                 trackedDiffArguments(for: plan, workspaceDir: workspaceDir, baseRef: baseRef, targetRef: targetRef, outputURL: outputURL), timeout: timeout)
             return true
         case .untracked:
@@ -759,7 +759,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             var targetStat = stat()
             if stat(fullPath, &targetStat) == 0, (targetStat.st_mode & S_IFMT) != S_IFREG { return false }
         }
-        _ = try gitClient.runGitAndCapture(
+        try gitClient.runGitWithFileOutput(
             [
                 "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
                 "--no-textconv", "--no-index", "--", "/dev/null", path,
@@ -807,7 +807,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             ["-C", workspaceDir, "update-index", "--add", "--", path], timeout: try remainingTimeout(start: deadlineStart),
             environmentOverrides: scratchIndexEnvironment)
         let diffTimeout = try remainingTimeout(start: deadlineStart)
-        _ = try gitClient.runGitAndCapture(
+        try gitClient.runGitWithFileOutput(
             [
                 "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
                 "--no-textconv", "--relative", compareRef, "--", ":(literal)\(path)",

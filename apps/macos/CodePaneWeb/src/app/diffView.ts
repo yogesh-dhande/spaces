@@ -47,15 +47,13 @@ type DiffViewPosition = { path: string; line: number; side: ReviewCommentSide };
  * `Virtualizer`), so this mounts into a `flex: 1; min-height: 0` element rather than an
  * auto-growing one inside a taller scrolling ancestor.
  *
- * Generic over `AnchoredComment` (Phase 4): `CodeView<AnchoredComment>`'s `enableGutterUtility` +
- * `onGutterUtilityClick` pairing renders the library's own default gutter icon on hover and opens
- * a new draft on click (chosen over the mutually-exclusive `renderGutterUtility`, since a custom
- * icon buys nothing here); `renderAnnotation` renders the comment card DOM for each
- * `CodeViewDiffItem.annotations` entry. Both callbacks are declared with `CodeViewOptions`'s own
- * indexed-access type rather than importing `CodeViewDiffItemContext` (not part of this package's
- * public export surface) — the compiled library appends that context object as each callback's
- * last argument regardless (see `CodeView.js`'s `defineItemSharedCallback`), so this still gets it
- * fully typed.
+ * Generic over `AnchoredComment` (Phase 4): `CodeView<AnchoredComment>`'s custom
+ * `renderGutterUtility` renders the stable comment affordance on hover and opens a new draft on
+ * click; `renderAnnotation` renders the comment card DOM for each
+ * `CodeViewDiffItem.annotations` entry. The custom utility is used so the button has a stable
+ * accessibility identifier for app automation; it must not be combined with Pierre's mutually
+ * exclusive `onGutterUtilityClick` option. The item context is appended as the callback's last
+ * argument by the compiled library's `defineItemSharedCallback` (see `CodeView.js`).
  */
 export class DiffView {
   private codeView: CodeView<AnchoredComment> | undefined;
@@ -129,6 +127,14 @@ export class DiffView {
   private editSessionGeneration = 0;
   private pendingEditPath: string | undefined;
   private focusedLocation: { path: string; line: number; side: ReviewCommentSide } | undefined;
+  /** The initial workspace snapshot names a source location, while a selected manifest row names
+   * only a file. Keep the former through patch streaming so revealing the selected row cannot
+   * replace an exact restored line with that file's first line. */
+  private restoredScrollPosition: DiffViewPosition | undefined;
+  /** Keeps the restored file from being moved to its item start by a late selected-file reveal.
+   * This ownership lasts for the whole initial stream; the exact line guard may be released as
+   * soon as its target post-renders so live viewport sampling can take over. */
+  private protectedStreamRevealPath: string | undefined;
   /** A persisted line cannot be restored into a queued file. Keep it until the target's
    * textual diff reports post-render, when Pierre has a concrete line to reveal and focus. */
   private pendingScrollPosition:
@@ -475,6 +481,10 @@ export class DiffView {
     this.itemsByPath.clear();
     this.renderedPaths.clear();
     this.fileIndexesByPath.clear();
+    // A failed refresh is a non-preserving reset. Do not let a restore target from the previous
+    // scope retarget the first rendered file in a later replacement scope.
+    this.restoredScrollPosition = undefined;
+    this.protectedStreamRevealPath = undefined;
     this.pendingScrollPosition = undefined;
     this.lastDurableScrollPosition = undefined;
     // The failed manifest must not strand an active editor. Re-promote it as a synthetic file so
@@ -521,6 +531,10 @@ export class DiffView {
     this.itemsByPath.clear();
     this.renderedPaths.clear();
     this.fileIndexesByPath.clear();
+    // Loading is a non-preserving scope reset. Do not let a restore target from the previous
+    // scope retarget the first rendered file in the replacement scope.
+    this.restoredScrollPosition = undefined;
+    this.protectedStreamRevealPath = undefined;
     this.pendingScrollPosition = undefined;
     this.lastDurableScrollPosition = undefined;
     // A non-preserving scope reset must not carry a source selection into the new comparison. The
@@ -554,7 +568,40 @@ export class DiffView {
   }
 
   scrollToFile(path: string): void {
+    // An explicit sidebar/quick-open navigation supersedes a startup restoration target. Keep
+    // streamed file reveals on `revealStreamedFile`, so transient queue updates cannot clear this
+    // guard or overwrite the user's choice.
+    this.restoredScrollPosition = undefined;
+    this.protectedStreamRevealPath = undefined;
+    this.pendingScrollPosition = undefined;
+    this.scrollToFileInternal(path);
+  }
+
+  /** Scrolls a streamed item without changing the user's/restoration position ownership. */
+  private scrollToFileInternal(path: string): void {
     this.codeView?.scrollTo({ type: "item", id: path, align: "start", behavior: "smooth" });
+  }
+
+  /** Reveals a queued selected file as its patch arrives, except when this workspace is restoring
+   * an exact source location in that same file. */
+  revealStreamedFile(path: string): void {
+    const restored = this.restoredScrollPosition;
+    if (restored?.path === path) {
+      this.applyRestoredScrollPosition({ path, scrollLine: restored.line, scrollSide: restored.side });
+      return;
+    }
+    // The exact line guard is released once the target post-renders, but the selected row can be
+    // revealed again during final/out-of-order reconciliation. Keep that late item-start scroll
+    // from undoing the user's restored/live viewport until the stream explicitly finishes.
+    if (this.protectedStreamRevealPath === path) return;
+    this.scrollToFileInternal(path);
+  }
+
+  /** The initial stream has completed its selected-row reveals. Subsequent user selections use
+   * `scrollToFile`'s ordinary file-start behavior. */
+  finishRestoredStream(): void {
+    this.restoredScrollPosition = undefined;
+    this.protectedStreamRevealPath = undefined;
   }
 
   /** A logical source line survives virtualized content reflow; pixel offsets do not. */
@@ -567,8 +614,8 @@ export class DiffView {
   visiblePosition(): DiffViewPosition | null {
     if (this.loading || !this.root.isConnected) return null;
     const top = this.root.getBoundingClientRect().top;
-    for (const node of this.root.querySelectorAll<HTMLElement>("[data-line]")) {
-      if (node.getBoundingClientRect().bottom < top) continue;
+    for (const node of this.renderedElements<HTMLElement>("[data-line]")) {
+      if (node.getBoundingClientRect().bottom <= top) continue;
       const line = Number(node.dataset.line);
       const path = node.dataset.diffPath;
       const side = node.dataset.diffSide;
@@ -578,8 +625,10 @@ export class DiffView {
   }
 
   /** Source location safe to persist at a lifecycle boundary. Sidebar selection and review focus
-   * are intentionally separate state, so neither can retarget a queued scroll restoration. */
+   * are intentionally separate state, so neither can retarget a queued scroll restoration. Until
+   * the initial stream finishes, an earlier rendered patch is likewise not the restored viewport. */
   durableScrollPosition(): DiffViewPosition | null {
+    if (this.restoredScrollPosition !== undefined) return this.restoredScrollPosition;
     const visible = this.visiblePosition();
     if (visible !== null) {
       this.lastDurableScrollPosition = visible;
@@ -615,6 +664,8 @@ export class DiffView {
         : { path: focusedPath, line: focusedLine, side: focusedSide };
     if (scrollPath !== null && scrollPath !== undefined && scrollLine !== null && scrollLine !== undefined && scrollSide !== null && scrollSide !== undefined) {
       const position = { path: scrollPath, scrollLine, scrollSide };
+      this.restoredScrollPosition = { path: scrollPath, line: scrollLine, side: scrollSide };
+      this.protectedStreamRevealPath = scrollPath;
       this.lastDurableScrollPosition = { path: scrollPath, line: scrollLine, side: scrollSide };
       if (this.itemTypes.get(scrollPath) === "diff") this.applyRestoredScrollPosition(position);
       else this.pendingScrollPosition = position;
@@ -628,6 +679,11 @@ export class DiffView {
   /** Used by the batch tray's row click. Falls back to `scrollToFile` when the tray asks for an
    *  outdated (file-level, `lineNumber: 0`) position — there is no real line to center on. */
   scrollToLine(filePath: string, side: ReviewCommentSide, lineNumber: number): void {
+    // Comment/tray navigation is an explicit source-location choice, just like selecting a file.
+    // It must not be overwritten by a pending position from the initial workspace restore.
+    this.restoredScrollPosition = undefined;
+    this.protectedStreamRevealPath = undefined;
+    this.pendingScrollPosition = undefined;
     if (lineNumber === 0) {
       this.scrollToFile(filePath);
       return;
@@ -643,42 +699,47 @@ export class DiffView {
   }
 
   private buildCodeViewOptions(): CodeViewOptions<AnchoredComment> {
-    const onGutterUtilityClick: NonNullable<CodeViewOptions<AnchoredComment>["onGutterUtilityClick"]> = (
-      range,
-      context,
-    ) => {
-      // Binary files render as plain-text placeholder ("file"-type) items with no real
-      // diff line content to anchor a comment to — the affordance only applies to real diff lines.
-      if (context.type !== "diff") return;
-      if (range.side === undefined) return; // defensive: a plain click always sets `side`
-      this.requestNewComment(context.item.id, fromAnnotationSide(range.side), range.start);
-    };
     const renderAnnotation: NonNullable<CodeViewOptions<AnchoredComment>["renderAnnotation"]> = (annotation) =>
       this.hooks.renderCard(annotation.metadata);
     const renderGutterUtility = (...args: unknown[]): HTMLElement | undefined => {
       const getHoveredLine = args[0] as (() => { lineNumber: number; side?: "additions" | "deletions" } | undefined);
-      const context = args.at(-1) as { item?: { id?: string } } | undefined;
-      const hovered = getHoveredLine();
+      const context = args.at(-1) as { type?: string; item?: { id?: string } } | undefined;
+      if (context?.type !== "diff") return undefined;
       const path = context?.item?.id;
-      if (!hovered || !path || hovered.side === undefined) return undefined;
-      const side = hovered.side === "deletions" ? "old" : "new";
+      if (!path) return undefined;
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("data-utility-button", "");
-      button.id = `code-pane-add-comment-${encodeURIComponent(path)}-${side}-${hovered.lineNumber}`;
+      // Pierre invokes this renderer while mounting the file, before any line is hovered. Keep one
+      // persistent action in the file's utility slot and resolve the current line only on click;
+      // the interaction manager updates its hovered-line getter as the pointer moves.
+      button.id = `code-pane-add-comment-${encodeURIComponent(path)}`;
       button.setAttribute("aria-label", "Add comment");
       button.textContent = "+";
+      button.addEventListener("click", (event) => {
+        // The custom utility lives inside the diff's interactive pre element. Stop the event at
+        // the button so clicking it cannot also be interpreted as a line click/edit request.
+        event.preventDefault();
+        event.stopPropagation();
+        const hovered = getHoveredLine();
+        if (!hovered || hovered.side === undefined) return;
+        const side = hovered.side === "deletions" ? "old" : "new";
+        this.requestNewComment(path, side, hovered.lineNumber);
+      });
       return button;
     };
-    const onLineClick: NonNullable<CodeViewOptions<AnchoredComment>["onLineClick"]> = (range, context) => {
-      if (context.type !== "diff" || !("side" in range) || (range.side !== "additions" && range.side !== "deletions")) return;
+    const onLineClick: NonNullable<CodeViewOptions<AnchoredComment>["onLineClick"]> = (event, context) => {
+      // Pierre reports a diff click as one `diff-line` event object. CodeView appends the owning
+      // item context as the second argument; this shape differs from the selected-range object
+      // used by CodeView's selection callbacks, so do not read `side`/`start` from it.
+      if (context.type !== "diff" || event.type !== "diff-line") return;
       this.focusedLocation = {
         path: context.item.id,
-        line: (range as unknown as { start: number }).start,
-        side: fromAnnotationSide(range.side),
+        line: event.lineNumber,
+        side: fromAnnotationSide(event.annotationSide),
       };
       this.hooks.onPositionChange?.();
-      if (range.side !== "additions") return;
+      if (event.annotationSide !== "additions") return;
       if (this.editing?.path === context.item.id) return;
       this.hooks.onRequestEdit?.(context.item.id);
     };
@@ -755,7 +816,6 @@ export class DiffView {
         const currentFile = this.filesByPath.get(item.id);
         if (currentFile) this.codeView?.updateItem(this.cacheItem(currentFile));
       },
-      onGutterUtilityClick,
       onLineClick,
       renderAnnotation,
       renderGutterUtility: renderGutterUtility as NonNullable<CodeViewOptions<AnchoredComment>["renderGutterUtility"]>,
@@ -766,6 +826,7 @@ export class DiffView {
         const context = args.at(-1) as { item?: { id?: string } } | undefined;
         const path = context?.item?.id;
         if (path !== undefined) {
+          this.assignEditorIdentifier();
           this.decorateRenderedLines(node, path);
           this.retryPendingRestorePosition(path);
         }
@@ -788,13 +849,8 @@ export class DiffView {
     // Left alone, the clicked line stays highlighted forever, the `+` affordance stops following
     // the pointer, and the next gutter click re-anchors to this stale selection instead of the
     // newly clicked line — so we must clear it. But we can't clear it synchronously from here:
-    // this hook (`onGutterUtilityClick`) runs in the middle of `InteractionManager`'s
-    // `handleDocumentPointerUp` "gutterSelecting" case, which — after calling us — goes on to call
-    // `notifySelectionEnd`/`notifySelectionCommitted`. `notifySelectionCommitted` fires
-    // `onLineSelected`, which `CodeView` wraps to call `applySelectedLines` and re-set the very
-    // selection we just cleared. That whole pointerup dispatch is one synchronous task, so
-    // queuing the clear as a microtask lets it run after the library's re-assert instead of
-    // before it.
+    // The utility click runs inside the diff's interactive pre element. Queueing the clear as a
+    // microtask keeps it after any selection bookkeeping from that click task.
     queueMicrotask(() => this.codeView?.clearSelectedLines());
   }
 
@@ -901,15 +957,34 @@ export class DiffView {
       } else {
         this.codeView.updateItem(nextItem);
       }
-      const editorElement = this.root.querySelector<HTMLElement>(`[contenteditable="true"]`);
-      if (editorElement) editorElement.id = "code-pane-diff-edit-input";
+      this.assignEditorIdentifierAfterRender(path);
     };
     requestAnimationFrame(poll);
   }
 
+  private assignEditorIdentifierAfterRender(path: string, framesRemaining = 2): void {
+    if (this.editing?.path !== path || this.editing.conflict !== undefined || !this.codeView) return;
+    if (this.assignEditorIdentifier()) return;
+    if (framesRemaining === 0) return;
+    // CodeView may replace the item synchronously while its editor surface is mounted by the
+    // following render pass. A bounded pair of post-render attempts covers that lifecycle without
+    // leaving an unbounded animation-frame loop behind when a test or host declines the attach.
+    requestAnimationFrame(() => this.assignEditorIdentifierAfterRender(path, framesRemaining - 1));
+  }
+
+  private assignEditorIdentifier(): boolean {
+    // Pierre's editor exposes its live surface as a multiline textbox. It sets the
+    // contentEditable property rather than an HTML contenteditable attribute, so select the
+    // semantic surface that is stable in both the browser and WKWebView DOMs.
+    const editorElement = this.renderedElements<HTMLElement>(`[role="textbox"][aria-multiline="true"]`)[0];
+    if (!editorElement) return false;
+    editorElement.id = "code-pane-diff-edit-input";
+    return true;
+  }
+
   private decorateRenderedLines(node: HTMLElement, path: string): void {
     const encodedPath = encodeURIComponent(path);
-    for (const line of node.querySelectorAll<HTMLElement>("[data-line]")) {
+    for (const line of this.renderedElements<HTMLElement>("[data-line]", node)) {
       const lineNumber = line.dataset.line;
       if (lineNumber === undefined) continue;
       const side = line.closest("[data-deletions]") !== null || line.dataset.lineType === "change-deletion" ? "old" : "new";
@@ -928,6 +1003,11 @@ export class DiffView {
       this.pendingScrollPosition = undefined;
       this.applyRestoredScrollPosition(scroll);
     }
+    // Once the target FileDiff has post-rendered, the restore has been applied (either through the
+    // pending path above or synchronously when the item was already mounted). Let subsequent live
+    // viewport samples represent explicit wheel/trackpad movement instead of keeping the startup
+    // location authoritative until the whole stream finishes.
+    if (this.restoredScrollPosition?.path === path) this.restoredScrollPosition = undefined;
     const focus = this.pendingFocusedPosition;
     if (focus?.path === path) {
       this.pendingFocusedPosition = undefined;
@@ -950,23 +1030,39 @@ export class DiffView {
 
   private applyRestoredFocusPosition(position: { path: string; line: number; side: ReviewCommentSide }): void {
     const { path, line, side } = position;
-    {
-      this.codeView?.setSelectedLines({
-        id: path,
-        range: {
-          start: line,
-          end: line,
-          side: toAnnotationSide(side),
-          endSide: toAnnotationSide(side),
-        },
-      });
-      requestAnimationFrame(() => {
-        const lineElement = document.getElementById(`code-pane-diff-${side}-line-${encodeURIComponent(path)}-${line}`);
-        if (!lineElement) return;
-        lineElement.tabIndex = -1;
-        lineElement.focus({ preventScroll: true });
-      });
-    }
+    // Restoring focus is distinct from restoring a user line selection. Pierre gives a selected
+    // line's gutter utility precedence over pointer hover; keeping the restored line selected would
+    // therefore make the comment affordance stay on that stale line after the user moves to another
+    // line. The focused DOM line still provides keyboard focus and the durable location remains in
+    // `focusedLocation` for persistence.
+    this.codeView?.clearSelectedLines({ notify: false });
+    requestAnimationFrame(() => {
+      const lineElement = this.renderedElements<HTMLElement>("[id]").find(
+        (element) => element.id === `code-pane-diff-${side}-line-${encodeURIComponent(path)}-${line}`,
+      );
+      if (!lineElement) return;
+      lineElement.tabIndex = -1;
+      lineElement.focus({ preventScroll: true });
+    });
+  }
+
+  /**
+   * Pierre mounts each virtualized file in an open `diffs-container` shadow root. Keep the
+   * light-DOM root as the test seam and inspect every descendant open root for the real renderer;
+   * nested roots matter because an editable file can place its content surface below another
+   * `diffs-container` host. This is required for line identity, durable scroll sampling, focus
+   * restoration, and the stable editor identifier.
+   */
+  private renderedElements<T extends Element>(selector: string, root: HTMLElement = this.root): T[] {
+    const roots: ParentNode[] = [];
+    const visit = (renderRoot: ParentNode): void => {
+      roots.push(renderRoot);
+      for (const element of renderRoot.querySelectorAll<HTMLElement>("*")) {
+        if (element.shadowRoot !== null) visit(element.shadowRoot);
+      }
+    };
+    visit(root.shadowRoot ?? root);
+    return roots.flatMap((renderRoot) => [...renderRoot.querySelectorAll<T>(selector)]);
   }
 
   /** Current `CodeViewItem.version` for a file — see `itemVersions`'s doc comment. Every manifest

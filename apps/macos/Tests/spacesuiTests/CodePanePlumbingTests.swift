@@ -397,9 +397,9 @@ extension ProcessProfileEnvironmentSuites {
 
         /// `openOrFocusGlobalEditorWindow` — the ⌘⌥E shortcut, the sidebar's "Open in Editor" item, and
         /// every other open-editor entry point — creates one code pane in the global singleton window
-        /// when none is open anywhere yet, and re-focuses that same pane on a second call instead of
-        /// creating a second one. The freshly minted window id is not knowable ahead of time, so the test
-        /// recovers it from `onLayoutChanged`.
+        /// when none is open anywhere yet, restores the target workspace's saved mode, and re-focuses
+        /// that same pane on a second call instead of creating a second one. The freshly minted window
+        /// id is not knowable ahead of time, so the test recovers it from `onLayoutChanged`.
         @Test func openOrFocusGlobalEditorWindowOpensAFreshSingletonWindowWhenNoneExistsAndFocusesOnASecondCall() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
@@ -419,7 +419,7 @@ extension ProcessProfileEnvironmentSuites {
             let paneID = try #require(panes.first?.id)
             let codePane = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID) as? CodePaneContentController)
             let initial = try initialWorkspaceState(from: codePane)
-            #expect(initial.mode == "diff", "an explicit Open Editor action starts in Diff even when the target last used Editor mode")
+            #expect(initial.mode == "editor", "recreating the global Editor restores the target workspace's saved mode")
             #expect(initial.scope == recovered.scope)
             #expect(initial.diffLayout == recovered.diffLayout)
             #expect(initial.diffSelectedPath == recovered.diffSelectedPath)
@@ -432,6 +432,27 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).map(\.id) == [paneID],
                 "the second call focuses the existing pane instead of opening a second one")
+        }
+
+        @Test func openOrFocusGlobalEditorWindowUsesDiffWhenTheWorkspaceHasNoSavedState() throws {
+            let controller = makeController()
+            let deviceID = controller.localDeviceID
+            let workspaceID = "workspace-without-saved-code-pane-state"
+            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-no-state", workspaceID: workspaceID)]
+            controller.rebuildFlatSidebarData()
+            var openedGlobalScopes: [PanelScope] = []
+            controller.panelCoordinator.onLayoutChanged = { scope, _ in
+                if case .globalWindow = scope { openedGlobalScopes.append(scope) }
+            }
+
+            let opened = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: workspaceID)
+
+            #expect(opened)
+            let globalScope = try #require(openedGlobalScopes.first, "a fresh global window scope was minted")
+            let paneID = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: globalScope)).first?.id)
+            let codePane = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID) as? CodePaneContentController)
+            #expect(codePane.initialMode == .diff)
+            #expect(try initialWorkspaceState(from: codePane).mode == "diff", "Diff is the fallback when no workspace snapshot exists")
         }
 
         /// An already-open Editor window stays focusable while its device is offline —
@@ -596,9 +617,9 @@ extension ProcessProfileEnvironmentSuites {
                 (retargetedContent as AnyObject?) !== (originalContent as AnyObject?),
                 "retarget installs a fresh controller instance rather than mutating the old one in place")
             #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected workspace")
-            #expect(retargetedContent.initialMode == .diff, "a retargeted monitor lands in diff mode")
+            #expect(retargetedContent.initialMode == .diff, "retargeting keeps Diff as the requested initial fallback")
             let initial = try initialWorkspaceState(from: retargetedContent)
-            #expect(initial.mode == "diff", "sidebar-following retargeting must not reopen the target's stale Editor mode")
+            #expect(initial.mode == "editor", "sidebar-following retargeting restores the target workspace's saved Editor mode")
             #expect(initial.scope == recovered.scope)
             #expect(initial.diffSelectedPath == recovered.diffSelectedPath)
             #expect(initial.editorState == recovered.editorState)
@@ -708,9 +729,8 @@ extension ProcessProfileEnvironmentSuites {
 
         /// Reusing a global singleton for `openOrFocusGlobalEditorWindow` whose workspace it does not
         /// currently show retargets it — closing and reinstalling on the same pane id (`retargetCodePane`,
-        /// shared with `retargetGlobalWindowCodePanes`) — and lands in `.diff` mode, the mode every
-        /// open-editor entry point requests.
-        @Test func openOrFocusGlobalEditorWindowRetargetsAnExistingSingletonToDiffMode() throws {
+        /// shared with `retargetGlobalWindowCodePanes`) — and restores the target workspace's saved mode.
+        @Test func openOrFocusGlobalEditorWindowRetargetsAnExistingSingletonAndRestoresSavedMode() throws {
             let controller = makeController()
             let deviceID = controller.localDeviceID
             let recovered = recoveredEditorWorkspaceState()
@@ -731,9 +751,9 @@ extension ProcessProfileEnvironmentSuites {
                 "the singleton's pane id keeps a live controller after retargeting")
             #expect((retargetedContent as AnyObject?) !== (originalContent as AnyObject?), "retarget installs a fresh controller instance")
             #expect(retargetedContent.workspaceID == "workspace-1", "the new controller is scoped to the requested workspace")
-            #expect(retargetedContent.initialMode == .diff, "every open-editor entry point lands in diff mode")
+            #expect(retargetedContent.initialMode == .diff, "Diff remains the initial fallback for a retarget")
             let initial = try initialWorkspaceState(from: retargetedContent)
-            #expect(initial.mode == "diff", "retargeting via Open Editor must not restore the target's stale Editor mode")
+            #expect(initial.mode == "editor", "retargeting via Open Editor restores the target workspace's saved Editor mode")
             #expect(initial.scope == recovered.scope)
             #expect(initial.diffLayout == recovered.diffLayout)
             #expect(initial.diffSelectedPath == recovered.diffSelectedPath)

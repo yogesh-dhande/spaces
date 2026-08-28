@@ -323,9 +323,26 @@ import spacesterminalcore
         #expect(
             metric
                 == CodePaneBridge.RenderMetric(
-                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17, fileCount: 3, contentBytes: 8192,
+                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17,
+                    bridgeElapsedMS: nil, decodeElapsedMS: nil, updateElapsedMS: nil, paintElapsedMS: nil,
+                    fileCount: 3, contentBytes: 8192,
                     path: nil, fileIndex: nil, selectedPriority: false, chunkCount: nil,
                     mode: nil, scope: nil, layout: nil, scrollTop: nil, focusedLine: nil, dirty: nil))
+    }
+
+    @Test func decodeRenderMetricParsesPerFileStreamingTimings() {
+        let metric = CodePaneBridge.decodeRenderMetric(body: [
+            "method": "renderMetric",
+            "params": [
+                "kind": "diff", "trigger": "filePatch", "elapsedMs": 42, "fileCount": 3, "contentBytes": 8192,
+                "bridgeElapsedMs": 11, "decodeElapsedMs": 7, "updateElapsedMs": 5, "paintElapsedMs": 19,
+            ],
+        ])
+
+        #expect(metric?.bridgeElapsedMS == 11)
+        #expect(metric?.decodeElapsedMS == 7)
+        #expect(metric?.updateElapsedMS == 5)
+        #expect(metric?.paintElapsedMS == 19)
     }
 
     @Test func decodeRenderMetricRejectsUnknownKindsAndRequestMessages() {
@@ -356,6 +373,11 @@ import spacesterminalcore
             CodePaneBridge.decodeRenderMetric(body: [
                 "method": "renderMetric",
                 "params": ["kind": "editor", "trigger": "fileOpen", "elapsedMs": 1, "fileCount": 1, "contentBytes": 5 * 1024 * 1024 * 1024],
+            ]) == nil)
+        #expect(
+            CodePaneBridge.decodeRenderMetric(body: [
+                "method": "renderMetric",
+                "params": ["kind": "diff", "trigger": "filePatch", "elapsedMs": 10, "fileCount": 1, "contentBytes": 1, "updateElapsedMs": 11],
             ]) == nil)
     }
 

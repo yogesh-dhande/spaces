@@ -185,11 +185,11 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   const diffAreaEl = document.createElement("div");
   diffAreaEl.className = "diff-area";
+  diffAreaEl.tabIndex = -1;
   diffAreaEl.style.position = "relative"; // hosts the comments controller's absolutely-positioned error banner
 
   const editorContainerEl = document.createElement("div");
   editorContainerEl.className = "diff-area";
-  editorContainerEl.id = "code-pane-editor-focus";
   editorContainerEl.tabIndex = -1;
 
   function pendingStartingAgentSessionId(): string | undefined {
@@ -561,11 +561,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       deadlineEpochMilliseconds: null,
     };
     startAgentInput.value = command;
-    startAgentStatus.textContent = failedAgentStatusText(pendingAgentLaunch);
+    setStartAgentStatus(failedAgentStatusText(pendingAgentLaunch));
     startAgentDialog.hidden = false;
     toolbar.update(buildToolbarState());
     pushWorkspaceState();
-    queueMicrotask(() => startAgentInput.focus());
+    // Keep the code surface focused after a launch fails detection. The dialog remains visible
+    // with the command retained for correction, but reopening it must not steal focus from the
+    // editor the user was working in.
+    focusCodeSurface();
   });
 
   window.addEventListener(SET_MODE_EVENT, (event) => {
@@ -622,6 +625,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const startAgentStatus = document.createElement("div");
   startAgentStatus.className = "agent-command-status";
   startAgentStatus.id = "code-pane-start-agent-status";
+  startAgentStatus.setAttribute("role", "status");
+  startAgentStatus.setAttribute("aria-live", "polite");
+  startAgentStatus.setAttribute("aria-atomic", "true");
+  startAgentStatus.setAttribute("aria-label", "");
   const startAgentActions = document.createElement("div");
   startAgentActions.className = "agent-command-actions";
   const startAgentCancel = document.createElement("button");
@@ -640,13 +647,21 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   startAgentDialog.appendChild(startAgentForm);
   pane.appendChild(startAgentDialog);
 
+  function setStartAgentStatus(text: string): void {
+    startAgentStatus.textContent = text;
+    // WebKit exposes a live region's accessible name as AXDescription, while AXValue belongs to
+    // editable controls. Keep the status message in the semantic name so native clients can read
+    // the same text VoiceOver announces without traversing implementation-only descendants.
+    startAgentStatus.setAttribute("aria-label", text);
+  }
+
   function showStartAgentDialog(): void {
     const failedLaunch = pendingAgentLaunch?.status === "failed" ? pendingAgentLaunch : undefined;
-    startAgentStatus.textContent = startAgentRequestInFlight
+    setStartAgentStatus(startAgentRequestInFlight
       ? "Starting agent…"
       : failedLaunch
         ? failedAgentStatusText(failedLaunch)
-        : "";
+        : "");
     startAgentDialog.hidden = false;
     startAgentInput.value = failedLaunch?.command ?? startAgentRequestCommand ?? "";
     startAgentSubmit.disabled = startAgentRequestInFlight || startAgentInput.value.trim().length === 0;
@@ -655,7 +670,12 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
 
   function hideStartAgentDialog(): void {
     startAgentDialog.hidden = true;
-    editorContainerEl.focus();
+    focusCodeSurface();
+  }
+
+  /** Returns focus to whichever code surface is visible after the command dialog closes. */
+  function focusCodeSurface(): void {
+    (state.mode === "diff" ? diffAreaEl : editorContainerEl).focus();
   }
 
   function failedAgentStatusText(launch: PendingAgentLaunch): string {
@@ -774,7 +794,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     if (command.length === 0 || startAgentRequestInFlight) return;
     startAgentRequestInFlight = true;
     startAgentRequestCommand = command;
-    startAgentStatus.textContent = "Starting agent…";
+    setStartAgentStatus("Starting agent…");
     startAgentSubmit.disabled = true;
     void bridge
       .startWorkspaceCommand(command)
@@ -805,7 +825,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           message: error instanceof Error ? error.message : null,
           deadlineEpochMilliseconds: null,
         };
-        startAgentStatus.textContent = failedAgentStatusText(pendingAgentLaunch);
+        setStartAgentStatus(failedAgentStatusText(pendingAgentLaunch));
         pushWorkspaceState();
       })
       .finally(() => {
@@ -851,11 +871,22 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    *  Files/Changes toggle either shows the full workspace listing or reparents this same
    *  `changesListEl` node into its own list host (see `EditorSidebar`'s doc comment). */
   function renderBody(): void {
+    const showingDiff = state.mode === "diff";
+    // The native host uses this one stable identifier to restore focus after the command dialog
+    // closes. Only the mounted code surface may own it; keeping it off the detached surface avoids
+    // duplicate DOM IDs and makes AX lookup unambiguous across mode switches.
+    if (showingDiff) {
+      diffAreaEl.id = "code-pane-editor-focus";
+      editorContainerEl.removeAttribute("id");
+    } else {
+      diffAreaEl.removeAttribute("id");
+      editorContainerEl.id = "code-pane-editor-focus";
+    }
     body.replaceChildren();
-    fileListEl.replaceChildren(state.mode === "diff" ? changesListEl : editorSidebar.el);
+    fileListEl.replaceChildren(showingDiff ? changesListEl : editorSidebar.el);
     body.appendChild(fileListEl);
     body.appendChild(fileListDividerEl);
-    body.appendChild(state.mode === "diff" ? diffAreaEl : editorContainerEl);
+    body.appendChild(showingDiff ? diffAreaEl : editorContainerEl);
   }
 
   /**
@@ -1124,13 +1155,17 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         let transferID: string | undefined;
         let chunkCount = 0;
         let finalFile: DiffFileEntry | undefined;
+        let bridgeElapsedMs = 0;
+        let decodeElapsedMs = 0;
         while (true) {
+          const bridgeWaitStartedAt = performance.now();
           const chunk = await bridge.workspaceDiffFileChunk(scope, {
             manifestID: manifest.manifestID,
             relativePath: next.path,
             byteOffset,
             transferID,
           });
+          bridgeElapsedMs += Math.max(performance.now() - bridgeWaitStartedAt, 0);
           if (token !== diffRequestToken || chunk.scopeSignature !== manifest.scopeSignature) {
             if (chunk.transferID !== undefined) {
               activePatchTransfer = undefined;
@@ -1145,8 +1180,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           }
           finalFile = chunk.file;
           if (chunk.patchBase64Data !== undefined) {
+            const decodeStartedAt = performance.now();
             const decoded = decoder.decode(base64ToBytes(chunk.patchBase64Data), { stream: true });
             if (decoded) patchChunks.push(decoded);
+            decodeElapsedMs += Math.max(performance.now() - decodeStartedAt, 0);
             chunkCount += 1;
           }
           if (chunk.nextByteOffset === undefined) break;
@@ -1157,18 +1194,26 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         }
         activePatchTransfer = undefined;
         if (token !== diffRequestToken || finalFile === undefined) return;
+        const trailingDecodeStartedAt = performance.now();
         const trailingDecoded = decoder.decode();
         if (trailingDecoded) patchChunks.push(trailingDecoded);
+        decodeElapsedMs += Math.max(performance.now() - trailingDecodeStartedAt, 0);
+        const joinStartedAt = performance.now();
+        const patch = finalFile.isBinary ? undefined : patchChunks.join("");
+        decodeElapsedMs += Math.max(performance.now() - joinStartedAt, 0);
         const completed: DiffFileEntry = {
           ...finalFile,
-          patch: finalFile.isBinary ? undefined : patchChunks.join(""),
+          patch,
           patchState: "ready",
         };
         files[next.index] = completed;
+        const updateStartedAt = performance.now();
         diffView.updateFile(completed);
+        const updateElapsedMs = Math.round(Math.max(performance.now() - updateStartedAt, 0));
+        const insertionCompletedAt = performance.now();
         // Queued rows do not have a CodeView item yet, so the click's initial scroll is a no-op.
         // Reveal the selected path immediately after its completed item is appended.
-        if (diffSelectedPath === completed.path) diffView.scrollToFile(completed.path);
+        if (diffSelectedPath === completed.path) diffView.revealStreamedFile(completed.path);
         updateChangesListRow(completed);
         comments.updateFile(completed);
         // Restored clean editors reconcile immediately after `beginEdit`, even when the manifest
@@ -1189,6 +1234,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             fileIndex: next.index,
             selectedPriority: selectedPriority || undefined,
             chunkCount,
+            bridgeElapsedMs: Math.round(bridgeElapsedMs),
+            decodeElapsedMs: Math.round(decodeElapsedMs),
+            updateElapsedMs,
+            paintElapsedMs: Math.round(Math.max(performance.now() - insertionCompletedAt, 0)),
           });
         });
       }
@@ -1196,10 +1245,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         diffView.finalizeStreamOrder();
         // `setItems` repairs the virtualizer's manifest order. Re-issue the selected-file reveal
         // because a priority-completed item may have moved from its append position.
-        if (diffSelectedPath !== null && diffSelectedPath !== undefined) diffView.scrollToFile(diffSelectedPath);
+        if (diffSelectedPath !== null && diffSelectedPath !== undefined) diffView.revealStreamedFile(diffSelectedPath);
       }
       afterBrowserPaint(() => {
-        if (token !== diffRequestToken || state.mode !== "diff") return;
+        if (token !== diffRequestToken) return;
+        // Let the final FileDiff post-render first apply a pending restored line. Clearing the
+        // protected location synchronously here lets that render's ordinary reveal win instead.
+        diffView.finishRestoredStream();
+        if (state.mode !== "diff") return;
         bridge.notifyRenderMetric({
           kind: "diff",
           trigger: "complete",
@@ -1681,6 +1734,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const restoredScope = state.scope.kind === "ref" ? `ref:${state.scope.refName}` : state.scope.kind;
   const restoredEditorState = editorView.snapshot();
   afterBrowserPaint(() => {
+    // A restored diff may still be queued behind the initial manifest when this milestone fires.
+    // DiffView's durable position intentionally retains that logical target until its textual
+    // patch renders, so the metric describes the state we restored rather than a transient DOM gap.
+    const restoredDiffPosition = state.mode === "diff" ? diffView.durableScrollPosition() : null;
+    // `diffSelectedPath` belongs to the diff surface and can remain populated while the restored
+    // pane is in Editor mode. In that mode the editor snapshot is the authoritative path.
+    const restoredPath = state.mode === "editor"
+      ? restoredEditorState?.path
+      : restoredDiffPosition?.path ?? diffSelectedPath ?? restoredEditorState?.path;
     bridge.notifyRenderMetric({
       kind: "diff",
       trigger: "workspaceStateRestored",
@@ -1690,8 +1752,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       mode: state.mode,
       scope: restoredScope,
       layout: state.layout,
-      path: diffSelectedPath ?? restoredEditorState?.path,
-      scrollTop: state.mode === "diff" ? diffView.visibleLine() ?? 0 : editorView.visibleLine() ?? 0,
+      path: restoredPath,
+      scrollTop: state.mode === "diff" ? restoredDiffPosition?.line ?? 0 : editorView.visibleLine() ?? 0,
       focusedLine: state.mode === "diff" ? diffView.focusedLineNumber() ?? undefined : editorView.focusedLineNumber() ?? undefined,
       dirty: diffEditorState?.dirty ?? restoredEditorState?.dirty ?? false,
     });

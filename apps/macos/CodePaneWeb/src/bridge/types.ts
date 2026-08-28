@@ -171,6 +171,14 @@ export interface CodePaneRenderMetric {
   elapsedMs: number;
   /** Time through the workspace data response, before DOM/model work. Present for diff metrics. */
   fetchElapsedMs?: number;
+  /** Time spent awaiting native/bridge responses while streaming one file's patch. */
+  bridgeElapsedMs?: number;
+  /** Time spent decoding base64 chunks, feeding the UTF-8 decoder, and joining the patch. */
+  decodeElapsedMs?: number;
+  /** Synchronous time spent updating the diff model and inserting the completed CodeView item. */
+  updateElapsedMs?: number;
+  /** Time from completed CodeView insertion until the post-insertion browser-paint milestone. */
+  paintElapsedMs?: number;
   fileCount: number;
   contentBytes: number;
   path?: string;

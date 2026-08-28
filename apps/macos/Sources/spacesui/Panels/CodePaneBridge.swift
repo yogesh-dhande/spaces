@@ -327,6 +327,10 @@ enum CodePaneBridge {
         let trigger: Trigger
         let elapsedMS: Int
         let fetchElapsedMS: Int?
+        let bridgeElapsedMS: Int?
+        let decodeElapsedMS: Int?
+        let updateElapsedMS: Int?
+        let paintElapsedMS: Int?
         let fileCount: Int
         let contentBytes: Int
         let path: String?
@@ -349,6 +353,10 @@ enum CodePaneBridge {
             (0...1_000_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int, (0...(4 * 1024 * 1024 * 1024)).contains(contentBytes)
         else { return nil }
         let fetchElapsedMS = params["fetchElapsedMs"] as? Int
+        let bridgeElapsedMS = params["bridgeElapsedMs"] as? Int
+        let decodeElapsedMS = params["decodeElapsedMs"] as? Int
+        let updateElapsedMS = params["updateElapsedMs"] as? Int
+        let paintElapsedMS = params["paintElapsedMs"] as? Int
         let path = params["path"] as? String
         let fileIndex = params["fileIndex"] as? Int
         let selectedPriority = params["selectedPriority"] as? Bool ?? false
@@ -360,6 +368,10 @@ enum CodePaneBridge {
         let focusedLine = params["focusedLine"] as? Int
         let dirty = params["dirty"] as? Bool
         guard fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            bridgeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            decodeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            updateElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            paintElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
             path.map({ !$0.isEmpty && $0.utf8.count <= 4_096 }) ?? true,
             fileIndex.map({ (0...1_000_000).contains($0) }) ?? true,
             chunkCount.map({ (0...1_000_000).contains($0) }) ?? true,
@@ -370,7 +382,9 @@ enum CodePaneBridge {
             focusedLine.map({ (1...10_000_000).contains($0) }) ?? true
         else { return nil }
         return RenderMetric(
-            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS, fileCount: fileCount, contentBytes: contentBytes,
+            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS,
+            bridgeElapsedMS: bridgeElapsedMS, decodeElapsedMS: decodeElapsedMS, updateElapsedMS: updateElapsedMS,
+            paintElapsedMS: paintElapsedMS, fileCount: fileCount, contentBytes: contentBytes,
             path: path, fileIndex: fileIndex, selectedPriority: selectedPriority, chunkCount: chunkCount,
             mode: mode, scope: scope, layout: layout, scrollTop: scrollTop, focusedLine: focusedLine, dirty: dirty)
     }

@@ -57,7 +57,7 @@ function anchoredPositionEquals(a: AnchoredComment, b: AnchoredComment): boolean
 /**
  * Owns the diff-mode comment surface end to end: the in-memory draft mirror (rehydrated once from
  * `reviewCommentList`, then kept in sync by local mutations only — see `loadInitial`'s doc
- * comment), the inline comment-card DOM (`DiffView`'s `renderAnnotation`/`onGutterUtilityClick`
+ * comment), the inline comment-card DOM (`DiffView`'s `renderAnnotation`/`renderGutterUtility`
  * hooks), the batch tray, and the assigned-agent selection. `root.ts` is the only caller.
  *
  * Construction is two-phase to break a circular dependency: `DiffView` needs this controller's

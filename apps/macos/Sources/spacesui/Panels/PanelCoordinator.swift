@@ -1259,32 +1259,28 @@ import spacesterminalcore
     /// this reuses that same placement rather than tracking a separate identity for it.
     @discardableResult func openOrFocusGlobalEditorWindow(deviceID: String, workspaceID: String) -> Bool {
         if let globalPlacement = anyGlobalCodePanePlacement() {
-            reuseGlobalCodePane(globalPlacement, deviceID: deviceID, workspaceID: workspaceID, mode: .diff)
+            reuseGlobalCodePane(globalPlacement, deviceID: deviceID, workspaceID: workspaceID)
             return true
         }
         return openCodePaneInNewTab(
-            deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, initialModePolicy: .useRequestedMode,
+            deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, initialModePolicy: .restoreWorkspaceMode,
             in: .globalWindow(panelWindowID: UUID().uuidString))
     }
 
     /// Reuses an already-open global-window code pane for a navigation gesture: retargets it first if
-    /// it isn't already showing `(deviceID, workspaceID)`, then focuses it and applies `mode`.
-    ///
-    /// A retarget's close-and-reinstall (see `retargetCodePane`) keeps the same pane id but is a brand
-    /// new controller instance, installed directly in `mode` — so the trailing `requestMode(mode)` call
-    /// below is a guarded no-op in that case, and only does real work when no retarget was needed (the
-    /// pane was already showing the gesture's workspace, so the live page has to be pushed to switch).
-    private func reuseGlobalCodePane(_ placement: PanePlacement, deviceID: String, workspaceID: String, mode: CodePaneMode) {
+    /// it isn't already showing `(deviceID, workspaceID)`, then focuses it. Retargeting restores the
+    /// target workspace's complete snapshot, including its last-used Diff/Editor mode. A pane already
+    /// showing the target is left untouched so opening the Editor again cannot reset that mode.
+    private func reuseGlobalCodePane(_ placement: PanePlacement, deviceID: String, workspaceID: String) {
         let needsRetarget: Bool
         switch PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope))?.content {
         case .codePane(let paneDeviceID, let paneWorkspaceID): needsRetarget = paneDeviceID != deviceID || paneWorkspaceID != workspaceID
         default: needsRetarget = false
         }
         if needsRetarget {
-            retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID, mode: mode)
+            retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID)
         }
         focus(placement: placement)
-        (codePaneContent(forPaneID: placement.paneID) as? CodePaneContentController)?.requestMode(mode)
     }
 
     /// Opens a fresh code pane as a new tab in an explicit scope (mirrors `openSessionInNewTab`). The
@@ -1324,13 +1320,12 @@ import spacesterminalcore
         return content
     }
 
-    /// Retargets a single code pane to `(deviceID, workspaceID)` in `mode` — close-and-reinstall on the
-    /// same pane id, not a live descriptor edit: `CodePaneContentController.descriptor`/`workspaceID`
-    /// are `let`, so a new controller instance is the only way to point a pane at a different
-    /// workspace. Closing the old controller first flushes its complete local recovery snapshot; the
-    /// replacement starts in the explicit navigation mode while restoring the target workspace's
-    /// independent location, drafts, and unsaved editor buffer. Neither buffer nor comment state is
-    /// shared across workspaces or sent to the daemon.
+    /// Retargets a single code pane to `(deviceID, workspaceID)` — close-and-reinstall on the same pane
+    /// id, not a live descriptor edit: `CodePaneContentController.descriptor`/`workspaceID` are `let`,
+    /// so a new controller instance is the only way to point a pane at a different workspace. Closing
+    /// the old controller first flushes its complete local recovery snapshot; the replacement restores
+    /// the target workspace's independent mode, location, drafts, and unsaved editor buffer. Neither
+    /// buffer nor comment state is shared across workspaces or sent to the daemon.
     ///
     /// The old controller is removed from `codePaneControllers` *before* installing the replacement:
     /// `installCodePaneController` is idempotent and returns the existing controller for an
@@ -1342,12 +1337,13 @@ import spacesterminalcore
     /// which a same-tab retarget never does, so `activateContentIfVisible` is called explicitly after,
     /// mirroring `claimReplacedPane`'s terminal-pane retarget precedent.
     ///
-    /// Shared by `retargetGlobalWindowCodePanes` (always `.diff`, the "workspace-following review
-    /// monitor" behavior) and `reuseGlobalCodePane` (the navigation gesture's own mode).
-    private func retargetCodePane(paneID: String, scope: PanelScope, toDeviceID deviceID: String, workspaceID: String, mode: CodePaneMode) {
+    /// Shared by `retargetGlobalWindowCodePanes` and `reuseGlobalCodePane`; both paths restore the
+    /// target workspace's saved mode. A fresh pane also restores a saved workspace mode, while the
+    /// explicit `.diff` initial mode remains the fallback when no workspace snapshot exists.
+    private func retargetCodePane(paneID: String, scope: PanelScope, toDeviceID deviceID: String, workspaceID: String) {
         codePaneControllers.removeValue(forKey: paneID)?.close()
         let content = installCodePaneController(
-            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: mode, initialModePolicy: .useRequestedMode)
+            paneID: paneID, deviceID: deviceID, workspaceID: workspaceID, initialMode: .diff, initialModePolicy: .restoreWorkspaceMode)
         mutateLayout(scope: scope) { PanelLayoutEngine.retargetPane(paneID: paneID, to: content.descriptor, in: $0) }
         if let retargetedPane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) {
             activateContentIfVisible(scope: scope, pane: retargetedPane)
@@ -1358,8 +1354,8 @@ import spacesterminalcore
     /// "workspace-following review monitor" behavior: a code pane placed in a panel window (as
     /// opposed to a workspace's own panel, which never retargets — see `showWorkspaceDetail`'s call
     /// site) tracks whichever workspace the main window's sidebar has selected, so switching
-    /// workspaces there switches every open monitor's diff along with it. Always lands in `.diff`
-    /// mode, the same entry point a freshly opened monitor gets.
+    /// workspaces there switches every open monitor along with it while restoring each target
+    /// workspace's complete saved state, including Diff/Editor mode.
     ///
     /// Deliberately unconditional on device reachability — `mayCreateCodePane`'s "install door" gate
     /// is not applied here — because an unreachable device's monitor still has to retarget locally so
@@ -1377,7 +1373,7 @@ import spacesterminalcore
                     // retargeted to it) is left untouched rather than closed and reinstalled for
                     // nothing.
                     guard paneDeviceID != deviceID || paneWorkspaceID != workspaceID else { continue }
-                    retargetCodePane(paneID: pane.id, scope: scope, toDeviceID: deviceID, workspaceID: workspaceID, mode: .diff)
+                    retargetCodePane(paneID: pane.id, scope: scope, toDeviceID: deviceID, workspaceID: workspaceID)
                 }
             }
         }

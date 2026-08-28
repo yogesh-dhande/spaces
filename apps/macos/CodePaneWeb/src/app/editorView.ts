@@ -337,18 +337,34 @@ export class EditorView {
       }
       this.editGeneration += 1;
       codeView.updateItem({ ...item, version: this.editGeneration });
-      const editorElement = this.codeHost.querySelector<HTMLElement>("[contenteditable=true]");
-      if (editorElement) editorElement.id = "code-pane-editor-input";
+      this.assignEditorIdentifierAfterRender(item.id, this.editGeneration);
     };
     requestAnimationFrame(poll);
+  }
+
+  private assignEditorIdentifierAfterRender(path: string, generation: number, framesRemaining = 2): void {
+    if (this.currentPath !== path || generation !== this.editGeneration || !this.codeView) return;
+    if (this.assignEditorIdentifier()) return;
+    if (framesRemaining === 0) return;
+    // Pierre creates the semantic editor surface in an open shadow root during the render pass
+    // scheduled by updateItem. Retry only across that bounded render window; a superseding open
+    // invalidates the generation and stops this callback from touching the new document.
+    requestAnimationFrame(() => this.assignEditorIdentifierAfterRender(path, generation, framesRemaining - 1));
+  }
+
+  private assignEditorIdentifier(): boolean {
+    const editorElement = this.renderedElements<HTMLElement>('[role="textbox"][aria-multiline="true"]')[0];
+    if (!editorElement) return false;
+    editorElement.id = "code-pane-editor-input";
+    return true;
   }
 
   /** Logical source-line recovery avoids retaining a stale pixel offset after virtualization. */
   visibleLine(): number | null {
     if (!this.codeHost.isConnected) return null;
     const top = this.codeHost.getBoundingClientRect().top;
-    for (const node of this.codeHost.querySelectorAll<HTMLElement>("[data-line]")) {
-      if (node.getBoundingClientRect().bottom < top) continue;
+    for (const node of this.renderedElements<HTMLElement>("[data-line]")) {
+      if (node.getBoundingClientRect().bottom <= top) continue;
       const line = Number(node.dataset.line);
       if (Number.isInteger(line) && line > 0) return line;
     }
@@ -399,19 +415,37 @@ export class EditorView {
   }
 
   private readFocusedLine(): number | null {
-    const selection = document.getSelection();
-    const node = selection?.focusNode;
-    if (!node || !this.codeHost.contains(node)) return null;
-    const editable = node.parentElement?.closest<HTMLElement>("[contenteditable=true]");
-    if (!editable) return null;
-    const range = document.createRange();
-    range.selectNodeContents(editable);
-    try {
-      range.setEnd(node, selection!.focusOffset);
-    } catch {
-      return null;
+    // Pierre keeps the canonical caret in its editor model. Reading that model is important for its
+    // shadow-root editor: WebKit's document Selection can be empty while the editor still has a
+    // focused logical selection, which would otherwise lose the focused line on a workspace switch.
+    if (this.currentPath !== undefined) {
+      const editor = this.codeView?.getEditor(this.currentPath) as {
+        getState?: () => { selections?: Array<{ start: { line: number }; end: { line: number }; direction?: number }> };
+      } | undefined;
+      const selection = editor?.getState?.().selections?.at(-1);
+      if (selection !== undefined) {
+        const caret = selection.direction === -1 ? selection.start : selection.end;
+        if (Number.isInteger(caret.line) && caret.line >= 0) return caret.line + 1;
+      }
     }
-    return range.toString().split("\n").length;
+    return null;
+  }
+
+  /**
+   * Pierre mounts each editor in an open `diffs-container` shadow root. Traverse open roots so
+   * editor identity and recovery sampling observe the real rendered surface as well as the
+   * light-DOM root used by tests and host layout.
+   */
+  private renderedElements<T extends Element>(selector: string, root: HTMLElement = this.codeHost): T[] {
+    const roots: ParentNode[] = [];
+    const visit = (renderRoot: ParentNode): void => {
+      roots.push(renderRoot);
+      for (const element of renderRoot.querySelectorAll<HTMLElement>("*")) {
+        if (element.shadowRoot !== null) visit(element.shadowRoot);
+      }
+    };
+    visit(root.shadowRoot ?? root);
+    return roots.flatMap((renderRoot) => [...renderRoot.querySelectorAll<T>(selector)]);
   }
 
   /**

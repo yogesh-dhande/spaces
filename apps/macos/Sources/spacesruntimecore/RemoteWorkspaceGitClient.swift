@@ -343,6 +343,55 @@ public final class RemoteWorkspaceGitClient: Sendable {
         }
     }
 
+    /// Runs a Git command whose useful payload is written to a file by the command itself (for example,
+    /// `git diff --output=...`). Stdout is redirected to `/dev/null`, so this path does not allocate a
+    /// capture buffer or a drain thread for bytes the caller will never read. Stderr is still drained on
+    /// one background thread: an error-producing command, or a descendant that inherits the descriptor,
+    /// must not deadlock the process while the caller waits for termination.
+    ///
+    /// The termination handler replaces `runGitAndCapture`'s 10 ms process-state polling. Timeout cleanup
+    /// retains the same terminate/escalate/reap sequence. The bounded stderr wait lets the caller return
+    /// when a detached descendant keeps stderr open; the drain thread and pipe remain until that descendant
+    /// closes its inherited descriptor, without making a successful file-output command pay for an unused
+    /// stdout drain.
+    public func runGitWithFileOutput(
+        _ arguments: [String], timeout: TimeInterval? = nil, allowedExitCodes: Set<Int32> = [0],
+        environmentOverrides callEnvironmentOverrides: [String: String] = [:]
+    ) throws {
+        let process = makeGitProcess(arguments, environmentOverrides: callEnvironmentOverrides)
+        let err = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = err
+        let errDrain: PipeDrain
+        let termination = ProcessTerminationWaiter()
+        process.terminationHandler = { _ in termination.signal() }
+        do {
+            try process.run()
+            errDrain = PipeDrain(err)
+        } catch {
+            process.terminationHandler = nil
+            throw error
+        }
+
+        guard termination.wait(timeout: timeout) else {
+            terminateThenKill(process)
+            process.waitUntilExit()
+            _ = errDrain.waitForData(timeout: Self.drainGrace)
+            process.terminationHandler = nil
+            let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
+            throw SpacesRuntimeError.gitCommandFailed(
+                message: "Git command timed out after \(timeout ?? 0)s: \(commandDescription)")
+        }
+
+        process.waitUntilExit()
+        process.terminationHandler = nil
+        let errData = errDrain.waitForData(timeout: Self.drainGrace) ?? Data()
+        guard allowedExitCodes.contains(process.terminationStatus) else {
+            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            throw SpacesRuntimeError.gitCommandFailed(message: message)
+        }
+    }
+
     private func runGit(_ arguments: [String], timeout: TimeInterval? = nil) throws -> Int32 {
         let process = makeGitProcess(arguments)
         process.standardOutput = Pipe()
@@ -538,6 +587,40 @@ private func terminateThenKill(_ process: Process, gracePeriod: TimeInterval = 0
     }
     if process.isRunning {
         kill(process.processIdentifier, SIGKILL)
+    }
+}
+
+/// Receives `Process.terminationHandler` without polling or relying on a semaphore whose signal can race
+/// the caller abandoning a timed wait. A condition variable permits a late termination signal after a
+/// timeout without retaining a dispatch primitive in an unmatched state.
+private final class ProcessTerminationWaiter: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var terminated = false
+
+    func signal() {
+        condition.lock()
+        terminated = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func wait(timeout: TimeInterval?) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        guard let timeout else {
+            while !terminated { condition.wait() }
+            return true
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while !terminated {
+            // `wait(until:)` reacquires the condition lock before returning. A timeout and termination
+            // signal can race at the deadline, so inspect the state again rather than treating a false
+            // return as authoritative.
+            if !condition.wait(until: deadline) {
+                return terminated
+            }
+        }
+        return true
     }
 }
 
