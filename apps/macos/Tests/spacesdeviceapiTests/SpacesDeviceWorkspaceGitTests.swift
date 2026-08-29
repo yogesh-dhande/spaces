@@ -11,6 +11,17 @@ import spacesruntimecore
     import Glibc
 #endif
 
+/// Fixture repositories must not inherit the repository-local Git environment exported by a
+/// pre-commit hook. Those variables can redirect `git init`/`git add` into the parent checkout or
+/// make an otherwise independent temporary repository use the hook's index and object database.
+private func removeGitRepositoryEnvironment(from environment: inout [String: String]) {
+    for key in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_COMMON_DIR", "GIT_DIR", "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE", "GIT_WORK_TREE",
+    ] { environment.removeValue(forKey: key) }
+}
+
 @Suite struct SpacesDeviceWorkspacePathResolverTests {
     private func makeWorkspace() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-path-resolve-\(UUID().uuidString)", isDirectory: true)
@@ -1119,9 +1130,7 @@ import spacesruntimecore
         process.arguments = ["git"] + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "GIT_DIR")
-        environment.removeValue(forKey: "GIT_WORK_TREE")
-        environment.removeValue(forKey: "GIT_INDEX_FILE")
+        removeGitRepositoryEnvironment(from: &environment)
         process.environment = environment
         let output = Pipe()
         let errorOutput = Pipe()
@@ -1576,6 +1585,9 @@ import spacesruntimecore
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        var environment = ProcessInfo.processInfo.environment
+        removeGitRepositoryEnvironment(from: &environment)
+        process.environment = environment
         let output = Pipe()
         process.standardOutput = output
         try process.run()

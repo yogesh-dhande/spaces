@@ -128,6 +128,30 @@
             }
         }
 
+        func testWorkspaceFileListReturnsAnUnresolvedConflictPathOnlyOnce() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // `ls-files --cached --stage` reports one record per unmerged index stage. Build that
+                // index shape directly so this test exercises the listing contract without leaving a
+                // merge command's non-zero conflict status to interpret.
+                let ours = try runGitWithStdin(["hash-object", "-w", "--stdin"], cwd: repo.path, stdin: "ours\n").trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                let theirs = try runGitWithStdin(["hash-object", "-w", "--stdin"], cwd: repo.path, stdin: "theirs\n").trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                try runGit(["update-index", "--force-remove", "README.md"], cwd: repo.path)
+                try runGitWithStdin(
+                    ["update-index", "--index-info"], cwd: repo.path, stdin: "100644 \(ours) 2\tREADME.md\n100644 \(theirs) 3\tREADME.md\n")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths.filter { $0 == "README.md" }.count, 1)
+            }
+        }
+
         func testWorkspaceFileListExcludesATrackedFileDeletedOnDisk() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 try "will be deleted".write(to: repo.appendingPathComponent("gone.txt"), atomically: true, encoding: .utf8)

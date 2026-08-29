@@ -1306,10 +1306,17 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// ever bothers to stat.
     private static func listGitFiles(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceFileListResult {
         let presentOutput = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], timeout: gitCommandTimeout)
+            ["-C", workspaceDir, "ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate", "-z"], timeout: gitCommandTimeout)
         let deletedOutput = try gitClient.runGitAndCapture(["-C", workspaceDir, "ls-files", "--deleted", "-z"], timeout: gitCommandTimeout)
-        let deleted = Set(splitNULDelimited(deletedOutput))
-        let paths = splitNULDelimited(presentOutput).filter { !deleted.contains($0) }.sorted()
+        // Compare path bytes, not Strings: Swift String equality uses canonical Unicode equivalence, while
+        // Git (and Linux filesystems) permits NFC and NFD spellings to be distinct names. This also keeps a
+        // deleted NFD path from accidentally filtering a still-present NFC path (or vice versa).
+        let deleted = Set(splitNULDelimited(deletedOutput).map { Array($0.utf8) })
+        // Ask Git to collapse duplicate index stages, rather than putting paths in Set<String>. Git's
+        // deduplicator compares the raw path bytes, so two distinct Linux filenames that happen to
+        // normalize to the same Swift String remain distinct. The unresolved-conflict case still emits
+        // one path because Git's --deduplicate removes repeated index stages.
+        let paths = splitNULDelimited(presentOutput).filter { !deleted.contains(Array($0.utf8)) }.sorted()
 
         var openablePaths: [String] = []
         openablePaths.reserveCapacity(min(paths.count, maxPaths))
