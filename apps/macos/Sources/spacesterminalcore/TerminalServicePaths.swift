@@ -62,6 +62,16 @@ public enum TerminalServicePaths {
         return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
     }
 
+    /// Profile-scoped unix socket the daemon streams one workspace's `workspaceFileList` signature
+    /// changes on (see `subscribeWorkspaceFileListSignature`). One socket per subscribed workspace,
+    /// hashed by workspace id to keep the path length bounded.
+    public static func workspaceFileListSignatureSocketPath(workspaceID: String, fileManager: FileManager = .default) throws -> String {
+        let root = try terminalRootDirectory(fileManager: fileManager)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let name = "workspace-file-list-\(socketPathComponent(for: root.path))-\(socketPathComponent(for: workspaceID))"
+        return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
+    }
+
     public static func instanceLockPath(fileManager: FileManager = .default) throws -> String {
         let root = try terminalRootDirectory(fileManager: fileManager)
         let socketRoot = try SpacesSocketPaths.secureSocketRoot()

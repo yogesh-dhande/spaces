@@ -35,6 +35,26 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 /// diff-signature subscription). A hidden tab therefore holds no live web process and no open
 /// daemon stream; showing the pane again pays a fresh page load and a fresh `ready` handshake.
 @MainActor final class CodePaneContentController: NSObject, PaneContentHosting {
+    /// A stream client can report its transport death before the async subscribe call returns its
+    /// handle. The callback runs off the main actor, so this tiny lock-guarded state bridges that
+    /// interval; a success continuation checks it before installing the already-dead client.
+    private final class SubscriptionAttemptState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var disconnected = false
+
+        func markDisconnected() {
+            lock.lock()
+            disconnected = true
+            lock.unlock()
+        }
+
+        var isDisconnected: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return disconnected
+        }
+    }
+
     /// Keeps the exact page that started a teardown collection alive until WebKit returns the page's
     /// final recovery snapshot. `teardownWebView()` releases its regular references immediately so a
     /// hidden pane does not retain a web process, but WebKit's asynchronous callback still requires
@@ -53,6 +73,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     private static let initEventName = "spaces:init"
     private static let themeEventName = "spaces:theme"
     private static let diffSignatureEventName = "spaces:diffSignature"
+    private static let fileListSignatureEventName = "spaces:fileListSignature"
     private static let fileSignatureEventName = "spaces:fileSignature"
     private static let agentsEventName = "spaces:agents"
     private static let agentStartStatusEventName = "spaces:agentStartStatus"
@@ -215,6 +236,27 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// can pin these to a short delay too.
     var fileSignatureReconnectFloor: Duration = .seconds(1)
     var fileSignatureReconnectCap: Duration = .seconds(30)
+    /// The last `workspaceFileList` signature the web app is known to have fetched. Unlike diff/file
+    /// subscriptions there is no scope/path discriminator here: this stream is always one workspace-wide
+    /// listing contract. This is acknowledged only by a successful `workspaceFileList` pull, never by a
+    /// pushed `spaces:fileListSignature` event alone: if the JS-side refetch fails transiently, the same
+    /// signature must be forwarded again on the daemon's next keepalive rather than being suppressed as
+    /// if the listing had already been refreshed.
+    private var lastActedFileListSignature: String?
+    private var fileListSignatureStream: (any CodePaneFileListSignatureStreamHandle)?
+    /// Set after the first successful `workspaceFileList` pull in this pane life. Until then there is
+    /// no visible file-list consumer to keep fresh, so the workspace-level listing poll should not run.
+    private var fileListSignatureMonitoringEnabled = false
+    private var fileListSignatureSubscriptionGeneration = 0
+    /// `ensureFileListSignatureSubscription` starts the subscribe RPC in an unstructured task; while
+    /// that await is pending `fileListSignatureStream` is still nil, so a second successful
+    /// `workspaceFileList` completion in the same window must not treat "nil stream" as "safe to start
+    /// another connect". This tracks the one in-flight attempt by the same generation identity the
+    /// installed stream and reconnect logic already use.
+    private var fileListSignatureSubscriptionAttemptGeneration: Int?
+    private var fileListSignatureReconnectFailures = 0
+    var fileListSignatureReconnectFloor: Duration = .seconds(1)
+    var fileListSignatureReconnectCap: Duration = .seconds(30)
 
     /// The open-editor buffer held inside the complete workspace recovery snapshot.
     private var editorState: CodePaneBridge.EditorState?
@@ -394,8 +436,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     init(
         paneID: String, deviceID: String, workspaceID: String, initialMode: CodePaneMode, hosting: any CodePaneHosting,
-        initialModePolicy: CodePaneInitialModePolicy = .useRequestedMode,
-        deviceGateway: any CodePaneDeviceGateway = LiveCodePaneDeviceGateway(), workspaceStateStore: (any CodePaneWorkspaceStateStoring)? = nil
+        initialModePolicy: CodePaneInitialModePolicy = .useRequestedMode, deviceGateway: any CodePaneDeviceGateway = LiveCodePaneDeviceGateway(),
+        workspaceStateStore: (any CodePaneWorkspaceStateStoring)? = nil
     ) {
         self.paneID = paneID
         self.workspaceID = workspaceID
@@ -480,11 +522,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// App termination supplies the only synchronous durable fence. It runs after the asynchronous
     /// page collection has applied and enqueued the final document, never before it. The fence is
     /// app-wide because a retarget may already have detached another controller with a live collector.
-    func closeForTermination(completion: @escaping () -> Void) {
-        beginClose {
-            CodePaneWorkspaceStatePersistence.finishTermination(completion)
-        }
-    }
+    func closeForTermination(completion: @escaping () -> Void) { beginClose { CodePaneWorkspaceStatePersistence.finishTermination(completion) } }
 
     private func beginClose(finalizer: (() -> Void)?) {
         if let finalizer {
@@ -497,8 +535,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         guard !closeStarted else { return }
         closeStarted = true
         closeLifetimeRetainer = self
-        CodePaneWorkspaceStateHandoff.collectorStarted(
-            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        CodePaneWorkspaceStateHandoff.collectorStarted(storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         teardownWebView()
         finishCloseIfReady()
     }
@@ -514,8 +551,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let finalizers = closeFinalizers
         closeFinalizers.removeAll()
         for finalizer in finalizers { finalizer() }
-        CodePaneWorkspaceStateHandoff.collectorFinished(
-            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        CodePaneWorkspaceStateHandoff.collectorFinished(storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         closeLifetimeRetainer = nil
     }
 
@@ -584,9 +620,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         } else {
             publishableAgents = agents
         }
-        let selectedAssignmentExpired = selectedAgentSessionId.map { selected in
-            !publishableAgents.contains(where: { $0.sessionID == selected })
-        } ?? false
+        let selectedAssignmentExpired =
+            selectedAgentSessionId.map { selected in !publishableAgents.contains(where: { $0.sessionID == selected }) } ?? false
         if selectedAssignmentExpired {
             selectedAgentSessionId = nil
             persistWorkspaceState()
@@ -612,8 +647,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// directly — exactly what `close()` already does when resetting to `initialMode`, and what
     /// `sendInitPayload` already reads (`currentMode`, not `initialMode`) to seed the next load.
     func requestMode(_ mode: CodePaneMode) {
-        let waitingForOutgoingWorkspaceState = !isReady && CodePaneWorkspaceStateHandoff.hasOutstandingCollector(
-            storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
+        let waitingForOutgoingWorkspaceState =
+            !isReady
+            && CodePaneWorkspaceStateHandoff.hasOutstandingCollector(
+                storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         guard currentMode != mode || waitingForOutgoingWorkspaceState else { return }
         guard isReady, let scriptEvaluator else {
             currentMode = mode
@@ -708,6 +745,13 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         lastActedFilePath = nil
         fileSignatureSubscriptionGeneration += 1
         fileSignatureReconnectFailures = 0
+        fileListSignatureStream?.stop()
+        fileListSignatureStream = nil
+        fileListSignatureMonitoringEnabled = false
+        lastActedFileListSignature = nil
+        fileListSignatureSubscriptionGeneration += 1
+        fileListSignatureSubscriptionAttemptGeneration = nil
+        fileListSignatureReconnectFailures = 0
         // Teardown is itself a "no path is active" transition: `subscribedFilePath = nil` above already
         // invalidates any outstanding same-path REREAD on its own (its guard checks
         // `subscribedFilePath == path`, which can never hold once it's `nil`), but a REREAD is only
@@ -759,8 +803,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         guard let write = lastCommittedFileWrite else { return }
         func adoptEditor(_ state: CodePaneBridge.EditorState?) -> CodePaneBridge.EditorState? {
             guard let state, state.path == write.path else { return state }
-            let matchesWrite = state.baseSHA256 == write.expectedBase ||
-                (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
+            let matchesWrite =
+                state.baseSHA256 == write.expectedBase || (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
             guard matchesWrite else { return state }
             var newDirty = state.dirty
             var newConflict = state.conflict
@@ -774,12 +818,13 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             // Post-click typing stays dirty against the committed baseline; this applies equally to
             // the standalone Editor and an inline Diff editor.
             return CodePaneBridge.EditorState(
-                path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty, conflict: newConflict)
+                path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty, conflict: newConflict
+            )
         }
         func adoptDiffEditor(_ state: CodePaneBridge.DiffEditorState?) -> CodePaneBridge.DiffEditorState? {
             guard let state, state.path == write.path else { return state }
-            let matchesWrite = state.baseSHA256 == write.expectedBase ||
-                (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
+            let matchesWrite =
+                state.baseSHA256 == write.expectedBase || (write.expectedBase == nil && write.pageGeneration == workspaceStateGeneration)
             guard matchesWrite else { return state }
             var newDirty = state.dirty
             var newConflict = state.conflict
@@ -848,16 +893,20 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             if metric.trigger == .workspaceStateRestored {
                 // Keep the restored-state dimensions ordered so the performance harness can compare
                 // workspace recovery runs without parsing a free-form diagnostic message.
-                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)" + [
-                    metric.mode.map { " mode=\($0)" }, metric.scope.map { " scope=\($0)" }, metric.layout.map { " layout=\($0)" },
-                    " path=\(metric.path ?? "")", metric.scrollTop.map { " scroll_top=\($0)" },
-                    metric.focusedLine.map { " focused_line=\($0)" }, metric.dirty.map { " dirty=\($0 ? 1 : 0)" },
-                ].compactMap { $0 }.joined()
+                detail =
+                    "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)"
+                    + [
+                        metric.mode.map { " mode=\($0)" }, metric.scope.map { " scope=\($0)" }, metric.layout.map { " layout=\($0)" },
+                        " path=\(metric.path ?? "")", metric.scrollTop.map { " scroll_top=\($0)" }, metric.focusedLine.map { " focused_line=\($0)" },
+                        metric.dirty.map { " dirty=\($0 ? 1 : 0)" },
+                    ].compactMap { $0 }.joined()
             } else {
-                detail = "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)" + [
-                    metric.path.map { " path=\($0)" }, metric.fileIndex.map { " file_index=\($0)" },
-                    metric.selectedPriority ? " selected_priority=1" : nil, metric.chunkCount.map { " chunk_count=\($0)" },
-                ].compactMap { $0 }.joined()
+                detail =
+                    "files=\(metric.fileCount) content_bytes=\(metric.contentBytes)\(fetchDetail)\(phaseDetail)"
+                    + [
+                        metric.path.map { " path=\($0)" }, metric.fileIndex.map { " file_index=\($0)" },
+                        metric.selectedPriority ? " selected_priority=1" : nil, metric.chunkCount.map { " chunk_count=\($0)" },
+                    ].compactMap { $0 }.joined()
             }
             TerminalPerformance.logWorkspaceMetric(
                 "code_pane_\(metric.kind.rawValue)_render", workspaceID: workspaceID, target: "trigger=\(metric.trigger.rawValue)",
@@ -912,8 +961,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// page is current now will get its own `ready` → `handleReady()` call in due course.
     private func resumeDeferredReadyIfNeeded() {
         guard outstandingTeardownFlushCount == 0, outstandingReviewCommentMutationCount == 0, outstandingFileWriteCount == 0,
-            outstandingStartWorkspaceCommandCount == 0,
-            let generation = deferredReadyGeneration
+            outstandingStartWorkspaceCommandCount == 0, let generation = deferredReadyGeneration
         else { return }
         deferredReadyGeneration = nil
         guard generation == pageGeneration, let scriptEvaluator, let hosting else { return }
@@ -922,9 +970,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     /// Makes a returning controller consume an outgoing instance's final collector before it sends
     /// its sole init payload. The wait is main-actor-only and does not block UI or persistence work.
-    private func sendInitPayloadAfterWorkspaceStateHandoff(
-        scriptEvaluator: any CodePaneScriptEvaluator, hosting: any CodePaneHosting
-    ) {
+    private func sendInitPayloadAfterWorkspaceStateHandoff(scriptEvaluator: any CodePaneScriptEvaluator, hosting: any CodePaneHosting) {
         guard !waitingForWorkspaceStateHandoff else { return }
         if CodePaneWorkspaceStateHandoff.waitUntilCollectorFinishes(
             storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID,
@@ -987,7 +1033,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
         let payload = CodePaneBridge.InitPayload(
             workspaceId: workspaceID, workspaceName: workspaceName, theme: appearance.rawValue, baseBranch: baseBranch,
-            workspaceState: workspaceStatePayload(), agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
+            workspaceState: workspaceStatePayload(),
+            agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
     }
@@ -996,21 +1043,19 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// absent: a restored page refetches and streams fresh patches, while this document preserves the
     /// user's location and unsaved recovery data across an app restart or workspace retarget.
     private func persistWorkspaceState(fromOutgoingHandoff: Bool = false) {
-        let mayPersist = if fromOutgoingHandoff {
-            CodePaneWorkspaceStateHandoff.outgoingCollectorMayPersistState(workspaceStateOwner)
-        } else {
-            CodePaneWorkspaceStateHandoff.ownerMayPersistState(workspaceStateOwner)
-        }
+        let mayPersist =
+            if fromOutgoingHandoff { CodePaneWorkspaceStateHandoff.outgoingCollectorMayPersistState(workspaceStateOwner) } else {
+                CodePaneWorkspaceStateHandoff.ownerMayPersistState(workspaceStateOwner)
+            }
         guard mayPersist else { return }
         let state = CodePaneWorkspaceState(
             mode: currentMode, scope: currentScope, diffLayout: diffLayout, diffSelectedPath: diffSelectedPath,
-            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath,
-            fileTreeExpandedPaths: fileTreeExpandedPaths, fileTreeSelectedPath: fileTreeSelectedPath,
-            editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths, diffScrollLine: diffScrollLine,
-            diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine, diffFocusedSide: diffFocusedSide,
-            editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
-            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState,
-            selectedAgentSessionId: selectedAgentSessionId, pendingAgentLaunch: pendingAgentLaunch)
+            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath, fileTreeExpandedPaths: fileTreeExpandedPaths,
+            fileTreeSelectedPath: fileTreeSelectedPath, editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths,
+            diffScrollLine: diffScrollLine, diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine,
+            diffFocusedSide: diffFocusedSide, editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
+            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState, selectedAgentSessionId: selectedAgentSessionId,
+            pendingAgentLaunch: pendingAgentLaunch)
         CodePaneWorkspaceStateCache.store(state, storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         workspaceStatePersistence.enqueue(state, workspaceID: workspaceID)
     }
@@ -1018,29 +1063,23 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     private func workspaceStatePayload() -> CodePaneBridge.WorkspaceState {
         .init(
             mode: currentMode.wireValue, scope: currentScope, diffLayout: diffLayout, diffSelectedPath: diffSelectedPath,
-            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath,
-            fileTreeExpandedPaths: fileTreeExpandedPaths, fileTreeSelectedPath: fileTreeSelectedPath,
-            editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths, diffScrollLine: diffScrollLine,
-            diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine, diffFocusedSide: diffFocusedSide,
-            editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
-            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState,
-            selectedAgentSessionId: selectedAgentSessionId, pendingAgentLaunch: pendingAgentLaunch)
+            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: diffTreeSelectedPath, fileTreeExpandedPaths: fileTreeExpandedPaths,
+            fileTreeSelectedPath: fileTreeSelectedPath, editorSidebarMode: editorSidebarMode, editorRecentPaths: editorRecentPaths,
+            diffScrollLine: diffScrollLine, diffScrollSide: diffScrollSide, diffFocusedPath: diffFocusedPath, diffFocusedLine: diffFocusedLine,
+            diffFocusedSide: diffFocusedSide, editorScrollLine: editorScrollLine, editorFocusedLine: editorFocusedLine, editorState: editorState,
+            diffEditorState: diffEditorState, pendingReviewComments: pendingReviewCommentState, selectedAgentSessionId: selectedAgentSessionId,
+            pendingAgentLaunch: pendingAgentLaunch)
     }
 
-    private static func loadWorkspaceState(
-        from store: any CodePaneWorkspaceStateStoring, workspaceID: String
-    ) -> CodePaneWorkspaceState? {
+    private static func loadWorkspaceState(from store: any CodePaneWorkspaceStateStoring, workspaceID: String) -> CodePaneWorkspaceState? {
         if let state = CodePaneWorkspaceStateCache.state(storageKey: store.workspaceStateStorageKey, workspaceID: workspaceID) { return state }
         do {
             guard let stateJSON = try store.stateJSON(workspaceID: workspaceID),
-                let state = try? JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stateJSON.utf8)), state.isCurrentVersion,
-                state.isValid
+                let state = try? JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stateJSON.utf8)), state.isCurrentVersion, state.isValid
             else { return nil }
             CodePaneWorkspaceStateCache.store(state, storageKey: store.workspaceStateStorageKey, workspaceID: workspaceID)
             return state
-        } catch {
-            return nil
-        }
+        } catch { return nil }
     }
 
     /// Stores every user-facing piece of workspace-local state in one operation. This is deliberately
@@ -1107,12 +1146,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 scope: scope, manifestID: manifestID, fileIndex: fileIndex, id: id, generation: generation, hosting: hosting)
         case .workspaceDiffFileChunk(let scope, let manifestID, let relativePath, let byteOffset, let transferID):
             performWorkspaceDiffFileChunk(
-                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id, generation: generation,
-                hosting: hosting)
+                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id,
+                generation: generation, hosting: hosting)
         case .workspaceDiffFileChunkCancel(let scope, let manifestID, let relativePath, let byteOffset, let transferID):
             performWorkspaceDiffFileChunkCancel(
-                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id, generation: generation,
-                hosting: hosting)
+                scope: scope, manifestID: manifestID, relativePath: relativePath, byteOffset: byteOffset, transferID: transferID, id: id,
+                generation: generation, hosting: hosting)
         case .workspaceDiffManifestRelease(let scope, let manifestID):
             performWorkspaceDiffManifestRelease(scope: scope, manifestID: manifestID, id: id, generation: generation, hosting: hosting)
         case .workspaceFileRead(let path, let ownsFileSignature):
@@ -1127,8 +1166,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         case .reviewCommentDelete(let commentID): performReviewCommentDelete(commentID: commentID, id: id, generation: generation, hosting: hosting)
         case .reviewCommentsSend(let sessionID, let text, let comments):
             performReviewCommentsSend(sessionID: sessionID, text: text, comments: comments, id: id, generation: generation, hosting: hosting)
-        case .startWorkspaceCommand(let command):
-            performStartWorkspaceCommand(command: command, id: id, generation: generation, hosting: hosting)
+        case .startWorkspaceCommand(let command): performStartWorkspaceCommand(command: command, id: id, generation: generation, hosting: hosting)
         case .resumeWorkspaceCommandTracking(let sessionID):
             performResumeWorkspaceCommandTracking(sessionID: sessionID, id: id, generation: generation, hosting: hosting)
         }
@@ -1237,9 +1275,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
                     byteOffset: byteOffset, transferID: transferID, device: device)
                 self?.reply(id: id, generation: generation, result: result)
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1262,9 +1298,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
                     byteOffset: byteOffset, transferID: transferID, device: device)
                 self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1285,9 +1319,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 try await deviceGateway.cancelWorkspaceDiffManifest(
                     workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, device: device)
                 self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1530,7 +1562,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     // is documented to be populated whenever `didWrite == true`, but the type is
                     // Optional — skip adoption defensively if it somehow isn't.
                     if result.didWrite, let sha = result.sha256 {
-                        self?.lastCommittedFileWrite = (path: path, expectedBase: baseSHA256, sha256: sha, content: content, pageGeneration: generation)
+                        self?.lastCommittedFileWrite = (
+                            path: path, expectedBase: baseSHA256, sha256: sha, content: content, pageGeneration: generation
+                        )
                         self?.adoptCommittedWriteIntoEditorState()
                         self?.persistWorkspaceState()
                     }
@@ -1545,12 +1579,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
-    /// Lists every path in the workspace's checkout for the Editor pane's file tree and quick-open —
-    /// mirrors `performReviewCommentList`'s shape exactly (no subscription-token tracking, unlike
-    /// `performFileRead`/`performWorkspaceDiffManifestChunk`, since this has no live-signature stream to repoint).
-    /// `SpacesDeviceWorkspaceFileListResult`'s own `{paths, truncated}` shape already matches the wire
-    /// contract the web app expects, so the daemon result is replied directly with no bridge-owned
-    /// payload struct in between.
+    /// Lists every path in the workspace's checkout for the Editor pane's file tree and quick-open.
+    /// The first successful pull is also the signal to start the workspace-level file-list-signature
+    /// stream: until some consumer has asked for the listing there is nothing to keep fresh, but after
+    /// that first pull the Files tree and quick-open both expect membership changes to arrive live.
     private func performFileList(id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -1563,6 +1595,11 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         Task { [weak self] in
             do {
                 let result = try await deviceGateway.workspaceFileList(workspaceID: workspaceID, device: device)
+                if let self, self.pageOwnsLiveWebView(generation: generation) {
+                    self.lastActedFileListSignature = SpacesDeviceWorkspaceFileListSignature.value(for: result)
+                    self.fileListSignatureMonitoringEnabled = true
+                    self.ensureFileListSignatureSubscription(device: device)
+                }
                 self?.reply(id: id, generation: generation, result: result)
             } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
@@ -1787,8 +1824,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 }
                 let deadlineEpochMilliseconds = self.nextAgentStartDeadlineEpochMilliseconds()
                 self.pendingAgentLaunch = .init(
-                    sessionId: sessionID, command: command, status: "starting", message: nil,
-                    deadlineEpochMilliseconds: deadlineEpochMilliseconds)
+                    sessionId: sessionID, command: command, status: "starting", message: nil, deadlineEpochMilliseconds: deadlineEpochMilliseconds)
                 self.persistWorkspaceState()
                 // Establish the pending association before inserting the terminal. Inserting it can
                 // synchronously apply an overview whose hooks have already registered this session;
@@ -1803,8 +1839,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 // live, ready page may own the observer. A returned page resumes it after installing
                 // its event listener, keeping one tracking lifetime instead of a hidden poller.
                 if self.isReady, !self.closeStarted {
-                    self.trackStartedWorkspaceCommand(
-                        sessionID: sessionID, device: device, deadlineEpochMilliseconds: deadlineEpochMilliseconds)
+                    self.trackStartedWorkspaceCommand(sessionID: sessionID, device: device, deadlineEpochMilliseconds: deadlineEpochMilliseconds)
                 }
                 self.settleStartWorkspaceCommand()
             } catch {
@@ -1817,9 +1852,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// Reattaches a recovery document's still-running Start Agent command after a page/controller/app
     /// restart. The session id is accepted only when the current device overview proves it belongs to
     /// this workspace; a stale document must not watch or assign some other workspace's terminal.
-    private func performResumeWorkspaceCommandTracking(
-        sessionID: String, id: String, generation: Int, hosting: any CodePaneHosting
-    ) {
+    private func performResumeWorkspaceCommandTracking(sessionID: String, id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let pending = pendingAgentLaunch, pending.sessionId == sessionID, pending.status == "starting" else {
             reply(
                 id: id, generation: generation,
@@ -1842,8 +1875,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let deviceGateway = deviceGateway
         Task { [weak self] in
             do {
-                let snapshot = try await deviceGateway.workspaceCommandStartSnapshot(
-                    workspaceID: workspaceID, sessionID: sessionID, device: device)
+                let snapshot = try await deviceGateway.workspaceCommandStartSnapshot(workspaceID: workspaceID, sessionID: sessionID, device: device)
                 guard let self else { return }
                 guard snapshot.sessionFound else {
                     self.reply(
@@ -1858,7 +1890,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 guard snapshot.belongsToWorkspace else {
                     self.reply(
                         id: id, generation: generation,
-                        error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "That terminal session does not belong to this workspace."))
+                        error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "That terminal session does not belong to this workspace.")
+                    )
                     return
                 }
                 self.reply(
@@ -1873,8 +1906,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 // falsely report a timeout before it could assign the session.
                 if self.agentStartNow() >= deadline {
                     if let agent = snapshot.agent, agent.sessionID == sessionID {
-                        self.finishAgentStartTracking(
-                            sessionID: sessionID, taskGeneration: nil, status: "detected", agent: agent, message: nil)
+                        self.finishAgentStartTracking(sessionID: sessionID, taskGeneration: nil, status: "detected", agent: agent, message: nil)
                     } else {
                         self.finishAgentStartTracking(
                             sessionID: sessionID, taskGeneration: nil, status: "timedOut", agent: nil,
@@ -1887,9 +1919,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 // hook-backed agent may be assigned.
                 self.trackStartedWorkspaceCommand(
                     sessionID: sessionID, device: device, deadlineEpochMilliseconds: deadlineEpochMilliseconds, initialSnapshot: snapshot)
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1923,8 +1953,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                         nextSample = nil
                         sample = initial
                     } else {
-                        sample = try await deviceGateway.workspaceCommandStartSnapshot(
-                            workspaceID: workspaceID, sessionID: sessionID, device: device)
+                        sample = try await deviceGateway.workspaceCommandStartSnapshot(workspaceID: workspaceID, sessionID: sessionID, device: device)
                     }
                     guard let self, self.agentStartTaskGenerations[sessionID] == taskGeneration else { return }
                     let snapshot = AgentSpawnReadiness.SessionSnapshot(
@@ -1933,8 +1962,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     if !reachedStableReadiness {
                         if let outcome = readiness.observe(snapshot, at: self.agentStartNow()) {
                             switch outcome {
-                            case .ready:
-                                reachedStableReadiness = true
+                            case .ready: reachedStableReadiness = true
                             case .ended(let state):
                                 self.finishAgentStartTracking(
                                     sessionID: sessionID, taskGeneration: taskGeneration, status: "exited", agent: nil,
@@ -1970,9 +1998,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                             message: "The command became ready but its agent hooks did not register within 90 seconds.")
                         return
                     }
-                } catch is CancellationError {
-                    return
-                } catch {
+                } catch is CancellationError { return } catch {
                     // A temporary device failure must not turn a still-running command into a false
                     // "exited" result. Continue until the same fixed readiness deadline; the next
                     // ordinary overview poll may have recovered the local or remote device.
@@ -1989,9 +2015,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
-    private func finishAgentStartTracking(
-        sessionID: String, taskGeneration: Int?, status: String, agent: CodePaneRunningAgent?, message: String?
-    ) {
+    private func finishAgentStartTracking(sessionID: String, taskGeneration: Int?, status: String, agent: CodePaneRunningAgent?, message: String?) {
         if let taskGeneration, agentStartTaskGenerations[sessionID] != taskGeneration { return }
         agentStartTasks.removeValue(forKey: sessionID)
         agentStartTaskGenerations.removeValue(forKey: sessionID)
@@ -2000,8 +2024,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             pendingAgentLaunch = nil
         } else if let pendingAgentLaunch, pendingAgentLaunch.sessionId == sessionID {
             self.pendingAgentLaunch = .init(
-                sessionId: sessionID, command: pendingAgentLaunch.command, status: "failed", message: message,
-                deadlineEpochMilliseconds: nil)
+                sessionId: sessionID, command: pendingAgentLaunch.command, status: "failed", message: message, deadlineEpochMilliseconds: nil)
         }
         // Persist before checking page liveness. A command can resolve while its Editor is hibernated;
         // its recovered page must still see the final status and typed command after restart.
@@ -2036,6 +2059,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let subscriptionGeneration = diffSignatureSubscriptionGeneration
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
+        let attemptState = SubscriptionAttemptState()
         // Built here, at MainActor isolation, rather than inside the task below: a weak-self capture
         // formed outside a `@Sendable` context and then merely *passed into* one as an already-built
         // `@Sendable` closure value is fine; re-deriving it from `self` from inside a non-isolated
@@ -2052,6 +2076,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
+            attemptState.markDisconnected()
             Task { @MainActor in self?.handleDiffSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
         }
         Task { [weak self] in
@@ -2073,7 +2098,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 // generation guard correctly refuses to act on it, so the pane silently stops
                 // reconnecting until something else forces a fresh resubscribe.
                 guard let self, self.subscribedScope == .scope(refName: refName, lastCommit: lastCommit),
-                    self.diffSignatureSubscriptionGeneration == subscriptionGeneration, self.webView != nil
+                    self.diffSignatureSubscriptionGeneration == subscriptionGeneration, self.webView != nil, !attemptState.isDisconnected
                 else {
                     client.stop()
                     return
@@ -2207,6 +2232,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let subscriptionGeneration = fileSignatureSubscriptionGeneration
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
+        let attemptState = SubscriptionAttemptState()
         // `client.stop()` (called by the success-arm guard below, or by a later resubscribe) cannot
         // retract a frame that is already queued as a `Task { @MainActor in ... }` closure: without this
         // guard, a stale frame from a superseded subscription (e.g. file A's stream, still delivering
@@ -2225,6 +2251,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
+            attemptState.markDisconnected()
             Task { @MainActor in self?.handleFileSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
         }
         Task { [weak self] in
@@ -2236,7 +2263,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 // newer A attempt has already taken over, so `subscriptionGeneration` (identity of this
                 // one ATTEMPT), not just the target path, is what tells them apart.
                 guard let self, self.subscribedFilePath == path, self.fileSignatureSubscriptionGeneration == subscriptionGeneration,
-                    self.webView != nil
+                    self.webView != nil, !attemptState.isDisconnected
                 else {
                     client.stop()
                     return
@@ -2306,6 +2333,93 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         lastActedFileSignatureValue = value
         scriptEvaluator.evaluateCodePaneScript(script)
     }
+
+    private func ensureFileListSignatureSubscription(device: SpacesPairedDeviceRecord) {
+        guard fileListSignatureMonitoringEnabled, fileListSignatureStream == nil else { return }
+        if let attemptGeneration = fileListSignatureSubscriptionAttemptGeneration {
+            // A disconnect can wake the retry while its original subscribe RPC is still pending. Keep
+            // the retry loop alive for the eventual dead-handle discard instead of consuming its only
+            // retry opportunity while the attempt marker correctly suppresses a duplicate connect.
+            scheduleFileListSignatureReconnect(generation: attemptGeneration)
+            return
+        }
+        fileListSignatureSubscriptionGeneration += 1
+        let subscriptionGeneration = fileListSignatureSubscriptionGeneration
+        fileListSignatureSubscriptionAttemptGeneration = subscriptionGeneration
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        let attemptState = SubscriptionAttemptState()
+        let onFrame: @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void = { [weak self] frame in
+            Task { @MainActor in
+                guard let self, self.fileListSignatureSubscriptionGeneration == subscriptionGeneration else { return }
+                self.handleFileListSignatureFrame(frame)
+            }
+        }
+        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
+            attemptState.markDisconnected()
+            Task { @MainActor in self?.handleFileListSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
+        }
+        Task { [weak self] in
+            do {
+                let client = try await deviceGateway.subscribeWorkspaceFileListSignature(
+                    workspaceID: workspaceID, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                if let self, self.fileListSignatureSubscriptionAttemptGeneration == subscriptionGeneration {
+                    self.fileListSignatureSubscriptionAttemptGeneration = nil
+                }
+                guard let self, self.fileListSignatureMonitoringEnabled, self.fileListSignatureSubscriptionGeneration == subscriptionGeneration,
+                    self.webView != nil, !attemptState.isDisconnected
+                else {
+                    client.stop()
+                    return
+                }
+                self.fileListSignatureStream = client
+                self.fileListSignatureReconnectFailures = 0
+            } catch {
+                if let self, self.fileListSignatureSubscriptionAttemptGeneration == subscriptionGeneration {
+                    self.fileListSignatureSubscriptionAttemptGeneration = nil
+                }
+                guard let self, self.fileListSignatureMonitoringEnabled, self.fileListSignatureSubscriptionGeneration == subscriptionGeneration else {
+                    return
+                }
+                self.scheduleFileListSignatureReconnect(generation: subscriptionGeneration)
+            }
+        }
+    }
+
+    private func handleFileListSignatureDisconnect(subscriptionGeneration: Int) {
+        guard subscriptionGeneration == fileListSignatureSubscriptionGeneration else { return }
+        fileListSignatureStream = nil
+        guard fileListSignatureMonitoringEnabled else { return }
+        scheduleFileListSignatureReconnect(generation: subscriptionGeneration)
+    }
+
+    private func scheduleFileListSignatureReconnect(generation: Int) {
+        fileListSignatureReconnectFailures += 1
+        let delay = RemoteConnectionBackoff.delay(
+            consecutiveFailures: fileListSignatureReconnectFailures, floor: fileListSignatureReconnectFloor, cap: fileListSignatureReconnectCap,
+            jitterFraction: 0)
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, self.fileListSignatureSubscriptionGeneration == generation, self.fileListSignatureMonitoringEnabled else { return }
+            guard let hosting = self.hosting, let device = hosting.codePaneDevice(workspaceID: self.workspaceID) else {
+                self.scheduleFileListSignatureReconnect(generation: generation)
+                return
+            }
+            self.ensureFileListSignatureSubscription(device: device)
+        }
+    }
+
+    private func handleFileListSignatureFrame(_ frame: SpacesDeviceWorkspaceFileListSignatureFrame) {
+        guard frame.fileListSignature != lastActedFileListSignature else { return }
+        guard isReady, let scriptEvaluator else { return }
+        guard
+            let script = CodePaneBridge.dispatchEventScript(
+                name: Self.fileListSignatureEventName, detail: CodePaneBridge.FileListSignaturePayload(fileListSignature: frame.fileListSignature))
+        else { return }
+        scriptEvaluator.evaluateCodePaneScript(script)
+    }
+
+    private func pageOwnsLiveWebView(generation: Int) -> Bool { generation == pageGeneration && webView != nil }
 
     // MARK: - Replies
 

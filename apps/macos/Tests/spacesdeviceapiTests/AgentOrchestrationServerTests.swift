@@ -20,8 +20,9 @@
             try withTemporaryProfile { _ in
                 try seedWorkspace()
                 let launches = TerminalLaunchRecorder()
-                let (server, client, clientApp, token) = try startServerAndClient(
-                    builtInTerminalSessionLauncher: { configuration in launches.launch(configuration) })
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionLauncher: { configuration in
+                    launches.launch(configuration)
+                })
                 defer {
                     client.cancel()
                     server.stop()
@@ -29,8 +30,8 @@
 
                 let response = try client.send(
                     SpacesDeviceAPIRequest(
-                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")),
-                        authToken: token, clientApp: clientApp))
+                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")), authToken: token,
+                        clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let configurations = launches.configurations()
@@ -41,6 +42,16 @@
                 XCTAssertTrue(launch.command?.contains("my-agent --review") == true)
                 XCTAssertTrue(launch.command?.contains(" -l -i -c ") == true)
                 XCTAssertEqual(response.sessionID, launch.sessionID)
+                let launchedSession = try XCTUnwrap(response.launchedTerminalSession)
+                XCTAssertEqual(launchedSession.id, launch.sessionID)
+                XCTAssertEqual(launchedSession.workspaceID, "workspace-1")
+                XCTAssertEqual(launchedSession.title, launch.title)
+                XCTAssertEqual(launchedSession.workingDirectory, launch.workingDirectory)
+                XCTAssertEqual(launchedSession.shell, launch.shell)
+                XCTAssertEqual(launchedSession.command, launch.command)
+                XCTAssertEqual(launchedSession.state, .running)
+                XCTAssertEqual(launchedSession.backend, launch.backend)
+                XCTAssertEqual(launchedSession.lifetimePolicy, launch.lifetimePolicy)
             }
         }
 
@@ -50,12 +61,11 @@
                 let launches = TerminalLaunchRecorder()
                 let launchArrived = DispatchSemaphore(value: 0)
                 let releaseLaunch = DispatchSemaphore(value: 0)
-                let (server, client, clientApp, token) = try startServerAndClient(
-                    builtInTerminalSessionLauncher: { configuration in
-                        launchArrived.signal()
-                        releaseLaunch.wait()
-                        return launches.launch(configuration)
-                    })
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionLauncher: { configuration in
+                    launchArrived.signal()
+                    releaseLaunch.wait()
+                    return launches.launch(configuration)
+                })
                 defer {
                     releaseLaunch.signal()
                     client.cancel()
@@ -66,19 +76,17 @@
                 DispatchQueue.global().async {
                     _ = try? client.send(
                         SpacesDeviceAPIRequest(
-                            command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")),
-                            authToken: token, clientApp: clientApp))
+                            command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")), authToken: token,
+                            clientApp: clientApp))
                     startFinished.fulfill()
                 }
                 XCTAssertEqual(launchArrived.wait(timeout: .now() + 5), .success, "The terminal launcher must be reached.")
 
                 let overviewClient = try SpacesDeviceAPIRequestClient(
                     resolver: SpacesDeviceEndpointResolver(
-                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: server.certificateFingerprint),
-                    timeoutSeconds: 2)
+                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: server.certificateFingerprint), timeoutSeconds: 2)
                 let startedAt = Date()
-                let overview = try overviewClient.request(
-                    SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))
+                let overview = try overviewClient.request(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))
                 let elapsed = Date().timeIntervalSince(startedAt)
 
                 XCTAssertTrue(overview.ok, overview.message)
@@ -91,8 +99,9 @@
         func testStartWorkspaceCommandSessionRejectsBlankCommandBeforeLaunching() throws {
             try withTemporaryProfile { _ in
                 let launches = TerminalLaunchRecorder()
-                let (server, client, clientApp, token) = try startServerAndClient(
-                    builtInTerminalSessionLauncher: { configuration in launches.launch(configuration) })
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionLauncher: { configuration in
+                    launches.launch(configuration)
+                })
                 defer {
                     client.cancel()
                     server.stop()
@@ -100,8 +109,8 @@
 
                 let response = try client.send(
                     SpacesDeviceAPIRequest(
-                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: " \n\t ")),
-                        authToken: token, clientApp: clientApp))
+                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: " \n\t ")), authToken: token,
+                        clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .invalidArgument)
@@ -570,8 +579,8 @@
                     processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false,
-                    isRunning: false, lastLaunchedAt: nil))
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil))
         }
 
         @discardableResult private func seedPreSignalAgentTerminal(terminalSessionID: String, runStatus: AutomationRunStatus) throws -> AutomationRun
@@ -625,7 +634,8 @@
             let pairingStore = AlwaysAuthorizedAgentOrchestrationPairingStore()
             let server = SpacesDeviceAPIServer(
                 host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
-                builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, agentSessionKiller: agentSessionKiller, automationOperations: automationOperations)
+                builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, agentSessionKiller: agentSessionKiller,
+                automationOperations: automationOperations)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
                 resolver: SpacesDeviceEndpointResolver(

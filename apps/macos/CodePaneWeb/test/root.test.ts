@@ -239,6 +239,11 @@ const hoisted = vi.hoisted(() => {
     diffSignatureCallbacks.push(callback);
     return () => {};
   });
+  const fileListSignatureCallbacks: Array<() => void> = [];
+  const subscribeFileListSignature = vi.fn((callback: () => void) => {
+    fileListSignatureCallbacks.push(callback);
+    return () => {};
+  });
   return {
     pendingDiffCalls,
     workspaceDiff,
@@ -260,7 +265,9 @@ const hoisted = vi.hoisted(() => {
     notifyRenderMetric,
     reviewCommentList,
     diffSignatureCallbacks,
+    fileListSignatureCallbacks,
     subscribeDiffSignature,
+    subscribeFileListSignature,
   };
 });
 
@@ -280,6 +287,7 @@ vi.mock("../src/bridge", () => ({
     workspaceFileWrite: hoisted.workspaceFileWrite,
     workspaceFileList: hoisted.workspaceFileList,
     subscribeDiffSignature: hoisted.subscribeDiffSignature,
+    subscribeFileListSignature: hoisted.subscribeFileListSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyWorkspaceStateChanged: hoisted.notifyWorkspaceStateChanged,
     notifyRenderMetric: hoisted.notifyRenderMetric,
@@ -335,6 +343,12 @@ function switchToLastCommit(container: HTMLElement): void {
 function fireDiffSignature(): void {
   const callbacks = hoisted.diffSignatureCallbacks;
   if (callbacks.length === 0) throw new Error("no diff-signature subscription registered yet");
+  callbacks[callbacks.length - 1]!();
+}
+
+function fireFileListSignature(): void {
+  const callbacks = hoisted.fileListSignatureCallbacks;
+  if (callbacks.length === 0) throw new Error("no file-list-signature subscription registered yet");
   callbacks[callbacks.length - 1]!();
 }
 
@@ -3682,12 +3696,13 @@ describe("mountRoot's init ordering — the seeded pending comment state is rest
   });
 });
 
-describe("mountRoot's diff-signature push — sidebar refresh gated to Editor mode (Finding A)", () => {
+describe("mountRoot's file-list-signature push — sidebar refresh gated to Editor mode", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
     hoisted.pendingDiffCalls.length = 0;
     hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.fileListSignatureCallbacks.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
@@ -3706,16 +3721,15 @@ describe("mountRoot's diff-signature push — sidebar refresh gated to Editor mo
     expect(hoisted.workspaceFileList).not.toHaveBeenCalled();
 
     // The pane is still in its default initial mode (Diff) here.
-    fireDiffSignature();
-    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2)); // refreshDiff(true) still runs
-    resolveDiff(1, [], "sig-b");
+    fireFileListSignature();
 
     // Give a (wrongly) triggered fetch a couple of microtask turns to happen before asserting it
     // didn't — the bug this closes was an unconditional `editorSidebar.refreshFilesListing()` call
-    // on every push, firing a full `workspaceFileList` RPC even while the sidebar isn't in the DOM.
+    // on every file-list push, firing a full `workspaceFileList` RPC even while the sidebar isn't in the DOM.
     await Promise.resolve();
     await Promise.resolve();
     expect(hoisted.workspaceFileList).not.toHaveBeenCalled();
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
 
     clickButton(container, "Editor");
     // The cache was invalidated by the push above, so returning to Editor mode re-fetches instead of
@@ -3724,12 +3738,13 @@ describe("mountRoot's diff-signature push — sidebar refresh gated to Editor mo
   });
 });
 
-describe("mountRoot's diff-signature push — ⌘P overlay refresh is not mode-gated", () => {
+describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not mode-gated", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
     hoisted.pendingDiffCalls.length = 0;
     hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.fileListSignatureCallbacks.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
@@ -3755,14 +3770,15 @@ describe("mountRoot's diff-signature push — ⌘P overlay refresh is not mode-g
     input.dispatchEvent(new Event("input"));
     await vi.waitFor(() => expect(container.querySelector('.quick-open .row[data-path="a.ts"]')).not.toBeNull());
 
-    // `fireDiffSignature` (unlike the keydown above) only invokes THIS mount's own subscription —
-    // `hoisted.diffSignatureCallbacks` was reset in `beforeEach` — so exactly one more call here is
-    // attributable to this pane alone. The sidebar's own refresh is gated to Editor mode (Finding A,
-    // previous describe block) and must not fire; but the ⌘P overlay works in both modes, so
+    // `fireFileListSignature` (unlike the keydown above) only invokes THIS mount's own subscription —
+    // `hoisted.fileListSignatureCallbacks` was reset in `beforeEach` — so exactly one more call here is
+    // attributable to this pane alone. The sidebar's own refresh is gated to Editor mode (previous
+    // describe block) and must not fire; but the ⌘P overlay works in both modes, so
     // `quickOpen.refreshListing()` must still fire, ungated, with the pane still in Diff mode.
     hoisted.workspaceFileList.mockClear();
-    fireDiffSignature();
+    fireFileListSignature();
     await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
   });
 });
 

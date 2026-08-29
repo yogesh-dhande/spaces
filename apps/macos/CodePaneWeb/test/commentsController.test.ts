@@ -82,6 +82,7 @@ function makeBridge(): SpacesBridge & {
     workspaceFileList: notUsed,
     workspaceRefList: notUsed,
     subscribeDiffSignature: () => () => {},
+    subscribeFileListSignature: () => () => {},
     subscribeFileSignature: () => () => {},
     notifyWorkspaceStateChanged: () => {},
     notifyRenderMetric: () => {},

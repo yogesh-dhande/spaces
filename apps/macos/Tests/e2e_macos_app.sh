@@ -7046,6 +7046,44 @@ end run
 APPLESCRIPT
 }
 
+open_code_pane_quick_open_query() {
+  local path="$1"
+  click_code_pane_relative 500 200
+  sleep 0.2
+  osascript - "$SPACES_PID" "$path" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetPath to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      key code 35 using command down
+      delay 0.5
+      keystroke targetPath
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+}
+
+submit_code_pane_quick_open_selection() {
+  CODE_PANE_EDITOR_REQUESTED_AT="$(timestamp_ms)"
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      key code 36
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+}
+
 open_and_measure_code_pane_file() {
   local workspace_id="$1" host="$2" scale="$3" path="$4" record_sample="${5:-1}"
   local line wall_ms log_start_line
@@ -7483,12 +7521,12 @@ PY
 }
 
 assert_code_pane_streaming_order() {
-  local start_line="$1"
-  python3 - "$APP_LOG" "$start_line" <<'PY'
+  local workspace_id="$1" start_line="$2"
+  python3 - "$APP_LOG" "$workspace_id" "$start_line" <<'PY'
 import re
 import sys
 
-log_path, start_line = sys.argv[1:]
+log_path, workspace_id, start_line = sys.argv[1:]
 start_line = int(start_line)
 metrics = []
 field = re.compile(r"(?:^|\s)([a-z_]+)=([^\s]+)")
@@ -7498,6 +7536,8 @@ with open(log_path, encoding="utf-8", errors="replace") as handle:
         if number < start_line or "metric=code_pane_diff_render" not in line:
             continue
         fields = dict(field.findall(line))
+        if fields.get("workspace") != workspace_id:
+            continue
         trigger_match = trigger_field.search(line)
         trigger = trigger_match.group(1) if trigger_match is not None else fields.get("trigger")
         if trigger in {"manifest", "filePatch", "complete"}:
@@ -7530,11 +7570,11 @@ record_code_pane_stream_metric() {
 }
 
 record_code_pane_stream_file_patch_metrics() {
-  local start_line="$1" host="$2" scale="$3" line_number=0 line
+  local start_line="$1" workspace_id="$2" host="$3" scale="$4" line_number=0 line
   while IFS= read -r line; do
     line_number=$((line_number + 1))
     (( line_number >= start_line )) || continue
-    [[ "$line" == *"metric=code_pane_diff_render"* && "$line" == *"target=trigger=filePatch"* ]] || continue
+    [[ "$line" == *"metric=code_pane_diff_render"* && "$line" == *"workspace=${workspace_id} "* && "$line" == *"target=trigger=filePatch"* ]] || continue
     record_code_pane_stream_metric "$line" "code_pane.stream_file_patch" "$host" "$scale"
   done <"$APP_LOG"
 }
@@ -7551,9 +7591,9 @@ exercise_code_pane_progressive_diff() {
   complete_line="$(wait_for_code_pane_stream_metric "$workspace_id" complete "$start_line")"
   stop_code_pane_resource_sampling
   record_code_pane_resource_snapshot "streaming-complete" "$host" "multi-chunk"
-  record_code_pane_stream_file_patch_metrics "$start_line" "$host" "multi-chunk"
+  record_code_pane_stream_file_patch_metrics "$start_line" "$workspace_id" "$host" "multi-chunk"
   record_code_pane_stream_metric "$complete_line" "code_pane.stream_all_patches" "$host" "multi-chunk"
-  assert_code_pane_streaming_order "$start_line"
+  assert_code_pane_streaming_order "$workspace_id" "$start_line"
 }
 
 discard_large_stream_fixture() {
@@ -7756,6 +7796,94 @@ exercise_code_pane_workspace_state_recovery() {
   wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty buffer after app restart"
 }
 
+remove_code_pane_membership_fixture() {
+  local workspace_dir="$1" relative_path="$2" remote="$3"
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir quoted_path
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    quoted_path="$(shell_quote "$relative_path")"
+    remote_device_ssh "python3 - $quoted_dir $quoted_path" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], sys.argv[2]).unlink(missing_ok=True)
+PY
+  else
+    python3 - "$workspace_dir" "$relative_path" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], sys.argv[2]).unlink(missing_ok=True)
+PY
+  fi
+}
+
+create_code_pane_membership_fixture() {
+  local workspace_dir="$1" relative_path="$2" content="$3" remote="$4"
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir quoted_path quoted_content
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    quoted_path="$(shell_quote "$relative_path")"
+    quoted_content="$(shell_quote "$content")"
+    remote_device_ssh "python3 - $quoted_dir $quoted_path $quoted_content" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1], sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(sys.argv[3], encoding="ascii")
+PY
+  else
+    python3 - "$workspace_dir" "$relative_path" "$content" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1], sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(sys.argv[3], encoding="ascii")
+PY
+  fi
+}
+
+exercise_code_pane_file_membership_refresh() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4"
+  local relative_path=".spaces-e2e-stream/stream-membership-${host}.txt"
+  local content="stream membership ${host} fixture"
+  local quick_open_row="code-pane-quick-open-$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$relative_path")"
+  local start_line line
+
+  prepare_code_pane_streaming_diff "$workspace_dir" "$remote"
+  remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
+
+  open_streaming_workspace_for_state_recovery "$workspace_id" "${host}-membership"
+  start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Last commit"
+  wait_for_code_pane_progressive_complete "$workspace_id" "$start_line" >/dev/null
+
+  # Open quick-open before the file exists so the first `workspaceFileList` fetch has already
+  # completed, the workspace-level file-membership stream is armed, and the overlay must refresh in
+  # place when the new untracked file appears without any scope change.
+  open_code_pane_quick_open_query "$relative_path"
+  wait_for_ui_identifier "code-pane-quick-open-empty" "$host quick-open empty state before file creation"
+
+  create_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$content" "$remote"
+  wait_for_ui_identifier "$quick_open_row" "$host quick-open discovered new workspace file"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  submit_code_pane_quick_open_selection
+  line="$(wait_for_code_pane_metric "$workspace_id" editor fileOpen "$start_line")"
+  record_code_pane_metric "$line" "code_pane.editor_open_to_first_render.internal" "$host" "workspace-membership"
+  assert_ui_identifier_attribute_contains "code-pane-editor-input" "AXValue" "$content" "$host discovered file content"
+  click_code_pane_mode "Diff"
+  # Opening the discovered file intentionally switches to Editor, and returning to Diff restores the
+  # user's last scope. Reset it explicitly so the following workspace-state section starts from the
+  # uncommitted fixture for both local and remote lanes.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Uncommitted"
+  wait_for_code_pane_progressive_complete "$workspace_id" "$start_line" >/dev/null
+  remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
+}
+
 exercise_code_pane_start_agent_requirements() {
   local workspace_dir="$1"
   # The comment gutter is covered by the real-Pierre browser test. Quartz/AX-generated pointer
@@ -7820,9 +7948,11 @@ run_code_pane_streaming_assertions() {
   exercise_code_pane_progressive_diff "local" "$local_workspace_id" "$local_workspace_dir" 0
   discard_large_stream_fixture "local" "$local_workspace_id" "$local_workspace_dir" 0
   exercise_code_pane_inline_diff_edit "local" "$local_workspace_id" "$local_workspace_dir" 0
+  exercise_code_pane_file_membership_refresh "local" "$local_workspace_id" "$local_workspace_dir" 0
   exercise_code_pane_progressive_diff "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
   discard_large_stream_fixture "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
   exercise_code_pane_inline_diff_edit "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
+  exercise_code_pane_file_membership_refresh "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
   pass_case
 
   begin_case "code pane: workspace state, app restart, and Start agent requirements"

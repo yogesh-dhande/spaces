@@ -14,6 +14,7 @@ import {
   CodePaneWorkspaceState,
   DiffScope,
   DiffSignatureListener,
+  FileListSignatureListener,
   FileSignatureListener,
   ReviewCommentSendEntry,
   ReviewCommentUpsertInput,
@@ -34,6 +35,7 @@ import {
 
 const INIT_EVENT = "spaces:init";
 const DIFF_SIGNATURE_EVENT = "spaces:diffSignature";
+const FILE_LIST_SIGNATURE_EVENT = "spaces:fileListSignature";
 const AGENTS_EVENT = "spaces:agents";
 
 let nextCommentId = 0;
@@ -55,6 +57,7 @@ function delay<T>(value: T): Promise<T> {
 export class MockSpacesBridge implements SpacesBridge {
   private version = 0;
   private readonly listeners = new Set<DiffSignatureListener>();
+  private readonly fileListSignatureListeners = new Set<FileListSignatureListener>();
   private readonly fileSignatureListeners = new Set<FileSignatureListener>();
   /** The path most recently passed to an editor-purpose `workspaceFileRead`: this is what the
    *  harness's "currently open in the editor" file is, for `simulateFileChange`/
@@ -64,6 +67,7 @@ export class MockSpacesBridge implements SpacesBridge {
   private readonly files = new Map<string, { content: string; sha256: string }>(
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
   );
+  private readonly workspaceMembership = new Set<string>(FIXTURE_ALL_PATHS);
   private readonly comments = new Map<string, SpacesReviewComment>();
   private readonly patchTransfers = new Map<string, { scopeSignature: string; file: ReturnType<typeof fixtureDiffFiles>[number]; bytes: Uint8Array }>();
   private readonly manifests = new Map<string, { scope: DiffScope; scopeSignature: string }>();
@@ -183,6 +187,7 @@ export class MockSpacesBridge implements SpacesBridge {
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
     const entry = this.files.get(path);
+    const created = entry === undefined;
     if (options.baseSHA256 === undefined) {
       // "Create" convention: succeeds only if nothing currently exists at this path. Used by the
       // conflict compare view's "Keep mine" action to recreate a file deleted on disk.
@@ -197,11 +202,15 @@ export class MockSpacesBridge implements SpacesBridge {
     }
     const sha256 = fixtureHash(content);
     this.files.set(path, { content, sha256 });
+    if (created && !this.workspaceMembership.has(path)) {
+      this.workspaceMembership.add(path);
+      this.emitFileListSignatureChange();
+    }
     return delay({ ok: true, sha256 });
   }
 
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
-    return delay({ paths: FIXTURE_ALL_PATHS, truncated: false });
+    return delay({ paths: [...this.workspaceMembership].sort((a, b) => a.localeCompare(b)), truncated: false });
   }
 
   async workspaceRefList(): Promise<WorkspaceRefListResult> {
@@ -216,6 +225,11 @@ export class MockSpacesBridge implements SpacesBridge {
   subscribeFileSignature(_path: string, listener: FileSignatureListener): Unsubscribe {
     this.fileSignatureListeners.add(listener);
     return () => this.fileSignatureListeners.delete(listener);
+  }
+
+  subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe {
+    this.fileListSignatureListeners.add(listener);
+    return () => this.fileListSignatureListeners.delete(listener);
   }
 
   /** Dev-harness-only control, not part of `SpacesBridge`: mutates the mock's file-content map for
@@ -243,6 +257,13 @@ export class MockSpacesBridge implements SpacesBridge {
     for (const listener of this.fileSignatureListeners) {
       listener({ path, sha256: undefined, missing: true });
     }
+    if (this.workspaceMembership.delete(path)) this.emitFileListSignatureChange();
+  }
+
+  private emitFileListSignatureChange(): void {
+    const detail = { fileListSignature: `fixture-file-list-v${++this.version}` };
+    for (const listener of this.fileListSignatureListeners) listener(detail);
+    window.dispatchEvent(new CustomEvent(FILE_LIST_SIGNATURE_EVENT, { detail }));
   }
 
   async reviewCommentList(): Promise<SpacesReviewComment[]> {

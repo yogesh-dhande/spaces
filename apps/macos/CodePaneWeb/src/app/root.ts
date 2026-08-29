@@ -1682,31 +1682,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     }, delay);
   }
 
+  function refreshFileListConsumers(): void {
+    fileListCache.invalidate();
+    quickOpen.refreshListing();
+    if (state.mode === "editor") editorSidebar.refreshFilesListing();
+  }
+
   function resubscribeDiffSignature(): void {
     // Only one scope is observed at a time (see SpacesBridge.subscribeDiffSignature's
     // doc comment): replace the previous subscription rather than layering another.
     unsubscribeSignature?.();
     unsubscribeSignature = bridge.subscribeDiffSignature(state.scope, () => {
       void refreshDiff(true, "workspaceChange");
-      // A push that changed the diff may equally have added or removed files elsewhere in the
-      // workspace — the same underlying git/agent activity both the diff and the full listing
-      // reflect. Invalidate the shared cache unconditionally so the Files tree and ⌘P overlay pick
-      // up the change instead of only the Changes list doing so — but only ask the sidebar to
-      // re-fetch RIGHT NOW when the PANE itself is in editor mode. The sidebar's own default mode
-      // is "files" while the pane's default top-level mode is "diff", so an ungated call here would
-      // fire a full `workspaceFileList` RPC (up to 50,000 paths, serialized on the daemon's
-      // per-workspace git queue) on every diff-signature push even while the sidebar isn't in the
-      // DOM. A pane that later returns to editor mode re-renders the sidebar's current tab against
-      // the already-invalidated cache (see `dispatch`'s `setMode` branch, which calls
-      // `editorSidebar.reattach()`), and the Files tab's own `renderList()` re-fetches on demand
-      // whenever it's shown regardless.
-      fileListCache.invalidate();
-      // Unlike the sidebar refresh above, NOT gated on `state.mode`: the ⌘P overlay is reachable
-      // from both Diff and Editor mode, and (unlike the sidebar) `refreshListing()` is a no-op
-      // unless the overlay is actually open, so there's no equivalent DOM-visibility cost to gate
-      // against.
-      quickOpen.refreshListing();
-      if (state.mode === "editor") editorSidebar.refreshFilesListing();
     });
   }
 
@@ -1828,6 +1815,12 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // same serial-queue ordering rule `openInEditor` applies (read before the mode dispatch that
   // triggers the listing).
   if (state.mode === "editor") editorSidebar.reattach();
+  bridge.subscribeFileListSignature(() => {
+    // Workspace membership changes are independent of the active diff scope: non-git workspaces
+    // have no diff-signature stream at all, and "Last commit" intentionally ignores plain worktree
+    // churn. The shared listing cache therefore owns its own workspace-scoped invalidation signal.
+    refreshFileListConsumers();
+  });
   // Install the one scope listener before an initial manifest starts streaming. A file patch can
   // take arbitrarily long under agent churn; subscribing after that await drops any signature
   // change that arrives in the visible sidebar/placeholder interval.

@@ -338,9 +338,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
     static func scopeSignature(
         workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil
     ) throws -> String {
-        try scopeSnapshot(
-            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart
-        ).signature
+        try scopeSnapshot(workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart)
+            .signature
     }
 
     /// `buildDiffPlanSnapshot` needs the same HEAD/status/prefix facts that form the signature. Keeping them in this
@@ -475,8 +474,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 input.append(Data("\(entry.path)|missing\n".utf8))
             }
         }
-        return ScopeSnapshot(
-            signature: SpacesDeviceWorkspaceGitHashing.sha256Hex(input), headSHA: headSHA, scopedEntries: scopedEntries)
+        return ScopeSnapshot(signature: SpacesDeviceWorkspaceGitHashing.sha256Hex(input), headSHA: headSHA, scopedEntries: scopedEntries)
     }
 
     /// One file identified by `git diff -M --name-status -z` (tracked) or by a `??` record in `git status
@@ -520,11 +518,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             self.plans = plans
             var indexByPath: [String: Int] = [:]
             indexByPath.reserveCapacity(plans.count)
-            for (index, plan) in plans.enumerated() {
-                if indexByPath[plan.path] == nil {
-                    indexByPath[plan.path] = index
-                }
-            }
+            for (index, plan) in plans.enumerated() { if indexByPath[plan.path] == nil { indexByPath[plan.path] = index } }
             self.planIndexByPath = indexByPath
         }
 
@@ -631,8 +625,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // out workspace-relative rather than repo-root-relative (confirmed empirically: the pathspec
             // match succeeds either way, but only `--relative` also relativizes the `diff --git a/... b/...`
             // header text).
-            return DiffFilePlan(
-                path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: compareRef, targetRef: nil))
+            return DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: compareRef, targetRef: nil))
         }
 
         // The signature has already read and subtree-scoped the same porcelain snapshot this request needs
@@ -690,8 +683,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let patchByteCount = wrotePatch ? fileByteCount(at: outputURL) : 0
         let metadata = wrotePatch ? patchMetadata(at: outputURL) : (isBinary: false, oldSHA: nil, newSHA: nil)
         let file = SpacesDeviceWorkspaceDiffFileMetadata(
-            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary,
-            oldSHA: metadata.oldSHA, newSHA: metadata.newSHA)
+            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA
+        )
         return FilePatchTransfer(scopeSignature: snapshot.scopeSignature, file: file, patchByteCount: patchByteCount)
     }
 
@@ -705,11 +698,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         switch plan.source {
         case .tracked(let baseRef, let targetRef):
             try gitClient.runGitWithFileOutput(
-                trackedDiffArguments(for: plan, workspaceDir: workspaceDir, baseRef: baseRef, targetRef: targetRef, outputURL: outputURL), timeout: timeout)
+                trackedDiffArguments(for: plan, workspaceDir: workspaceDir, baseRef: baseRef, targetRef: targetRef, outputURL: outputURL),
+                timeout: timeout)
             return true
         case .untracked:
-            return try writeUntrackedPatch(
-                path: plan.path, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient, timeout: timeout)
+            return try writeUntrackedPatch(path: plan.path, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient, timeout: timeout)
         case .deletedButUntrackedInWorktree(let compareRef):
             return try writeCoalescedDeletedButUntrackedPatch(
                 path: plan.path, compareRef: compareRef, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient,
@@ -717,9 +710,9 @@ enum SpacesDeviceWorkspaceDiffEngine {
         }
     }
 
-    private static func trackedDiffArguments(
-        for plan: DiffFilePlan, workspaceDir: String, baseRef: String, targetRef: String?, outputURL: URL
-    ) -> [String] {
+    private static func trackedDiffArguments(for plan: DiffFilePlan, workspaceDir: String, baseRef: String, targetRef: String?, outputURL: URL)
+        -> [String]
+    {
         var arguments = [
             "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "-M", "--no-color", "--no-ext-diff",
             "--no-textconv", "--relative", baseRef,
@@ -731,9 +724,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return arguments
     }
 
-    private static func fileByteCount(at url: URL) -> Int64 {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-    }
+    private static func fileByteCount(at url: URL) -> Int64 { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0 }
 
     /// Git's `index` and `Binary files ... differ` header lines always precede any hunk body. Sampling a
     /// fixed prefix keeps binary/SHA classification bounded even when the textual patch is hundreds of MB.
@@ -789,18 +780,15 @@ enum SpacesDeviceWorkspaceDiffEngine {
             throw SpacesRuntimeError.gitCommandFailed(message: "git rev-parse --git-path objects returned an empty path.")
         }
         let objectDirectoryURL = URL(
-            fileURLWithPath: objectDirectoryPath, isDirectory: true,
-            relativeTo: URL(fileURLWithPath: workspaceDir, isDirectory: true)
+            fileURLWithPath: objectDirectoryPath, isDirectory: true, relativeTo: URL(fileURLWithPath: workspaceDir, isDirectory: true)
         ).standardizedFileURL
-        let scratchDirectoryURL = URL(
-            fileURLWithPath: NSTemporaryDirectory(), isDirectory: true
-        ).appendingPathComponent("spaces-workspacediff-\(UUID().uuidString)", isDirectory: true)
+        let scratchDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
+            "spaces-workspacediff-\(UUID().uuidString)", isDirectory: true)
         let scratchObjectsURL = scratchDirectoryURL.appendingPathComponent("objects", isDirectory: true)
         try fileManager.createDirectory(at: scratchObjectsURL, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: scratchDirectoryURL) }
         let scratchIndexEnvironment = [
-            "GIT_INDEX_FILE": scratchDirectoryURL.appendingPathComponent("index").path,
-            "GIT_OBJECT_DIRECTORY": scratchObjectsURL.path,
+            "GIT_INDEX_FILE": scratchDirectoryURL.appendingPathComponent("index").path, "GIT_OBJECT_DIRECTORY": scratchObjectsURL.path,
             "GIT_ALTERNATE_OBJECT_DIRECTORIES": objectDirectoryURL.path,
         ]
         _ = try gitClient.runGitAndCapture(
@@ -824,9 +812,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// nothing has been committed yet, so the "last commit" is empty.
     private static func buildLastCommitPlans(
         workspaceDir: String, gitClient: RemoteWorkspaceGitClient, signature: String, headSHA: String, deadlineStart: Date
-    ) throws
-        -> DiffPlanSnapshot
-    {
+    ) throws -> DiffPlanSnapshot {
         guard !headSHA.isEmpty else {
             // No commits exist yet, so there is no "last commit" to diff — an empty file list, not an
             // error, matching the manifest plan's treatment of an unborn HEAD as a supported state rather than
@@ -844,7 +830,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         let parent: String
         if parentProbe.isEmpty {
-        // Root commit: diff the empty tree against the snapshotted HEAD so every file it introduces reports as an
+            // Root commit: diff the empty tree against the snapshotted HEAD so every file it introduces reports as an
             // addition — see the manifest plan's identical empty-tree handling for why this is computed per call
             // rather than hardcoded as the well-known SHA-1 constant.
             parent = try gitClient.runGitAndCapture(
@@ -861,9 +847,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", parent, headSHA],
             timeout: try remainingTimeout(start: deadlineStart))
         let plans = parseNameStatusZ(nameStatusOutput).map { entry in
-            DiffFilePlan(
-                path: entry.path, oldPath: entry.oldPath, status: entry.status,
-                source: .tracked(baseRef: parent, targetRef: headSHA))
+            DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: parent, targetRef: headSHA))
         }
 
         return DiffPlanSnapshot(scopeSignature: signature, plans: plans)
@@ -1034,6 +1018,68 @@ enum SpacesDeviceWorkspaceDiffEngine {
 /// than `SpacesDeviceAPIServer.workspaceFileMaxBytes` is excluded too: `workspaceFileRead` rejects it with
 /// `.payloadTooLarge`, so listing it would offer a file this engine already knows can never be opened.
 enum SpacesDeviceWorkspaceFileListEngine {
+    final class GitMembershipIndexCache: @unchecked Sendable {
+        struct EntrySet: Equatable {
+            let symlinkPaths: [String]
+            let skipWorktreePaths: [String]
+            let oversizedPaths: [String]
+            let assumeUnchangedPaths: [String]
+            let gitlinkPaths: [String]
+        }
+
+        private let lock = NSLock()
+        private var didLoad = false
+        private var fingerprint: String?
+        private var metadataFingerprint: String?
+        private var entries = EntrySet(symlinkPaths: [], skipWorktreePaths: [], oversizedPaths: [], assumeUnchangedPaths: [], gitlinkPaths: [])
+        private(set) var indexScanCount = 0
+
+        func entries(for fingerprint: String?, metadataFingerprint: String?, refreshMetadata: Bool, loader: () throws -> EntrySet) rethrows
+            -> EntrySet
+        {
+            lock.lock()
+            if didLoad, self.fingerprint == fingerprint, !refreshMetadata || self.metadataFingerprint == metadataFingerprint {
+                let entries = self.entries
+                lock.unlock()
+                return entries
+            }
+            lock.unlock()
+
+            let loaded = try loader()
+            lock.lock()
+            indexScanCount += 1
+            didLoad = true
+            self.fingerprint = fingerprint
+            self.metadataFingerprint = metadataFingerprint
+            entries = loaded
+            lock.unlock()
+            return loaded
+        }
+    }
+
+    struct GitMembershipContext: Sendable, Equatable {
+        let workspaceDir: String
+        let workspacePrefix: String
+        let indexCache: GitMembershipIndexCache
+
+        static func == (lhs: GitMembershipContext, rhs: GitMembershipContext) -> Bool {
+            lhs.workspaceDir == rhs.workspaceDir && lhs.workspacePrefix == rhs.workspacePrefix
+        }
+    }
+
+    private enum MembershipState: String {
+        case listed
+        case oversized
+        case missing
+        case notOpenable
+    }
+
+    private struct MembershipEntry {
+        let status: String
+        let path: String
+        let origPath: String?
+    }
+
     /// Bounds the `git ls-files` subprocesses this engine spawns — mirrors
     /// `SpacesDeviceWorkspaceDiffEngine.gitCommandTimeout`'s reasoning (a wedged repository must not
     /// permanently occupy the workspace's serial git queue).
@@ -1069,6 +1115,166 @@ enum SpacesDeviceWorkspaceFileListEngine {
     static func listFiles(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> SpacesDeviceWorkspaceFileListResult {
         guard try gitClient.isRepoStrict(path: workspaceDir) else { return listFilesystemFiles(workspaceDir: workspaceDir) }
         return try listGitFiles(workspaceDir: workspaceDir, gitClient: gitClient)
+    }
+
+    static func gitMembershipContext(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, indexCache: GitMembershipIndexCache? = nil) throws
+        -> GitMembershipContext?
+    {
+        guard try gitClient.isRepoStrict(path: workspaceDir) else { return nil }
+        let prefix = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(["-C", workspaceDir, "rev-parse", "--show-prefix"], timeout: gitCommandTimeout))
+        return GitMembershipContext(workspaceDir: workspaceDir, workspacePrefix: prefix, indexCache: indexCache ?? GitMembershipIndexCache())
+    }
+
+    /// Cheap detector for "would `workspaceFileList` produce a different exact `{paths, truncated}`
+    /// result?" on a git checkout. It intentionally tracks only membership-affecting facts:
+    /// resolved `HEAD` commit for clean tracked-set changes, plus a scoped
+    /// `git status --porcelain -z --untracked-files=all --ignored=matching` reduction that ignores
+    /// ordinary same-membership content churn while still noticing additions/removals/renames,
+    /// ignored↔unignored transitions, and a dirty/untracked file crossing the 10 MiB openability
+    /// threshold. The exact listing is recomputed only when this token changes.
+    static func gitMembershipChangeToken(context: GitMembershipContext, gitClient: RemoteWorkspaceGitClient) throws -> String {
+        let statusOutput = try gitClient.runGitAndCapture(
+            ["-C", context.workspaceDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching", "--", "."],
+            timeout: gitCommandTimeout, environmentOverrides: ["GIT_OPTIONAL_LOCKS": "0"])
+        let entries = membershipEntries(fromPorcelainZ: statusOutput, workspacePrefix: context.workspacePrefix)
+        // Read this after status: status is run with optional index locks disabled, so ordinary content
+        // churn does not rewrite the index and visibility-flag edits are represented by settled metadata.
+        let indexMetadataFingerprint = try gitIndexMetadataFingerprint(workspaceDir: context.workspaceDir, gitClient: gitClient)
+        // `HEAD` itself may be a symbolic ref, whose file stays unchanged while the ref it names
+        // advances. Hash the resolved commit rather than HEAD/index metadata: staging ordinary
+        // content edits changes index metadata but not the list, while a commit changes tracked
+        // membership even when the working tree is clean. An unborn repository has no HEAD commit
+        // but remains a valid git workspace, so represent that stable state explicitly.
+        let head = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(
+                ["-C", context.workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD"], timeout: gitCommandTimeout, allowedExitCodes: [0, 1]))
+
+        var input = Data()
+        input.append(Data("head:\(head.isEmpty ? "unborn" : head)\n".utf8))
+        for entry in entries {
+            if entry.status == "??" {
+                input.append(Data("untracked|\(entry.path)|\(membershipState(path: entry.path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+                continue
+            }
+            if entry.status == "!!" {
+                // Ignored files do not list by themselves, but an ignored in-workspace file can be
+                // the target of a tracked symlink. Its threshold/type transition then changes that
+                // tracked entry's openability, so retain only this membership-relevant state.
+                input.append(Data("ignored|\(entry.path)|\(membershipState(path: entry.path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+                continue
+            }
+            if entry.status.contains("R") || entry.status.contains("C") {
+                input.append(
+                    Data(
+                        "rename|\(entry.origPath ?? "")|\(entry.path)|\(membershipState(path: entry.path, workspaceDir: context.workspaceDir).rawValue)\n"
+                            .utf8))
+                continue
+            }
+            if entry.status.contains("D") {
+                input.append(Data("deleted|\(entry.path)\n".utf8))
+                continue
+            }
+            if entry.status.contains("A") {
+                input.append(Data("added|\(entry.path)|\(membershipState(path: entry.path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+                continue
+            }
+            let state = membershipState(path: entry.path, workspaceDir: context.workspaceDir)
+            if state != .listed { input.append(Data("openability|\(entry.path)|\(state.rawValue)\n".utf8)) }
+        }
+        // Git refreshes the index's stat-cache fields while running `status`, so its mtime is not a
+        // logical index-change signal: using it here would re-scan a large index on every content edit.
+        // HEAD and the sparse-checkout pattern file are the relevant cheap signals for the cached mode
+        // set. Staged symlink changes are already represented in the scoped porcelain entries below;
+        // committed symlink changes move HEAD and refresh the set.
+        let indexRefreshKey = "head:\(head)|sparse:\(try sparseCheckoutFingerprint(workspaceDir: context.workspaceDir, gitClient: gitClient))"
+        let indexEntries = try context.indexCache.entries(for: indexRefreshKey, metadataFingerprint: indexMetadataFingerprint, refreshMetadata: true)
+        { try trackedIndexEntries(workspaceDir: context.workspaceDir, gitClient: gitClient) }
+        for path in indexEntries.skipWorktreePaths {
+            // `git status` intentionally stays quiet for a clean skip-worktree entry even when sparse
+            // checkout materializes or removes its file. Include the on-disk membership state so those
+            // transitions invalidate the cached exact listing.
+            input.append(Data("skip-worktree|\(path)|\(membershipState(path: path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+        }
+        // Porcelain collapses an ignored directory to one `!! ignored/` entry. That is not enough to
+        // detect a tracked symlink whose target lives below that directory: the symlink itself is clean,
+        // while its target can cross the 10 MiB/openability boundary that determines whether the symlink
+        // appears in the exact listing. Read the index's symlink entries directly and retain only their
+        // current openability state; ordinary content churn for a still-listed target remains ignored.
+        for path in indexEntries.symlinkPaths {
+            let state = membershipState(path: path, workspaceDir: context.workspaceDir)
+            if state != .listed { input.append(Data("symlink|\(path)|\(state.rawValue)\n".utf8)) }
+        }
+        // Clean tracked regular files are absent from porcelain. Keep checking only files that were
+        // already known to be oversized, so a shrink below the openability cap is observed without
+        // stat'ing every tracked file on every stable poll tick.
+        for path in indexEntries.oversizedPaths {
+            input.append(Data("oversized|\(path)|\(membershipState(path: path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+        }
+        for path in indexEntries.assumeUnchangedPaths {
+            input.append(Data("assume-unchanged|\(path)|\(membershipState(path: path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+        }
+        for path in indexEntries.gitlinkPaths {
+            input.append(Data("gitlink|\(path)|\(membershipState(path: path, workspaceDir: context.workspaceDir).rawValue)\n".utf8))
+        }
+        return SpacesDeviceWorkspaceGitHashing.sha256Hex(input)
+    }
+
+    /// Returns a cheap logical-index refresh signal. `git status` rewrites index stat-cache fields during
+    /// ordinary content churn, so the index file's mtime is intentionally not used. A sparse-checkout
+    /// pattern update is the clean tracked-file membership transition that status leaves silent; its
+    /// pattern file identity captures that update without scanning all index entries. Staged symlink
+    /// additions/removals appear in scoped porcelain, and committed changes move HEAD.
+    private static func sparseCheckoutFingerprint(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> String {
+        let rawPath = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(["-C", workspaceDir, "rev-parse", "--git-path", "info/sparse-checkout"], timeout: gitCommandTimeout))
+        let sparsePath = URL(fileURLWithPath: rawPath, relativeTo: URL(fileURLWithPath: workspaceDir)).standardizedFileURL.path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: sparsePath) else { return "absent" }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+        return "\(fileNumber):\(size):\(modified)"
+    }
+
+    /// The index file's metadata is a cheap signal for visibility-flag edits made after a subscription
+    /// starts. `git status` disables optional index locks, so ordinary content churn does not rewrite the
+    /// index and dirty ticks can still observe real flag changes without scanning unchanged entries.
+    private static func gitIndexMetadataFingerprint(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> String {
+        let rawPath = strippingTrailingNewline(
+            try gitClient.runGitAndCapture(["-C", workspaceDir, "rev-parse", "--git-path", "index"], timeout: gitCommandTimeout))
+        let indexPath = URL(fileURLWithPath: rawPath, relativeTo: URL(fileURLWithPath: workspaceDir)).standardizedFileURL.path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: indexPath) else { return "absent" }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+        return "\(fileNumber):\(size):\(modified)"
+    }
+
+    /// Returns tracked symlinks, gitlinks, visibility-flagged paths, and oversized regular files from one index
+    /// scan. This is refreshed only when the logical HEAD/sparse or cheap index metadata fingerprint moves,
+    /// so stable 2s detector ticks do not repeatedly walk a large index.
+    private static func trackedIndexEntries(workspaceDir: String, gitClient: RemoteWorkspaceGitClient) throws -> GitMembershipIndexCache.EntrySet {
+        let output = try gitClient.runGitAndCapture(["-C", workspaceDir, "ls-files", "--cached", "-v", "--stage", "-z"], timeout: gitCommandTimeout)
+        var symlinks = Set<String>()
+        var skipWorktree = Set<String>()
+        var oversized = Set<String>()
+        var assumeUnchanged = Set<String>()
+        var gitlinks = Set<String>()
+        for record in output.split(separator: "\0", omittingEmptySubsequences: true) {
+            guard let tab = record.firstIndex(of: "\t") else { continue }
+            let metadata = record[..<tab]
+            let fields = metadata.split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count >= 2 else { continue }
+            let path = String(record[record.index(after: tab)...])
+            if metadata.first == "S" || metadata.first == "s" { skipWorktree.insert(path) }
+            if metadata.first == "h" || metadata.first == "s" { assumeUnchanged.insert(path) }
+            if fields[1] == "120000" { symlinks.insert(path) }
+            if fields[1] == "160000" { gitlinks.insert(path) }
+            if fields[1] != "120000", membershipState(path: path, workspaceDir: workspaceDir) == .oversized { oversized.insert(path) }
+        }
+        return GitMembershipIndexCache.EntrySet(
+            symlinkPaths: symlinks.sorted(), skipWorktreePaths: skipWorktree.sorted(), oversizedPaths: oversized.sorted(),
+            assumeUnchangedPaths: assumeUnchanged.sorted(), gitlinkPaths: gitlinks.sorted())
     }
 
     /// Lists every path a git checkout owns, sorted ascending and capped at `maxPaths`. Two `ls-files`
@@ -1203,6 +1409,75 @@ enum SpacesDeviceWorkspaceFileListEngine {
     private static func splitNULDelimited(_ output: String) -> [String] {
         output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
     }
+
+    private static func strippingTrailingNewline(_ output: String) -> String {
+        var result = output
+        if result.hasSuffix("\n") { result.removeLast() }
+        return result
+    }
+
+    private static func membershipState(path: String, workspaceDir: String) -> MembershipState {
+        let fullPath = (workspaceDir as NSString).appendingPathComponent(path)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fullPath) else { return .missing }
+        switch attributes[.type] as? FileAttributeType {
+        case .typeRegular: return isWithinMaxBytes(attributes) ? .listed : .oversized
+        case .typeSymbolicLink:
+            guard let resolvedPath = try? SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: path, workspaceDir: workspaceDir),
+                let resolvedAttributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
+            else { return .notOpenable }
+            guard resolvedAttributes[.type] as? FileAttributeType == .typeRegular else { return .notOpenable }
+            return isWithinMaxBytes(resolvedAttributes) ? .listed : .oversized
+        default: return .notOpenable
+        }
+    }
+
+    private static func membershipEntries(fromPorcelainZ output: String, workspacePrefix: String) -> [MembershipEntry] {
+        let tokens = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        var entries: [MembershipEntry] = []
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            index += 1
+            guard token.count > 3 else { continue }
+            let status = String(token.prefix(2))
+            let repoRelativePath = String(token.dropFirst(3))
+            var repoRelativeOrigPath: String?
+            if status.contains("R") || status.contains("C"), index < tokens.count {
+                repoRelativeOrigPath = tokens[index]
+                index += 1
+            }
+            if workspacePrefix.isEmpty {
+                entries.append(MembershipEntry(status: status, path: repoRelativePath, origPath: repoRelativeOrigPath))
+                continue
+            }
+
+            let pathInWorkspace = repoRelativePath.hasPrefix(workspacePrefix)
+            let origInWorkspace = repoRelativeOrigPath?.hasPrefix(workspacePrefix) ?? false
+            guard pathInWorkspace || origInWorkspace else { continue }
+
+            if status.contains("R") || status.contains("C") {
+                switch (pathInWorkspace, origInWorkspace) {
+                case (true, true):
+                    entries.append(
+                        MembershipEntry(
+                            status: status, path: String(repoRelativePath.dropFirst(workspacePrefix.count)),
+                            origPath: repoRelativeOrigPath.map { String($0.dropFirst(workspacePrefix.count)) }))
+                case (true, false):
+                    entries.append(MembershipEntry(status: "A ", path: String(repoRelativePath.dropFirst(workspacePrefix.count)), origPath: nil))
+                case (false, true):
+                    entries.append(
+                        MembershipEntry(status: " D", path: String((repoRelativeOrigPath ?? "").dropFirst(workspacePrefix.count)), origPath: nil))
+                case (false, false): break
+                }
+                continue
+            }
+
+            guard pathInWorkspace else { continue }
+            entries.append(MembershipEntry(status: status, path: String(repoRelativePath.dropFirst(workspacePrefix.count)), origPath: nil))
+        }
+        return entries
+    }
+
 }
 
 /// Backs the read-only `workspaceRefList` Device API command: the branch and recent-commit lists the

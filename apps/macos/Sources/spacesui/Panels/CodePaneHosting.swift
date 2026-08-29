@@ -25,8 +25,7 @@ struct CodePaneAgentStartSnapshot: Equatable, Sendable {
 
     init(
         sessionFound: Bool = true, belongsToWorkspace: Bool = true, state: TerminalSessionState?, detectedKind: TerminalDetectedAgentKind?,
-        bracketedPasteActive: Bool,
-        agent: CodePaneRunningAgent?
+        bracketedPasteActive: Bool, agent: CodePaneRunningAgent?
     ) {
         self.sessionFound = sessionFound
         self.belongsToWorkspace = belongsToWorkspace
@@ -69,9 +68,7 @@ struct CodePaneAgentStartSnapshot: Equatable, Sendable {
     /// Inserts the terminal created by Start Agent into a background tab. The Editor remains the
     /// selected responder; this is deliberately host-owned because only the panel coordinator knows
     /// where a workspace's unselected terminal tabs belong.
-    func codePaneInstallBackgroundCommandSession(
-        workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse
-    )
+    func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse)
 }
 
 extension AppKitController: CodePaneHosting {
@@ -102,11 +99,7 @@ extension AppKitController: CodePaneHosting {
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {
         let epoch = panelCoordinator.paneReplacementEpoch
         applyDeviceMutationResponse(response, deviceID: deviceID, epoch: epoch)
-        guard let sessionID = response.sessionID,
-            let request = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: response.overview)
-        else {
-            return
-        }
+        guard let request = Self.startedWorkspaceCommandPaneOpenRequest(deviceID: deviceID, response: response) else { return }
         _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .init(focus: .withoutFocus))
     }
 }

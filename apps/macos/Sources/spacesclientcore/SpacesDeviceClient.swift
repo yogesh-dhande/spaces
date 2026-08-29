@@ -704,14 +704,13 @@ public enum SpacesDeviceClient {
     /// Reads one bounded changed-file metadata chunk before the Editor begins fetching patch bodies.
     public static func workspaceDiffManifestChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String? = nil, fileIndex: Int,
-        device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceDiffManifestChunkResult {
         let response = try request(
             .init(
                 command: .workspaceDiffManifestChunk(
-                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex))), device: device,
-            clientApp: clientApp, profile: profile)
+                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex))),
+            device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceDiffManifestChunk else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -722,16 +721,15 @@ public enum SpacesDeviceClient {
     /// range unchanged for every later offset.
     public static func workspaceDiffFileChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
-        transferID: String? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        transferID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceDiffFileChunkResult {
         let response = try request(
             .init(
                 command: .workspaceDiffFileChunk(
                     .init(
                         workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                        byteOffset: byteOffset,
-                        transferID: transferID))), device: device, clientApp: clientApp, profile: profile)
+                        byteOffset: byteOffset, transferID: transferID))), device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceDiffFileChunk else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -743,16 +741,14 @@ public enum SpacesDeviceClient {
     /// ambiguous connection failure.
     public static func cancelWorkspaceDiffFileChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
-        transferID: String,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        transferID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws {
         let response = try request(
             .init(
                 command: .workspaceDiffFileChunk(
                     .init(
                         workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                        byteOffset: byteOffset,
-                        transferID: transferID, cancel: true))), device: device, clientApp: clientApp, profile: profile)
+                        byteOffset: byteOffset, transferID: transferID, cancel: true))), device: device, clientApp: clientApp, profile: profile)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
     }
 
@@ -884,6 +880,22 @@ public enum SpacesDeviceClient {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
         let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
             workspaceID: workspaceID, path: relativePath, authToken: authToken, clientApp: clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            onDisconnect: onDisconnect)
+        try client.start()
+        return client
+    }
+
+    /// Opens a live per-workspace file-list-signature subscription: the paired daemon pushes a frame
+    /// whenever the authoritative `workspaceFileList` result changes, and the caller re-fetches
+    /// `workspaceFileList` on delivery rather than trusting any listing payload on the frame.
+    public static func subscribeWorkspaceFileListSignature(
+        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws -> SpacesDeviceWorkspaceFileListSignatureStreamClient {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let client = try SpacesDeviceWorkspaceFileListSignatureStreamClient(
+            workspaceID: workspaceID, authToken: authToken, clientApp: clientApp,
             resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
             onDisconnect: onDisconnect)
         try client.start()
@@ -1332,15 +1344,15 @@ public enum SpacesDeviceClient {
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk,
-            .workspaceFileList, .workspaceRefList:
+            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
             .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns, .workspaceReviewCommentList,
-            .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
+            .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations,
+            .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
+            .workspaceReviewCommentsSend:
             defaultRequestTimeoutSeconds
         }
     }

@@ -8,13 +8,11 @@ import { SpacesBridge, WorkspaceFileListResult } from "../bridge/types";
  * not at construction: a pane that never opens the overlay or switches to the Files tab never pays
  * for the listing at all.
  *
- * `root.ts` owns the one instance for a pane and calls `invalidate()` from
- * `resubscribeDiffSignature`'s callback — the same push event that refreshes the diff — so files
- * added or removed by an agent (or any other outside change) reappear without a manual refresh.
- * That push is Diff mode's own signal, though: the Swift host only opens the diff-signature stream
- * after a successful `workspaceDiffManifestChunk` pull, which a non-git workspace never has (`workspaceFileList`
- * is its only way to open files at all) and a pane rehydrated straight into Editor mode may not have
- * yet either. `getFresh()` exists for those cases — see its own doc comment.
+ * `root.ts` owns the one instance for a pane and calls `invalidate()` from the dedicated
+ * workspace-level `spaces:fileListSignature` push, so files added or removed by an agent (or any
+ * other outside change) reappear without a manual refresh even when the active diff scope would not
+ * change. `getFresh()` exists for the first show of Files/⌘P before that stream has ever fired — see
+ * its own doc comment.
  *
  * Invariant: at most one `workspaceFileList` bridge call is outstanding at a time, across `get()`
  * and `getFresh()` combined (`inFlight`). `workspaceFileList` runs on the daemon's per-workspace
@@ -90,10 +88,9 @@ export class WorkspaceFileListCache {
 
   /** Stale-while-revalidate entry point for the two "show" points where the listing must be correct
    *  even though nothing pushed an invalidation: the ⌘P overlay opening, and the Files tab becoming
-   *  visible (tab switch or `reattach()`). Both moments matter because the ONLY invalidation signal
-   *  — the diff-signature push `resubscribeDiffSignature` relays into `invalidate()` — rides a stream
-   *  the Swift host opens only after a successful diff fetch; a non-git workspace never gets one, and
-   *  neither does a pane still sitting on its first Editor-mode render.
+   *  visible (tab switch or `reattach()`). Both moments matter because the workspace-level
+   *  `spaces:fileListSignature` stream only starts after the first successful `workspaceFileList`
+   *  pull, so a pane's first visible consumer still has to revalidate on demand.
    *
    *  With nothing cached yet, this is just `get()` — there's no stale value to keep serving while a
    *  fetch is outstanding. With a cached value already in hand, it returns (and dedupes) a background

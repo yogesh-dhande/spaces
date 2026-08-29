@@ -1,9 +1,9 @@
 import Foundation
 import Testing
-
-@testable import spacesdeviceapi
 import spacesdevicecore
 import spacesruntimecore
+
+@testable import spacesdeviceapi
 
 #if canImport(Darwin)
     import Darwin
@@ -72,8 +72,7 @@ import spacesruntimecore
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: outside) }
         try "secret".write(to: outside.appendingPathComponent("secret.txt"), atomically: true, encoding: .utf8)
-        try FileManager.default.createSymbolicLink(
-            at: workspace.appendingPathComponent("escape-link"), withDestinationURL: outside)
+        try FileManager.default.createSymbolicLink(at: workspace.appendingPathComponent("escape-link"), withDestinationURL: outside)
 
         #expect(throws: SpacesDeviceWorkspacePathResolver.PathError.escapesWorkspace) {
             _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: "escape-link/secret.txt", workspaceDir: workspace.path)
@@ -115,8 +114,7 @@ import spacesruntimecore
         try FileManager.default.createSymbolicLink(
             atPath: workspace.appendingPathComponent("dangling-inside-link").path, withDestinationPath: "real.txt")
 
-        let resolved = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(
-            relativePath: "dangling-inside-link", workspaceDir: workspace.path)
+        let resolved = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: "dangling-inside-link", workspaceDir: workspace.path)
         #expect(resolved == workspace.appendingPathComponent("real.txt").resolvingSymlinksInPath().path)
     }
 
@@ -132,8 +130,7 @@ import spacesruntimecore
         for index in 0..<linkCount {
             let linkName = "link-\(index)"
             let targetName = index == linkCount - 1 ? "/does/not/exist" : "link-\(index + 1)"
-            try FileManager.default.createSymbolicLink(
-                atPath: workspace.appendingPathComponent(linkName).path, withDestinationPath: targetName)
+            try FileManager.default.createSymbolicLink(atPath: workspace.appendingPathComponent(linkName).path, withDestinationPath: targetName)
         }
 
         #expect(throws: SpacesDeviceWorkspacePathResolver.PathError.escapesWorkspace) {
@@ -144,19 +141,13 @@ import spacesruntimecore
 
 @Suite struct SpacesDeviceWorkspaceGitHashingTests {
     @Test func matchesKnownSHA256Vectors() {
-        #expect(
-            SpacesDeviceWorkspaceGitHashing.sha256Hex(Data())
-                == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-        #expect(
-            SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("abc".utf8))
-                == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        #expect(SpacesDeviceWorkspaceGitHashing.sha256Hex(Data()) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        #expect(SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 }
 
 @Suite struct SpacesDeviceWorkspaceBinaryGuessTests {
-    @Test func plainTextIsNotBinary() {
-        #expect(!SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(Data("hello world\n".utf8)))
-    }
+    @Test func plainTextIsNotBinary() { #expect(!SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(Data("hello world\n".utf8))) }
 
     @Test func dataContainingANULByteIsBinary() {
         var bytes = Data("hello".utf8)
@@ -189,15 +180,15 @@ import spacesruntimecore
     }
 
     @Test func aLargeManifestResolvesEachPathAndKeepsTheFirstDuplicatePlan() {
-        let first = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-            path: "duplicate.md", oldPath: nil, status: .modified, source: .untracked)
+        let first = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(path: "duplicate.md", oldPath: nil, status: .modified, source: .untracked)
         let duplicate = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-            path: "duplicate.md", oldPath: nil, status: .deleted,
-            source: .tracked(baseRef: "HEAD", targetRef: nil))
-        let plans = [first] + (0..<10_000).map { index in
-            SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-                path: "Sources/file-" + String(index) + ".swift", oldPath: nil, status: .modified, source: .untracked)
-        } + [duplicate]
+            path: "duplicate.md", oldPath: nil, status: .deleted, source: .tracked(baseRef: "HEAD", targetRef: nil))
+        let plans =
+            [first]
+            + (0..<10_000).map { index in
+                SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+                    path: "Sources/file-" + String(index) + ".swift", oldPath: nil, status: .modified, source: .untracked)
+            } + [duplicate]
         let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
 
         #expect(snapshot.plans.count == 10_002)
@@ -208,26 +199,26 @@ import spacesruntimecore
     }
 
     private func buildDiff(
-        workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient,
-        deadlineStart: Date = Date()
+        workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()
     ) throws -> DiffResult {
         let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
             workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart)
-        let transferDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-test-\(UUID().uuidString)", isDirectory: true)
+        let transferDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-diff-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: transferDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: transferDirectory) }
         let files = try snapshot.plans.compactMap { plan -> DiffFile? in
             let outputURL = transferDirectory.appendingPathComponent(UUID().uuidString)
             FileManager.default.createFile(atPath: outputURL.path, contents: Data())
-            guard let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
-                snapshot: snapshot, workspaceDir: workspaceDir, relativePath: plan.path, outputURL: outputURL, gitClient: gitClient,
-                deadlineStart: deadlineStart)
+            guard
+                let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
+                    snapshot: snapshot, workspaceDir: workspaceDir, relativePath: plan.path, outputURL: outputURL, gitClient: gitClient,
+                    deadlineStart: deadlineStart)
             else { return nil }
             // Match the chunk contract: a refused/non-produced body has no payload, not an empty text
             // patch. This is distinct from a generated patch whose textual contents happen to be empty.
-            let patch = transfer.file.isBinary || transfer.patchByteCount == 0
-                ? nil
-                : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
+            let patch =
+                transfer.file.isBinary || transfer.patchByteCount == 0 ? nil : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
             return DiffFile(
                 path: transfer.file.path, oldPath: transfer.file.oldPath, status: transfer.file.status, patch: patch,
                 isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA)
@@ -527,9 +518,7 @@ import spacesruntimecore
 
         let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         #expect(result.files.count == 2)
-        for file in result.files {
-            #expect(file.patch != nil)
-        }
+        for file in result.files { #expect(file.patch != nil) }
     }
 
     @Test func aNonASCIIFilenameRoundTripsItsExactPathWithAPatch() throws {
@@ -737,8 +726,7 @@ import spacesruntimecore
         try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "attributes"], cwd: repo.path)
         let client = RemoteWorkspaceGitClient()
 
-        try "plain ascii text content, nothing binary here".write(
-            to: repo.appendingPathComponent("blob.bin"), atomically: true, encoding: .utf8)
+        try "plain ascii text content, nothing binary here".write(to: repo.appendingPathComponent("blob.bin"), atomically: true, encoding: .utf8)
 
         let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
         let file = try #require(result.files.first { $0.path == "blob.bin" })
@@ -837,21 +825,20 @@ import spacesruntimecore
         let shim = repo.appendingPathComponent("git-race-shim.sh")
         let marker = repo.appendingPathComponent(".race-staged")
         try """
-            #!/bin/sh
-            case " $* " in
-              *" --name-status "*)
-                if [ ! -e "$SPACES_RACE_MARKER" ]; then
-                  git -C "$SPACES_RACE_REPO" add raced.txt
-                  : > "$SPACES_RACE_MARKER"
-                fi
-                ;;
-            esac
-            exec git "$@"
-            """.write(to: shim, atomically: true, encoding: .utf8)
+        #!/bin/sh
+        case " $* " in
+          *" --name-status "*)
+            if [ ! -e "$SPACES_RACE_MARKER" ]; then
+              git -C "$SPACES_RACE_REPO" add raced.txt
+              : > "$SPACES_RACE_MARKER"
+            fi
+            ;;
+        esac
+        exec git "$@"
+        """.write(to: shim, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
         let client = RemoteWorkspaceGitClient(
-            gitExecutable: shim.path,
-            environmentOverrides: ["SPACES_RACE_REPO": repo.path, "SPACES_RACE_MARKER": marker.path])
+            gitExecutable: shim.path, environmentOverrides: ["SPACES_RACE_REPO": repo.path, "SPACES_RACE_MARKER": marker.path])
 
         let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
 
@@ -1097,8 +1084,7 @@ import spacesruntimecore
     /// every test using this fixture passes as `workspaceDir`, exactly as the daemon does for a subdir
     /// workspace).
     private func makeRepoWithSubdirWorkspace() throws -> (root: URL, workspace: URL) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "spaces-diff-engine-subdir-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-engine-subdir-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("packages/app"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("other"), withIntermediateDirectories: true)
         try runGit(["init", "--initial-branch", "main"], cwd: root.path)
@@ -1166,12 +1152,18 @@ import spacesruntimecore
     }
 
     @Test func anEmptyOrWhitespaceRefNameNormalizesToTheSameScopeAsNil() {
-        #expect(SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "") == SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: nil))
-        #expect(SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "   ") == SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: nil))
+        #expect(
+            SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "")
+                == SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: nil))
+        #expect(
+            SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "   ")
+                == SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: nil))
     }
 
     @Test func differentWorkspacesWithTheSameRefNameAreDistinctKeys() {
-        #expect(SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "main") != SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w2", refName: "main"))
+        #expect(
+            SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w1", refName: "main")
+                != SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "w2", refName: "main"))
     }
 }
 
@@ -1211,5 +1203,384 @@ import spacesruntimecore
         // Ticks 2-9: sentinel is unchanged and not a keepalive tick, so nothing broadcasts.
         // Ticks 10 and 20: unchanged but the 10th-tick keepalive still fires.
         #expect(broadcastTicks == [1, 10, 20])
+    }
+
+    @Test func aFileListProviderThatPermanentlyReturnsNilStillBroadcastsOnTheTransitionAndOnEveryKeepaliveTick() {
+        var lastBroadcastSignature: String?
+        var broadcastTicks: [Int] = []
+        for tick in 1...21 {
+            let signature = Optional<String>.none ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+            let changed = signature != lastBroadcastSignature
+            guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: tick, changed: changed) else { continue }
+            lastBroadcastSignature = signature
+            broadcastTicks.append(tick)
+        }
+        #expect(broadcastTicks == [1, 10, 20])
+    }
+}
+
+@Suite struct SpacesDeviceWorkspaceFileListSignatureTests {
+    @Test func newlineContainingPathsDoNotCollideWithADifferentMembershipShape() {
+        let first = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["a\nb", "c"], truncated: false))
+        let second = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["a", "b\nc"], truncated: false))
+
+        #expect(first != second)
+    }
+}
+
+@Suite struct SpacesDeviceWorkspaceFileListDetectorTests {
+    @Test func gitDetectorIgnoresContentChurnButDetectsMembershipAndOpenabilityChanges() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let initial = try token(repo, client)
+
+        // A coding agent repeatedly editing an already-listed tracked file must not make the
+        // subscription rescan the full tree merely because the content changed.
+        try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        #expect(try token(repo, client) == initial)
+
+        let untracked = repo.appendingPathComponent("new.txt")
+        try "small".write(to: untracked, atomically: true, encoding: .utf8)
+        let added = try token(repo, client)
+        #expect(added != initial)
+
+        // The list excludes a file once it crosses workspaceFileRead's cap, even though its git
+        // membership is otherwise unchanged, so the detector includes this threshold state.
+        try Data(repeating: 0, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: untracked)
+        let oversized = try token(repo, client)
+        #expect(oversized != added)
+
+        try FileManager.default.removeItem(at: untracked)
+        #expect(try token(repo, client) != oversized)
+
+        try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
+        #expect(try token(repo, client) != initial)
+    }
+
+    @Test func gitDetectorDetectsCleanTrackedFileShrinkingBelowOpenabilityCap() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.bin")
+        try Data(repeating: 0, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: trackedPath)
+        try runGit(["add", "tracked.bin"], cwd: repo.path)
+        try runGit(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add oversized tracked file"], cwd: repo.path)
+
+        let oversized = try token(repo, client)
+        try Data(repeating: 0, count: SpacesDeviceAPIServer.workspaceFileMaxBytes).write(to: trackedPath)
+
+        // A clean tracked file is absent from porcelain, so its cap crossing must still invalidate the
+        // detector token even though ordinary content churn for already-listed tracked files is ignored.
+        #expect(try token(repo, client) != oversized)
+    }
+
+    @Test func gitDetectorDetectsAssumeUnchangedTrackedFileDeletion() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        try "assume unchanged".write(to: repo.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add assume unchanged file"], cwd: repo.path)
+        try runGit(["update-index", "--assume-unchanged", "tracked.txt"], cwd: repo.path)
+
+        let initial = try token(repo, client)
+        try FileManager.default.removeItem(at: repo.appendingPathComponent("tracked.txt"))
+
+        // Assume-unchanged files are hidden from porcelain status, so the cached index metadata must
+        // still make a deletion visible to the file-list detector.
+        #expect(try token(repo, client) != initial)
+    }
+
+    @Test func gitDetectorDetectsAssumeUnchangedFlagAppliedAfterSubscriptionStarts() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.txt")
+        try "assume unchanged".write(to: trackedPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add assume unchanged file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try runGit(["update-index", "--assume-unchanged", "tracked.txt"], cwd: repo.path)
+        try FileManager.default.removeItem(at: trackedPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsSkipWorktreeFlagAppliedAfterSubscriptionStarts() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.txt")
+        try "skip worktree".write(to: trackedPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add skip worktree file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try runGit(["update-index", "--skip-worktree", "tracked.txt"], cwd: repo.path)
+        try FileManager.default.removeItem(at: trackedPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsAssumeUnchangedTransitionWithUnrelatedDirtyEntry() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.txt")
+        try "assume unchanged".write(to: trackedPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try runGit(["update-index", "--assume-unchanged", "tracked.txt"], cwd: repo.path)
+        try "ignored churn".write(to: repo.appendingPathComponent("ignored.tmp"), atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: trackedPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsSkipWorktreeTransitionWithUnrelatedDirtyEntry() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.txt")
+        try "skip worktree".write(to: trackedPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try runGit(["update-index", "--skip-worktree", "tracked.txt"], cwd: repo.path)
+        try "ignored churn".write(to: repo.appendingPathComponent("ignored.tmp"), atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: trackedPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsAssumeUnchangedTransitionWithUnrelatedTrackedDirtyEntry() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let hiddenPath = repo.appendingPathComponent("hidden.txt")
+        try "hidden".write(to: hiddenPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "hidden.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add hidden file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try "ordinary dirty content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["update-index", "--assume-unchanged", "hidden.txt"], cwd: repo.path)
+        try FileManager.default.removeItem(at: hiddenPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsCombinedAssumeUnchangedAndSkipWorktreeTransition() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        let trackedPath = repo.appendingPathComponent("tracked.txt")
+        try "combined flags".write(to: trackedPath, atomically: true, encoding: .utf8)
+        try runGit(["add", "tracked.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add combined flags file"], cwd: repo.path)
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try runGit(["update-index", "--assume-unchanged", "--skip-worktree", "tracked.txt"], cwd: repo.path)
+        try FileManager.default.removeItem(at: trackedPath)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsIgnoredToUnignoredTransitionsAndTrackedHeadChanges() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        try "ignored".write(to: repo.appendingPathComponent("ignored.tmp"), atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("tracked-link.txt").path, withDestinationPath: "ignored.tmp")
+        try runGit(["add", "tracked-link.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add symlink"], cwd: repo.path)
+        let ignored = try token(repo, client)
+
+        // An ignored target can still determine whether a tracked symlink is openable and therefore
+        // listed. Its cap crossing must move the detector without making ignored content churn noisy.
+        try Data(repeating: 0, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: repo.appendingPathComponent("ignored.tmp"))
+        #expect(try token(repo, client) != ignored)
+
+        try FileManager.default.removeItem(at: repo.appendingPathComponent(".gitignore"))
+        let unignored = try token(repo, client)
+        #expect(unignored != ignored)
+
+        try runGit(["add", "-A"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add ignored"], cwd: repo.path)
+        #expect(try token(repo, client) != unignored)
+    }
+
+    @Test func gitDetectorDetectsTrackedSymlinkTargetChangesInsideIgnoredDirectory() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("ignored", isDirectory: true), withIntermediateDirectories: true)
+        try "ignored/\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try Data(repeating: 0, count: 32).write(to: repo.appendingPathComponent("ignored/target.txt"))
+        try FileManager.default.createSymbolicLink(
+            atPath: repo.appendingPathComponent("tracked-link.txt").path, withDestinationPath: "ignored/target.txt")
+        try runGit(["add", "tracked-link.txt", ".gitignore"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add ignored symlink"], cwd: repo.path)
+
+        let initial = try token(repo, client)
+        try Data(repeating: 0, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: repo.appendingPathComponent("ignored/target.txt"))
+
+        // `git status --ignored=matching` reports only `!! ignored/` for the target directory. The
+        // tracked symlink remains clean, so the detector must inspect index mode 120000 entries too.
+        #expect(try token(repo, client) != initial)
+    }
+
+    @Test func gitDetectorDetectsSparseCheckoutMaterializationChangesForCleanTrackedFiles() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        try "sparse candidate".write(to: repo.appendingPathComponent("sparse.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "sparse.txt"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add sparse candidate"], cwd: repo.path)
+        let initial = try token(repo, client)
+
+        try runGit(["sparse-checkout", "init", "--no-cone"], cwd: repo.path)
+        try runGit(["sparse-checkout", "set", "README.md"], cwd: repo.path)
+        #expect(try token(repo, client) != initial)
+        #expect(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("sparse.txt").path))
+
+        try runGit(["sparse-checkout", "set", "README.md", "sparse.txt"], cwd: repo.path)
+        #expect(try token(repo, client) != initial)
+        #expect(FileManager.default.fileExists(atPath: repo.appendingPathComponent("sparse.txt").path))
+    }
+
+    @Test func gitDetectorScopesStatusToANestedWorkspaceDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-file-list-monorepo-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("packages/app", isDirectory: true), withIntermediateDirectories: true)
+        try "app".write(to: root.appendingPathComponent("packages/app/README.md"), atomically: true, encoding: .utf8)
+        try "root".write(to: root.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        try runGit(["init", "--initial-branch", "main"], cwd: root.path)
+        try runGit(["add", "-A"], cwd: root.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: root.path)
+        let workspace = root.appendingPathComponent("packages/app", isDirectory: true)
+        let client = RemoteWorkspaceGitClient()
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: workspace.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+
+        // A monorepo agent can edit another package while this workspace is open. That must not cause
+        // this workspace's file-list stream to perform an exact refresh.
+        try "root edit".write(to: root.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) == initial)
+
+        try "nested addition".write(to: workspace.appendingPathComponent("new.swift"), atomically: true, encoding: .utf8)
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorDetectsGitlinkChangingFromDirectoryToRegularFile() throws {
+        let repo = try makeRepository()
+        let subrepo = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-file-list-gitlink-(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: repo)
+            try? FileManager.default.removeItem(at: subrepo)
+        }
+        try FileManager.default.createDirectory(at: subrepo, withIntermediateDirectories: true)
+        try "submodule".write(to: subrepo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["init", "--initial-branch", "main"], cwd: subrepo.path)
+        try runGit(["add", "-A"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: subrepo.path)
+        let subrepoSHA = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["update-index", "--add", "--cacheinfo", "160000,\(subrepoSHA),submodule"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add gitlink"], cwd: repo.path)
+
+        let client = RemoteWorkspaceGitClient()
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let initial = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try "materialized regular file".write(to: repo.appendingPathComponent("submodule"), atomically: true, encoding: .utf8)
+
+        #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    @Test func gitDetectorCachesIndexMembershipUntilTheIndexChanges() throws {
+        let repo = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 1)
+
+        // Agent content churn does not rewrite the index, so stable ticks reuse the cached symlink and
+        // skip-worktree sets rather than scanning every index entry again.
+        try "content churn".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 1)
+
+        // Index membership/mode changes invalidate the cache and refresh the set exactly once. This also
+        // covers symlink additions/removals without paying the full-index scan on every poll.
+        try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("tracked-link.txt").path, withDestinationPath: "README.md")
+        try runGit(["add", "tracked-link.txt"], cwd: repo.path)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 2)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked symlink"], cwd: repo.path)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 3)
+        try FileManager.default.removeItem(at: repo.appendingPathComponent("tracked-link.txt"))
+        try runGit(["add", "-u"], cwd: repo.path)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 4)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "remove tracked symlink"], cwd: repo.path)
+        _ = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        #expect(context.indexCache.indexScanCount == 5)
+    }
+
+    private func token(_ repo: URL, _ client: RemoteWorkspaceGitClient) throws -> String {
+        guard let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(workspaceDir: repo.path, gitClient: client) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+    }
+
+    private func makeRepository() throws -> URL {
+        let repo = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-file-list-detector-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+        try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "ignored.tmp\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try runGit(["add", "-A"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+        return repo
+    }
+
+    @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown) }
+        return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
     }
 }

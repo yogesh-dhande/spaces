@@ -53,6 +53,10 @@ function rowPaths(host: HTMLElement): (string | undefined)[] {
   return [...host.querySelectorAll(".row")].map((row) => row.getAttribute("data-path") ?? undefined);
 }
 
+function rowId(path: string): string {
+  return `code-pane-quick-open-${encodeURIComponent(path)}`;
+}
+
 function inputOf(host: HTMLElement): HTMLInputElement {
   return host.querySelector("input") as HTMLInputElement;
 }
@@ -226,6 +230,75 @@ describe("QuickOpen — typing triggers fuzzy search", () => {
     // "src/foo.ts" scores higher: its "f" lands right at a path-segment start (after "/"), while
     // "src/xfoo.ts"'s "f" does not — see fuzzyMatch.ts's SEGMENT_START_BONUS.
     await vi.waitFor(() => expect(rowPaths(host)).toEqual(["src/foo.ts", "src/xfoo.ts"]));
+  });
+});
+
+describe("QuickOpen — accessibility identifiers", () => {
+  it("exposes the search and results with combobox/listbox semantics", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["src/a.ts", "src/b.ts"])));
+    const host = makeHost();
+    const quickOpen = new QuickOpen(host, cache, () => [], makeCallbacks());
+
+    quickOpen.show();
+    const input = inputOf(host);
+    input.value = "src";
+    input.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => expect(input.getAttribute("role")).toBe("combobox"));
+    const list = host.querySelector('[role="listbox"]');
+    expect(list?.id).toBe("code-pane-quick-open-list");
+    expect(input.getAttribute("aria-controls")).toBe(list?.id);
+    await vi.waitFor(() => expect(host.querySelectorAll('[role="option"]')).toHaveLength(2));
+    const rows = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
+    const first = rows[0]!;
+    const second = rows[1]!;
+    expect(first.getAttribute("aria-selected")).toBe("true");
+    expect(second.getAttribute("aria-selected")).toBe("false");
+    expect(input.getAttribute("aria-activedescendant")).toBe(first.id);
+  });
+
+  it("marks the empty state with a stable identifier", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["a.ts"])));
+    const host = makeHost();
+    const quickOpen = new QuickOpen(host, cache, () => [], makeCallbacks());
+
+    quickOpen.show();
+    const input = inputOf(host);
+    input.value = "missing.ts";
+    input.dispatchEvent(new Event("input"));
+
+    await vi.waitFor(() => expect(host.querySelector("#code-pane-quick-open-empty")).not.toBeNull());
+  });
+
+  it("marks each result row with a path-derived stable identifier", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["src/a.ts", "src/b.ts"])));
+    const host = makeHost();
+    const quickOpen = new QuickOpen(host, cache, () => [], makeCallbacks());
+
+    quickOpen.show();
+    const input = inputOf(host);
+    input.value = "src";
+    input.dispatchEvent(new Event("input"));
+
+    await vi.waitFor(() => expect(host.querySelector(`[id="${rowId("src/a.ts")}"]`)).not.toBeNull());
+    expect(host.querySelector(`[id="${rowId("src/b.ts")}"]`)).not.toBeNull();
+  });
+
+  it("clears the active descendant when a populated result list becomes empty", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["src/a.ts"])));
+    const host = makeHost();
+    const quickOpen = new QuickOpen(host, cache, () => [], makeCallbacks());
+
+    quickOpen.show();
+    const input = inputOf(host);
+    input.value = "src";
+    input.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => expect(host.querySelector('[role="option"]')).not.toBeNull());
+    expect(input.getAttribute("aria-activedescendant")).not.toBeNull();
+
+    input.value = "missing";
+    input.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => expect(host.querySelector('[role="option"]')).toBeNull());
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
   });
 });
 

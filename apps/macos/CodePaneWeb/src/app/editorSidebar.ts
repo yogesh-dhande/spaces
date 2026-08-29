@@ -130,14 +130,15 @@ export class EditorSidebar {
     this.callbacks.onTreeStateChange?.({ expandedPaths: this.expandedPaths, selectedPath: this.selectedPath });
   }
 
-  /** Called by root.ts after invalidating the shared `WorkspaceFileListCache` (the diff-signature
-   *  push event, see root.ts's `resubscribeDiffSignature`), so files added or removed elsewhere
-   *  reappear without a manual refresh. root.ts only calls this while the PANE's own mode is
-   *  "editor" — this sidebar isn't even in the DOM in Diff mode, so a call here would otherwise
-   *  fire a full workspace listing fetch for nothing. A no-op while the Changes tab is showing — the
-   *  Files tab re-fetches on demand the next time it's selected (see `setMode`, and `reattach` below
-   *  for the diff→editor transition specifically), since `WorkspaceFileListCache` itself was already
-   *  invalidated by the caller and will fetch fresh on the next `get()` either way. */
+  /** Called by root.ts after invalidating the shared `WorkspaceFileListCache` from the dedicated
+   *  workspace file-list-signature stream, so files added or removed elsewhere reappear without a
+   *  manual refresh even when the active diff scope would not change. root.ts only calls this while
+   *  the PANE's own mode is "editor" — this sidebar isn't even in the DOM in Diff mode, so a call
+   *  here would otherwise fire a full workspace listing fetch for nothing. A no-op while the
+   *  Changes tab is showing — the Files tab re-fetches on demand the next time it's selected (see
+   *  `setMode`, and `reattach` below for the diff→editor transition specifically), since
+   *  `WorkspaceFileListCache` itself was already invalidated by the caller and will fetch fresh on
+   *  the next `get()` either way. */
   refreshFilesListing(): void {
     if (this.mode === "files") this.renderList();
   }
@@ -148,9 +149,9 @@ export class EditorSidebar {
    *  it isn't even attached to the DOM while the pane is in Diff mode — so returning to Editor mode
    *  on the Changes tab would otherwise show an empty list until the user manually toggled tabs.
    *  Re-running `renderList()` here reparents `changesListEl` back in for "changes", or re-fetches
-   *  from the shared cache for "files" — which also picks up anything invalidated by a
-   *  diff-signature push that arrived while this sidebar was off-screen (see `refreshFilesListing`'s
-   *  doc comment above). */
+   *  from the shared cache for "files" — which also picks up anything invalidated by a workspace
+   *  file-list-signature push that arrived while this sidebar was off-screen (see
+   *  `refreshFilesListing()` above). */
   reattach(): void {
     this.renderList();
   }
@@ -212,10 +213,10 @@ export class EditorSidebar {
     }
     const token = ++this.fetchToken;
     // getFresh() (not get()): renderList() runs on every Files-tab "show" (tab switch, reattach() on
-    // editor re-entry) — the moments Finding 1 needs to revalidate at, since the diff-signature push
-    // that drives `invalidate()` never fires for a non-git workspace or before a pane's first diff
-    // fetch. renderFilesTreeNow() above already painted whatever this.paths last held, so a stale
-    // cached value keeps showing while this resolves rather than the tree going blank.
+    // editor re-entry) — the moments this sidebar must revalidate at before the dedicated
+    // file-list-signature stream has fired for this pane, and after any invalidation that arrived
+    // while it was off-screen. renderFilesTreeNow() above already painted whatever this.paths last
+    // held, so a stale cached value keeps showing while this resolves rather than the tree going blank.
     void this.fileListCache
       .getFresh()
       .then((result) => {
@@ -229,8 +230,8 @@ export class EditorSidebar {
         // A failed fetch/revalidation doesn't touch the cache's existing state (see
         // WorkspaceFileListCache.getFresh's doc comment), so the Files tree just stays on whatever it
         // last had (empty, on a first-ever failure) rather than showing an error of its own — the
-        // next tab visit or diff-signature push retries. Swallowed here so it doesn't surface as an
-        // unhandled rejection.
+        // next tab visit or workspace file-list-signature push retries. Swallowed here so it doesn't
+        // surface as an unhandled rejection.
       });
   }
 

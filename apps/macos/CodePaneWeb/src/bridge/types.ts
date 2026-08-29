@@ -213,7 +213,18 @@ export interface FileSignatureEvent {
 
 export type FileSignatureListener = (event: FileSignatureEvent) => void;
 
-/** Unsubscribe function returned by `subscribeDiffSignature`/`subscribeFileSignature`. */
+/** One workspace listing's signature, pushed whenever the authoritative `workspaceFileList`
+ *  result changes (paths added/removed, or truncation flips). This never carries the listing
+ *  itself — callers still re-fetch `workspaceFileList` so Files and quick-open stay on the same
+ *  contract as the ordinary pull path. */
+export interface FileListSignatureEvent {
+  fileListSignature: string;
+}
+
+export type FileListSignatureListener = (event: FileListSignatureEvent) => void;
+
+/** Unsubscribe function returned by `subscribeDiffSignature`/`subscribeFileSignature`/
+ *  `subscribeFileListSignature`. */
 export type Unsubscribe = () => void;
 
 /** One line's side within a diff: `"old"` is the deletion side, `"new"` is the addition side.
@@ -360,6 +371,12 @@ export interface SpacesBridge {
    * explicit subscribe/unsubscribe RPC here; see README.md for the event-delivery mechanism.
    */
   subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;
+  /**
+   * Subscribe to workspace-listing-signature push events for the shared `workspaceFileList`
+   * cache. The host opens this only after the first successful `workspaceFileList` pull, so a
+   * pane that never opens Files or quick-open never pays for background listing polls.
+   */
+  subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe;
   /** Atomically persists the current workspace-local recovery document. The page owns snapshot
    * construction so navigation, comment text, and either editing surface cannot race into
    * separate host writes. */

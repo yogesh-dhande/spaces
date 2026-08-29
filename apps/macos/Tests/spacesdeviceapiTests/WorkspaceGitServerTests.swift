@@ -724,8 +724,9 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
@@ -742,8 +743,8 @@
 
                 let manifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
                 let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
@@ -806,17 +807,15 @@
                 while true {
                     let response = try requestClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .workspaceDiffFileChunk(.init(
-                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "large-untracked.txt",
-                                byteOffset: byteOffset, transferID: transferID)),
-                            authToken: authToken, clientApp: clientApp))
+                            command: .workspaceDiffFileChunk(
+                                .init(
+                                    workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "large-untracked.txt",
+                                    byteOffset: byteOffset, transferID: transferID)), authToken: authToken, clientApp: clientApp))
                     XCTAssertTrue(response.ok, response.message)
                     XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
                     let chunk = try XCTUnwrap(response.workspaceDiffFileChunk)
                     XCTAssertEqual(chunk.file.path, "large-untracked.txt")
-                    if let encoded = chunk.patchBase64Data {
-                        patchData.append(try XCTUnwrap(Data(base64Encoded: encoded)))
-                    }
+                    if let encoded = chunk.patchBase64Data { patchData.append(try XCTUnwrap(Data(base64Encoded: encoded))) }
                     chunkCount += 1
                     guard let nextByteOffset = chunk.nextByteOffset else {
                         XCTAssertNil(chunk.transferID)
@@ -835,8 +834,8 @@
             try withWorkspaceFixture { _, _, server, _, _, _ in
                 let plans = (0..<30_000).map { index in
                     SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified,
-                        source: .untracked)
+                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified, source: .untracked
+                    )
                 }
                 let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
                 let firstResponse = try server.workspaceDiffManifestChunkResponse(manifestID: "manifest", snapshot: snapshot, fileIndex: 0)
@@ -879,7 +878,8 @@
                 try largeText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
                 let manifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
                 let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
                 XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1)
@@ -930,8 +930,7 @@
                             command: .workspaceDiffFileChunk(
                                 SpacesDeviceWorkspaceDiffFileChunkRequest(
                                     workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
-                                    transferID: transferID)),
-                            authToken: authToken, clientApp: clientApp))
+                                    transferID: transferID)), authToken: authToken, clientApp: clientApp))
                     resumedDurations.append(Date().timeIntervalSince(resumedStart))
                     XCTAssertTrue(response.ok, response.message)
                     XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
@@ -964,8 +963,7 @@
                         command: .workspaceDiffFileChunk(
                             .init(
                                 workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md",
-                                byteOffset: try XCTUnwrap(lastRequestOffset), transferID: transferID)),
-                        authToken: authToken, clientApp: clientApp))
+                                byteOffset: try XCTUnwrap(lastRequestOffset), transferID: transferID)), authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(replayResponse.ok, replayResponse.message)
                 let replayedChunk = try XCTUnwrap(replayResponse.workspaceDiffFileChunk)
                 XCTAssertNil(replayedChunk.nextByteOffset)
@@ -974,16 +972,16 @@
 
                 let releaseResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestRelease(
-                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID)), authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, manifestID: manifest.manifestID)),
+                        authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(releaseResponse.ok, releaseResponse.message)
                 XCTAssertEqual(server.workspaceDiffManifestSessionActiveCount, 0, "explicit release removes the compact manifest plan")
                 XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "manifest release removes the retained EOF patch")
 
                 let repeatedRelease = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestRelease(
-                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID)), authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, manifestID: manifest.manifestID)),
+                        authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(repeatedRelease.ok, repeatedRelease.message)
             }
         }
@@ -996,7 +994,8 @@
                 try initialText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
                 let manifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
                 let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
                 let firstResponse = try requestClient.send(
@@ -1018,8 +1017,7 @@
                         command: .workspaceDiffFileChunk(
                             SpacesDeviceWorkspaceDiffFileChunkRequest(
                                 workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
-                                transferID: transferID)),
-                        authToken: authToken, clientApp: clientApp))
+                                transferID: transferID)), authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(resumedResponse.ok, resumedResponse.message)
                 XCTAssertEqual(try XCTUnwrap(resumedResponse.workspaceDiffFileChunk).scopeSignature, first.scopeSignature)
 
@@ -1028,8 +1026,7 @@
                         command: .workspaceDiffFileChunk(
                             SpacesDeviceWorkspaceDiffFileChunkRequest(
                                 workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
-                                transferID: transferID, cancel: true)),
-                        authToken: authToken, clientApp: clientApp))
+                                transferID: transferID, cancel: true)), authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(cancelResponse.ok, cancelResponse.message)
                 XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "explicit cancel must release an unfinished transfer")
 
@@ -1037,14 +1034,14 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceDiffFileChunk(
                             .init(
-                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md",
-                                byteOffset: nextOffset, transferID: transferID, cancel: true)),
-                        authToken: authToken, clientApp: clientApp))
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID, cancel: true)), authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(repeatedCancel.ok, repeatedCancel.message)
 
                 let currentManifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertTrue(currentManifestResponse.ok, currentManifestResponse.message)
                 let currentManifest = try XCTUnwrap(currentManifestResponse.workspaceDiffManifestChunk)
 
@@ -1063,7 +1060,8 @@
         }
 
         func testWorkspaceDiffManifestTTLRemovesItsAbandonedChildTemporaryFile() throws {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-transfer-ttl-\(UUID().uuidString)", isDirectory: true)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-diff-transfer-ttl-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: directory) }
             let outputURL = directory.appendingPathComponent("patch")
@@ -1072,8 +1070,8 @@
             let start = Date(timeIntervalSince1970: 1_000)
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
             let manifestID = store.createManifest(
-                scope: scope, workspaceDir: directory.path,
-                snapshot: .init(scopeSignature: "signature", plans: []), now: start).manifestID
+                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: start
+            ).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
                 file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: start)
@@ -1094,11 +1092,13 @@
             for index in 1..<16 {
                 clock.advance(by: 1)
                 _ = store.createManifest(
-                    scope: .init(workspaceID: "other-\(index)", refName: nil), workspaceDir: "/other", snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
+                    scope: .init(workspaceID: "other-\(index)", refName: nil), workspaceDir: "/other",
+                    snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
             }
             clock.advance(by: 1)
             _ = store.createManifest(
-                scope: .init(workspaceID: "evictor", refName: nil), workspaceDir: "/evictor", snapshot: .init(scopeSignature: "evictor", plans: []), now: clock.now())
+                scope: .init(workspaceID: "evictor", refName: nil), workspaceDir: "/evictor", snapshot: .init(scopeSignature: "evictor", plans: []),
+                now: clock.now())
 
             XCTAssertEqual(created.session.scope, targetScope)
             XCTAssertEqual(created.session.snapshot.scopeSignature, "target-signature")
@@ -1106,7 +1106,8 @@
         }
 
         func testWorkspaceDiffManifestTTLReapsAnAbandonedChildWithoutAnotherStoreCall() throws {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-diff-transfer-autoreap-\(UUID().uuidString)", isDirectory: true)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-diff-transfer-autoreap-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: directory) }
             let outputURL = directory.appendingPathComponent("patch")
@@ -1118,8 +1119,8 @@
             XCTAssertNotNil(reaper.scheduledInterval, "the store must schedule autonomous expiry at construction")
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
             let manifestID = store.createManifest(
-                scope: scope, workspaceDir: directory.path,
-                snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()).manifestID
+                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()
+            ).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
                 file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: clock.now())
@@ -1129,14 +1130,17 @@
 
             XCTAssertEqual(store.activeManifestCount, 0)
             XCTAssertEqual(store.activePatchCount, 0)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "the scheduled TTL reap must clean an abandoned transfer without another request")
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: directory.path),
+                "the scheduled TTL reap must clean an abandoned transfer without another request")
         }
 
         func testWorkspaceDiffOnAnUnknownWorkspaceReturnsNotFound() throws {
             try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: "no-such-workspace", refName: nil, fileIndex: 0)),
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: "no-such-workspace", refName: nil, fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -1157,8 +1161,9 @@
 
                 let diffResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(diffResponse.ok)
                 XCTAssertEqual(diffResponse.errorCode, .invalidArgument)
@@ -1180,7 +1185,8 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "no-such-ref", fileIndex: 0)),
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "no-such-ref", fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -1196,8 +1202,9 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 XCTAssertNotNil(response.workspaceDiffManifestChunk)
@@ -1214,15 +1221,14 @@
                 try runGit(["rm", "-rf", "."], cwd: repo.path)
                 try "unrelated history".write(to: repo.appendingPathComponent("UNRELATED.md"), atomically: true, encoding: .utf8)
                 try runGit(["add", "UNRELATED.md"], cwd: repo.path)
-                try runGit(
-                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "unrelated history"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "unrelated history"], cwd: repo.path)
                 try runGit(["checkout", "main"], cwd: repo.path)
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceDiffManifestChunk(
-                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "unrelated-base", fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "unrelated-base", fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .invalidArgument)
@@ -1242,8 +1248,9 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
@@ -1259,8 +1266,9 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
@@ -1277,8 +1285,9 @@
             try withUnbornWorkspaceFixture { workspaceID, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
-                        clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
@@ -1293,7 +1302,8 @@
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", lastCommit: true, fileIndex: 0)),
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", lastCommit: true, fileIndex: 0)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -1309,7 +1319,8 @@
                 func fetchSignature() throws -> String {
                     let response = try requestClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                            command: .workspaceDiffManifestChunk(
+                                SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
                             authToken: authToken, clientApp: clientApp))
                     XCTAssertTrue(response.ok, response.message)
                     return try XCTUnwrap(response.workspaceDiffManifestChunk).scopeSignature
@@ -1636,7 +1647,8 @@
             let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
             let deadlineStart = Date().addingTimeInterval(-44)
             XCTAssertThrowsError(
-                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                    workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
             ) { error in
                 guard case .gitCommandFailed = error as? SpacesRuntimeError else {
                     XCTFail("expected the HEAD-probe execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
@@ -1689,7 +1701,8 @@
             let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
             let deadlineStart = Date().addingTimeInterval(-44)
             XCTAssertThrowsError(
-                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                    workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
             ) { error in
                 guard case .gitCommandFailed = error as? SpacesRuntimeError else {
                     XCTFail("expected the show-prefix execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
@@ -1920,6 +1933,118 @@
             XCTAssertEqual(receivedFrames.values, ["S1", "S2"])
             XCTAssertEqual(
                 providerCallCounter.value, 2, "the first tick must feed exactly one provider call to both the change-compare and the broadcast frame")
+        }
+
+        func testWorkspaceFileListSubscriptionSkipsExactListingForAnUnchangedDetectorAndRefreshesOnceWhenItChanges() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let detector = MutableString("unchanged")
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID).uncommitted"),
+                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _ in detector.value })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // t=2 establishes the cache. At t=4 the unchanged detector must not repeat the exact
+                // listing, which is the steady-state coding-agent churn path.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(exactCalls.value, 1)
+
+                // Add/remove/rename/cap crossings surface as a changed detector token; one following
+                // exact list refresh is required to preserve the wire signature's pull-acknowledgement contract.
+                detector.value = "membership-changed"
+                Thread.sleep(forTimeInterval: 2.5)
+                XCTAssertEqual(exactCalls.value, 2)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionRetriesAnExactListingAfterFailureEvenWhenTheDetectorIsUnchanged() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry.\(workspaceID)"),
+                    signatureProvider: { _ in exactCalls.increment() == 1 ? nil : "recovered-exact" }, detectorProvider: { _ in "unchanged" })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // The first tick cannot list; the second has the same membership token but must retry
+                // rather than treating the unavailable sentinel as a successfully acknowledged baseline.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(exactCalls.value, 2)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenConnecting() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let providers = MembershipRaceProviders()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.connect-race.\(workspaceID)"),
+                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                let received = FrameSignatureCollector()
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in received.append(frame.fileListSignature)
+                }
+                defer { client.stop() }
+                let deadline = Date().addingTimeInterval(2)
+                while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+
+                // The detector models a membership transition that happens between the two provider
+                // calls. Detector-first ordering makes the initial exact frame describe the new state.
+                XCTAssertEqual(received.values, ["S1"])
+                XCTAssertEqual(providers.exactCalls, 1)
+                XCTAssertEqual(providers.detectorCalls, 1)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenTimerRunsFirst() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let providers = MembershipRaceProviders()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.timer-race.\(workspaceID)"),
+                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // Let the first poll establish the cache before a relay connects. The connect-time
+                // frame must use that detector-first exact value rather than a stale pre-transition one.
+                Thread.sleep(forTimeInterval: 2.4)
+                let received = FrameSignatureCollector()
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in received.append(frame.fileListSignature)
+                }
+                defer { client.stop() }
+                let deadline = Date().addingTimeInterval(2)
+                while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+
+                XCTAssertEqual(received.values, ["S1"])
+                XCTAssertEqual(providers.exactCalls, 1)
+                XCTAssertEqual(providers.detectorCalls, 1)
+            }
         }
 
         // MARK: - workspaceFileSignature subscription (Phase 5 Part A)
@@ -2258,6 +2383,55 @@
             }
         }
 
+        private final class MutableString: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: String
+
+            init(_ value: String) { storage = value }
+
+            var value: String {
+                get {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage
+                }
+                set {
+                    lock.lock()
+                    storage = newValue
+                    lock.unlock()
+                }
+            }
+        }
+
+        /// Models a membership transition that occurs when the detector is sampled. An exact-first
+        /// implementation returns S0 but records the post-transition detector token, so it can never
+        /// discover that stale initial listing; detector-first returns S1 and remains safe.
+        private final class MembershipRaceProviders: @unchecked Sendable {
+            private let lock = NSLock()
+            private var generation = 0
+            private var didTransition = false
+            private(set) var exactCalls = 0
+            private(set) var detectorCalls = 0
+
+            func detector() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                detectorCalls += 1
+                if !didTransition {
+                    didTransition = true
+                    generation = 1
+                }
+                return "D\(generation)"
+            }
+
+            func exact() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                exactCalls += 1
+                return "S\(generation)"
+            }
+        }
+
         /// Thread-safe ordered collector for the `scopeSignature` values a
         /// `RawWorkspaceDiffSignatureSocketClient` decodes, appended from that client's own read queue.
         private final class FrameSignatureCollector: @unchecked Sendable {
@@ -2362,6 +2536,56 @@
                     let line = pendingBytes[..<newlineIndex]
                     pendingBytes.removeSubrange(...newlineIndex)
                     if let frame = try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.decodeLine(Data(line)) { onFrame(frame) }
+                }
+            }
+
+            func stop() { source?.cancel() }
+        }
+
+        /// Minimal producer-socket reader for the workspace-wide file-list signature tests.
+        private final class RawWorkspaceFileListSignatureSocketClient: @unchecked Sendable {
+            private let fileDescriptor: Int32
+            private let queue = DispatchQueue(label: "test.raw-workspace-file-list-signature-client")
+            private var source: DispatchSourceRead?
+            private var pendingBytes = Data()
+            private let onFrame: (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void
+
+            init(socketPath: String, onFrame: @escaping (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void) throws {
+                self.onFrame = onFrame
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                var address = sockaddr_un()
+                address.sun_family = sa_family_t(AF_UNIX)
+                let utf8Path = socketPath.utf8CString
+                guard utf8Path.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw POSIXError(.ENAMETOOLONG) }
+                withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                    utf8Path.withUnsafeBufferPointer { if let baseAddress = $0.baseAddress { memcpy(pointer, baseAddress, $0.count) } }
+                }
+                let connectResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                }
+                guard connectResult == 0 else {
+                    let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                    close(fd)
+                    throw POSIXError(code)
+                }
+                fileDescriptor = fd
+                let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+                readSource.setEventHandler { [weak self] in self?.drain() }
+                readSource.setCancelHandler { close(fd) }
+                source = readSource
+                readSource.resume()
+            }
+
+            private func drain() {
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(fileDescriptor, &readBuffer, readBuffer.count)
+                guard count > 0 else { return }
+                pendingBytes.append(contentsOf: readBuffer[0..<count])
+                while let newlineIndex = pendingBytes.firstIndex(of: 0x0A) {
+                    let line = pendingBytes[..<newlineIndex]
+                    pendingBytes.removeSubrange(...newlineIndex)
+                    if let frame = try? SpacesDeviceWorkspaceFileListSignatureStreamCodec.decodeLine(Data(line)) { onFrame(frame) }
                 }
             }
 

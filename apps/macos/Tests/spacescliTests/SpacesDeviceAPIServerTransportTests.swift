@@ -1722,9 +1722,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         process.arguments = ["git"] + arguments
         process.currentDirectoryURL = cwd
         var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "GIT_DIR")
-        environment.removeValue(forKey: "GIT_WORK_TREE")
-        environment.removeValue(forKey: "GIT_INDEX_FILE")
+        removeGitRepositoryEnvironment(from: &environment)
         environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
         environment["GIT_CONFIG_SYSTEM"] = "/dev/null"
         environment["GIT_TERMINAL_PROMPT"] = "0"
@@ -1782,6 +1780,17 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
 private let deviceAPITransportTestTLSRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
     "spaces-device-api-transport-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+/// A pre-commit hook exports Git's repository-local environment into its child processes. Clear every
+/// variable in Git's local-env-vars list before running fixture commands so a temporary repository cannot
+/// accidentally read or mutate the repository whose hook launched the tests.
+private func removeGitRepositoryEnvironment(from environment: inout [String: String]) {
+    for key in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_COMMON_DIR", "GIT_DIR", "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE", "GIT_WORK_TREE",
+    ] { environment.removeValue(forKey: key) }
+}
 
 /// One pinned-TLS identity per test process: generation is expensive and every server/client pair
 /// only needs a stable certificate to pin.
@@ -1974,8 +1983,7 @@ private func runDeviceAPITestGit(_ arguments: [String], cwd: String) throws {
     environment["GIT_AUTHOR_EMAIL"] = "test@example.com"
     environment["GIT_COMMITTER_NAME"] = "spaces-test"
     environment["GIT_COMMITTER_EMAIL"] = "test@example.com"
-    environment.removeValue(forKey: "GIT_DIR")
-    environment.removeValue(forKey: "GIT_WORK_TREE")
+    removeGitRepositoryEnvironment(from: &environment)
     process.environment = environment
     let errorPipe = Pipe()
     process.standardOutput = Pipe()

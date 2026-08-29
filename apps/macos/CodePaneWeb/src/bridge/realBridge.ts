@@ -4,6 +4,8 @@ import {
   DiffScope,
   DiffSignatureEvent,
   DiffSignatureListener,
+  FileListSignatureEvent,
+  FileListSignatureListener,
   FileSignatureEvent,
   FileSignatureListener,
   ReviewCommentSendEntry,
@@ -49,7 +51,9 @@ import {
  *   Swift -> JS (push events): `window.dispatchEvent(new CustomEvent(name,
  *     { detail }))` for three event names — `spaces:init` (once, at startup,
  *     detail: CodePaneInitPayload), `spaces:diffSignature` (any time the
- *     active scope's git state changes, detail: DiffSignatureEvent), and
+ *     active scope's git state changes, detail: DiffSignatureEvent),
+ *     `spaces:fileListSignature` (any time the authoritative
+ *     `workspaceFileList` result changes, detail: FileListSignatureEvent), and
  *     `spaces:fileSignature` (any time the editor's currently open file
  *     changes or is deleted on disk, detail: FileSignatureEvent). The host
  *     decides which path `spaces:fileSignature` tracks based on
@@ -68,6 +72,7 @@ type PendingCall = {
 };
 
 const DIFF_SIGNATURE_EVENT = "spaces:diffSignature";
+const FILE_LIST_SIGNATURE_EVENT = "spaces:fileListSignature";
 const FILE_SIGNATURE_EVENT = "spaces:fileSignature";
 
 interface SpacesBridgeCallbacks {
@@ -264,6 +269,17 @@ class RealSpacesBridge implements SpacesBridge {
     };
     window.addEventListener(FILE_SIGNATURE_EVENT, handler);
     return () => window.removeEventListener(FILE_SIGNATURE_EVENT, handler);
+  }
+
+  subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<FileListSignatureEvent>).detail;
+      if (detail && typeof detail.fileListSignature === "string") {
+        listener(detail);
+      }
+    };
+    window.addEventListener(FILE_LIST_SIGNATURE_EVENT, handler);
+    return () => window.removeEventListener(FILE_LIST_SIGNATURE_EVENT, handler);
   }
 }
 

@@ -15,6 +15,11 @@ protocol CodePaneFileSignatureStreamHandle: AnyObject, Sendable { func stop() }
 
 extension SpacesDeviceWorkspaceFileSignatureStreamClient: CodePaneFileSignatureStreamHandle {}
 
+/// A live workspace-file-list-signature subscription handle. Mirrors the diff/file handles exactly.
+protocol CodePaneFileListSignatureStreamHandle: AnyObject, Sendable { func stop() }
+
+extension SpacesDeviceWorkspaceFileListSignatureStreamClient: CodePaneFileListSignatureStreamHandle {}
+
 /// Seam over the `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
 /// staleness guards (page generation, diff-request/file-read token, diff/file-signature subscription
 /// generation) protect against races with hibernation and scope/path changes, plus the review-comment
@@ -35,12 +40,10 @@ protocol CodePaneDeviceGateway: Sendable {
 
     func cancelWorkspaceDiffFileChunk(
         workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, relativePath: String, byteOffset: Int, transferID: String,
-        device: SpacesPairedDeviceRecord
-    ) async throws
+        device: SpacesPairedDeviceRecord) async throws
 
-    func cancelWorkspaceDiffManifest(
-        workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, device: SpacesPairedDeviceRecord
-    ) async throws
+    func cancelWorkspaceDiffManifest(workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, device: SpacesPairedDeviceRecord)
+        async throws
 
     func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
         -> SpacesDeviceWorkspaceFileReadResult
@@ -62,6 +65,11 @@ protocol CodePaneDeviceGateway: Sendable {
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) async throws -> any CodePaneFileSignatureStreamHandle
 
+    func subscribeWorkspaceFileListSignature(
+        workspaceID: String, device: SpacesPairedDeviceRecord, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> any CodePaneFileListSignatureStreamHandle
+
     func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment]
 
     func workspaceReviewCommentUpsert(
@@ -80,9 +88,8 @@ protocol CodePaneDeviceGateway: Sendable {
     /// Samples only the terminal session the Editor just created. It deliberately goes through the
     /// ordinary overview on both local and remote devices: that is the one payload which combines the
     /// session runtime's foreground facts with the hook-backed coding-agent rows.
-    func workspaceCommandStartSnapshot(
-        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord
-    ) async throws -> CodePaneAgentStartSnapshot
+    func workspaceCommandStartSnapshot(workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord) async throws
+        -> CodePaneAgentStartSnapshot
 }
 
 /// Forwards to `SpacesDeviceClient`'s real, network-performing static methods, off the caller's task
@@ -91,8 +98,7 @@ protocol CodePaneDeviceGateway: Sendable {
 struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     func workspaceDiffManifestChunk(
         workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String?, fileIndex: Int, device: SpacesPairedDeviceRecord
-    ) async throws -> SpacesDeviceWorkspaceDiffManifestChunkResult
-    {
+    ) async throws -> SpacesDeviceWorkspaceDiffManifestChunkResult {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceDiffManifestChunk(
                 workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex, device: device)
@@ -121,9 +127,9 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
-    func cancelWorkspaceDiffManifest(
-        workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, device: SpacesPairedDeviceRecord
-    ) async throws {
+    func cancelWorkspaceDiffManifest(workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, device: SpacesPairedDeviceRecord)
+        async throws
+    {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.cancelWorkspaceDiffManifest(
                 workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, device: device)
@@ -175,6 +181,16 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
+    func subscribeWorkspaceFileListSignature(
+        workspaceID: String, device: SpacesPairedDeviceRecord, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> any CodePaneFileListSignatureStreamHandle {
+        try await Task.detached(priority: .utility) {
+            try SpacesDeviceClient.subscribeWorkspaceFileListSignature(
+                workspaceID: workspaceID, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+        }.value
+    }
+
     func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment] {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceReviewCommentList(workspaceID: workspaceID, device: device)
@@ -213,9 +229,9 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
-    func workspaceCommandStartSnapshot(
-        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord
-    ) async throws -> CodePaneAgentStartSnapshot {
+    func workspaceCommandStartSnapshot(workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord) async throws
+        -> CodePaneAgentStartSnapshot
+    {
         let task = Task.detached(priority: .utility) { () throws -> CodePaneAgentStartSnapshot in
             let overview = try SpacesDeviceClient.overview(device: device).overview
             let terminal = overview.sessions.first(where: { $0.id == sessionID })
@@ -228,9 +244,8 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
             let state = terminal?.state
             let bracketedPasteActive = terminal?.bracketedPasteActive ?? false
             return CodePaneAgentStartSnapshot(
-                sessionFound: terminal != nil, belongsToWorkspace: terminal?.workspaceID == workspaceID, state: state,
-                detectedKind: detectedKind, bracketedPasteActive: bracketedPasteActive,
-                agent: agent)
+                sessionFound: terminal != nil, belongsToWorkspace: terminal?.workspaceID == workspaceID, state: state, detectedKind: detectedKind,
+                bracketedPasteActive: bracketedPasteActive, agent: agent)
         }
         return try await task.value
     }

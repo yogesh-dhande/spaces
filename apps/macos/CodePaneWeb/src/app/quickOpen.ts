@@ -1,6 +1,9 @@
 import { fuzzyMatch } from "./fuzzyMatch";
 import { WorkspaceFileListCache } from "./workspaceFileListCache";
 
+const QUICK_OPEN_EMPTY_ID = "code-pane-quick-open-empty";
+const QUICK_OPEN_LIST_ID = "code-pane-quick-open-list";
+
 export interface QuickOpenCallbacks {
   /** The pane's current top-level mode, read live at open time — determines which of the two arms
    *  below applies (see this class's doc comment). */
@@ -92,6 +95,10 @@ export class QuickOpen {
 
     this.inputEl = document.createElement("input");
     this.inputEl.type = "text";
+    this.inputEl.setAttribute("role", "combobox");
+    this.inputEl.setAttribute("aria-controls", QUICK_OPEN_LIST_ID);
+    this.inputEl.setAttribute("aria-expanded", "true");
+    this.inputEl.setAttribute("aria-autocomplete", "list");
     this.inputEl.placeholder = "Open file…";
     this.inputEl.addEventListener("input", () => {
       this.query = this.inputEl.value;
@@ -102,6 +109,8 @@ export class QuickOpen {
 
     this.listEl = document.createElement("div");
     this.listEl.className = "list";
+    this.listEl.id = QUICK_OPEN_LIST_ID;
+    this.listEl.setAttribute("role", "listbox");
 
     this.noteEl = document.createElement("div");
     this.noteEl.className = "note";
@@ -170,13 +179,15 @@ export class QuickOpen {
     this.priorFocusEl = undefined;
   }
 
-  /** Called by root.ts when a diff-signature push invalidates the shared `WorkspaceFileListCache`:
-   *  that cache deliberately keeps serving an in-flight pre-invalidation promise to callers that
-   *  already hold it (see WorkspaceFileListCache's doc comment), so an overlay whose `show()` fetch
-   *  resolved (or was pending) before the push would otherwise sit on a stale listing until closed
-   *  and reopened. No-op while the overlay is closed — nothing is rendering, and the next `show()`
-   *  fetches fresh on its own. Applies in both Diff and Editor mode: unlike root.ts's editor-gated
-   *  sidebar refresh, the overlay itself is visible in either mode. */
+  /** Called by root.ts when the dedicated workspace file-list-signature stream invalidates the
+   *  shared `WorkspaceFileListCache`: that cache deliberately keeps serving an in-flight
+   *  pre-invalidation promise to callers that already hold it (see WorkspaceFileListCache's doc
+   *  comment), so an overlay whose `show()` fetch resolved (or was pending) before the push would
+   *  otherwise sit on a stale listing until closed and reopened. This signal is workspace-membership
+   *  scoped rather than diff-scope scoped, so it covers Last commit and non-git workspaces too.
+   *  No-op while the overlay is closed — nothing is rendering, and the next `show()` fetches fresh
+   *  on its own. Applies in both Diff and Editor mode: unlike root.ts's editor-gated sidebar
+   *  refresh, the overlay itself is visible in either mode. */
   refreshListing(): void {
     if (!this.isOpen) return;
     this.fetchListing();
@@ -308,8 +319,10 @@ export class QuickOpen {
     this.rowEls = [];
 
     if (this.results.length === 0) {
+      this.inputEl.removeAttribute("aria-activedescendant");
       const empty = document.createElement("div");
       empty.className = "empty";
+      empty.id = QUICK_OPEN_EMPTY_ID;
       empty.textContent = isRecents ? "No recent files" : "No matches";
       this.listEl.appendChild(empty);
       return;
@@ -325,6 +338,8 @@ export class QuickOpen {
     for (const result of this.results) {
       const row = document.createElement("div");
       row.className = "row";
+      row.setAttribute("role", "option");
+      row.id = quickOpenResultIdentifier(result.path);
       row.dataset.path = result.path;
       const pathEl = document.createElement("span");
       pathEl.className = "path";
@@ -342,9 +357,17 @@ export class QuickOpen {
     this.rowEls.forEach((row, index) => {
       const isSelected = index === this.selectedIndex;
       row.classList.toggle("sel", isSelected);
+      row.setAttribute("aria-selected", String(isSelected));
       if (isSelected) row.scrollIntoView({ block: "nearest" });
     });
+    const selected = this.rowEls[this.selectedIndex];
+    if (selected) this.inputEl.setAttribute("aria-activedescendant", selected.id);
+    else this.inputEl.removeAttribute("aria-activedescendant");
   }
+}
+
+function quickOpenResultIdentifier(path: string): string {
+  return `code-pane-quick-open-${encodeURIComponent(path)}`;
 }
 
 /** Builds `text` as a fragment with every position in `indices` wrapped in a `<mark>`, coalescing

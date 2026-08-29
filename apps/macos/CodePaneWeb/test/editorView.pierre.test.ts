@@ -31,6 +31,7 @@ function makeBridge(result: WorkspaceFileReadResult): SpacesBridge {
     workspaceFileList: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceRefList: vi.fn().mockRejectedValue(new Error("not used")),
     subscribeDiffSignature: vi.fn(() => () => {}),
+    subscribeFileListSignature: vi.fn(() => () => {}),
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),

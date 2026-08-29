@@ -101,9 +101,7 @@ enum CodePaneBridge {
             self.conflictBaseSHA256 = conflictBaseSHA256
         }
 
-        private enum CodingKeys: String, CodingKey {
-            case path, baseSHA256, baseContent, content, dirty, conflict, conflictBaseSHA256
-        }
+        private enum CodingKeys: String, CodingKey { case path, baseSHA256, baseContent, content, dirty, conflict, conflictBaseSHA256 }
 
         /// This field is required-nullable on the web bridge. Decoding it with `decode`, rather
         /// than `decodeIfPresent`, rejects stale partial snapshots instead of inventing a deletion.
@@ -175,10 +173,9 @@ enum CodePaneBridge {
         init(
             mode: String, scope: Scope, diffLayout: String, diffSelectedPath: String?, diffTreeExpandedPaths: [String]?,
             diffTreeSelectedPath: String?, fileTreeExpandedPaths: [String], fileTreeSelectedPath: String?, editorSidebarMode: String,
-            editorRecentPaths: [String], diffScrollLine: Int?, diffScrollSide: String?, diffFocusedPath: String?, diffFocusedLine: Int?, diffFocusedSide: String?,
-            editorScrollLine: Int?, editorFocusedLine: Int?,
-            editorState: EditorState?, diffEditorState: DiffEditorState?, pendingReviewComments: [ReviewCommentEntryPayload]?,
-            selectedAgentSessionId: String? = nil, pendingAgentLaunch: PendingAgentLaunch? = nil
+            editorRecentPaths: [String], diffScrollLine: Int?, diffScrollSide: String?, diffFocusedPath: String?, diffFocusedLine: Int?,
+            diffFocusedSide: String?, editorScrollLine: Int?, editorFocusedLine: Int?, editorState: EditorState?, diffEditorState: DiffEditorState?,
+            pendingReviewComments: [ReviewCommentEntryPayload]?, selectedAgentSessionId: String? = nil, pendingAgentLaunch: PendingAgentLaunch? = nil
         ) {
             self.mode = mode
             self.scope = scope
@@ -222,23 +219,16 @@ enum CodePaneBridge {
     /// persisting a partial state would restore a UI combination the page never produced.
     static func isValidWorkspaceState(_ state: WorkspaceState) -> Bool {
         guard ["diff", "editor"].contains(state.mode), ["unified", "split"].contains(state.diffLayout),
-            ["files", "changes"].contains(state.editorSidebarMode),
-            state.diffScrollLine.map({ $0 >= 0 }) ?? true,
-            state.diffScrollSide.map({ ["old", "new"].contains($0) }) ?? true,
-            state.diffFocusedLine.map({ $0 >= 0 }) ?? true,
-            state.diffFocusedSide.map({ ["old", "new"].contains($0) }) ?? true,
-            (state.diffSelectedPath == nil) == (state.diffScrollLine == nil),
-            (state.diffScrollLine == nil) == (state.diffScrollSide == nil),
-            (state.diffFocusedPath == nil) == (state.diffFocusedLine == nil),
-            (state.diffFocusedLine == nil) == (state.diffFocusedSide == nil),
-            state.editorScrollLine.map({ $0 >= 0 }) ?? true,
+            ["files", "changes"].contains(state.editorSidebarMode), state.diffScrollLine.map({ $0 >= 0 }) ?? true,
+            state.diffScrollSide.map({ ["old", "new"].contains($0) }) ?? true, state.diffFocusedLine.map({ $0 >= 0 }) ?? true,
+            state.diffFocusedSide.map({ ["old", "new"].contains($0) }) ?? true, (state.diffSelectedPath == nil) == (state.diffScrollLine == nil),
+            (state.diffScrollLine == nil) == (state.diffScrollSide == nil), (state.diffFocusedPath == nil) == (state.diffFocusedLine == nil),
+            (state.diffFocusedLine == nil) == (state.diffFocusedSide == nil), state.editorScrollLine.map({ $0 >= 0 }) ?? true,
             state.editorFocusedLine.map({ $0 >= 0 }) ?? true
         else { return false }
         switch state.scope.kind {
-        case "uncommitted", "lastCommit":
-            guard state.scope.refName == nil else { return false }
-        case "ref":
-            guard let refName = state.scope.refName, !refName.isEmpty else { return false }
+        case "uncommitted", "lastCommit": guard state.scope.refName == nil else { return false }
+        case "ref": guard let refName = state.scope.refName, !refName.isEmpty else { return false }
         default: return false
         }
         if let pending = state.pendingAgentLaunch {
@@ -247,11 +237,10 @@ enum CodePaneBridge {
             }
             switch pending.status {
             case "starting":
-                guard let sessionID = pending.sessionId, !sessionID.isEmpty,
-                    let deadline = pending.deadlineEpochMilliseconds, deadline >= 0
-                else { return false }
-            case "failed":
-                guard pending.deadlineEpochMilliseconds == nil else { return false }
+                guard let sessionID = pending.sessionId, !sessionID.isEmpty, let deadline = pending.deadlineEpochMilliseconds, deadline >= 0 else {
+                    return false
+                }
+            case "failed": guard pending.deadlineEpochMilliseconds == nil else { return false }
             default: return false
             }
         }
@@ -260,9 +249,9 @@ enum CodePaneBridge {
             // Keep mine must CAS against that exact version. A nil target is reserved for a
             // deleted file (or an ordinary, non-conflicting inline buffer); it must never be
             // invented for a malformed changed-file conflict.
-            guard diffEditorState.conflictBaseSHA256?.isEmpty != true,
-                diffEditorState.conflict || diffEditorState.conflictBaseSHA256 == nil
-            else { return false }
+            guard diffEditorState.conflictBaseSHA256?.isEmpty != true, diffEditorState.conflict || diffEditorState.conflictBaseSHA256 == nil else {
+                return false
+            }
         }
         return true
     }
@@ -284,18 +273,15 @@ enum CodePaneBridge {
         if jsonString == "__none__" { return .none }
         guard let data = jsonString.data(using: .utf8), let state = try? JSONDecoder().decode(WorkspaceState.self, from: data),
             isValidWorkspaceState(state)
-        else {
-            return .notReported
-        }
+        else { return .notReported }
         return .state(state)
     }
 
     /// Decodes the complete live workspace-state notification. Its `params` is intentionally the
     /// same object as `WorkspaceState`, so live persistence and teardown persistence cannot drift.
     static func decodeWorkspaceStateChanged(body: Any) -> WorkspaceState? {
-        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "workspaceStateChanged",
-            let params = dict["params"], JSONSerialization.isValidJSONObject(params),
-            let data = try? JSONSerialization.data(withJSONObject: params)
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "workspaceStateChanged", let params = dict["params"],
+            JSONSerialization.isValidJSONObject(params), let data = try? JSONSerialization.data(withJSONObject: params)
         else { return nil }
         guard let state = try? JSONDecoder().decode(WorkspaceState.self, from: data), isValidWorkspaceState(state) else { return nil }
         return state
@@ -350,7 +336,8 @@ enum CodePaneBridge {
             let params = dict["params"] as? [String: Any], let kindRaw = params["kind"] as? String, let kind = RenderMetric.Kind(rawValue: kindRaw),
             let triggerRaw = params["trigger"] as? String, let trigger = RenderMetric.Trigger(rawValue: triggerRaw),
             let elapsedMS = params["elapsedMs"] as? Int, (0...600_000).contains(elapsedMS), let fileCount = params["fileCount"] as? Int,
-            (0...1_000_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int, (0...(4 * 1024 * 1024 * 1024)).contains(contentBytes)
+            (0...1_000_000).contains(fileCount), let contentBytes = params["contentBytes"] as? Int,
+            (0...(4 * 1024 * 1024 * 1024)).contains(contentBytes)
         else { return nil }
         let fetchElapsedMS = params["fetchElapsedMs"] as? Int
         let bridgeElapsedMS = params["bridgeElapsedMs"] as? Int
@@ -367,26 +354,19 @@ enum CodePaneBridge {
         let scrollTop = params["scrollTop"] as? Int
         let focusedLine = params["focusedLine"] as? Int
         let dirty = params["dirty"] as? Bool
-        guard fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
-            bridgeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
-            decodeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
-            updateElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
-            paintElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
-            path.map({ !$0.isEmpty && $0.utf8.count <= 4_096 }) ?? true,
-            fileIndex.map({ (0...1_000_000).contains($0) }) ?? true,
-            chunkCount.map({ (0...1_000_000).contains($0) }) ?? true,
-            mode.map({ $0 == "diff" || $0 == "editor" }) ?? true,
-            scope.map({ !$0.isEmpty && $0.utf8.count <= 1_024 }) ?? true,
-            layout.map({ $0 == "unified" || $0 == "split" }) ?? true,
-            scrollTop.map({ (0...10_000_000).contains($0) }) ?? true,
+        guard fetchElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true, bridgeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            decodeElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true, updateElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true,
+            paintElapsedMS.map({ (0...elapsedMS).contains($0) }) ?? true, path.map({ !$0.isEmpty && $0.utf8.count <= 4_096 }) ?? true,
+            fileIndex.map({ (0...1_000_000).contains($0) }) ?? true, chunkCount.map({ (0...1_000_000).contains($0) }) ?? true,
+            mode.map({ $0 == "diff" || $0 == "editor" }) ?? true, scope.map({ !$0.isEmpty && $0.utf8.count <= 1_024 }) ?? true,
+            layout.map({ $0 == "unified" || $0 == "split" }) ?? true, scrollTop.map({ (0...10_000_000).contains($0) }) ?? true,
             focusedLine.map({ (1...10_000_000).contains($0) }) ?? true
         else { return nil }
         return RenderMetric(
-            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS,
-            bridgeElapsedMS: bridgeElapsedMS, decodeElapsedMS: decodeElapsedMS, updateElapsedMS: updateElapsedMS,
-            paintElapsedMS: paintElapsedMS, fileCount: fileCount, contentBytes: contentBytes,
-            path: path, fileIndex: fileIndex, selectedPriority: selectedPriority, chunkCount: chunkCount,
-            mode: mode, scope: scope, layout: layout, scrollTop: scrollTop, focusedLine: focusedLine, dirty: dirty)
+            kind: kind, trigger: trigger, elapsedMS: elapsedMS, fetchElapsedMS: fetchElapsedMS, bridgeElapsedMS: bridgeElapsedMS,
+            decodeElapsedMS: decodeElapsedMS, updateElapsedMS: updateElapsedMS, paintElapsedMS: paintElapsedMS, fileCount: fileCount,
+            contentBytes: contentBytes, path: path, fileIndex: fileIndex, selectedPriority: selectedPriority, chunkCount: chunkCount, mode: mode,
+            scope: scope, layout: layout, scrollTop: scrollTop, focusedLine: focusedLine, dirty: dirty)
     }
 
     // MARK: - Diff scope
@@ -476,7 +456,10 @@ enum CodePaneBridge {
         case "workspaceDiffManifestChunk":
             let manifestID = request.params["manifestID"] as? String
             guard let fileIndex = request.params["fileIndex"] as? Int, fileIndex >= 0, manifestID?.isEmpty != true else {
-                return .failure(BridgeError(code: .invalidArgument, message: "workspaceDiffManifestChunk requires a non-negative fileIndex and a non-empty manifestID when supplied."))
+                return .failure(
+                    BridgeError(
+                        code: .invalidArgument,
+                        message: "workspaceDiffManifestChunk requires a non-negative fileIndex and a non-empty manifestID when supplied."))
             }
             return decodeDiffScope(request.params["scope"]).map {
                 .workspaceDiffManifestChunk(scope: $0, manifestID: manifestID, fileIndex: fileIndex)
@@ -487,7 +470,8 @@ enum CodePaneBridge {
                 let byteOffset = request.params["byteOffset"] as? Int, byteOffset >= 0
             else {
                 return .failure(
-                    BridgeError(code: .invalidArgument, message: "workspaceDiffFileChunk requires manifestID, relativePath, and a non-negative byteOffset."))
+                    BridgeError(
+                        code: .invalidArgument, message: "workspaceDiffFileChunk requires manifestID, relativePath, and a non-negative byteOffset."))
             }
             return decodeDiffScope(request.params["scope"]).map {
                 .workspaceDiffFileChunk(
@@ -497,8 +481,8 @@ enum CodePaneBridge {
         case "workspaceDiffFileChunkCancel":
             guard let manifestID = request.params["manifestID"] as? String, !manifestID.isEmpty,
                 let relativePath = request.params["relativePath"] as? String, !relativePath.isEmpty,
-                let byteOffset = request.params["byteOffset"] as? Int, byteOffset >= 0,
-                let transferID = request.params["transferID"] as? String, !transferID.isEmpty
+                let byteOffset = request.params["byteOffset"] as? Int, byteOffset >= 0, let transferID = request.params["transferID"] as? String,
+                !transferID.isEmpty
             else {
                 return .failure(
                     BridgeError(
@@ -781,6 +765,10 @@ enum CodePaneBridge {
         let sha256: String?
         let missing: Bool
     }
+
+    /// `spaces:fileListSignature`'s detail, dispatched whenever the authoritative
+    /// `workspaceFileList` result changes for this workspace.
+    struct FileListSignaturePayload: Encodable, Equatable { let fileListSignature: String }
 
     /// `spaces:agents`'s detail, dispatched whenever this workspace's running-agent set changes after
     /// startup (`spaces:init`'s `agents` field carries the set at page-load time).

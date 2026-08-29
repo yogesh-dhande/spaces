@@ -650,3 +650,74 @@ public final class SpacesDeviceWorkspaceFileSignatureStreamClient: @unchecked Se
         activeConnection?.cancel()
     }
 }
+
+/// Reads the per-workspace file-list-signature subscription stream: opens a pinned-TLS Device API
+/// connection, sends a `subscribeWorkspaceFileListSignature` request scoped to one workspace, and
+/// delivers each newline-framed `SpacesDeviceWorkspaceFileListSignatureFrame`. Unlike the diff/file
+/// stream clients this transport intentionally does not dedupe identical payloads client-side: the host
+/// only acknowledges a signature after its follow-up `workspaceFileList` pull succeeds, so repeated
+/// identical keepalives are the retry signal after a transient pull failure.
+public final class SpacesDeviceWorkspaceFileListSignatureStreamClient: @unchecked Sendable {
+    private let request: SpacesDeviceAPIRequest
+    private let resolver: SpacesDeviceEndpointResolver
+    private let onFrame: @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void
+    private let onDisconnect: @Sendable ((any Error)?) -> Void
+    private let connectionLock = NSLock()
+    private var connection: (any SpacesPinnedTLSLineConnection)?
+
+    public init(
+        workspaceID: String, authToken: String?, clientApp: SpacesDeviceClientApp?, resolver: SpacesDeviceEndpointResolver,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws {
+        guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
+        self.request = SpacesDeviceAPIRequest(
+            command: .subscribeWorkspaceFileListSignature(SpacesDeviceWorkspaceFileListSignatureRequest(workspaceID: workspaceID)),
+            authToken: authToken, clientApp: clientApp)
+        self.resolver = resolver
+        self.onFrame = onFrame
+        self.onDisconnect = onDisconnect
+    }
+
+    deinit { stop() }
+
+    public func start(timeoutSeconds: TimeInterval = 10) throws {
+        let host = try SpacesDeviceAPIStreamEndpoint.host(resolver: resolver)
+        let createdConnection: any SpacesPinnedTLSLineConnection
+        do { createdConnection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        connectionLock.lock()
+        connection = createdConnection
+        connectionLock.unlock()
+        let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
+        do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        let onFrame = onFrame
+        createdConnection.startReceiveLoop(
+            onLine: { [weak self] line in
+                do {
+                    let frame = try SpacesDeviceWorkspaceFileListSignatureStreamCodec.decodeLine(line)
+                    guard self != nil else { return }
+                    onFrame(frame)
+                } catch {
+                    if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
+                        onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode))
+                    } else {
+                        onDisconnect(error)
+                    }
+                    self?.stop()
+                }
+            }, onClosed: { error in onDisconnect(error) })
+    }
+
+    public func stop() {
+        connectionLock.lock()
+        let activeConnection = connection
+        connection = nil
+        connectionLock.unlock()
+        activeConnection?.cancel()
+    }
+}

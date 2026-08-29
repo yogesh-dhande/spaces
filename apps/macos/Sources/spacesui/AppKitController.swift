@@ -2024,9 +2024,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// pane attaches to that device — remote or local — regardless of the request's later workspace
     /// device lookup. Shared by the cold-resolve path and the remote deep-link open.
     nonisolated static func terminalSessionPaneOpenRequest(from match: TerminalSessionSummaryMatch) -> DeviceTerminalOpenRequest {
-        let summary = match.summary
+        terminalSessionPaneOpenRequest(summary: match.summary, deviceID: match.device.id)
+    }
+
+    nonisolated static func terminalSessionPaneOpenRequest(summary: SpacesDeviceTerminalSessionSummary, deviceID: String) -> DeviceTerminalOpenRequest
+    {
         return DeviceTerminalOpenRequest(
-            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: summary.id, title: summary.title,
+            workspaceID: summary.workspaceID, deviceID: deviceID, sessionID: summary.id, title: summary.title,
             workingDirectory: summary.workingDirectory, kind: terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
             command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
             createdAt: summary.createdAt, updatedAt: summary.updatedAt)
@@ -2396,6 +2400,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let sessionID = response.sessionID else { return nil }
         return Self.deviceTerminalOpenRequest(
             workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
+    }
+
+    /// Start Agent's background terminal is opened from the mutation's explicit launched-session
+    /// payload, not by re-resolving the refreshed overview. A fast-exiting command can disappear from
+    /// `overview.sessions` before the response is built even though the user still needs that
+    /// terminal's pane and failure output.
+    nonisolated static func startedWorkspaceCommandPaneOpenRequest(deviceID: String, response: SpacesDeviceAPIResponse) -> DeviceTerminalOpenRequest?
+    {
+        guard let launchedTerminalSession = response.launchedTerminalSession else { return nil }
+        return terminalSessionPaneOpenRequest(summary: launchedTerminalSession, deviceID: deviceID)
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -5473,15 +5487,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Every overview-install path calls this before it discards the prior workspace catalog. The
     /// overview is the authority for whether an Editor recovery document still has a workspace to
     /// belong to; this shared reconciliation also fences any queued write that has not reached SQLite.
-    func removeCodePaneRecoveryStateForDeletedWorkspaces(
-        deviceID: String, liveWorkspaceIDs: Set<String>, previousWorkspaceIDs: Set<String>
-    ) {
+    func removeCodePaneRecoveryStateForDeletedWorkspaces(deviceID: String, liveWorkspaceIDs: Set<String>, previousWorkspaceIDs: Set<String>) {
         guard let database = try? clientDatabase() else { return }
         let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: deviceID)
         CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
-            storageKey: storageKey,
-            liveWorkspaceIDs: liveWorkspaceIDs,
-            previousWorkspaceIDs: previousWorkspaceIDs,
+            storageKey: storageKey, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: previousWorkspaceIDs,
             persistedWorkspaceIDs: { (try? database.codePaneWorkspaceIDs(deviceID: deviceID)) ?? [] },
             delete: { workspaceID in try? database.deleteCodePaneWorkspaceState(deviceID: deviceID, workspaceID: workspaceID) })
     }
@@ -5499,15 +5509,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane-prune keep-set — into the local section.
         // Captured before the section is overwritten: the pairing between an ended session and the one
         // that replaced it exists only in the difference between these two overviews.
-        if deviceID == SpacesPairedDeviceRecord.localDeviceID {
-            localOverviewInstallGeneration += 1
-        }
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID { localOverviewInstallGeneration += 1 }
         let previousOverview = deviceSection(id: deviceID)?.overview
         let liveWorkspaceIDs = Set(overview.workspaces.map(\.id))
         removeCodePaneRecoveryStateForDeletedWorkspaces(
-            deviceID: deviceID,
-            liveWorkspaceIDs: liveWorkspaceIDs,
-            previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
+            deviceID: deviceID, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
         let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
         let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {

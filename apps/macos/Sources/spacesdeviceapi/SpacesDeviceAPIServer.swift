@@ -170,13 +170,14 @@ extension SpacesDeviceAPICommand {
     /// the corroboration `.ping`) if left on the serial state queue. Both transports divert them to a
     /// serial queue scoped to the request's own workspace (`workspaceGitQueue(for:)`), so a slow diff on one
     /// workspace stalls only that workspace's other requests, not another workspace's or the state queue's.
-    /// `.subscribeWorkspaceDiffSignature` and `.subscribeWorkspaceFileSignature` are not included here: both
-    /// hijack the connection (`hijacksConnection`) before either transport's dispatch chain reaches this
-    /// check, so neither ever needs a worker-queue divert of its own.
+    /// `.subscribeWorkspaceDiffSignature`, `.subscribeWorkspaceFileSignature`, and
+    /// `.subscribeWorkspaceFileListSignature` are not included here: all three hijack the connection
+    /// (`hijacksConnection`) before either transport's dispatch chain reaches this check, so none of
+    /// them needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceFileList,
-            .workspaceRefList:
+        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk,
+            .workspaceFileList, .workspaceRefList:
             true
         default: false
         }
@@ -407,6 +408,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// release that scope's poll-subscriber slot when this relay's connection closes. A separate
             /// field from `diffSignatureScope` since the scope types differ (workspace+ref vs. workspace+path).
             var fileSignatureScope: WorkspaceFileScope? = nil
+            /// Set only for a `subscribeWorkspaceFileListSignature` relay; `closeStreamRelay` uses it to
+            /// release that workspace's poll-subscriber slot when this relay's connection closes.
+            var fileListSignatureWorkspaceID: String? = nil
         }
 
         private final class StreamSendSequencer: @unchecked Sendable {
@@ -675,6 +679,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceFileSignature` relay; `relayLinuxSubscription` uses it to
             /// release that scope's poll-subscriber slot once the relay loop returns.
             var fileSignatureScope: WorkspaceFileScope? = nil
+            /// Set only for a `subscribeWorkspaceFileListSignature` relay; `relayLinuxSubscription` uses it
+            /// to release that workspace's poll-subscriber slot once the relay loop returns.
+            var fileListSignatureWorkspaceID: String? = nil
         }
 
         private enum LinuxSubscribeAction: Sendable {
@@ -1296,6 +1303,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// and removed when its last relay closes (see
     /// `addWorkspaceFileSignatureSubscriber`/`removeWorkspaceFileSignatureSubscriber`).
     private var workspaceFileSignatureSubscriptions: [WorkspaceFileScope: WorkspaceFileSignatureSubscription] = [:]
+    /// Producer + 2s poll timer per subscribed workspace for `subscribeWorkspaceFileListSignature`,
+    /// keyed by workspace id. Entries are `queue`-confined: created on a workspace's first subscriber
+    /// and removed when its last relay closes.
+    private var workspaceFileListSignatureSubscriptions: [String: WorkspaceFileListSignatureSubscription] = [:]
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1835,9 +1846,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// an unresponsive remote client from accumulating arbitrary changed-file metadata before TTL fires.
         private static let maximumActiveManifests = 16
 
-        convenience init(ttl: TimeInterval) {
-            self.init(ttl: ttl, clock: { Date() }, reaper: DispatchExpiryReaper())
-        }
+        convenience init(ttl: TimeInterval) { self.init(ttl: ttl, clock: { Date() }, reaper: DispatchExpiryReaper()) }
 
         /// This initializer is internal for deterministic lifecycle tests. Production always uses the
         /// dispatch reaper above; both paths invoke the same `reapExpired` cleanup operation.
@@ -1867,14 +1876,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             lock.lock()
             defer { lock.unlock() }
             reapExpiredLocked(now: now)
-            while manifests.count >= Self.maximumActiveManifests,
-                let oldest = manifests.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key
-            {
+            while manifests.count >= Self.maximumActiveManifests, let oldest = manifests.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key {
                 removeManifestLocked(oldest)
             }
             let manifestID = UUID().uuidString.lowercased()
-            let session = ManifestSession(
-                scope: scope, workspaceDir: workspaceDir, snapshot: snapshot, expiresAt: now.addingTimeInterval(ttl))
+            let session = ManifestSession(scope: scope, workspaceDir: workspaceDir, snapshot: snapshot, expiresAt: now.addingTimeInterval(ttl))
             manifests[manifestID] = session
             createdManifestCount += 1
             return CreatedManifest(manifestID: manifestID, session: session)
@@ -1902,8 +1908,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
 
         func createPatch(
-            manifestID: String, scope: WorkspaceDiffScope, relativePath: String, scopeSignature: String,
-            file: SpacesDeviceWorkspaceDiffFileMetadata, outputURL: URL, byteCount: Int64, now: Date = Date()
+            manifestID: String, scope: WorkspaceDiffScope, relativePath: String, scopeSignature: String, file: SpacesDeviceWorkspaceDiffFileMetadata,
+            outputURL: URL, byteCount: Int64, now: Date = Date()
         ) -> String {
             lock.lock()
             defer { lock.unlock() }
@@ -1911,9 +1917,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // A manifest normally streams files serially. Retain its last completed file for a lost EOF
             // response, but drop it before starting the next file so a generation keeps only active files
             // plus at most one completed transfer artifact.
-            for transferID in patches.filter({ $0.value.manifestID == manifestID && $0.value.isComplete }).keys {
-                _ = removePatchLocked(transferID)
-            }
+            for transferID in patches.filter({ $0.value.manifestID == manifestID && $0.value.isComplete }).keys { _ = removePatchLocked(transferID) }
             let transferID = UUID().uuidString.lowercased()
             patches[transferID] = PatchSession(
                 manifestID: manifestID, scope: scope, relativePath: relativePath, scopeSignature: scopeSignature, file: file, outputURL: outputURL,
@@ -1922,9 +1926,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return transferID
         }
 
-        func lookupPatch(
-            manifestID: String, transferID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()
-        ) -> Lookup<PatchSession> {
+        func lookupPatch(manifestID: String, transferID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()) -> Lookup<
+            PatchSession
+        > {
             lock.lock()
             defer { lock.unlock() }
             reapExpiredLocked(now: now)
@@ -1942,9 +1946,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// Offset-zero requests intentionally carry no transfer ID. If their response was lost, locate the
         /// already-created child by the manifest-bound path so the retry returns the same first range rather
         /// than allocating another active patch file.
-        func lookupPatchForInitialRange(
-            manifestID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()
-        ) -> (transferID: String, patch: PatchSession)? {
+        func lookupPatchForInitialRange(manifestID: String, scope: WorkspaceDiffScope, relativePath: String, now: Date = Date()) -> (
+            transferID: String, patch: PatchSession
+        )? {
             lock.lock()
             defer { lock.unlock() }
             reapExpiredLocked(now: now)
@@ -2063,6 +2067,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// transition into "unavailable" is also the correct signal for a live client, whose re-pull of
     /// `workspaceDiffManifestChunk` then surfaces the workspace's actual 404.
     static let workspaceDiffSignatureUnavailableSentinel = "unavailable"
+
+    /// Same rationale as `workspaceDiffSignatureUnavailableSentinel`, but for the workspace-wide
+    /// file-membership stream. `workspaceFileList`-derived signatures are also sha256 hex digests,
+    /// so this non-hex sentinel cannot collide with a real signature and keeps the keepalive cadence
+    /// alive through provider failures instead of silently freezing the producer.
+    static let workspaceFileListSignatureUnavailableSentinel = "unavailable"
 
     /// Producer + 2s poll timer for one (workspace, ref) scope's `subscribeWorkspaceDiffSignature` stream.
     /// The producer (a reused `DeviceOverviewStreamServer`) and the poll timer both run on `streamQueue`,
@@ -2529,6 +2539,176 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Producer + 2s poll timer for one workspace's `subscribeWorkspaceFileListSignature` stream.
+    /// The wire frame remains the exact `workspaceFileList` signature, which is the value a successful
+    /// pull acknowledges. Polls use a cheaper membership detector and refresh that cached exact value only
+    /// when the detector moves; otherwise a keepalive simply repeats the cache without listing the tree.
+    final class WorkspaceFileListSignatureSubscription: @unchecked Sendable {
+        private final class LatestSignatureBox: @unchecked Sendable {
+            var signature: String?
+            var detectorToken: String?
+            var lastBroadcastSignature: String?
+        }
+
+        let socketPath: String
+        let server: DeviceOverviewStreamServer
+        private let pollTimer: DispatchSourceTimer
+        private let latestSignatureBox = LatestSignatureBox()
+        private var tick = 0
+        var subscriberCount = 0
+
+        init(
+            workspaceID: String, socketPath: String, streamQueue: DispatchQueue, signatureProvider: @escaping @Sendable (String) -> String?,
+            detectorProvider: @escaping @Sendable (String) -> String?
+        ) {
+            self.socketPath = socketPath
+            let latestSignatureBox = latestSignatureBox
+            let initialize: @Sendable () -> String = {
+                if let signature = latestSignatureBox.signature { return signature }
+                // Establish the detector baseline before taking the exact listing. The filesystem can
+                // change between these two calls (an agent can create/remove a file in that window). If
+                // the exact listing ran first, the detector could observe the post-change state and make
+                // that stale listing look current forever. A detector-first baseline may cause one extra
+                // exact refresh when the change lands during the listing, but it cannot suppress it.
+                let detectorToken = detectorProvider(workspaceID)
+                let exactSignature = signatureProvider(workspaceID)
+                let signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+                latestSignatureBox.signature = signature
+                // A failed exact listing has no trustworthy detector baseline: retaining one would
+                // let identical later detector ticks keep the unavailable sentinel cached forever.
+                latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
+                // This is the connection's initial frame. Recording it as sent means the first poll does
+                // not re-announce the same exact signature and make an already-current client re-pull.
+                latestSignatureBox.lastBroadcastSignature = signature
+                return signature
+            }
+            server = DeviceOverviewStreamServer(
+                socketPath: socketPath, queue: streamQueue,
+                lineProvider: {
+                    let signature = initialize()
+                    // A timer may have initialized the cache before the first client connected. In
+                    // that case this connect-time frame is the first actual broadcast, so acknowledge
+                    // it as sent; otherwise the next timer would immediately re-announce the same
+                    // signature solely because there was no relay at the earlier tick.
+                    if latestSignatureBox.lastBroadcastSignature == nil { latestSignatureBox.lastBroadcastSignature = signature }
+                    return try? SpacesDeviceWorkspaceFileListSignatureStreamCodec.encodeLine(
+                        SpacesDeviceWorkspaceFileListSignatureFrame(workspaceID: workspaceID, fileListSignature: signature))
+                })
+            let timer = DispatchSource.makeTimerSource(queue: streamQueue)
+            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
+            pollTimer = timer
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.tick += 1
+                if latestSignatureBox.signature == nil {
+                    // A timer can fire before any relay connects. It must establish the same cache as the
+                    // connect path, but has not sent a frame yet, so leave `lastBroadcastSignature` nil.
+                    // Keep initialization's detector-first ordering so a change during the exact listing
+                    // cannot be hidden by a detector baseline captured afterward.
+                    let detectorToken = detectorProvider(workspaceID)
+                    let exactSignature = signatureProvider(workspaceID)
+                    latestSignatureBox.signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+                    latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
+                } else {
+                    let detectorToken = detectorProvider(workspaceID)
+                    if latestSignatureBox.detectorToken == nil || detectorToken != latestSignatureBox.detectorToken {
+                        let exactSignature = signatureProvider(workspaceID)
+                        latestSignatureBox.signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+                        // Same invariant as the connect path: retry a failed exact pull on the
+                        // following detector tick even if membership itself stayed unchanged.
+                        latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
+                    }
+                }
+                let signature = latestSignatureBox.signature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+                let changed = signature != latestSignatureBox.lastBroadcastSignature
+                guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: self.tick, changed: changed) else { return }
+                latestSignatureBox.lastBroadcastSignature = signature
+                self.server.broadcast()
+            }
+        }
+
+        func start() throws {
+            do { try server.start() } catch {
+                pollTimer.resume()
+                pollTimer.cancel()
+                throw error
+            }
+            pollTimer.resume()
+        }
+
+        func stop() {
+            pollTimer.cancel()
+            server.stop()
+        }
+    }
+
+    private func addWorkspaceFileListSignatureSubscriber(workspaceID: String) throws -> String {
+        if let existing = workspaceFileListSignatureSubscriptions[workspaceID] {
+            existing.subscriberCount += 1
+            return existing.socketPath
+        }
+        let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+        let streamQueue = DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID)")
+        let indexCache = SpacesDeviceWorkspaceFileListEngine.GitMembershipIndexCache()
+        let subscription = WorkspaceFileListSignatureSubscription(
+            workspaceID: workspaceID, socketPath: socketPath, streamQueue: streamQueue,
+            signatureProvider: { [weak self] workspaceID in try? self?.computeWorkspaceFileListSignature(workspaceID: workspaceID) },
+            detectorProvider: { [weak self] workspaceID in
+                try? self?.computeWorkspaceFileListChangeDetector(workspaceID: workspaceID, indexCache: indexCache)
+            })
+        try subscription.start()
+        subscription.subscriberCount = 1
+        workspaceFileListSignatureSubscriptions[workspaceID] = subscription
+        return socketPath
+    }
+
+    private func removeWorkspaceFileListSignatureSubscriber(workspaceID: String) {
+        guard let subscription = workspaceFileListSignatureSubscriptions[workspaceID] else { return }
+        subscription.subscriberCount -= 1
+        guard subscription.subscriberCount <= 0 else { return }
+        subscription.stop()
+        workspaceFileListSignatureSubscriptions.removeValue(forKey: workspaceID)
+    }
+
+    private func computeWorkspaceFileListSignature(workspaceID: String) throws -> String {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
+        }
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
+        return SpacesDeviceWorkspaceFileListSignature.value(for: result)
+    }
+
+    /// Produces the poll-only file-membership detector. Git has an index/status source that can distinguish
+    /// membership from ordinary content edits; a plain directory has no equivalent recursive change journal,
+    /// and a parent-directory mtime misses nested changes and 10 MiB/symlink openability crossings. Its
+    /// exact listing signature is therefore the smallest correct detector rather than a lossy shortcut.
+    private func computeWorkspaceFileListChangeDetector(
+        workspaceID: String, indexCache: SpacesDeviceWorkspaceFileListEngine.GitMembershipIndexCache? = nil
+    ) throws -> String {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
+        }
+        if let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
+            workspaceDir: workspace.dir, gitClient: workspaceGitClient, indexCache: indexCache)
+        {
+            return "git:\(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: workspaceGitClient))"
+        }
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
+        return "filesystem:\(SpacesDeviceWorkspaceFileListSignature.value(for: result))"
+    }
+
+    private func assertWorkspaceExistsForFileListSignature(workspaceID: String) throws {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard try store.workspace(id: workspaceID) != nil else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
+        }
+    }
+
     /// Stops accepting and tears the transport down on the Device API queue. Uses `performOnQueue` rather
     /// than a bare `async` so a stop requested from that queue takes effect at that point instead of
     /// behind everything already queued ahead of it — the same inline-if-already-there rule the rest of
@@ -2667,8 +2847,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // `workspaceGitQueue` before they reach here (see `runsOnWorkspaceGitQueue`), so this case only
         // keeps the switch exhaustive.
         case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk,
-            .workspaceFileList,
-            .workspaceRefList:
+            .workspaceFileList, .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
@@ -2708,7 +2887,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+            .subscribeWorkspaceFileListSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
@@ -4295,9 +4475,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let existingPermissions { try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path) }
     }
 
-    private func handleWorkspaceDiffManifestChunkRequest(
-        _ request: SpacesDeviceWorkspaceDiffManifestChunkRequest, context: RequestContext
-    ) throws -> SpacesDeviceAPIResponse {
+    private func handleWorkspaceDiffManifestChunkRequest(_ request: SpacesDeviceWorkspaceDiffManifestChunkRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         guard request.fileIndex >= 0 else {
             return SpacesDeviceAPIResponse(ok: false, message: "fileIndex must not be negative.", errorCode: .invalidArgument)
         }
@@ -4348,9 +4528,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// reserves the largest possible cursor encoding, so this linear pass never underestimates response size.
     private static let workspaceDiffManifestChunkByteCap = 4 * 1024 * 1024
 
-    func workspaceDiffManifestChunkResponse(
-        manifestID: String, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, fileIndex: Int
-    ) throws -> SpacesDeviceAPIResponse {
+    func workspaceDiffManifestChunkResponse(manifestID: String, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, fileIndex: Int) throws
+        -> SpacesDeviceAPIResponse
+    {
         guard fileIndex <= snapshot.plans.count else {
             return SpacesDeviceAPIResponse(ok: false, message: "fileIndex is outside this workspace diff manifest.", errorCode: .invalidArgument)
         }
@@ -4385,14 +4565,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     nextFileIndex: nextIndex < snapshot.plans.count ? nextIndex : nil)))
         let encodedResponse = try SpacesDeviceAPICodec.encodeResponseLine(response)
         precondition(
-            encodedResponse.count <= Self.workspaceDiffManifestChunkByteCap,
-            "Workspace diff manifest metadata response exceeded its byte cap.")
+            encodedResponse.count <= Self.workspaceDiffManifestChunkByteCap, "Workspace diff manifest metadata response exceeded its byte cap.")
         return response
     }
 
-    private func handleWorkspaceDiffManifestReleaseRequest(
-        _ request: SpacesDeviceWorkspaceDiffManifestReleaseRequest
-    ) -> SpacesDeviceAPIResponse {
+    private func handleWorkspaceDiffManifestReleaseRequest(_ request: SpacesDeviceWorkspaceDiffManifestReleaseRequest) -> SpacesDeviceAPIResponse {
         guard !request.manifestID.isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "manifestID is required to release a diff manifest.", errorCode: .invalidArgument)
         }
@@ -4401,8 +4578,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let scope = WorkspaceDiffScope(workspaceID: request.workspaceID, refName: request.refName, lastCommit: request.lastCommit)
         switch workspaceDiffTransfers.releaseManifest(manifestID: request.manifestID, scope: scope) {
-        case .found:
-            return SpacesDeviceAPIResponse(ok: true, message: "Released workspace diff manifest.")
+        case .found: return SpacesDeviceAPIResponse(ok: true, message: "Released workspace diff manifest.")
         case .missing:
             // Release is an idempotent cleanup request. A client may retry after the daemon accepted the
             // first release but lost its response, or release after TTL did the same work.
@@ -4413,14 +4589,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func handleWorkspaceDiffFileChunkRequest(
-        _ request: SpacesDeviceWorkspaceDiffFileChunkRequest, context _: RequestContext
-    ) throws -> SpacesDeviceAPIResponse {
+    private func handleWorkspaceDiffFileChunkRequest(_ request: SpacesDeviceWorkspaceDiffFileChunkRequest, context _: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         guard request.byteOffset >= 0 else {
             return SpacesDeviceAPIResponse(ok: false, message: "byteOffset must not be negative.", errorCode: .invalidArgument)
         }
         guard !request.manifestID.isEmpty else {
-            return SpacesDeviceAPIResponse(ok: false, message: "manifestID is required for a workspace diff patch range.", errorCode: .invalidArgument)
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "manifestID is required for a workspace diff patch range.", errorCode: .invalidArgument)
         }
         guard !(request.lastCommit && SpacesDeviceWorkspaceDiffEngine.normalizedRefName(request.refName) != nil) else {
             return SpacesDeviceAPIResponse(ok: false, message: "lastCommit and refName are mutually exclusive.", errorCode: .invalidArgument)
@@ -4473,14 +4650,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             let outputURL = try makeWorkspaceDiffPatchTransferFile()
             var retainedByTransfer = false
-            defer {
-                if !retainedByTransfer { try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent()) }
-            }
-            guard let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
-                snapshot: manifest.snapshot, workspaceDir: manifest.workspaceDir, relativePath: request.relativePath, outputURL: outputURL,
-                gitClient: workspaceGitClient, deadlineStart: Date())
+            defer { if !retainedByTransfer { try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent()) } }
+            guard
+                let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
+                    snapshot: manifest.snapshot, workspaceDir: manifest.workspaceDir, relativePath: request.relativePath, outputURL: outputURL,
+                    gitClient: workspaceGitClient, deadlineStart: Date())
             else {
-                return SpacesDeviceAPIResponse(ok: false, message: "The requested file is not changed in this workspace diff manifest.", errorCode: .notFound)
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "The requested file is not changed in this workspace diff manifest.", errorCode: .notFound)
             }
 
             // Binary and empty patches have complete metadata but no byte stream. Do not create a transfer
@@ -4495,9 +4672,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 manifestID: request.manifestID, scope: scope, relativePath: request.relativePath, scopeSignature: transfer.scopeSignature,
                 file: transfer.file, outputURL: outputURL, byteCount: transfer.patchByteCount)
             retainedByTransfer = true
-            do {
-                return try workspaceDiffPatchChunkResponse(transferID: transferID, transfer: transfer, byteOffset: 0, outputURL: outputURL)
-            } catch {
+            do { return try workspaceDiffPatchChunkResponse(transferID: transferID, transfer: transfer, byteOffset: 0, outputURL: outputURL) } catch {
                 _ = workspaceDiffTransfers.removePatch(transferID: transferID)
                 throw error
             }
@@ -4520,8 +4695,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 _ = workspaceDiffTransfers.removePatch(transferID: transferID)
                 throw error
             }
-        case .missing:
-            return SpacesDeviceAPIResponse(ok: false, message: "Workspace diff patch transfer or manifest expired.", errorCode: .notFound)
+        case .missing: return SpacesDeviceAPIResponse(ok: false, message: "Workspace diff patch transfer or manifest expired.", errorCode: .notFound)
         case .mismatched:
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Workspace diff patch transfer does not match this manifest, workspace, scope, or file.",
@@ -4533,8 +4707,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static let workspaceDiffPatchResponseByteCap = 4 * 1024 * 1024
 
     private func workspaceDiffPatchChunkResponse(
-        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer, byteOffset: Int,
-        outputURL: URL
+        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer, byteOffset: Int, outputURL: URL
     ) throws -> SpacesDeviceAPIResponse {
         guard Int64(byteOffset) <= transfer.patchByteCount else {
             return SpacesDeviceAPIResponse(ok: false, message: "byteOffset is outside this workspace diff patch.", errorCode: .invalidArgument)
@@ -4542,21 +4715,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let rawByteCap = try workspaceDiffPatchInitialRawByteCap(transferID: transferID, transfer: transfer)
         var (bytes, nextByteOffset) = try readWorkspaceDiffPatchChunk(
             at: outputURL, byteOffset: byteOffset, byteCount: transfer.patchByteCount, rawByteCap: rawByteCap)
-        var response = workspaceDiffPatchResponse(
-            transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
+        var response = workspaceDiffPatchResponse(transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
         if try SpacesDeviceAPICodec.encodeResponseLine(response).count > Self.workspaceDiffPatchResponseByteCap {
             let fittedByteCount = try workspaceDiffPatchFittingByteCount(
                 transferID: transferID, transfer: transfer, bytes: bytes, byteOffset: byteOffset)
             bytes = Data(bytes.prefix(fittedByteCount))
             nextByteOffset = Int64(byteOffset) + Int64(bytes.count) < transfer.patchByteCount ? byteOffset + bytes.count : nil
-            response = workspaceDiffPatchResponse(
-                transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
+            response = workspaceDiffPatchResponse(transferID: transferID, transfer: transfer, bytes: bytes, nextByteOffset: nextByteOffset)
         }
         if nextByteOffset == nil { workspaceDiffTransfers.markPatchComplete(transferID: transferID) }
         let encodedResponseByteCount = try SpacesDeviceAPICodec.encodeResponseLine(response).count
         precondition(
-            encodedResponseByteCount <= Self.workspaceDiffPatchResponseByteCap,
-            "Workspace diff patch response exceeded its transport byte cap.")
+            encodedResponseByteCount <= Self.workspaceDiffPatchResponseByteCap, "Workspace diff patch response exceeded its transport byte cap.")
         return response
     }
 
@@ -4574,15 +4744,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// This first read reserves base64 expansion. The exact serialized response below verifies the
     /// complete transport representation and reduces the range through the same path when needed.
-    private func workspaceDiffPatchInitialRawByteCap(
-        transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer
-    ) throws -> Int {
+    private func workspaceDiffPatchInitialRawByteCap(transferID: String, transfer: SpacesDeviceWorkspaceDiffEngine.FilePatchTransfer) throws -> Int {
         let reserved = SpacesDeviceAPIResponse(
             ok: true, message: "Loaded workspace diff patch chunk.",
             result: .workspaceDiffFileChunk(
                 .init(
-                    scopeSignature: transfer.scopeSignature, file: transfer.file, transferID: transferID,
-                    patchBase64Data: "", nextByteOffset: Int.max)))
+                    scopeSignature: transfer.scopeSignature, file: transfer.file, transferID: transferID, patchBase64Data: "", nextByteOffset: Int.max
+                )))
         let envelopeBytes = try SpacesDeviceAPICodec.encodeResponseLine(reserved).count
         let base64Groups = max(0, (Self.workspaceDiffPatchResponseByteCap - envelopeBytes) / 4)
         return base64Groups * 3
@@ -4598,11 +4766,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         while lowerBound < upperBound {
             let candidateByteCount = (lowerBound + upperBound + 1) / 2
             let candidate = Data(bytes.prefix(candidateByteCount))
-            let nextByteOffset = Int64(byteOffset) + Int64(candidateByteCount) < transfer.patchByteCount
-                ? byteOffset + candidateByteCount
-                : nil
-            let response = workspaceDiffPatchResponse(
-                transferID: transferID, transfer: transfer, bytes: candidate, nextByteOffset: nextByteOffset)
+            let nextByteOffset = Int64(byteOffset) + Int64(candidateByteCount) < transfer.patchByteCount ? byteOffset + candidateByteCount : nil
+            let response = workspaceDiffPatchResponse(transferID: transferID, transfer: transfer, bytes: candidate, nextByteOffset: nextByteOffset)
             if try SpacesDeviceAPICodec.encodeResponseLine(response).count <= Self.workspaceDiffPatchResponseByteCap {
                 lowerBound = candidateByteCount
             } else {
@@ -4636,15 +4801,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let fileManager = FileManager.default
         for _ in 0..<3 {
             let directory = fileManager.temporaryDirectory.appendingPathComponent("spaces-workspace-diff-\(UUID().uuidString)", isDirectory: true)
-            do {
-                try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            } catch {
+            do { try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) } catch {
                 continue  // UUID collision or transient temp-dir race: mint another unique directory.
             }
             let outputURL = directory.appendingPathComponent("patch", isDirectory: false)
-            if fileManager.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) {
-                return outputURL
-            }
+            if fileManager.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) { return outputURL }
             try? fileManager.removeItem(at: directory)
         }
         throw NSError(
@@ -4924,8 +5085,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // The interactive runtime can outlive the agent process as a bare shell. Re-read the agent
             // row immediately before writing so a session that has since exited cannot receive review text
             // merely because its launch configuration and control socket are still present.
-            guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: request.sessionID),
-                agent.workspaceID == request.workspaceID, agent.status != .exited
+            guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: request.sessionID), agent.workspaceID == request.workspaceID,
+                agent.status != .exited
             else {
                 return SpacesDeviceAPIResponse(
                     ok: false, message: "Terminal session '\(request.sessionID)' is not an active coding agent.", errorCode: .invalidArgument)
@@ -4969,16 +5130,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `spawnAgentSession`: the latter is a CLI/MCP contract that rejects unrecognized commands, whereas
     /// Editor's Start Agent dialog accepts the command the user supplies and waits for ordinary foreground
     /// detection to decide whether it becomes an addressable coding agent.
-    private func handleStartWorkspaceCommandSessionRequest(
-        _ request: SpacesDeviceStartWorkspaceCommandSessionRequest, context: RequestContext
-    ) throws -> SpacesDeviceAPIResponse {
+    private func handleStartWorkspaceCommandSessionRequest(_ request: SpacesDeviceStartWorkspaceCommandSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         guard let command = normalizedString(request.command) else {
             return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
         }
-        let session = try context.orchestrator().createWorkspaceTerminalSession(
-            workspaceID: request.workspaceID, title: nil, command: command)
+        let session = try context.orchestrator().createWorkspaceTerminalSession(workspaceID: request.workspaceID, title: nil, command: command)
         return try refreshedMutationResponse(
-            context: context, message: "Started workspace command session.", workspaceID: request.workspaceID, sessionID: session.id)
+            context: context, message: "Started workspace command session.", workspaceID: request.workspaceID, sessionID: session.id,
+            launchedTerminalSession: try launchedTerminalSessionSummary(session, workspaceID: request.workspaceID))
     }
 
     private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
@@ -5327,14 +5488,40 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func refreshedMutationResponse(
         context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        notice: String? = nil, terminatedTerminalSession: Bool? = nil
+        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
                     overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
-                    notice: notice, terminatedTerminalSession: terminatedTerminalSession)))
+                    launchedTerminalSession: launchedTerminalSession, notice: notice, terminatedTerminalSession: terminatedTerminalSession)))
+    }
+
+    /// Carries the launched terminal's own metadata in the start-command mutation response so the
+    /// client can still open that session even if it exits before the refreshed overview is built and
+    /// therefore never appears in `overview.sessions`.
+    private func launchedTerminalSessionSummary(_ session: TerminalServiceSessionSummary, workspaceID: String) throws
+        -> SpacesDeviceTerminalSessionSummary
+    {
+        guard let launch = session.launchConfiguration else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 500,
+                userInfo: [NSLocalizedDescriptionKey: "Launched terminal session is missing its launch configuration."])
+        }
+        let runtime = session.runtimeState
+        let state = runtime?.state ?? session.state
+        let isInteractive = state.isInteractive
+        return SpacesDeviceTerminalSessionSummary(
+            id: session.id, title: session.title, liveTitle: runtime?.title, workingDirectory: session.workingDirectory, shell: launch.shell,
+            command: launch.command, state: state, backend: session.backend, lifetimePolicy: session.lifetimePolicy, servicePID: session.servicePID,
+            childPID: session.childPID, workspaceID: workspaceID, workspaceTitle: nil, projectID: nil, projectName: nil, createdAt: launch.createdAt,
+            updatedAt: runtime?.updatedAt ?? launch.createdAt, isControlAvailable: isInteractive, isSubscriptionAvailable: isInteractive,
+            attachmentSnapshot: session.attachmentSnapshot ?? .init(), rowKind: .liveSession, rowSourceID: nil,
+            hasFinalRender: session.hasFinalRender, foregroundDetectedAgentKind: runtime?.foregroundDetectedAgentKind?.rawValue,
+            foregroundCommand: TerminalForegroundProcessInspector.displayCommand(
+                executableName: runtime?.foregroundExecutableName, argv: runtime?.foregroundArgv), bellAt: runtime?.bellAt,
+            bracketedPasteActive: runtime?.bracketedPasteActive ?? false)
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {
@@ -5558,6 +5745,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
                         clientID: nil, fileSignatureScope: scope))
             }
+            if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
+                let socketPath: String
+                do {
+                    try assertWorkspaceExistsForFileListSignature(workspaceID: workspaceID)
+                    socketPath = try addWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID)
+                } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
+                return .relay(
+                    LinuxSubscription(
+                        sessionID: "workspace-file-list-signature:\(workspaceID)", installationID: request.clientApp?.installationID ?? "",
+                        subscriptionSocketPath: socketPath, controlSocketPath: "", clientID: nil, fileListSignatureWorkspaceID: workspaceID))
+            }
             guard let sessionID = request.sessionID else {
                 return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument))
             }
@@ -5592,6 +5790,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             defer {
                 if let scope = subscription.diffSignatureScope { performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) } }
                 if let scope = subscription.fileSignatureScope { performOnQueue { self.removeWorkspaceFileSignatureSubscriber(scope: scope) } }
+                if let workspaceID = subscription.fileListSignatureWorkspaceID {
+                    performOnQueue { self.removeWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID) }
+                }
             }
             let relaySocketFD = try connectUnixSocket(path: subscription.subscriptionSocketPath)
             defer {
@@ -5731,6 +5932,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try relayWorkspaceFileSignatureSubscription(
                     connection: connection, scope: WorkspaceFileScope(workspaceID: scopePayload.workspaceID, path: scopePayload.path),
                     installationID: request.clientApp?.installationID ?? "")
+                return
+            }
+            if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
+                try relayWorkspaceFileListSignatureSubscription(
+                    connection: connection, workspaceID: workspaceID, installationID: request.clientApp?.installationID ?? "")
                 return
             }
             guard let sessionID = request.sessionID else {
@@ -5894,6 +6100,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
+        private func relayWorkspaceFileListSignatureSubscription(connection: NWConnection, workspaceID: String, installationID: String) throws {
+            try assertWorkspaceExistsForFileListSignature(workspaceID: workspaceID)
+            let socketPath = try addWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID)
+            do {
+                let relaySocketFD = try connectUnixSocket(path: socketPath)
+                try setNonBlocking(relaySocketFD)
+                let relayQueue = DispatchQueue(label: "spaces.device.api.workspace-file-list.\(ObjectIdentifier(connection))")
+                let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
+                relaySource.setEventHandler { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.relayStateData(from: relaySocketFD, to: connection)
+                }
+                relaySource.setCancelHandler { close(relaySocketFD) }
+                streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+                    sessionID: "workspace-file-list-signature:\(workspaceID)", installationID: installationID, relaySocketFD: relaySocketFD,
+                    relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: nil, connection: connection,
+                    sendSequencer: StreamSendSequencer(queueKey: queueKey), fileListSignatureWorkspaceID: workspaceID)
+                relaySource.resume()
+            } catch {
+                removeWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID)
+                throw error
+            }
+        }
+
     #endif
 
     #if canImport(Network) && canImport(Security)
@@ -6037,6 +6267,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             if let scope = relay.diffSignatureScope { removeWorkspaceDiffSignatureSubscriber(scope: scope) }
             if let scope = relay.fileSignatureScope { removeWorkspaceFileSignatureSubscriber(scope: scope) }
+            if let workspaceID = relay.fileListSignatureWorkspaceID { removeWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID) }
             if cancelNetworkConnection { connection.cancel() }
         }
 

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FIXTURE_ALL_PATHS } from "../src/bridge/fixtures";
 import { createRealBridge } from "../src/bridge/realBridge";
 import { createMockBridge } from "../src/bridge/mockBridge";
 import { SpacesBridgeError } from "../src/bridge/types";
@@ -202,6 +203,26 @@ describe("MockSpacesBridge", () => {
     const reread = await bridge.workspaceFileRead("notes/TODO.md", "editor");
     expect(reread.content).toBe("# TODO\n\n- done\n");
     expect(reread.sha256).not.toBe(read.sha256);
+  });
+
+  it("preserves the broad fixture listing and only emits file-list events for real membership changes", async () => {
+    const bridge = createMockBridge();
+    const onMembership = vi.fn();
+    bridge.subscribeFileListSignature(onMembership);
+
+    const initial = await bridge.workspaceFileList();
+    expect(initial.paths).toEqual([...FIXTURE_ALL_PATHS].sort((a, b) => a.localeCompare(b)));
+
+    await bridge.workspaceFileRead("notes/TODO.md", "editor");
+    bridge.simulateFileChange("# TODO\n\n- edited in place\n");
+    expect(onMembership).not.toHaveBeenCalled();
+
+    bridge.simulateFileDeleted();
+    expect(onMembership).toHaveBeenCalledTimes(1);
+
+    const recreated = await bridge.workspaceFileWrite("notes/TODO.md", "# TODO\n\n- recreated\n", { baseSHA256: undefined });
+    expect(recreated).toEqual({ ok: true, sha256: expect.any(String) });
+    expect(onMembership).toHaveBeenCalledTimes(2);
   });
 
   it("delivers a signature-change event to every subscribed listener, and stops after unsubscribe", () => {
