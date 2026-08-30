@@ -216,12 +216,12 @@ public final class RemoteWorkspaceGitClient: Sendable {
     /// `--exit-code` semantics (0 = no difference, 1 = difference found, >1 = error) rather than the usual
     /// "0 = success" every other caller relies on; the default keeps every existing call site unchanged.
     ///
-    /// `maxOutputBytes`, when set, bounds how much of stdout is captured: once that many bytes have been
-    /// read, `PipeDrain` stops draining and reports the overflow rather than reading to EOF. A process
-    /// whose remaining output would exceed the cap is then still writing into a pipe nobody is draining, so
-    /// it is terminated and reaped here rather than risking a hang; the throw carries no exit code because
-    /// the termination made one meaningless. Passing `nil` (the default) keeps the unbounded behavior every
-    /// existing call site relies on.
+    /// `maxOutputBytes`, when set, bounds how much of stdout is captured: once more than that many bytes
+    /// have been read, `PipeDrain` stops draining and reports the overflow rather than reading to EOF. A
+    /// process whose remaining output would exceed the cap is then still writing into a pipe nobody is
+    /// draining, so it is terminated and reaped here rather than risking a hang; the throw carries no exit
+    /// code because the termination made one meaningless. Passing `nil` (the default) keeps the unbounded
+    /// behavior every existing call site relies on.
     ///
     /// The process deadline is enforced before anything blocks on the drains reaching EOF:
     /// `awaitProcessExitOrCapOverflow` polls `process.isRunning`, `outDrain.didExceedCap`, and `timeout`
@@ -675,9 +675,10 @@ private final class PipeDrain: @unchecked Sendable {
     }
 
     /// `maxBytes == nil` reads to EOF exactly as before. `maxBytes` set switches to an incremental
-    /// `read(upToCount:)` loop that stops (and closes its end of the pipe) as soon as at least that many
+    /// `availableData` loop that stops (and closes its end of the pipe) as soon as more than that many
     /// bytes have been read, rather than blocking until the writer closes the pipe — a writer producing
-    /// more than the cap would otherwise never be observed to finish.
+    /// more than the cap would otherwise never be observed to finish. Reading one chunk past the cap is
+    /// intentional: output exactly equal to the cap is valid and must still be returned normally.
     ///
     /// The drain runs on a dedicated `Thread`, never a GCD queue: `waitForData(timeout:)` blocks its caller
     /// on a condition variable, and when many `runGitAndCapture` calls run concurrently those blocked
@@ -694,7 +695,7 @@ private final class PipeDrain: @unchecked Sendable {
                     let chunk = handle.availableData
                     if chunk.isEmpty { break }  // EOF: writer closed its end without exceeding the cap.
                     data.append(chunk)
-                    if data.count >= maxBytes {
+                    if data.count > maxBytes {
                         capLock.lock()
                         _didExceedCap = true
                         capLock.unlock()

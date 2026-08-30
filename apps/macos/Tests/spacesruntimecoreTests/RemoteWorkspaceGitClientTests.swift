@@ -93,6 +93,19 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 5, "bounded capture must terminate the child promptly rather than hang")
     }
 
+    func testRunGitAndCaptureBoundedModeAcceptsOutputExactlyAtTheCap() throws {
+        let fixture = try makeRemoteFixture()
+        let expected = Data(repeating: 0x78, count: 1024)
+        try expected.write(to: fixture.source.appendingPathComponent("EXACT.md"))
+        try runGit(["add", "EXACT.md"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "exact"], cwd: fixture.source.path)
+
+        let output = try RemoteWorkspaceGitClient().runGitAndCaptureData(
+            ["-C", fixture.source.path, "show", "HEAD:EXACT.md"], maxOutputBytes: expected.count)
+
+        XCTAssertEqual(output, expected)
+    }
+
     func testRunGitAndCaptureDataPreservesRawBlobBytes() throws {
         let fixture = try makeRemoteFixture()
         let expected = Data([0, 0xFF, 0xC3, 0x28])
