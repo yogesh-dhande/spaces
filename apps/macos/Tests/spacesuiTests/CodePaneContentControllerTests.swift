@@ -3690,6 +3690,55 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(state.pendingAgentLaunch?.status == "starting")
     }
 
+    @Test func detectedStartedAgentIsRetainedForAReactivatedPage() async throws {
+        let storage = MemoryCodePaneWorkspaceStateStorage()
+        let gateway = RecordingCodePaneDeviceGateway()
+        await gateway.setWorkspaceCommandStartResult(.success(startedCommandResponse()))
+        let agent = CodePaneRunningAgent(id: "agent-start", label: "Claude", sessionID: "session-start")
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway, workspaceStateStore: storage)
+        let clock = ControllableAgentStartClock(Date(timeIntervalSince1970: 0))
+        content.agentStartReadinessTimeout = 10
+        content.agentStartPollInterval = .milliseconds(1)
+        content.agentStartNow = {
+            let now = clock.now()
+            clock.advance(by: AgentSpawnReadiness.inputReadinessConfirmation)
+            return now
+        }
+        // This is the overview applied while the start response is installing its terminal. The
+        // pending launch intentionally filters the new row, which seeds the controller's cache with
+        // an empty assignable-agent set before the keyed readiness observer detects the same agent.
+        hosting.onInstallBackgroundCommandSession = { content.applyRunningAgents([agent]) }
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+        await gateway.enqueueWorkspaceCommandStartSnapshot(
+            .success(.init(state: .running, detectedKind: .claude, bracketedPasteActive: true, agent: agent)))
+        await gateway.enqueueWorkspaceCommandStartSnapshot(
+            .success(.init(state: .running, detectedKind: .claude, bracketedPasteActive: true, agent: agent)))
+
+        content.dispatch(.init(id: "start-cache", method: "startWorkspaceCommand", params: ["command": "custom-agent --review"]))
+        await waitUntil {
+            evaluator.evaluatedScripts.contains {
+                $0.contains("spaces:agentStartStatus") && $0.contains("\"sessionId\":\"session-start\"") && $0.contains("\"status\":\"detected\"")
+            }
+        }
+
+        content.deactivate()
+        evaluator.completeOldestPending(with: "__none__")
+        content.activate(focus: false)
+        let returningEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = returningEvaluator
+        content.handleReady()
+        await waitUntil { returningEvaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+        let restoredInit = try #require(returningEvaluator.evaluatedScripts.first { $0.contains("spaces:init") })
+        #expect(restoredInit.contains("\"agents\":[{\"id\":\"agent-start\",\"label\":\"Claude\",\"sessionId\":\"session-start\"}]"))
+
+        content.deactivate()
+        returningEvaluator.completeOldestPending(with: "__none__")
+    }
+
     @Test func startAgentInstallsItsBackgroundTerminalFromTheMutationPayloadWhenTheOverviewAlreadyDroppedTheSession() async throws {
         let gateway = RecordingCodePaneDeviceGateway()
         await gateway.setWorkspaceCommandStartResult(.success(startedCommandResponseWithoutOverviewSession()))

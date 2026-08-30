@@ -2063,6 +2063,15 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         agentStartTasks.removeValue(forKey: sessionID)
         agentStartTaskGenerations.removeValue(forKey: sessionID)
         if status == "detected", let agent {
+            // The overview that installed this terminal may have been filtered while the launch was
+            // pending, leaving currentAgents cached without this row. Merge the keyed detection into
+            // that cache so a later hibernation/reload init cannot lose the assignment before the next
+            // overview arrives.
+            if let existingIndex = currentAgents?.firstIndex(where: { $0.id == agent.id || $0.sessionID == agent.sessionID }) {
+                currentAgents?[existingIndex] = agent
+            } else {
+                currentAgents = (currentAgents ?? []) + [agent]
+            }
             selectedAgentSessionId = agent.sessionID
             pendingAgentLaunch = nil
         } else if let pendingAgentLaunch, pendingAgentLaunch.sessionId == sessionID {
