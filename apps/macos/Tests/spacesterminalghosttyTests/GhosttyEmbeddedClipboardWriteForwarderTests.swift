@@ -40,7 +40,7 @@
                 free(mimePointer)
                 free(dataPointer)
             }
-            var content = ghostty_clipboard_content_s(mime: UnsafePointer(mimePointer), data: UnsafePointer(dataPointer))
+            var content = ghostty_clipboard_content_s(mime: UnsafePointer(mimePointer), data: UnsafePointer(dataPointer), len: strlen(data))
             withUnsafePointer(to: &content) { body($0, 1) }
         }
 

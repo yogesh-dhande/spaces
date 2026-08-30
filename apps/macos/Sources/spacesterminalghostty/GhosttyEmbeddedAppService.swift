@@ -52,9 +52,11 @@ import Foundation
                 Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
                 return true
             }
-            runtimeConfig.read_clipboard_cb = { userdata, _, state in GhosttyClipboardBridge.readClipboard(userdata: userdata, state: state) }
-            runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
-                GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, content: content, state: state)
+            runtimeConfig.read_clipboard_cb = { userdata, location, state, mimes, mimesCount, list in
+                GhosttyClipboardBridge.readClipboard(userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
+            }
+            runtimeConfig.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
+                GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
             }
             runtimeConfig.write_clipboard_cb = { userdata, location, content, len, _ in
                 GhosttyEmbeddedClipboardWriteForwarder.forward(userdata: userdata, location: location, content: content, count: Int(len))

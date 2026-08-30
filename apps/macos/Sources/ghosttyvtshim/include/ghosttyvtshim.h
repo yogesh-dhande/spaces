@@ -159,8 +159,11 @@ typedef struct {
     bool is_dark;
 } SpacesGhosttyVtTheme;
 
-// Upper bound on one turn's buffered OSC 52 payload. A clipboard write larger than this is dropped
-// rather than buffered, so a runaway program cannot make the session's event sink grow without bound.
+// Upper bound on one turn's buffered clipboard write payload. An OSC 52 write larger than this is
+// dropped rather than buffered, so a runaway program cannot make the session's event sink grow
+// without bound. The same constant also caps libghostty-vt's own OSC 5522 (Kitty clipboard
+// protocol) transaction buffer, so an oversized 5522 write fails with EFBIG before it is spooled
+// rather than reaching this shim's check at all.
 enum {
     SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES = 1 * 1024 * 1024,
 };

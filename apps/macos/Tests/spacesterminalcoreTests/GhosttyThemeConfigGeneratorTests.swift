@@ -24,6 +24,7 @@ final class GhosttyThemeConfigGeneratorTests: XCTestCase {
         XCTAssertTrue(contents.contains("theme = light:/profile/ghostty/themes/x-light,dark:/profile/ghostty/themes/x-dark"))
         XCTAssertTrue(contents.contains("window-vsync = false"))
         XCTAssertTrue(contents.contains("font-size = 12"))
+        XCTAssertTrue(contents.contains("clipboard-write-limit-bytes = 1048576"))
     }
 
     func testWriteConfigurationGeneratesFilesUnderConfigRootAndRegenerates() throws {
