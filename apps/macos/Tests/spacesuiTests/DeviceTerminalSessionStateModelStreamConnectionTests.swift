@@ -953,9 +953,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.reconnectBackoff.maxRetryDelay = .seconds(3600)
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
-        model.linkCorroborationProbeForTesting = { _ in
-            TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb")
-        }
+        model.linkCorroborationProbeForTesting = { _ in TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb") }
 
         XCTAssertFalse(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out.")))
         await model.drainPendingLinkCorroborationProbeForTesting()

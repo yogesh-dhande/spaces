@@ -653,11 +653,18 @@ import Foundation
             guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
             guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
             guard isProcessAlive(pid: Int(runtimeState.servicePID)) else { return nil }
-            return TerminalServiceSessionSummary(
+            return recoveredSessionSummary(launchConfiguration: launchConfiguration, runtimeState: runtimeState, paths: paths)
+        }
+
+        static func recoveredSessionSummary(
+            launchConfiguration: TerminalSessionLaunchConfiguration, runtimeState: TerminalSessionRuntimeState, paths: TerminalSessionPaths
+        ) -> TerminalServiceSessionSummary {
+            TerminalServiceSessionSummary(
                 id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
-                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState)
         }
 
         private static func createXCTestCompatibilitySession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
@@ -680,7 +687,8 @@ import Foundation
                 id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
-                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState)
         }
 
         private static func terminateXCTestCompatibilitySession(id sessionID: String) throws {

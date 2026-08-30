@@ -138,7 +138,8 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
 
         XCTAssertEqual(resolution.compatibility, .compatible)
         XCTAssertEqual(probe.bootstrapCount, 1)
-        XCTAssertEqual(probe.dialedPorts, [Self.livePort, Self.livePort], "Authorization recovery retries exactly once against the refreshed identity.")
+        XCTAssertEqual(
+            probe.dialedPorts, [Self.livePort, Self.livePort], "Authorization recovery retries exactly once against the refreshed identity.")
     }
 
     func testRotatedLocalCertificateOnTheSamePortReBootstrapsAndRetriesWithTheCurrentIdentity() throws {
@@ -344,13 +345,10 @@ private final class LocalEndpointProbe: @unchecked Sendable {
             guard daemonRunning else { throw POSIXError(.ETIMEDOUT) }
             guard device.port == livePort else { throw POSIXError(.ECONNREFUSED) }
             guard device.certificateFingerprint == "SHA256:local" else {
-                throw TerminalServiceTLSError.certificatePinMismatch(
-                    expected: device.certificateFingerprint, actual: "SHA256:local")
+                throw TerminalServiceTLSError.certificatePinMismatch(expected: device.certificateFingerprint, actual: "SHA256:local")
             }
             guard request.command.name == "overview" else { throw POSIXError(.EINVAL) }
-            if rejectsAsUnauthorized {
-                throw SpacesDeviceClientError.requestRejected(message: "Unauthorized", code: .unauthorized)
-            }
+            if rejectsAsUnauthorized { throw SpacesDeviceClientError.requestRejected(message: "Unauthorized", code: .unauthorized) }
             return SpacesDeviceAPIResponse(
                 ok: true, message: "ok",
                 result: .overview(

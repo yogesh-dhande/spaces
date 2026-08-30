@@ -821,6 +821,7 @@ def run(args: argparse.Namespace) -> dict:
         "projectID": project_id,
         "defaultWorkspaceID": default_workspace_id,
         "workspaceID": workspace_id,
+        "workspaceDir": final_workspace.get("dir"),
         "terminalSessionID": terminal_session_id,
         "terminalAppearanceFlip": appearance_flip,
         "processID": process_id,

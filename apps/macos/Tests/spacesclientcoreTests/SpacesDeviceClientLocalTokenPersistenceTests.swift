@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
-import spacesdevicecore
 import spacesdeviceapi
+import spacesdevicecore
 
 @testable import spacesclientcore
 
@@ -16,8 +16,8 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("spaces-local-token-tests-\(UUID().uuidString)", isDirectory: true)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
+            "spaces-local-token-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         secretDirectory = root.appendingPathComponent("client-secrets", isDirectory: true)
         databasePath = root.appendingPathComponent("spaces.db", isDirectory: false).path
@@ -48,8 +48,7 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
     func testRebootstrapWithTheSameTokenLeavesTheSecretFileUntouched() throws {
         let database = try SpacesClientDatabase(path: databasePath)
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
         let afterFirstWrite = try fileIdentity()
 
         // The daemon keeps the presented token for a client whose credentials are already valid. The
@@ -69,14 +68,12 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
     func testRotatedTokenIsPersisted() throws {
         let database = try SpacesClientDatabase(path: databasePath)
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
         let afterFirstWrite = try fileIdentity()
 
         // A daemon that rejects the presented token mints a replacement; the client must store the new one
         // or every later Device API request authenticates with a revoked token.
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-2"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-2"))
 
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID), "token-2")
         XCTAssertNotEqual(try fileIdentity(), afterFirstWrite, "A rotated token replaces the stored secret.")
@@ -84,14 +81,12 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
     func testTokenIsRestoredAfterTheSecretFileGoesMissing() throws {
         let database = try SpacesClientDatabase(path: databasePath)
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
         try FileManager.default.removeItem(at: secretFileURL())
 
         // With no stored token the client presents nothing, and whatever the daemon issues has to land on
         // disk — the skip must key off the presented value, not off having bootstrapped before.
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
 
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID), "token-1")
     }
@@ -104,8 +99,7 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
         let recorder = PresentedTokenRecorder()
 
         let refreshed = try SpacesDeviceClient.localDeviceForSidebarRefresh(
-            database: database, clientApp: Self.clientApp,
-            bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
+            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
 
         XCTAssertEqual(recorder.recorded, [], "A routine sidebar refresh must not make a bootstrap control-socket round trip.")
         XCTAssertEqual(refreshed, original)
@@ -114,14 +108,12 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
     func testSidebarRefreshBootstrapsWhenTheStoredCredentialsAreMissing() throws {
         let database = try SpacesClientDatabase(path: databasePath)
-        _ = try SpacesDeviceClient.bootstrapLocalDevice(
-            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
+        _ = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1"))
         try SpacesDeviceCredentialStore.deleteToken(deviceID: SpacesPairedDeviceRecord.localDeviceID)
         let recorder = PresentedTokenRecorder()
 
         let refreshed = try SpacesDeviceClient.localDeviceForSidebarRefresh(
-            database: database, clientApp: Self.clientApp,
-            bootstrap: Self.provider(issuing: "token-2", recordingPresentedInto: recorder))
+            database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-2", recordingPresentedInto: recorder))
 
         XCTAssertEqual(recorder.recorded, [nil], "A genuine credential miss must retain the bootstrap recovery path.")
         XCTAssertEqual(refreshed.id, SpacesPairedDeviceRecord.localDeviceID)
@@ -135,11 +127,8 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
 
         XCTAssertThrowsError(
             try SpacesDeviceClient.localDeviceForSidebarRefresh(
-                database: database, clientApp: Self.clientApp,
-                bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
-        ) { error in
-            XCTAssertEqual(error as? SpacesDeviceClientError, .missingLocalBootstrap)
-        }
+                database: database, clientApp: Self.clientApp, bootstrap: Self.provider(issuing: "token-1", recordingPresentedInto: recorder))
+        ) { error in XCTAssertEqual(error as? SpacesDeviceClientError, .missingLocalBootstrap) }
         XCTAssertEqual(recorder.recorded, [], "Inconsistent stored state must surface instead of adding another bootstrap path.")
     }
 
@@ -154,18 +143,16 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
         private let lock = NSLock()
         private var values: [String?] = []
 
-        func record(_ value: String?) {
-            lock.withLock { values.append(value) }
-        }
+        func record(_ value: String?) { lock.withLock { values.append(value) } }
 
         var recorded: [String?] { lock.withLock { values } }
     }
 
     /// A stand-in for the daemon's bootstrap round-trip that issues `token` and reports what the client
     /// presented, so a test can assert on the presented value without a live control socket.
-    private static func provider(
-        issuing token: String, recordingPresentedInto recorder: PresentedTokenRecorder? = nil
-    ) -> SpacesDeviceClient.LocalBootstrapProvider {
+    private static func provider(issuing token: String, recordingPresentedInto recorder: PresentedTokenRecorder? = nil)
+        -> SpacesDeviceClient.LocalBootstrapProvider
+    {
         { _, presentedToken in
             recorder?.record(presentedToken)
             return SpacesDeviceAPIControlResponse(
@@ -180,9 +167,7 @@ final class SpacesDeviceClientLocalTokenPersistenceTests: XCTestCase {
     private func secretFileURL() throws -> URL {
         let contents = try FileManager.default.contentsOfDirectory(at: secretDirectory, includingPropertiesForKeys: nil)
         let secrets = contents.filter { $0.pathExtension == "secret" }
-        guard let url = secrets.first, secrets.count == 1 else {
-            throw XCTSkip("Expected exactly one stored secret, found \(secrets.count).")
-        }
+        guard let url = secrets.first, secrets.count == 1 else { throw XCTSkip("Expected exactly one stored secret, found \(secrets.count).") }
         return url
     }
 

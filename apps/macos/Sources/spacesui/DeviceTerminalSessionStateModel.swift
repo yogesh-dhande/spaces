@@ -937,9 +937,7 @@
         // these instead of racing a real connect.
         /// `connectedHost` stands in for the address the concrete client would have pinned itself to, so a
         /// test can drive the probe's host correlation without a multi-address daemon.
-        @discardableResult func installStreamClientForTesting(
-            _ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil
-        ) -> UInt64 {
+        @discardableResult func installStreamClientForTesting(_ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil) -> UInt64 {
             streamClientGeneration &+= 1
             installStreamClient(client, generation: streamClientGeneration)
             streamConnectedHost = connectedHost
@@ -1346,7 +1344,8 @@
                     // daemon-authoritative copy text for a `setSelection`/`readSelectionText` on a
                     // paired device's session, where the selection can extend beyond the mirror's
                     // viewport-clipped snapshot.
-                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message, selectionText: response.terminalSelectionText))
+                    controlResponse: TerminalControlResponse(
+                        ok: response.ok, message: response.message, selectionText: response.terminalSelectionText))
             case .resolveTerminalLink(let payload):
                 guard let terminalLink = payload.terminalLink?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLink.isEmpty else {
                     throw WorkspaceError.invalidArgument(message: "Missing terminal link to resolve.")

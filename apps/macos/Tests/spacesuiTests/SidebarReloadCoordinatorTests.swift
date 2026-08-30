@@ -19,10 +19,7 @@ import Testing
     }
 
     @Test func queuedFullSnapshotDominatesTerminalOverviewRequestsInEitherOrder() async {
-        for queuedScopes in [
-            [SidebarReloadCoordinator<Int>.ReloadScope.terminalOverview, .fullSnapshot],
-            [.fullSnapshot, .terminalOverview],
-        ] {
+        for queuedScopes in [[SidebarReloadCoordinator<Int>.ReloadScope.terminalOverview, .fullSnapshot], [.fullSnapshot, .terminalOverview]] {
             var continuations: [CheckedContinuation<Result<Int, any Error>, Never>] = []
             var loadedScopes: [SidebarReloadCoordinator<Int>.ReloadScope] = []
             let coordinator = SidebarReloadCoordinator<Int>(
@@ -288,8 +285,7 @@ import Testing
             loadSnapshot: { scope in
                 loadedScopes.append(scope)
                 return await withCheckedContinuation { continuation in continuations.append(continuation) }
-            },
-            applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
+            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .zero)
 
         coordinator.request(scope: .terminalOverview)
         #expect(await eventually { continuations.count == 1 })

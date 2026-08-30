@@ -14,10 +14,12 @@ import spacesterminalcore
 /// completion, enforcing concurrency and timeout policies, sweeping and finalizing the coding-agent
 /// sessions a run spawned, and pruning old run history.
 ///
-/// No run state lives only in memory: an `agent`-kind run has two phases, both derived from
-/// `promptDeliveredAt` — NULL means it is detecting the agent and sending the prompt, set means it is
-/// awaiting the agent's `done` signal or its session end — so a daemon restart resumes the correct phase
-/// from the store through the same `pollRunningRun` path rather than a parallel recovery path.
+/// Durable agent-run phase comes from `promptDeliveredAt` — NULL means it is detecting the agent and
+/// sending the prompt, set means it is awaiting the agent's `done` signal or its session end — so a daemon
+/// restart resumes the correct phase from the store through the same `pollRunningRun` path. The one
+/// process-local exception is a terminal-confirmed delivery whose durable marker transiently failed: it is
+/// retried without resending while this service instance remains alive; a restart keeps the existing
+/// conservative behavior of starting a fresh, verified delivery ladder.
 ///
 /// All firing (cron, manual, missed catch-up) funnels through one concurrency gate so every path applies
 /// the same allow/skip/queue rules. Execution is poll-based: `tick()` advances the schedule, polls running
@@ -83,6 +85,10 @@ public final class AutomationService: @unchecked Sendable {
     /// second phase marker alongside `prompt_delivered_at` and trusting an unverified send across the
     /// restart, which is exactly the assumption the ladder exists to remove.
     private var agentPromptDeliveries: [String: AutomationAgentPromptDelivery] = [:]
+    /// A prompt whose terminal output confirmed delivery but whose run-row update has not committed yet.
+    /// Keeping this distinct from the ladder means a transient database failure retries only the durable
+    /// marker; it must never restart the ladder and submit a prompt the agent already took.
+    private var confirmedAgentPromptDeliveryPersistence: [String: Date] = [:]
 
     public init(
         store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String, timeZone: @escaping @Sendable () -> TimeZone = { .current },
@@ -480,6 +486,7 @@ public final class AutomationService: @unchecked Sendable {
     /// terminal session and transcript for replay.
     private func markRunCanceledDuringWorkspaceStop(_ run: AutomationRun) throws {
         agentPromptDeliveries[run.id] = nil
+        confirmedAgentPromptDeliveryPersistence[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
@@ -859,6 +866,14 @@ public final class AutomationService: @unchecked Sendable {
     private func pollRunningAgentRun(_ run: AutomationRun, automation: Automation) {
         do {
             guard let sessionID = run.terminalSessionID else { return }
+            // A terminal-output-confirmed prompt has already crossed the only threshold that permits a
+            // resend. Retry its durable marker before observing liveness/readiness/deadlines: those facts
+            // may legitimately disappear while the database is transiently unavailable, but they cannot
+            // turn a confirmed prompt back into an unconfirmed one.
+            if run.promptDeliveredAt == nil, let deliveredAt = confirmedAgentPromptDeliveryPersistence[run.id] {
+                _ = persistConfirmedAgentPromptDelivery(run, sessionID: sessionID, deliveredAt: deliveredAt)
+                return
+            }
             let sessionLive = orchestrator.automationSessionIsLive(sessionID: sessionID)
             let launchPending = orchestrator.automationSessionLaunchIsPending(sessionID: sessionID)
 
@@ -972,9 +987,7 @@ public final class AutomationService: @unchecked Sendable {
     /// phase and is what lets the caller skip the readiness deadline for a prompt the agent just took.
     /// `writing: false` observes only — the ladder still advances, but a step that would write is dropped,
     /// which is what keeps a run that is about to fail its readiness budget from seeding an agent anyway.
-    @discardableResult private func deliverAgentPrompt(
-        _ run: AutomationRun, automation: Automation, sessionID: String, writing: Bool
-    ) -> Bool {
+    @discardableResult private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String, writing: Bool) -> Bool {
         guard let prompt = automation.agentPrompt else { return false }
         let mark = sessionOutputMark(sessionID: sessionID)
         guard var delivery = agentPromptDeliveries[run.id] else {
@@ -984,8 +997,7 @@ public final class AutomationService: @unchecked Sendable {
         let action = delivery.next(mark: mark)
         agentPromptDeliveries[run.id] = delivery
         switch action {
-        case .wait:
-            return false
+        case .wait: return false
         case .sendPrompt:
             if writing { writeAgentPromptInput(.text(prompt), run: run, sessionID: sessionID, detail: "prompt") }
             return false
@@ -994,28 +1006,41 @@ public final class AutomationService: @unchecked Sendable {
             return false
         case .recordDelivered:
             agentPromptDeliveries[run.id] = nil
-            do {
-                try store.updateAutomationRun(
-                    id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID,
-                    startedAt: run.startedAt, endedAt: nil, promptDeliveredAt: now())
-                return true
-            } catch {
-                logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) error=\(error)")
-                return false
-            }
+            let deliveredAt = now()
+            confirmedAgentPromptDeliveryPersistence[run.id] = deliveredAt
+            return persistConfirmedAgentPromptDelivery(run, sessionID: sessionID, deliveredAt: deliveredAt)
+        }
+    }
+
+    /// Persists a delivery already confirmed from terminal output. A failure stays in the detecting
+    /// phase only in storage; in memory it is confirmed, so the caller must keep retrying this write
+    /// without advancing or reinitializing the prompt-send ladder.
+    private func persistConfirmedAgentPromptDelivery(_ run: AutomationRun, sessionID: String, deliveredAt: Date) -> Bool {
+        do {
+            try store.updateAutomationRun(
+                id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
+                promptDeliveredAt: deliveredAt)
+            confirmedAgentPromptDeliveryPersistence[run.id] = nil
+            return true
+        } catch {
+            logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) error=\(error)")
+            // True means terminal delivery is confirmed even though durable recording is pending. It keeps
+            // the detection deadline from turning that confirmed prompt into a failed/re-sendable attempt.
+            return true
         }
     }
 
     /// One submit-send for a delivery ladder step. An unacknowledged write clears the ladder so the next
     /// tick starts a fresh attempt against a freshly observed terminal.
-    @discardableResult private func writeAgentPromptInput(
-        _ input: TerminalProfileInput, run: AutomationRun, sessionID: String, detail: String
-    ) -> Bool {
+    @discardableResult private func writeAgentPromptInput(_ input: TerminalProfileInput, run: AutomationRun, sessionID: String, detail: String)
+        -> Bool
+    {
         do {
             try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: input, appendNewline: true)
             return true
         } catch {
             agentPromptDeliveries[run.id] = nil
+            confirmedAgentPromptDeliveryPersistence[run.id] = nil
             logError("automation_agent_prompt_delivery_failed run=\(run.id) session=\(sessionID) write=\(detail) error=\(error)")
             return false
         }
@@ -1113,6 +1138,7 @@ public final class AutomationService: @unchecked Sendable {
     @discardableResult private func finishRun(_ run: AutomationRun, status: AutomationRunStatus, exitCode: Int?) throws -> AutomationRun {
         let endedAt = now()
         agentPromptDeliveries[run.id] = nil
+        confirmedAgentPromptDeliveryPersistence[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: status, skipReason: nil, exitCode: exitCode, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: endedAt, promptDeliveredAt: run.promptDeliveredAt)
@@ -1285,6 +1311,7 @@ public final class AutomationService: @unchecked Sendable {
     /// row-less-agent branch acquires the workspace gate already held by the caller.
     private func markRunCanceledDuringWorkspaceTeardown(_ run: AutomationRun) throws {
         agentPromptDeliveries[run.id] = nil
+        confirmedAgentPromptDeliveryPersistence[run.id] = nil
         try store.updateAutomationRun(
             id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
             endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)

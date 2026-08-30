@@ -68,6 +68,8 @@ for suite in \
   TerminalServiceSystemdStartDeadlineTests \
   GhosttyVtSessionEventSinkTests \
   TerminalSessionAttachmentSnapshotMutationsTests \
+  WorkspaceFileWriteModePreservationTests \
+  SpacesDeviceWorkspaceGitHashingKnownAnswerTests \
   GhosttyLinuxHeadlessSessionAttachmentAuthorityTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessMouseEncodingTests \

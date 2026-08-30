@@ -44,27 +44,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // one load at a time and applies before starting the next, so a plain instance field
                 // carries this safely from here to the apply site.
                 self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
+                self?.capturedLocalOverviewInstallGeneration = self?.host.localOverviewInstallGeneration
                 switch scope {
                 case .terminalOverview:
-                    let result = if let override = self?.localOverviewLoadOverrideForTesting {
-                        await override()
-                    } else {
-                        await AppKitController.localDeviceOverviewSnapshot()
-                    }
+                    let result =
+                        if let override = self?.localOverviewLoadOverrideForTesting { await override() } else {
+                            await AppKitController.localDeviceOverviewSnapshot()
+                        }
                     return result.map(SidebarReloadPayload.terminalOverview)
                 case .fullSnapshot:
-                    let result = if let override = self?.loadSnapshotOverrideForTesting {
-                        await override()
-                    } else {
-                        await AppKitController.refreshedSidebarDataSnapshot()
-                    }
+                    let result =
+                        if let override = self?.loadSnapshotOverrideForTesting { await override() } else {
+                            await AppKitController.refreshedSidebarDataSnapshot()
+                        }
                     return result.map(SidebarReloadPayload.fullSnapshot)
                 }
             },
             applySnapshot: { [weak self] payload, forceRemoteRefresh, bypassesBackoff in
                 switch payload {
-                case .terminalOverview(let snapshot):
-                    self?.applyLocalDeviceSidebarSnapshot(snapshot, preserveDetailPane: true)
+                case .terminalOverview(let snapshot): self?.applyLocalDeviceSidebarSnapshot(snapshot, preserveDetailPane: true)
                 case .fullSnapshot(let snapshot):
                     self?.applySidebarDataSnapshot(
                         snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
@@ -169,6 +167,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// replacement from one that postdates it: see `PanelCoordinator.paneReplacementEpoch` and the guard
     /// around the retarget/prune block in `applySidebarDataSnapshot`.
     private var capturedLocalReloadEpoch = 0
+    /// A local reload can read the database while a mutation response installs a newer overview on the
+    /// main actor. The stale snapshot must not become the basis for destructive workspace recovery.
+    private var capturedLocalOverviewInstallGeneration: Int?
     /// The strongest reload scope requested while the user is mid-edit; flushed at idle points so a
     /// deferred database or terminal-runtime change is not lost.
     private var pendingReloadScope: ReloadScope?
@@ -277,14 +278,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// CLI/daemon database edits that no other event-driven reload would observe.
     /// Driven by the writer, so there is no polling and no
     /// file-watch feedback loop from the app's own reads.
-    func handleDatabaseDidChange() {
-        requestOrDeferReload(scope: .fullSnapshot)
-    }
+    func handleDatabaseDidChange() { requestOrDeferReload(scope: .fullSnapshot) }
 
     /// Refreshes only This Mac's overview after terminal runtime state changes outside the database.
-    func handleTerminalOverviewDidChange() {
-        requestOrDeferReload(scope: hasAppliedFullSidebarSnapshot ? .terminalOverview : .fullSnapshot)
-    }
+    func handleTerminalOverviewDidChange() { requestOrDeferReload(scope: hasAppliedFullSidebarSnapshot ? .terminalOverview : .fullSnapshot) }
 
     private func requestOrDeferReload(scope: ReloadScope) {
         guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
@@ -397,9 +394,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         await reloadCoordinator.requestAndAwaitNextRun()
     }
 
-    func drainSidebarRefreshForTesting() async {
-        await reloadCoordinator.drainCurrentReloadForTesting()
-    }
+    func drainSidebarRefreshForTesting() async { await reloadCoordinator.drainCurrentReloadForTesting() }
 
     func applySidebarDataSnapshot(
         _ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool = false
@@ -414,6 +409,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func applyLocalDeviceSidebarSnapshot(_ snapshot: LocalDeviceSidebarSnapshot, preserveDetailPane: Bool = false) {
+        if let capturedGeneration = capturedLocalOverviewInstallGeneration,
+            capturedGeneration != host.localOverviewInstallGeneration
+        {
+            DeviceLinkTrace.log(
+                deviceID: snapshot.localDeviceID, event: "local_snapshot_superseded",
+                detail: "captured_generation=\(capturedGeneration) current_generation=\(host.localOverviewInstallGeneration)")
+            capturedLocalOverviewInstallGeneration = nil
+            return
+        }
+        capturedLocalOverviewInstallGeneration = nil
+        host.localOverviewInstallGeneration += 1
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         host.commandPalette.invalidateCommandPaletteCache()
         // Update the local device's section in place and keep already-loaded remote
@@ -489,6 +495,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // placeholder overview (mirroring the remote path's `load.overview == nil` branch), and absence
         // of a real overview is never evidence a session's product row was removed.
         if AppKitController.localSnapshotAuthorizesPanePrune(loadState: localLoadState, compatibility: snapshot.localCompatibility) {
+            host.removeCodePaneRecoveryStateForDeletedWorkspaces(
+                deviceID: snapshot.localDeviceID,
+                liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)),
+                previousWorkspaceIDs: Set(previousLocalSection?.overview?.workspaces.map(\.id) ?? []))
             // Hand over the panes whose runtime target merely swapped sessions before pruning could close
             // them: a start or restart replaces the session a row names, and the predecessor is exactly
             // what the keep-set below no longer retains. Runs unconditionally, even against a snapshot
@@ -514,6 +524,24 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     deviceID: snapshot.localDeviceID,
                     catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
             }
+            // Unlike the terminal prune above, this runs unconditionally (not gated on
+            // `epochWasFreshBeforeRetarget`): a code pane has no session for a pane-replacement race to
+            // protect, so workspace liveness here is unrelated to terminal-session epoch/replacement
+            // concerns. Gating this too would mean a workspace deletion arriving while the epoch is
+            // stale skips the prune, and it never gets retried — the next identical overview
+            // early-returns above before pruning could run again, unlike the terminal prune's
+            // self-heal (a fresher overview follows the epoch-bumping activity). The keep-set is
+            // workspace ids from this just-installed authoritative overview, which no pane-replacement
+            // race can invalidate: a workspace absent from `overview.workspaces` was deleted, not
+            // merely hidden (a hidden workspace stays listed with `isHidden` set).
+            if let orphan = host.panelCoordinator.pruneOpenCodePanes(
+                deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
+            {
+                host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+            }
+            // Same just-installed overview carries this device's agent rows too, so a code pane's
+            // assigned-agent dropdown stays current with whatever just spawned/exited.
+            host.panelCoordinator.updateCodePaneAgents(deviceID: snapshot.localDeviceID, hosting: host)
         }
         // Diff against the runtime map actually installed, not the raw snapshot. An unreachable local
         // daemon answers with the offline placeholder, whose empty map reads as every running workspace
@@ -522,6 +550,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
+        // Terminal panes close on an externally initiated stop via session pruning above (their sessions
+        // leave the overview's keep-set); a code pane has no session, so this same run-state transition is
+        // its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget` gate above, same as
+        // the browser teardown just above: a run-state transition is unrelated to pane replacement.
+        //
+        // The signal is the observed transition, never the stopped state itself, because a code pane may be
+        // legitimately opened on a workspace that is already stopped (its working tree is still there to
+        // review). Two limits of transition-observation are accepted rather than patched with state checks:
+        // a cross-client restart whose stopped moment the daemon's coalesced overview broadcast never
+        // surfaces keeps the pane open — matching terminal panes keeping their place across restarts, and
+        // harmless since the pane's content stays valid for the running workspace — and a stop completed
+        // while this app was not running is never observed, so a persisted pane restores alongside its
+        // stopped-but-existing workspace (see `PanelLayoutEngine.prunedLayout`).
+        if let previousLocalSection {
+            host.panelCoordinator.closeCodePanes(
+                deviceID: snapshot.localDeviceID,
+                workspaceIDs: Set(
+                    Self.workspaceIDsTransitionedToNotRunning(
+                        previous: previousLocalSection.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID)))
+        }
         // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
         // session's bell into that same set and writes it back, so a consume that ran against a not-yet
         // loaded (empty) set would persist itself over everything the user had dismissed.
@@ -1244,6 +1292,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // resolver lookup for this device is taken from. Dropping it there would hand the endpoint
             // resolver a narrower candidate list than the one just learned.
             host.deviceSections[index].device = overview.device
+            host.removeCodePaneRecoveryStateForDeletedWorkspaces(
+                deviceID: deviceID,
+                liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)),
+                previousWorkspaceIDs: Set(host.deviceSections[index].overview?.workspaces.map(\.id) ?? []))
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
@@ -1253,6 +1305,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // the difference between these two overviews is the only thing that names a session's
             // replacement on this client.
             let previousOverview = host.deviceSections[index].overview
+            // Same capture-before-overwrite as `previousOverview` above, for the code-pane close diff
+            // below: `workspaceRuntimeStatusByID` defaults to empty for a device section's first load (or
+            // one recovered from the reachable-but-incompatible placeholder, which clears it), so diffing
+            // against it seeds with no false transitions without needing a separate first-load guard.
+            let previousWorkspaceRuntimeStatusByID = host.deviceSections[index].workspaceRuntimeStatusByID
             let mapped = AppKitController.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -1298,6 +1355,33 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.panelCoordinator.pruneOpenPanes(
                     deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
             }
+            // Unlike the terminal prune above, this runs unconditionally (see the local-path sibling in
+            // `applySidebarDataSnapshot` above for the full rationale): a code pane has no session for
+            // a pane-replacement race to protect, so skipping it here for a stale epoch would let a
+            // remote workspace deletion that arrives mid-race go unpruned indefinitely — the next
+            // identical overview early-returns above before it could retry.
+            if let orphan = host.panelCoordinator.pruneOpenCodePanes(
+                deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
+            {
+                host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+            }
+            // Same just-installed overview carries this device's agent rows too, so a code pane's
+            // assigned-agent dropdown stays current with whatever just spawned/exited.
+            host.panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: host)
+            // Terminal panes close on an externally initiated stop via session pruning above (their
+            // sessions leave the overview's keep-set); a code pane has no session, so this same run-state
+            // transition is its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget`
+            // gate above, mirroring the local-path close beside `tearDownBrowserSessionsForLocallyStoppedWorkspaces`:
+            // a run-state transition is unrelated to pane replacement. Only reached here, in the
+            // successfully-loaded-with-overview branch — never for the reachable-but-incompatible or
+            // offline `.failure` paths, whose overviews are not this device's authoritative state. The
+            // transition-observation limits accepted at the local-path close (coalesced restarts, stops
+            // completed while this app was not running) apply identically here.
+            host.panelCoordinator.closeCodePanes(
+                deviceID: deviceID,
+                workspaceIDs: Set(
+                    Self.workspaceIDsTransitionedToNotRunning(
+                        previous: previousWorkspaceRuntimeStatusByID, current: mapped.workspaceRuntimeStatusByID)))
         case .failure(let error):
             let reason = error.localizedDescription
             let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)
@@ -2393,6 +2477,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 isEnabled: daemonActionsEnabled)
         }
         menu.addItem(.separator())
+        // Not gated on `daemonActionsEnabled`: routes through the same editor-preference dispatch as
+        // every other "open editor" action (⌘⌥E, the workspace detail's editor button), which for the
+        // built-in default opens/focuses/retargets the singleton Editor window unconditionally, with no
+        // session or process to start on the workspace's daemon.
+        addItem(
+            "Open in Editor", symbol: "macwindow.badge.plus", target: self, action: #selector(openWorkspaceInEditorMenuItem(_:)),
+            identifier: workspace.id)
+        menu.addItem(.separator())
         addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
         // Reveal in Finder needs a path on this Mac, so it is offered only for local-device workspaces.
         if host.isLocalWorkspace(workspace) {
@@ -2432,6 +2524,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         host.hideWorkspace(id: id)
+    }
+
+    @objc private func openWorkspaceInEditorMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.openWorkspaceEditor(workspaceID: id)
     }
 
     @objc private func deleteWorkspaceMenuItem(_ sender: NSMenuItem) {

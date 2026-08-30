@@ -536,8 +536,7 @@ import spacesterminalcore
         XCTAssertEqual(writes.first?.appendNewline, true, "the send submits (the chokepoint writes the spaced Enter)")
         XCTAssertEqual(writes.map(\.sessionID), [sessionID])
         XCTAssertNil(
-            try harness.store.automationRun(id: run.id)?.promptDeliveredAt,
-            "a write that reached the PTY is not yet proof the agent's TUI took it")
+            try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "a write that reached the PTY is not yet proof the agent's TUI took it")
 
         // The agent's TUI paints in response and keeps painting as it works: that is the delivery.
         harness.host.markSessionOutput(sessionID: sessionID)
@@ -559,6 +558,39 @@ import spacesterminalcore
         XCTAssertEqual(finished.status, .succeeded)
         XCTAssertNil(finished.exitCode)
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "a done agent's session stays open")
+    }
+
+    func testConfirmedAgentPromptRetriesPersistenceWithoutSendingItAgain() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, prompt: "persist this once")
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        XCTAssertTrue(harness.tickUntilAgentWrite())
+        XCTAssertEqual(harness.host.writtenInput.count, 1)
+
+        // Make only the delivery-marker write fail after the terminal has already painted two working
+        // samples. Dropping the trigger simulates the database recovering on the next scheduler tick.
+        try harness.store.execute(
+            sql: """
+                CREATE TRIGGER reject_prompt_delivery
+                BEFORE UPDATE OF prompt_delivered_at ON automation_runs
+                WHEN NEW.prompt_delivered_at IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'temporary delivery-marker failure'); END;
+                """, bindings: [])
+        harness.host.markSessionOutput(sessionID: sessionID)
+        harness.service.tick()
+        harness.host.markSessionOutput(sessionID: sessionID)
+        harness.service.tick()
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "the confirmed prompt is never re-sent while its marker is pending")
+
+        try harness.store.execute(sql: "DROP TRIGGER reject_prompt_delivery", bindings: [])
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "recovery retries only persistence, even after liveness/readiness disappear")
     }
 
     /// The readiness gate: foreground detection fires on process identity, a second or two before the
@@ -2784,8 +2816,8 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
-                updatedAt: ISO8601DateFormatter().string(from: Date()), foregroundDetectedAgentKind: kind,
-                bracketedPasteActive: bracketedPasteActive), paths: paths)
+                updatedAt: ISO8601DateFormatter().string(from: Date()), foregroundDetectedAgentKind: kind, bracketedPasteActive: bracketedPasteActive),
+            paths: paths)
     }
 
     private func launch(_ configuration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {

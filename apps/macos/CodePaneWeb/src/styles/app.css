@@ -1,0 +1,820 @@
+/*
+ * Component styles, matching the class vocabulary of the picked Variant A
+ * ("Toolbar") mockup so the pane reads as native Spaces chrome rather than a
+ * web page loaded in a WKWebView. Structural layout only lives here — actual
+ * diff/editor content painting is `@pierre/diffs`' own concern (see
+ * diffView.ts/editorView.ts), styled through the `--diffs-*` variables in
+ * tokens.css instead of hand-written line/token CSS.
+ */
+
+.pane {
+  position: relative; /* anchors the ⌘P quick-open overlay's absolutely-positioned backdrop */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* The code pane's own toolbar: one 30pt strip (see docs/design.md's rule
+   against ad hoc chrome heights — this matches the app's existing pane
+   toolbar metric). */
+.pane-hdr {
+  height: 30px;
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface2);
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+.pane-hdr .sp {
+  flex: 1;
+}
+
+/* Holds the assigned-agent picker (static label or <select>, depending on how many agents are
+   running) and the "Send batch" button, visible only in Diff mode — see toolbar.ts's
+   buildAgentSlot. */
+.pane-hdr .agent-slot {
+  flex: 0 0 auto;
+  min-width: 1px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-label {
+  font-size: 11px;
+  color: var(--fg3);
+  white-space: nowrap;
+}
+
+.agent-select {
+  appearance: none;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg2);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 7px;
+}
+
+.agent-command-dialog {
+  position: absolute;
+  z-index: 20;
+  top: 50%;
+  left: 50%;
+  width: min(420px, calc(100% - 32px));
+  transform: translate(-50%, -50%);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.7);
+}
+
+.agent-command-dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-command-dialog h2 {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.agent-command-dialog input {
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.agent-command-status {
+  min-height: 14px;
+  color: var(--orange);
+  font-size: 11px;
+}
+
+.agent-command-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  height: 22px;
+  flex: 0 0 auto;
+}
+
+.seg button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg2);
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.seg button:last-child {
+  border-right: none;
+}
+
+.seg button.on {
+  background: var(--chip);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The diff header's "Compare" menu (toolbar.ts): a single button showing the current scope's
+   label, opening a dropdown of the four compare options anchored below it. `position: relative`
+   here (rather than on `.pane-hdr`) keeps the dropdown's `top: 100%` anchored to the button's own
+   row regardless of where the toolbar places it. */
+.compare {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.compare-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.compare-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.6);
+}
+
+.compare-menu .item {
+  appearance: none;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: default;
+}
+
+.compare-menu .item:hover {
+  background: var(--row-sel);
+}
+
+.compare-menu .item.on {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg2);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+/*
+ * File-list sidebar. Not part of the Variant A mockup markup (that variant
+ * shows files inline, one after another, with no file-picking chrome) — it
+ * is added here because Phase 3 explicitly requires "a file list sidebar"
+ * as product behavior (jumping to a file, seeing its status/stat at a
+ * glance) independent of which toolbar variant was picked for the toolbar
+ * itself. Visually it borrows the mockup's Variant B `.rail` tokens/metrics
+ * since that is the mockup's only other file-list treatment.
+ */
+.code-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.file-list {
+  /* `flex: 0 0 auto` (not a fixed flex-basis) so `width` below is what determines the box size —
+     fileListDivider.ts resizes this element by setting `style.width` directly, which a fixed
+     flex-basis would otherwise override. This default matches `DEFAULT_FILE_LIST_WIDTH` in
+     fileListDivider.ts; root.ts overwrites it with the restored/persisted width on mount. */
+  width: 212px;
+  flex: 0 0 auto;
+  background: var(--surface2);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* The divider between the file list and the diff area (docs mockup "D — Drag divider"). A few px
+   wide so the col-resize hit area is comfortable without visually widening the seam — the visible
+   line is a 1px inset gradient, not the full hit area. */
+.file-list-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  touch-action: none;
+  background: linear-gradient(90deg, transparent 0 2px, var(--line) 2px 3px, transparent 3px);
+}
+
+.file-list-divider:hover,
+.file-list-divider.active {
+  background: linear-gradient(90deg, transparent 0 1px, var(--accent) 1px 4px, transparent 4px);
+}
+
+.file-list .row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--fg2);
+}
+
+.file-list .dirrow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg2);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.file-list .row,
+.file-list .dirrow {
+  /* `--depth` is set inline per row/dirrow by fileList.ts, one nesting level of the compacted tree
+     at a time (see docs mockup "G — Tree with compacted chains"). Placed after the blocks above:
+     their `padding` shorthand expands to a `padding-left` that would win on source order otherwise
+     and flatten the tree indent. */
+  padding-left: calc(10px + var(--depth, 0) * 14px);
+}
+
+.file-list .dirrow:hover {
+  background: var(--row-hover);
+}
+
+/* Rows are keyboard-operable (role=button + tabindex in fileList.ts), so the tab stop needs a
+   visible focus state; :focus-visible keeps pointer clicks outline-free. */
+.file-list .row:focus-visible,
+.file-list .dirrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Same rationale for the divider's tab stop (role=separator + arrow-key resize in
+   fileListDivider.ts). */
+.file-list-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.file-list .dirrow .tri {
+  flex: 0 0 10px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--fg3);
+}
+
+.file-list .dirrow .dirlabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.file-list .row.on {
+  background: var(--row-sel);
+  color: var(--fg);
+}
+
+.file-list .row .status {
+  flex: 0 0 14px;
+  text-align: center;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.file-list .row .status.added,
+.file-list .row .status.untracked {
+  color: var(--add-fg);
+}
+
+.file-list .row .status.deleted {
+  color: var(--del-fg);
+}
+
+.file-list .row .status.renamed,
+.file-list .row .status.modified {
+  color: var(--fg3);
+}
+
+.file-list .row .fn {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.file-list .row .st {
+  margin-left: auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+.file-list .row .st .p {
+  color: var(--add-fg);
+}
+
+.file-list .row .st .m {
+  color: var(--del-fg);
+}
+
+.file-list .empty {
+  padding: 10px;
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+/* Editor mode's Files/Changes sidebar (Design K) — the sole child `.file-list` shows in Editor
+   mode, in place of the plain changed-files list (`.file-list`'s own `overflow-y: auto` is
+   harmless here: this fills its exact-fit flex parent, so it never actually overflows). Reuses
+   `.file-list .row`/`.dirrow`/etc above for its own rows — both the Files tree (filesTree.ts) and
+   the reparented Changes list (fileList.ts) are plain descendants of `.file-list`, so no new row
+   selectors are needed here, only this wrapper's own chrome. */
+.editor-sidebar {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-sidebar-hdr {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.editor-sidebar-note {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg3);
+  font-size: 11px;
+}
+
+.diff-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* Host for @pierre/diffs' CodeView. The library treats the element passed to
+   `CodeView.setup()` as the scroll container — it listens for `scroll` on it and
+   derives the virtualized window from its `scrollTop` — but never styles it, so
+   the embedding app must make it a bounded-height scroll container itself.
+   Without `overflow-y` the native scroll range is zero: wheel/trackpad scrolling
+   is dead while programmatic `scrollTo` still appears to move (the virtualizer
+   repositions content), which is exactly the trap to avoid reintroducing. */
+.diff-view-root {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg3);
+  font-size: 13px;
+}
+
+.empty-state.error {
+  color: var(--orange);
+}
+
+/* Editor mode */
+.editor-open-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface2);
+}
+
+/* The open file's path (Design O) — plain text, not an input: there is nothing to type into it,
+   only to read. Opening happens exclusively through the ⌘P overlay (`.quick-open` below), the
+   Files tree, or the Changes list. */
+.editor-open-bar .editor-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.editor-open-bar .editor-path.hint {
+  font-family: inherit;
+  color: var(--fg3);
+}
+
+/* ⌘P quick-open overlay (Design O) — a centered floating panel over the whole pane, available in
+   both Diff and Editor mode. See quickOpen.ts's doc comment for the open semantics; this only
+   covers layout/paint. */
+.quick-open-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.quick-open {
+  width: 480px;
+  max-width: calc(100% - 32px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.quick-open input {
+  flex: 0 0 auto;
+  appearance: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.quick-open .list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.quick-open .list .section-label {
+  padding: 5px 12px 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.quick-open .list .row {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.quick-open .list .row .path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--fg2);
+}
+
+.quick-open .list .row.sel {
+  background: var(--row-sel);
+}
+
+.quick-open .list .row.sel .path {
+  color: var(--fg);
+}
+
+.quick-open .list .row .path mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.quick-open .list .empty {
+  padding: 10px 12px;
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.quick-open .note {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--fg3);
+  font-size: 11px;
+}
+
+/* refSearchDialog.ts's "Branch…" / "Commit or ref…" overlay: a `.quick-open` panel (inheriting all
+   its rules above) plus row shapes specific to a branch's "base" badge and a commit's sha/subject
+   pair. */
+.ref-search .list .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ref-search .list .row .badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chip);
+  color: var(--fg3);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.ref-search .list .row .sha {
+  flex: 0 0 auto;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--fg3);
+}
+
+.ref-search .list .row .subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg2);
+}
+
+.ref-search .list .row.sel .sha,
+.ref-search .list .row.sel .subject {
+  color: var(--fg);
+}
+
+.ref-search .list .row.literal {
+  color: var(--fg3);
+  font-style: italic;
+}
+
+.ref-search .list .row.literal.sel {
+  color: var(--fg);
+}
+
+/* Non-blocking conflict/status banner, per docs/design.md's rule: a
+   single-line overlay, top-trailing. */
+.banner {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg2);
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
+}
+
+.banner.conflict {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+
+.banner.error {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+
+/* A clean auto-merge is good news, not a problem needing attention — distinct from
+   .banner.conflict/.banner.error's orange (an unresolved problem the user must act on). */
+.banner.merge {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+/* Diff-mode comment surface: an inline card rendered under its annotated line
+   (`@pierre/diffs`' renderAnnotation) plus the collapsible batch tray docked at the bottom of
+   `.diff-area`. See commentsController.ts. */
+.comment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.comment-card.outdated {
+  border-color: var(--orange);
+}
+
+.comment-card-body {
+  resize: vertical;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.comment-send-requirement {
+  color: var(--orange);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.comment-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.comment-tray {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--surface2);
+  max-height: 40%;
+}
+
+.comment-tray-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  cursor: default;
+}
+
+.comment-tray-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+
+.comment-tray-count {
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+.comment-tray-caret {
+  font-size: 10px;
+  color: var(--fg3);
+}
+
+.comment-tray-list {
+  flex-direction: column;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.comment-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--fg2);
+}
+
+.comment-tray-row:hover {
+  background: var(--row-hover);
+}
+
+.comment-tray-loc {
+  flex: 0 0 auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--fg3);
+}
+
+.comment-tray-excerpt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comment-tray-remove {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg3);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.comment-tray-remove:hover {
+  color: var(--fg);
+}

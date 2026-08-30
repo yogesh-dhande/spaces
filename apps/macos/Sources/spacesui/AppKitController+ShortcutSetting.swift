@@ -33,7 +33,7 @@ extension AppKitController {
             case .guiPreviousShortcut: return "Previous window"
             case .guiSidebarNextShortcut: return "Next workspace"
             case .guiSidebarPreviousShortcut: return "Previous workspace"
-            case .guiOpenEditorShortcut: return "Open editor"
+            case .guiOpenEditorShortcut: return "Open in Editor"
             case .guiOpenTerminalShortcut: return "New terminal"
             case .guiNewTabShortcut: return "New tab (session picker)"
             case .guiOpenFinderShortcut: return "Open Finder"

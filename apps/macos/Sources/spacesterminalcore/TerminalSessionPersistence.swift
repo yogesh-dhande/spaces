@@ -249,8 +249,7 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
     public func liveWireProjection() -> TerminalSessionAttachmentSnapshot {
         let attachedAttachments = attachments.filter { $0.detachedAt == nil }
         let attachedClientIDs = Set(attachedAttachments.map(\.clientID))
-        return TerminalSessionAttachmentSnapshot(
-            clients: clients.filter { attachedClientIDs.contains($0.id) }, attachments: attachedAttachments)
+        return TerminalSessionAttachmentSnapshot(clients: clients.filter { attachedClientIDs.contains($0.id) }, attachments: attachedAttachments)
     }
 }
 
@@ -261,8 +260,8 @@ public enum TerminalSessionPersistence {
     /// by `writeUserTitle` (the rename command), so launch-config rewrites can never clobber a
     /// manual rename.
     public static func writeLaunchConfiguration(
-        _ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-        clearingPreviousRunRuntimeState: Bool = true, databasePath: String? = nil
+        _ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths, clearingPreviousRunRuntimeState: Bool = true,
+        databasePath: String? = nil
     ) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
@@ -523,9 +522,9 @@ public enum TerminalSessionPersistence {
         return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data).withLiveWireAttachmentProjection()
     }
 
-    public static func appendPendingAgentSignal(
-        _ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths, databasePath: String? = nil
-    ) throws {
+    public static func appendPendingAgentSignal(_ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths, databasePath: String? = nil)
+        throws
+    {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let environmentKeysJSON = try encodeEnvironmentKeys(event.environmentKeys)

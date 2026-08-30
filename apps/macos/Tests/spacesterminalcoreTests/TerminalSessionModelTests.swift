@@ -471,8 +471,8 @@ final class TerminalSessionModelTests: XCTestCase {
             },
             attachments: (0..<20).map { index in
                 TerminalAttachment(
-                    id: "attachment-\(index)", sessionID: sessionID, clientID: "client-\(index)", mode: .viewer,
-                    attachedAt: "2026-05-08T00:00:00Z", detachedAt: "2026-05-08T00:00:01Z")
+                    id: "attachment-\(index)", sessionID: sessionID, clientID: "client-\(index)", mode: .viewer, attachedAt: "2026-05-08T00:00:00Z",
+                    detachedAt: "2026-05-08T00:00:01Z")
             })
         let payload = GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,

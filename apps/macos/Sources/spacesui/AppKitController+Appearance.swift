@@ -37,8 +37,15 @@ extension AppKitController {
     /// attach path uses. Each pane dedupes against its own last-applied appearance, so a broadcast that does
     /// not change the resolved variant sends nothing. At launch, before any pane exists, this is a no-op.
     func broadcastResolvedAppAppearance() {
-        let resolved: ThemeAppearance = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
-        panelCoordinator.broadcastAppearance(resolved)
+        panelCoordinator.broadcastAppearance(Self.resolvedThemeAppearance())
+    }
+
+    /// The app's current effective light/dark variant. A `static` helper (rather than an instance
+    /// method reading `self`) so `CodePaneHosting.codePaneCurrentAppearance()` can share the exact
+    /// computation `broadcastResolvedAppAppearance()` broadcasts, instead of a code pane's
+    /// construction-time read ever disagreeing with the next broadcast.
+    static func resolvedThemeAppearance() -> ThemeAppearance {
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 }
 

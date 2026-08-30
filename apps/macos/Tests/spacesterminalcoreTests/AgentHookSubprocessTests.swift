@@ -45,9 +45,8 @@
             environment["CHILD_PID_FILE"] = childPIDFile.path
 
             let result = try AgentHookSubprocess.run(
-                executablePath: "/bin/sh",
-                arguments: ["-c", #"sleep 30 & printf '%s\n' "$!" > "$CHILD_PID_FILE""#],
-                environment: environment, timeoutSeconds: 2)
+                executablePath: "/bin/sh", arguments: ["-c", #"sleep 30 & printf '%s\n' "$!" > "$CHILD_PID_FILE""#], environment: environment,
+                timeoutSeconds: 2)
 
             let childPIDText = try String(contentsOf: childPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             let childPID = try #require(pid_t(childPIDText))
@@ -66,8 +65,7 @@
             environment["SENTINEL_FD"] = String(sentinelPipe[0])
 
             let result = try AgentHookSubprocess.run(
-                executablePath: "/bin/sh", arguments: ["-c", #"[ ! -e "/dev/fd/$SENTINEL_FD" ]"#], environment: environment,
-                timeoutSeconds: 2)
+                executablePath: "/bin/sh", arguments: ["-c", #"[ ! -e "/dev/fd/$SENTINEL_FD" ]"#], environment: environment, timeoutSeconds: 2)
 
             #expect(result.terminationStatus == 0)
         }
@@ -77,8 +75,8 @@
             defer { _ = signal(SIGUSR1, originalHandler) }
 
             let ignoredSignalResult = try AgentHookSubprocess.run(
-                executablePath: "/bin/sh", arguments: ["-c", "kill -USR1 $$; exit 42"],
-                environment: ProcessInfo.processInfo.environment, timeoutSeconds: 2)
+                executablePath: "/bin/sh", arguments: ["-c", "kill -USR1 $$; exit 42"], environment: ProcessInfo.processInfo.environment,
+                timeoutSeconds: 2)
 
             var blockedSignal = sigset_t()
             sigemptyset(&blockedSignal)
@@ -87,8 +85,8 @@
             #expect(pthread_sigmask(SIG_BLOCK, &blockedSignal, &originalMask) == 0)
             defer { _ = pthread_sigmask(SIG_SETMASK, &originalMask, nil) }
             let blockedSignalResult = try AgentHookSubprocess.run(
-                executablePath: "/bin/sh", arguments: ["-c", "kill -USR2 $$; exit 43"],
-                environment: ProcessInfo.processInfo.environment, timeoutSeconds: 2)
+                executablePath: "/bin/sh", arguments: ["-c", "kill -USR2 $$; exit 43"], environment: ProcessInfo.processInfo.environment,
+                timeoutSeconds: 2)
 
             #expect(ignoredSignalResult.terminationStatus == 128 + SIGUSR1)
             #expect(blockedSignalResult.terminationStatus == 128 + SIGUSR2)

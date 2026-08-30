@@ -71,7 +71,10 @@ let macAppTargets: [Target] = [
             "spacesterminalcore",
             "spacesterminalui",
             .product(name: "Sparkle", package: "Sparkle"),
-        ]
+        ],
+        // The code pane's web app (CodePaneWeb), built with `npm run build` into this directory
+        // and checked in; Swift builds never need node. See CodePaneWeb/README.md.
+        resources: [.copy("Resources/CodePane")]
     )
 ]
 let macExecutableTargets: [Target] = [
@@ -142,7 +145,7 @@ let baseTerminalTargets: [Target] = [
     .target(name: "spacesdevicecore", dependencies: ["spacesterminalcore"]),
     .target(
         name: "spacesdeviceapi",
-        dependencies: ["spacesdevicecore", "workspacecore", "spacesterminalcore"] + spacesDeviceAPIExtraDependencies
+        dependencies: ["spacesdevicecore", "workspacecore", "spacesterminalcore", "spacesruntimecore"] + spacesDeviceAPIExtraDependencies
     ),
     .target(
         name: "spacesclientcore",
@@ -241,6 +244,18 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
                 "GhosttyLinuxHeadlessSpawnStressTests.swift",
                 "GhosttyLinuxHeadlessSubmitOrderingTests.swift",
+            ]
+        ),
+        // spacesdeviceapiTests mixes suites that need Network/Security (Apple-only) or Darwin-only APIs
+        // with plain Foundation ones, so the Linux target compiles an explicit whitelist, same pattern as
+        // spacesterminalghosttyTests above. A new Linux suite must be added here AND to
+        // run_linux_tests.sh's per-suite filter loop.
+        .testTarget(
+            name: "spacesdeviceapiTests",
+            dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"],
+            sources: [
+                "WorkspaceFileWriteModePreservationTests.swift",
+                "SpacesDeviceWorkspaceGitHashingKnownAnswerTests.swift"
             ]
         ),
     ]

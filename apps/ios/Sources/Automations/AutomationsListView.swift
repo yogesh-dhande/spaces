@@ -39,9 +39,7 @@ struct AutomationsListView: View {
             model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
     }
 
-    private var activeDetailRouteID: String? {
-        selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) ?? selectedSession?.id
-    }
+    private var activeDetailRouteID: String? { selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) ?? selectedSession?.id }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
@@ -111,8 +109,7 @@ struct AutomationRunsView: View {
     private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
 
     var body: some View {
-        content.navigationTitle(title).tint(Theme.accent).overviewPolling(
-            model: model, tab: .automations, activeDetailRouteID: selectedSession?.id)
+        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: selectedSession?.id)
     }
 
     @ViewBuilder private var content: some View {

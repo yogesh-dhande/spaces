@@ -118,9 +118,7 @@ import Foundation
                 spawnFlags |= Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
             #endif
             let flagResult = posix_spawnattr_setflags(&attributes, spawnFlags)
-            guard
-                fileActionResult == nil, attributeResult == 0, signalMaskResult == 0, signalDefaultResult == 0, flagResult == 0
-            else {
+            guard fileActionResult == nil, attributeResult == 0, signalMaskResult == 0, signalDefaultResult == 0, flagResult == 0 else {
                 close(outputPipe[0])
                 close(outputPipe[1])
                 throw RunError.launch("failed to configure posix_spawn")

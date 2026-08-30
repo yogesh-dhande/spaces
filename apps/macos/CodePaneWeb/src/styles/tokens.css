@@ -1,0 +1,199 @@
+/*
+ * App-wide color tokens, copied from the Variant A mockup's `.mac`/`.mac.light`
+ * blocks (Spaces' own ThemeRegistry:spacesBrand values), which is the
+ * artifact the user picked as the source of truth for this pane's design
+ * language (see docs/design.md for the general rules these follow).
+ *
+ * Unlike the mockup page, this bundle has no "page shell" to theme against
+ * system preference: the Swift host reports the theme explicitly in
+ * `CodePaneInitPayload.theme`, and `app/root.ts` stamps it onto
+ * `<html data-theme>` before anything renders. So theme selection here is
+ * driven only by `[data-theme]`, never `prefers-color-scheme`.
+ */
+
+:root[data-theme="dark"] {
+  --bg: #0f1517;
+  --surface: #1d2a2d;
+  --surface2: #172124;
+  --sidebar: #0f1517;
+  --fg: #eaf0ef;
+  --fg2: #adc0c4;
+  --fg3: #7a8a8d;
+  --line: #304346;
+  --line-strong: #3f5458;
+  --accent: #59dbcd;
+  --accent-strong: #3dc6b8;
+  --accent-tint: rgba(89, 219, 205, 0.16);
+  --on-accent: #0f1517;
+  --green: #4cd07a;
+  --orange: #f5a742;
+  --blue: #7aa2d2;
+  --red: #ff6b60;
+  --row-hover: rgba(234, 240, 239, 0.06);
+  --row-sel: rgba(89, 219, 205, 0.18);
+  --chip: rgba(234, 240, 239, 0.08);
+  --add-bg: rgba(76, 208, 122, 0.12);
+  --add-gutter: rgba(76, 208, 122, 0.22);
+  --add-fg: #6ae092;
+  --del-bg: rgba(255, 107, 96, 0.11);
+  --del-gutter: rgba(255, 107, 96, 0.2);
+  --del-fg: #ff8a80;
+  --sy-key: #bb80cc;
+  --sy-str: #6ae092;
+  --sy-type: #79e6db;
+  --sy-fn: #96b9e1;
+  --sy-num: #fabe66;
+  --sy-com: #7a8a8d;
+}
+
+:root[data-theme="light"] {
+  --bg: #f8f7f1;
+  --surface: #ffffff;
+  --surface2: #f1efe6;
+  --sidebar: #f1efe6;
+  --fg: #102028;
+  --fg2: #3a4d57;
+  --fg3: #6f848d;
+  --line: #d5d8d3;
+  --line-strong: #b8bdb5;
+  --accent: #0f7a76;
+  --accent-strong: #0d5f5d;
+  --accent-tint: rgba(15, 122, 118, 0.12);
+  --on-accent: #ffffff;
+  --green: #3a9e5f;
+  --orange: #d07a1a;
+  --blue: #3465a4;
+  --red: #c63a2f;
+  --row-hover: rgba(15, 32, 40, 0.04);
+  --row-sel: rgba(15, 122, 118, 0.14);
+  --chip: rgba(15, 32, 40, 0.06);
+  --add-bg: rgba(58, 158, 95, 0.11);
+  --add-gutter: rgba(58, 158, 95, 0.2);
+  --add-fg: #2f8a51;
+  --del-bg: rgba(198, 58, 47, 0.09);
+  --del-gutter: rgba(198, 58, 47, 0.18);
+  --del-fg: #b83428;
+  --sy-key: #8854a0;
+  --sy-str: #2f8a51;
+  --sy-type: #0d5f5d;
+  --sy-fn: #3465a4;
+  --sy-num: #b56d12;
+  --sy-com: #6f848d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/*
+ * `@pierre/diffs`' CSS-variables Shiki theme (registered by
+ * `theme/index.ts` via `registerCustomCSSVariableTheme`) reads these exact
+ * variable names, all prefixed `--diffs-` (see `formatCSSVariablePrefix` in
+ * `@pierre/diffs/dist/utils/formatCSSVariablePrefix.js`, which the library
+ * hardcodes and does not let callers change). Mapping them onto the app
+ * tokens above, instead of passing `variableDefaults`, means syntax colors
+ * repaint automatically whenever `data-theme` changes, with no separate
+ * light/dark theme registration.
+ *
+ * A `--shiki-*` mapping shipped here previously: shiki's own default
+ * variable prefix is `--shiki-`, but `@pierre/diffs` overrides it to
+ * `--diffs-` before constructing the theme, so every token span's inline
+ * `color: var(--diffs-token-keyword)` (etc.) resolved to nothing and fell
+ * back to plain inherited text color — flat, monochrome diffs.
+ */
+:root {
+  --diffs-foreground: var(--fg);
+  --diffs-background: var(--bg);
+  --diffs-token-keyword: var(--sy-key);
+  --diffs-token-string: var(--sy-str);
+  --diffs-token-string-expression: var(--sy-str);
+  --diffs-token-comment: var(--sy-com);
+  --diffs-token-constant: var(--sy-num);
+  --diffs-token-parameter: var(--fg2);
+  --diffs-token-function: var(--sy-fn);
+  --diffs-token-link: var(--sy-type);
+  --diffs-token-punctuation: var(--fg2);
+  --diffs-token-inserted: var(--add-fg);
+  --diffs-token-deleted: var(--del-fg);
+  --diffs-token-changed: var(--orange);
+}
+
+/*
+ * `@pierre/diffs`' own diff-chrome CSS (`dist/style.js`, injected into each
+ * `<diffs-container>` shadow root) reads a second set of `--diffs-*`
+ * variables for backgrounds, foregrounds, and the addition/deletion/
+ * modified accent colors used for file-card chrome, line tinting, and
+ * gutter numbers. Its `:host` block computes those (e.g. `--diffs-bg`)
+ * from `light-dark(var(--diffs-light-bg, #fff), var(--diffs-dark-bg, #000))`
+ * and *also* sets `color-scheme: light dark` on the same host element, so
+ * `light-dark()` there follows the OS's dark-mode preference rather than
+ * our own `[data-theme]` attribute — and because `:host` assigns
+ * `--diffs-bg`/`color-scheme` directly, an inherited value from `:root`
+ * can never override them (a specified value on an element always beats
+ * inheritance). We don't fight `color-scheme`; instead we map both the
+ * "light" and "dark" half of every pair below to the *same* value for the
+ * theme that is currently active, so whichever branch `light-dark()` picks
+ * resolves to our palette either way.
+ *
+ * Only the vars whose library defaults are wrong for our theme (invisible
+ * tints, off-palette accent colors) are set here. Layout/spacing/font vars
+ * (gaps, column widths, font family/size) keep the library's defaults.
+ *
+ * The duplicated pairs above neutralize every place the library reads a var
+ * we've mapped, but not the library's *own* internal `light-dark()` math
+ * (mixer percentages, `--diffs-mixer`, and the context/hover/selection/
+ * changed-line background formulas), which keys off the used value of
+ * `color-scheme` rather than reading our vars at all. `:host` hardcodes
+ * `color-scheme: light dark`, so those formulas otherwise follow the OS
+ * appearance instead of our `[data-theme]`. A light-DOM author rule
+ * targeting the host element (below) overrides a shadow tree's own `:host`
+ * style at equal specificity, so we pin `color-scheme` to match the active
+ * theme there too. The page always stamps `data-theme` from the init
+ * payload before any diff renders, so there's no un-stamped case to handle.
+ */
+:root {
+  --diffs-light-bg: var(--bg);
+  --diffs-dark-bg: var(--bg);
+  --diffs-light: var(--fg);
+  --diffs-dark: var(--fg);
+  --diffs-light-addition-color: var(--add-fg);
+  --diffs-dark-addition-color: var(--add-fg);
+  --diffs-light-deletion-color: var(--del-fg);
+  --diffs-dark-deletion-color: var(--del-fg);
+  --diffs-light-modified-color: var(--orange);
+  --diffs-dark-modified-color: var(--orange);
+}
+
+:root[data-theme="dark"] diffs-container {
+  color-scheme: dark;
+}
+:root[data-theme="light"] diffs-container {
+  color-scheme: light;
+}

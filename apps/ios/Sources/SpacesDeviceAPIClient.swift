@@ -269,6 +269,59 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Reads one file inside a workspace's checkout (capped at 10 MiB on the daemon side; see
+    /// `SpacesDeviceAPIServer.workspaceFileMaxBytes`). Wire parity with the Mac client; no iOS UI in v1.
+    func workspaceFileRead(workspaceID: String, relativePath: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceWorkspaceFileReadResult
+    {
+        let response = try await sendRequest(
+            .init(
+                command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: relativePath)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let result = response.workspaceFileRead else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a workspace file read result.")
+        }
+        return result
+    }
+
+    func workspaceRevisionFileRead(
+        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
+    {
+        let response = try await sendRequest(
+            .init(
+                command: .workspaceRevisionFileRead(
+                    .init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let result = response.workspaceRevisionFileRead else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a workspace revision file read result.")
+        }
+        return result
+    }
+
+    /// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` should be the
+    /// hash last read via `workspaceFileRead`, or `nil` to assert the file must not exist yet. A mismatch
+    /// is not thrown: `didWrite` is `false` and the result carries the disk content to merge against. Wire
+    /// parity with the Mac client; no iOS UI in v1.
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
+        let response = try await sendRequest(
+            .init(
+                command: .workspaceFileWrite(
+                    .init(workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let result = response.workspaceFileWrite else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a workspace file write result.")
+        }
+        return result
+    }
+
     func runWorkspaceProcess(
         workspaceID: String, processKey: String, processTemplateID: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws -> SpacesDeviceAPIResponse {

@@ -39,7 +39,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text-1")
                 return .written(framed: true)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr-1")
                 return .delivered
             })
@@ -47,7 +48,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text-2")
                 return .written(framed: true)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr-2")
                 return .delivered
             })
@@ -76,7 +78,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text-1")
                 return .written(framed: true)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr-1")
                 return .delivered
             })
@@ -84,7 +87,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text-2")
                 return .written(framed: true)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr-2")
                 drained.fulfill()
                 return .delivered
@@ -113,7 +117,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text")
                 return .written(framed: false)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr")
                 return .delivered
             })
@@ -171,7 +176,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
                 try? await Task.sleep(for: .milliseconds(80), clock: .continuous)
                 recorder.record("text")
                 return .written(framed: true)
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 try? await Task.sleep(for: .milliseconds(80), clock: .continuous)
                 recorder.record("cr")
                 return .delivered
@@ -193,7 +199,8 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             writeText: {
                 recorder.record("text")
                 return .notDelivered
-            }, writeCarriageReturn: {
+            },
+            writeCarriageReturn: {
                 recorder.record("cr")
                 return .delivered
             })

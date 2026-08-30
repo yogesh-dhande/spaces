@@ -188,7 +188,8 @@
             let overdue = ISO8601DateFormatter().string(from: now.addingTimeInterval(-5))
             let exactlyNow = ISO8601DateFormatter().string(from: now)
 
-            XCTAssertEqual(SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: overdue), relativeTo: now), "next due")
+            XCTAssertEqual(
+                SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: overdue), relativeTo: now), "next due")
             XCTAssertEqual(
                 SpacesMobileAutomations.nextFireDescription(makeAutomation(enabled: true, nextFireTime: exactlyNow), relativeTo: now), "next due")
         }
@@ -697,8 +698,7 @@
         /// independent of the resulting value (which looks identical either way for a value type).
         func testRefreshSkipsRepublishWhenTheFetchedOverviewIsUnchanged() async {
             let settings = SpacesMobileConnectionSettings()
-            let responder = SpacesMobileOverviewResponder(
-                overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
+            let responder = SpacesMobileOverviewResponder(overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
             }
@@ -735,7 +735,7 @@
             await model.refresh()
             XCTAssertEqual(model.relativeTimeReference, initialReference)
 
-            clock.advance(25) // 35 seconds total since `initialReference`: past the 30-second bar.
+            clock.advance(25)  // 35 seconds total since `initialReference`: past the 30-second bar.
             await model.refresh()
             XCTAssertEqual(model.relativeTimeReference, clock.now)
         }
@@ -747,8 +747,7 @@
         func testRelativeTimeReferenceKeepsAdvancingAcrossRefreshesWithAnUnchangedOverview() async {
             let clock = SpacesMobileTestWallClock()
             let settings = SpacesMobileConnectionSettings()
-            let responder = SpacesMobileOverviewResponder(
-                overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
+            let responder = SpacesMobileOverviewResponder(overview: makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")]))
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
             }
@@ -779,7 +778,7 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
             await model.refresh()
 
-            clock.advance(300) // five minutes with polling paused
+            clock.advance(300)  // five minutes with polling paused
             await model.refresh()
 
             XCTAssertEqual(model.relativeTimeReference, clock.now)

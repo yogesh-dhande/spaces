@@ -42,11 +42,10 @@ extension ProcessProfileEnvironmentSuites {
                 isInstalledProfile: false, runtimeDirectory: root.appendingPathComponent("runtime").path,
                 ipcNotificationObject: "com.spaces.test.\(UUID().uuidString)", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
             let owner = SpacesProcessLeaseOwner(
-                pid: ProcessInfo.processInfo.processIdentifier, executablePath: "/tmp/spaces-test", profileRoot: root.path,
-                token: UUID().uuidString, acquiredAt: "2026-01-01T00:00:00Z")
+                pid: ProcessInfo.processInfo.processIdentifier, executablePath: "/tmp/spaces-test", profileRoot: root.path, token: UUID().uuidString,
+                acquiredAt: "2026-01-01T00:00:00Z")
             let lease = SpacesProcessLease(
-                owner: owner, leaseDirectoryPath: root.appendingPathComponent("app-owner-lease").path, metadataPath: "unused",
-                fileManager: .default)
+                owner: owner, leaseDirectoryPath: root.appendingPathComponent("app-owner-lease").path, metadataPath: "unused", fileManager: .default)
             return AppKitController(
                 launchContext: SpacesAppLaunchContext(profile: profile, appOwnerLease: lease, desktopControlState: .passive(owner)))
         }
@@ -72,11 +71,22 @@ extension ProcessProfileEnvironmentSuites {
                 ], workspaces: [workspace], sessions: [])
         }
 
+        private func overview(_ base: SpacesDeviceOverviewPayload, addingWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload {
+            let workspace = SpacesDeviceWorkspaceSummary(
+                id: workspaceID, projectID: Self.projectID, projectName: "Project", branch: "created", baseBranch: "main",
+                dir: "/tmp/project-created", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0)
+            return SpacesDeviceOverviewPayload(
+                projects: base.projects, workspaces: base.workspaces + [workspace], sessions: base.sessions,
+                retainedTerminalSessionIDs: base.retainedTerminalSessionIDs,
+                workspaceIDsWithTeardownInFlight: base.workspaceIDsWithTeardownInFlight, daemonStatus: base.daemonStatus,
+                automations: base.automations, automationRuns: base.automationRuns)
+        }
+
         private func section(overview: SpacesDeviceOverviewPayload) -> AppKitController.DeviceSection {
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: SpacesPairedDeviceRecord.localDeviceID)
             return AppKitController.DeviceSection(
-                deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded,
-                device: localDevice(), projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
+                deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: localDevice(),
+                projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
                 workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview, daemonStatus: .testStatus,
                 compatibility: .compatible)
         }
@@ -107,9 +117,7 @@ extension ProcessProfileEnvironmentSuites {
                 fullSnapshotLoads += 1
                 return .success(self.fullSnapshot(overview: before))
             }
-            controller.sidebar.localOverviewLoadOverrideForTesting = {
-                .success(self.localSnapshot(overview: after))
-            }
+            controller.sidebar.localOverviewLoadOverrideForTesting = { .success(self.localSnapshot(overview: after)) }
 
             controller.sidebar.handleTerminalOverviewDidChange()
             await controller.sidebar.drainSidebarRefreshForTesting()
@@ -140,6 +148,45 @@ extension ProcessProfileEnvironmentSuites {
             #expect(fullSnapshotLoads == 1)
             #expect(localOverviewLoads == 0)
             #expect(controller.deviceSections.first?.overview == after)
+        }
+
+        @Test func staleLocalReloadCannotDeleteRecoveryStateForWorkspaceInstalledByMutation() async throws {
+            let controller = makeController()
+            let staleOverview = overview(liveTitle: nil)
+            controller.deviceSections = [section(overview: staleOverview)]
+            controller.localPairedDevice = localDevice()
+
+            let createdWorkspaceID = "workspace-created"
+            let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: SpacesPairedDeviceRecord.localDeviceID)
+            CodePaneWorkspaceStateCache.store(
+                CodePaneWorkspaceState(mode: .editor, editorState: nil, pendingReviewComments: nil),
+                storageKey: storageKey, workspaceID: createdWorkspaceID)
+            defer { CodePaneWorkspaceStateCache.remove(storageKey: storageKey, workspaceID: createdWorkspaceID) }
+
+            var releaseSnapshot: CheckedContinuation<Result<AppKitController.SidebarDataSnapshot, any Error>, Never>?
+            controller.sidebar.loadSnapshotOverrideForTesting = {
+                await withCheckedContinuation { continuation in
+                    releaseSnapshot = continuation
+                }
+            }
+            controller.sidebar.requestSidebarReload()
+            while releaseSnapshot == nil { await Task.yield() }
+
+            // The mutation response is authoritative and installs the workspace while the older
+            // sidebar read is still in flight. Releasing that read afterward reproduces the stale
+            // `liveWorkspaceIDs`/`previousLocalSection` ordering that used to delete valid state.
+            let currentOverview = overview(staleOverview, addingWorkspaceID: createdWorkspaceID)
+            let response = SpacesDeviceAPIResponse(
+                ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: currentOverview)))
+            controller.applyDeviceMutationResponse(
+                response, deviceID: SpacesPairedDeviceRecord.localDeviceID, epoch: controller.panelCoordinator.paneReplacementEpoch)
+            #expect(controller.deviceWorkspaceSummary(workspaceID: createdWorkspaceID) != nil)
+
+            releaseSnapshot!.resume(returning: .success(fullSnapshot(overview: staleOverview)))
+            await controller.sidebar.drainSidebarRefreshForTesting()
+
+            #expect(controller.deviceWorkspaceSummary(workspaceID: createdWorkspaceID) != nil)
+            #expect(CodePaneWorkspaceStateCache.state(storageKey: storageKey, workspaceID: createdWorkspaceID) != nil)
         }
     }
 }

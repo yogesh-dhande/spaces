@@ -347,6 +347,53 @@ import XCTest
             XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: [:]), 30)
         }
 
+        func testRecoveredSessionSummaryPreservesLaunchConfigurationMetadata() {
+            let launch = TerminalSessionLaunchConfiguration(
+                sessionID: "recovered", title: "Editor", workingDirectory: "/tmp/workspace", shell: "/bin/zsh", command: "agent",
+                createdAt: "2026-08-28T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let runtime = TerminalSessionRuntimeState(
+                sessionID: launch.sessionID, backend: launch.backend, servicePID: 1, childPID: nil, state: .running, updatedAt: launch.createdAt,
+                workingDirectory: launch.workingDirectory)
+            let summary = TerminalService.recoveredSessionSummary(
+                launchConfiguration: launch, runtimeState: runtime, paths: TerminalSessionPaths(rootDirectory: "/tmp/recovered"))
+
+            XCTAssertEqual(summary.launchConfiguration, launch)
+            XCTAssertEqual(summary.runtimeState, runtime)
+        }
+
+        func testXCTestCompatibilitySessionPreservesLaunchConfigurationMetadata() throws {
+            let root = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+            let originalRuntimeDirectory = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+            let originalDaemonOverride = ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"]
+            setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
+            setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+            unsetenv("SPACESD_EXECUTABLE")
+            defer {
+                if let originalDatabasePath {
+                    setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+                } else {
+                    unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+                }
+                if let originalRuntimeDirectory {
+                    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDirectory, 1)
+                } else {
+                    unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+                }
+                if let originalDaemonOverride { setenv("SPACESD_EXECUTABLE", originalDaemonOverride, 1) } else { unsetenv("SPACESD_EXECUTABLE") }
+            }
+
+            let launch = TerminalSessionLaunchConfiguration(
+                sessionID: "xctest-compatibility", title: "Editor", workingDirectory: root.path, shell: "/bin/zsh", command: "agent",
+                createdAt: "2026-08-28T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let summary = try TerminalService.createSession(launch)
+            defer { try? TerminalService.terminateSession(id: launch.sessionID) }
+
+            XCTAssertEqual(summary.launchConfiguration, launch)
+            XCTAssertEqual(summary.runtimeState?.sessionID, launch.sessionID)
+        }
+
         private func makeTemporaryDirectory() throws -> URL {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
                 "spacesd tests \(UUID().uuidString)", isDirectory: true)

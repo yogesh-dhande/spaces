@@ -18,8 +18,8 @@ struct BuiltInTerminalOwnershipIndex {
     private let windowsByWorkspace: [String: [WindowRecord]]
 
     init(
-        workspaceIDs: [String], runningProcessesByWorkspace: [String: [RunningProcessRecord]],
-        agentWindowsByWorkspace: [String: [AgentWindowRecord]], windowsByWorkspace: [String: [WindowRecord]]
+        workspaceIDs: [String], runningProcessesByWorkspace: [String: [RunningProcessRecord]], agentWindowsByWorkspace: [String: [AgentWindowRecord]],
+        windowsByWorkspace: [String: [WindowRecord]]
     ) {
         self.workspaceIDs = workspaceIDs
         self.runningProcessesByWorkspace = runningProcessesByWorkspace

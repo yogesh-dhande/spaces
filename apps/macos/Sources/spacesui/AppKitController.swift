@@ -232,6 +232,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     // device and act as the default target when no row is selected. Per-row device
     // context is resolved via deviceID(for…) helpers and the device sections.
     var localDeviceID = SpacesPairedDeviceRecord.localDeviceID
+    /// Advances whenever an authoritative local overview is installed, including a mutation response.
+    /// Sidebar reloads capture this before their off-main read; a response that lands while that read
+    /// is in flight therefore fences the stale snapshot before it can reconcile missing workspaces.
+    var localOverviewInstallGeneration = 0
     var localDeviceName = "This Mac"
     var localPairedDevice: SpacesPairedDeviceRecord?
     var deviceSections: [DeviceSection] = []
@@ -269,6 +273,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Read-only facets of `detailPane` that the app reads throughout. `showingSettings` is a separate
     /// stored flag because the Settings dialog floats over, and coexists with, whatever pane is shown.
     var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
+    /// The workspace `showWorkspaceDetail` most recently presented, tracked independently of
+    /// `detailPane` because the monitor-follow contract (docs/spec.md: a global-window code pane
+    /// "follows the sidebar's workspace selection") must survive detours through non-workspace
+    /// details: Alerts/Automations nil out `visibleDetailWorkspaceID`, but they do not change which
+    /// workspace the user last selected — so comparing against the visible detail would silently skip
+    /// the A → Alerts → B retarget. `nil` only until the first workspace presentation this launch,
+    /// preserving the restore-then-follow rule (a reopened monitor stays on its persisted workspace
+    /// until a real selection change).
+    private var lastPresentedWorkspaceDetailID: String?
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
     var showingAutomations: Bool { detailPane.isAutomations }
@@ -371,6 +384,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.dumpFocusableWindowNames, #selector(handleDumpFocusableWindowNamesIPC(_:))),
         (IPCNotification.selectWorkspaceDetail, #selector(handleSelectWorkspaceDetailIPC(_:))),
         (IPCNotification.openWorkspaceTerminal, #selector(handleOpenWorkspaceTerminalIPC(_:))),
+        (IPCNotification.openWorkspaceEditor, #selector(handleOpenWorkspaceEditorIPC(_:))),
         (IPCNotification.runWorkspaceProcess, #selector(handleRunWorkspaceProcessIPC(_:))),
         (IPCNotification.stopWorkspaceProcess, #selector(handleStopWorkspaceProcessIPC(_:))),
         (IPCNotification.restartWorkspaceProcess, #selector(handleRestartWorkspaceProcessIPC(_:))),
@@ -418,6 +432,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     private var keepsTerminalSessionsRunningDuringTermination = false
+    /// AppKit remains alive in `.terminateLater` while Editor panes collect their last JS-owned
+    /// workspace state and synchronously drain its queued persistence. A second quit request while
+    /// that one is in flight must keep waiting for the same fence rather than starting another close.
+    private var isFinalizingEditorStateForTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
     /// Workspaces whose delete mutation is in flight. Deleting a workspace takes seconds on the owning
@@ -672,24 +690,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isFinalizingEditorStateForTermination { return .terminateLater }
         let liveSessions = Self.liveBuiltInTerminalSessions()
         switch Self.terminalQuitPolicy(liveTerminalSessionCount: liveSessions.count) {
         case .quitImmediately:
             keepsTerminalSessionsRunningDuringTermination = true
-            return .terminateNow
+            return deferTerminationUntilEditorStateIsDurable(sender)
         case .promptForLiveSessions:
             switch presentTerminalQuitDialog(liveSessionCount: liveSessions.count) {
             case .keepRunning:
                 keepsTerminalSessionsRunningDuringTermination = true
-                return .terminateNow
+                return deferTerminationUntilEditorStateIsDurable(sender)
             case .stopAll:
                 keepsTerminalSessionsRunningDuringTermination = false
                 let cleanupResult = performStopAllQuitCleanup(liveSessions: liveSessions)
                 guard cleanupResult.succeeded else { return handleStopAllQuitCleanupFailure(cleanupResult) }
-                return .terminateNow
+                return deferTerminationUntilEditorStateIsDurable(sender)
             case .cancel: return .terminateCancel
             }
         }
+    }
+
+    private func deferTerminationUntilEditorStateIsDurable(_ application: NSApplication) -> NSApplication.TerminateReply {
+        isFinalizingEditorStateForTermination = true
+        panelCoordinator.closeAllContentForTermination { [weak self, weak application] in
+            // The no-pane case settles synchronously inside `applicationShouldTerminate`; reply on
+            // the following main-queue turn so AppKit has observed `.terminateLater` first.
+            DispatchQueue.main.async {
+                guard let self, let application else { return }
+                self.isFinalizingEditorStateForTermination = false
+                application.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -721,11 +754,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
-        // Terminal windows once detached their clients as AppKit closed them during
-        // termination; panes are not closed by AppKit, so detach their clients here.
-        // The sessions themselves are untouched — quit keeps them running unless the
-        // quit dialog already stopped them all.
-        panelCoordinator.closeAllContentForTermination()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
@@ -1497,6 +1525,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    @objc private nonisolated func handleOpenWorkspaceEditorIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.openWorkspaceEditor(workspaceID: workspaceID)
+        }
+    }
+
     @objc private nonisolated func handleRunWorkspaceProcessIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
@@ -1987,9 +2024,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// pane attaches to that device — remote or local — regardless of the request's later workspace
     /// device lookup. Shared by the cold-resolve path and the remote deep-link open.
     nonisolated static func terminalSessionPaneOpenRequest(from match: TerminalSessionSummaryMatch) -> DeviceTerminalOpenRequest {
-        let summary = match.summary
+        terminalSessionPaneOpenRequest(summary: match.summary, deviceID: match.device.id)
+    }
+
+    nonisolated static func terminalSessionPaneOpenRequest(summary: SpacesDeviceTerminalSessionSummary, deviceID: String) -> DeviceTerminalOpenRequest
+    {
         return DeviceTerminalOpenRequest(
-            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: summary.id, title: summary.title,
+            workspaceID: summary.workspaceID, deviceID: deviceID, sessionID: summary.id, title: summary.title,
             workingDirectory: summary.workingDirectory, kind: terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
             command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
             createdAt: summary.createdAt, updatedAt: summary.updatedAt)
@@ -2359,6 +2400,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let sessionID = response.sessionID else { return nil }
         return Self.deviceTerminalOpenRequest(
             workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
+    }
+
+    /// Start Agent's background terminal is opened from the mutation's explicit launched-session
+    /// payload, not by re-resolving the refreshed overview. A fast-exiting command can disappear from
+    /// `overview.sessions` before the response is built even though the user still needs that
+    /// terminal's pane and failure output.
+    nonisolated static func startedWorkspaceCommandPaneOpenRequest(deviceID: String, response: SpacesDeviceAPIResponse) -> DeviceTerminalOpenRequest?
+    {
+        guard let launchedTerminalSession = response.launchedTerminalSession else { return nil }
+        return terminalSessionPaneOpenRequest(summary: launchedTerminalSession, deviceID: deviceID)
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -3381,9 +3432,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The cold launch owns the one unconditional identity bootstrap for this app run. Later full
     /// snapshots use the stored local device and bootstrap only when credentials or endpoint recovery
     /// genuinely require it.
-    nonisolated static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
-        await sidebarDataSnapshot(purpose: .launch)
-    }
+    nonisolated static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> { await sidebarDataSnapshot(purpose: .launch) }
 
     nonisolated static func refreshedSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
         await sidebarDataSnapshot(purpose: .refresh)
@@ -3427,10 +3476,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let bootstrapOfflineMessage: String?
         do {
             switch purpose {
-            case .launch:
-                localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: clientApp)
-            case .refresh:
-                localDevice = try SpacesDeviceClient.localDeviceForSidebarRefresh(database: database, clientApp: clientApp)
+            case .launch: localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: clientApp)
+            case .refresh: localDevice = try SpacesDeviceClient.localDeviceForSidebarRefresh(database: database, clientApp: clientApp)
             }
             bootstrapOfflineMessage = nil
         } catch {
@@ -3490,13 +3537,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             details: "device=\(resolvedDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
         let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
         logStartupSnapshotProfile(
-            "sidebar_snapshot_alerts_ready",
-            details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
+            "sidebar_snapshot_alerts_ready", details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })"
+        )
         return LocalDeviceSidebarSnapshot(
-            projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
-            workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: resolvedDevice.id,
-            localDeviceName: resolvedDevice.name, localPairedDevice: resolvedDevice, localDeviceOverview: localOverview,
-            localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility, localOfflineMessage: localOfflineMessage)
+            projects: mapped.projects, workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID,
+            alertsGroups: alertsGroups, localDeviceID: resolvedDevice.id, localDeviceName: resolvedDevice.name, localPairedDevice: resolvedDevice,
+            localDeviceOverview: localOverview, localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility,
+            localOfflineMessage: localOfflineMessage)
     }
 
     nonisolated static func deviceSidebarData(
@@ -3909,7 +3956,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         var title: String {
             switch self {
-            case .openEditor: "Open editor"
+            case .openEditor: "Open Editor"
             case .revealInFinder: "Reveal in Finder"
             }
         }
@@ -4411,7 +4458,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The terminal pane owning the key window's first responder — the target of the
     /// Edit menu's Find actions.
     private func focusedTerminalPaneContentForMenuAction() -> (any TerminalPaneContentHosting)? {
-        panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+        panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder) as? any TerminalPaneContentHosting
     }
 
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
@@ -5114,6 +5161,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hasExistingPane || deviceAcceptsDaemonActions
     }
 
+    /// Whether a fresh code pane may be created for a device. Unlike
+    /// `canOpenOrFocusTerminalPane`, this takes no `hasExistingPane` flag: a code pane has
+    /// no daemon-side session to attach, but building its content still means installing a
+    /// pane into the layout and persisting it, so a device that cannot act right now must
+    /// not have one added on its behalf. `PanelCoordinator.openCodePaneInNewTab` is reached
+    /// only from `openOrFocusGlobalEditorWindow`'s "nothing to reuse" branch — the
+    /// "reuse an existing global pane" branch focuses (and, if needed, retargets) it and
+    /// returns before creation is even considered — so this only ever needs to ask "can we
+    /// create," never "can we create or is one already there." Pure for the same test-seam
+    /// reason as `canOpenOrFocusTerminalPane`.
+    nonisolated static func canCreateCodePane(deviceAcceptsDaemonActions: Bool) -> Bool { deviceAcceptsDaemonActions }
+
     /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
     /// running the open path's state fetch, attach, and ownership reclaim. All three conditions are load
     /// bearing: the pane must be the focused one in the panel's selected tab (anything else has to move
@@ -5425,6 +5484,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// Every overview-install path calls this before it discards the prior workspace catalog. The
+    /// overview is the authority for whether an Editor recovery document still has a workspace to
+    /// belong to; this shared reconciliation also fences any queued write that has not reached SQLite.
+    func removeCodePaneRecoveryStateForDeletedWorkspaces(deviceID: String, liveWorkspaceIDs: Set<String>, previousWorkspaceIDs: Set<String>) {
+        guard let database = try? clientDatabase() else { return }
+        let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: deviceID)
+        CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
+            storageKey: storageKey, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: previousWorkspaceIDs,
+            persistedWorkspaceIDs: { (try? database.codePaneWorkspaceIDs(deviceID: deviceID)) ?? [] },
+            delete: { workspaceID in try? database.deleteCodePaneWorkspaceState(deviceID: deviceID, workspaceID: workspaceID) })
+    }
+
     private func applyDeviceOverview(
         _ overview: SpacesDeviceOverviewPayload, deviceID: String, epoch: Int, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil, preserveDetailPane: Bool = false
@@ -5436,11 +5507,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // selection: a mutation that clears the selection (e.g. a remote project delete) would
         // otherwise fall through to the local device and install a remote overview — and its
         // pane-prune keep-set — into the local section.
-        let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
-        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         // Captured before the section is overwritten: the pairing between an ended session and the one
         // that replaced it exists only in the difference between these two overviews.
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID { localOverviewInstallGeneration += 1 }
         let previousOverview = deviceSection(id: deviceID)?.overview
+        let liveWorkspaceIDs = Set(overview.workspaces.map(\.id))
+        removeCodePaneRecoveryStateForDeletedWorkspaces(
+            deviceID: deviceID, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
+        let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -5477,6 +5552,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if epoch == panelCoordinator.paneReplacementEpoch {
             panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview))
         }
+        // Unlike the terminal prune above, this runs unconditionally (see the local/remote apply sites
+        // in `SidebarController` for the full reasoning): a code pane has no session for a
+        // pane-replacement race to protect, so gating this on the same epoch would let a workspace
+        // deletion this mutation response reports go unpruned indefinitely whenever it lands mid-race —
+        // there is no guaranteed follow-up overview the way the terminal prune's self-heal relies on.
+        // The keep-set is workspace ids from this overview: a workspace absent from `overview.workspaces`
+        // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set). A
+        // reported orphaned global pane (the Editor pointed at the just-deleted workspace) is retargeted
+        // or closed right after, rather than left stranded pointing at nothing.
+        if let orphan = panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id))) {
+            resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
+        }
+        // Same overview this device's prune just consumed carries this device's agent rows too, so a
+        // code pane's assigned-agent dropdown stays current with whatever just spawned/exited.
+        panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: self)
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
@@ -7371,6 +7461,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict, presentation: presentation)
             return
         }
+        // Accepted, deliberate consequence: this `return` exits before `lastPresentedWorkspaceDetailID`
+        // is updated below, so a blocked selection never touches it. That is intentional — a
+        // compatibility block presents a banner, not `workspace`, so no monitor should retarget its
+        // code pane to a workspace nothing ever actually showed. Accepted residue: if the very first
+        // workspace selected this launch is blocked, `lastPresentedWorkspaceDetailID` stays `nil`
+        // through it, so the first compatible workspace picked afterward is treated as this launch's
+        // very first selection (the `nil` guard below) and skips its own monitor retarget too — one
+        // skipped retarget that self-heals on the next selection change. The ordinary mid-session case
+        // (a compatible workspace, then a blocked one, then another compatible workspace) is already
+        // handled correctly: the first compatible selection already recorded
+        // `lastPresentedWorkspaceDetailID`, so the blocked visit in between leaves it untouched and the
+        // later compatible selection still retargets against it.
+        // Captured before any branch below presents `workspace.id`: every remaining branch (the
+        // loading placeholder, the setup detail, or the full panel — including its own
+        // same-workspace fast path further down) ends up presenting this workspace, so this one
+        // comparison, made once here, covers all of them instead of needing to be repeated per
+        // branch. Read from `lastPresentedWorkspaceDetailID` rather than `visibleDetailWorkspaceID`:
+        // the latter is derived from `detailPane`, which goes `nil` the moment the user detours
+        // through Alerts or Automations, even though that detour does not change which workspace
+        // they last selected — comparing against it would silently skip the retarget on an
+        // A → Alerts → B sequence. `nil` means nothing has been presented yet this launch
+        // (`lastPresentedWorkspaceDetailID` starts `nil`, just as `detailPane` starts `.none`),
+        // which must never retarget a monitor — it stays on its persisted workspace until a real
+        // selection change, not merely the first workspace this session shows.
+        let previousWorkspaceID = lastPresentedWorkspaceDetailID
+        lastPresentedWorkspaceDetailID = workspace.id
+        if let previousWorkspaceID, previousWorkspaceID != workspace.id {
+            // Every global panel window's code pane is a workspace-following review monitor: the
+            // sidebar selecting a different workspace retargets its diff to match, in `.diff`
+            // mode, discarding whatever it held in memory for the old workspace. A code pane in
+            // the workspace's own panel (below) is untouched by this — it belongs to that one
+            // workspace and never retargets.
+            panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: workspaceDeviceID, workspaceID: workspace.id)
+        }
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
@@ -8398,10 +8522,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    /// Editors offered in settings, filtered to those installed on this Mac. Detection and
-    /// launch both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
+    /// Editors offered in settings: the built-in Editor first (always available, needs nothing
+    /// installed), then the external editors installed on this Mac. Detection and launch of the
+    /// external editors both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
     /// Desktop) does not require a path or display-name update here.
-    func installedEditorOptions() -> [EditorPreference] { [.vscode, .devin, .zed].filter(isEditorInstalled) }
+    func installedEditorOptions() -> [EditorPreference] { [.builtin] + [.vscode, .devin, .zed].filter(isEditorInstalled) }
 
     private func isEditorInstalled(_ editor: EditorPreference) -> Bool {
         guard let bundleID = editor.bundleIdentifier else { return false }
@@ -9786,7 +9911,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // client-side Chrome browser-session tabs, so close them here too for a clean
             // restarted state (a later browser focus then opens fresh tabs).
             self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }
@@ -9817,7 +9942,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch result {
         case .success(let response):
             self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }
@@ -9840,11 +9965,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Closes the workspace's open terminal panes after the owning daemon confirms a workspace
-    /// stop/restart/delete. The terminal sessions are already being stopped by that mutation, so
-    /// pane teardown skips the client-detach cleanup path.
-    private func closeWorkspaceTerminalPanes(workspaceID: String) {
+    /// Closes the workspace's open terminal and code panes after the owning daemon confirms a
+    /// workspace stop/restart/delete. The terminal sessions are already being stopped by that
+    /// mutation, so pane teardown skips the client-detach cleanup path; a code pane has no session to
+    /// stop, so it is a pure layout edit either way.
+    private func closeWorkspacePanes(workspaceID: String) {
         panelCoordinator.closeTerminalPanes(workspaceID: workspaceID, sessionIsTerminating: true)
+        panelCoordinator.closeCodePanes(workspaceID: workspaceID)
     }
 
     private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
@@ -9918,7 +10045,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .success(let response):
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                    self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    self.closeWorkspacePanes(workspaceID: id)
                     // Install the post-delete overview first, then clear the marking: the workspace is
                     // already absent from that overview, so its row leaves the sidebar exactly once.
                     //
@@ -9994,7 +10121,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // indefinitely.
                         self.endPendingWorkspaceDeletion(workspaceID: id)
                         self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                        self.closeWorkspaceTerminalPanes(workspaceID: id)
+                        self.closeWorkspacePanes(workspaceID: id)
                         if deleteLocalBranch || deleteRemoteBranch {
                             // The delete landed, but the branch-deletion report existed only in the response
                             // that was lost — reconciliation can prove the workspace is gone, not what
@@ -10238,22 +10365,65 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func openWorkspaceEditor(workspaceID: String) {
+    /// The single dispatch point for every "open editor" action (⌘⌥E, the sidebar's "Open in
+    /// Editor" item, the command palette): resolves the configured `EditorPreference` — `.builtin`
+    /// when unset, since that is the default — and either focuses the global Editor window in-process
+    /// or launches the configured external editor. Returns whether the open succeeded (errors are
+    /// still presented here, exactly as before).
+    ///
+    /// The builtin branch keys the Editor window synchronously, so ANY entry point that runs while
+    /// the command palette is key must dismiss the palette first: an open palette resigning key
+    /// mid-open would run its ORDINARY dismissal, whose return-focus restore would pull key straight
+    /// back from the Editor. That dismiss-before-open (and restore-on-failure) contract is centralized
+    /// in `commandPalette.withPaletteDismissedForBuiltInOpen`, which no-ops when the palette isn't
+    /// visible, so every caller gets it for free without needing to know whether the palette is
+    /// involved.
+    ///
+    /// The external-editor branch below keeps its own, different contract: it dismisses the palette
+    /// only AFTER a successful launch (see its comment), since a declined or failed external launch
+    /// should leave the palette open rather than silently closing it.
+    @discardableResult func openWorkspaceEditor(workspaceID: String) -> Bool {
         do {
             guard let (project, workspace) = findWorkspace(id: workspaceID) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace not found.")
             }
-            let target = try resolveEditorLaunch(try clientAppConfig().editor)
+            let editor = try clientAppConfig().editor ?? .builtin
+            if editor == .builtin {
+                // The coordinator reports false when no Editor exists and its creation door is
+                // closed (e.g. the workspace's device is unreachable) — that is a failed open, and
+                // `withPaletteDismissedForBuiltInOpen` restores the palette's return focus for it.
+                return commandPalette.withPaletteDismissedForBuiltInOpen {
+                    self.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: project.deviceID, workspaceID: workspaceID)
+                }
+            }
+            let target = try resolveEditorLaunch(editor)
             // The owning device comes from the row the workspace was found in, so the
             // remote/local branch below can never run the local path for a remote workspace.
             let deviceID = project.deviceID
             if isRemoteDeviceID(deviceID) {
+                // A remote launch dials the paired device directly over SSH — the editor's own
+                // connection, entirely outside this Mac's daemon session with that device — but
+                // `deviceAcceptsDaemonActions` is still the only signal Spaces has for whether the
+                // device is currently reachable at all. Attempting the launch anyway while it is
+                // offline just trades a clear "device offline" message for a confusing failure
+                // buried inside the editor's own SSH handshake, so this is gated the same way the
+                // code-pane creation door is (`PanelCoordinator.mayCreateCodePane`). A local launch
+                // needs no such check: it runs the editor CLI directly with no daemon involved, and
+                // this Mac's own daemon being down is the separate, already-handled case in
+                // `deviceUnreachableError`'s `isLocal` branch.
+                guard deviceAcceptsDaemonActions(forDeviceID: deviceID) else {
+                    showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
+                    return false
+                }
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
                 else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }
                 switch target {
                 case .vscode(let editor, let support):
-                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return }
+                    // The user can decline the SSH-remote extension install this prompts for; that
+                    // cancellation is itself a failure to open, not an error to present (the prompt
+                    // already explained the choice), so it reports false like any other non-open.
+                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return false }
                     try EditorLauncher.openRemoteVSCode(
                         cliExecutablePath: support.cliExecutableURL.path, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
                         directory: workspace.dir)
@@ -10272,15 +10442,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // every action it takes and the main window was already hidden before the editor was
             // asked for.
             commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
-        } catch { showError(error) }
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
     }
 
-    /// Resolves the configured editor to a launchable CLI from its installed bundle,
-    /// throwing a clear error when no editor is configured or it is not installed.
-    private func resolveEditorLaunch(_ editor: EditorPreference?) throws -> EditorLaunchTarget {
-        guard let editor, editor != .none, let bundleID = editor.bundleIdentifier else {
-            throw WorkspaceError.configError(message: "Preferred editor is not configured.")
-        }
+    /// Resolves an external editor preference (never `.builtin`, intercepted by the caller before this
+    /// runs) to a launchable CLI from its installed bundle, throwing a clear error when it is not
+    /// installed.
+    private func resolveEditorLaunch(_ editor: EditorPreference) throws -> EditorLaunchTarget {
+        guard let bundleID = editor.bundleIdentifier else { throw WorkspaceError.configError(message: "Preferred editor is not configured.") }
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
             throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
         }
@@ -10535,7 +10708,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // otherwise a deferred-but-confirmed delete would leave this workspace's browser windows
                 // and terminal panes open indefinitely.
                 closeLocalBrowserSessionWindows(workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
-                closeWorkspaceTerminalPanes(workspaceID: workspaceID)
+                closeWorkspacePanes(workspaceID: workspaceID)
                 if showsBranchOutcomeNotice {
                     showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
                 }
@@ -10628,7 +10801,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
                 let disposition = Self.shortcutMonitorDisposition(
-                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: focusedPaneContent is any TerminalPaneContentHosting,
+                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
                 focusedTerminalDisposition = disposition
                 if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
@@ -10649,14 +10823,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.isTextInputFocused() { return event }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
-                // In a global panel window the new tab opens there, targeting the
-                // focused pane's workspace; otherwise it lands in the selected
-                // workspace's panel.
-                if let panelWindowID = self.panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
-                    self.openNewTerminalTab(scope: .globalWindow(panelWindowID: panelWindowID))
-                } else if let workspaceID = self.selectedWorkspaceID {
-                    self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut)
-                }
+                // Global panel windows carry no tabs (and so no "new tab" of their own): this
+                // always lands in the selected workspace's panel, even when a panel window is key.
+                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut) }
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
@@ -11068,6 +11237,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// The ⌘⌥E shortcut and every other "open editor" entry point (sidebar "Open in Editor", palette)
+    /// resolve "which workspace" the same way: a focused tracked Chrome window, else the app's selected
+    /// workspace, else the daemon's last-active workspace.
     private func openGlobalEditorFromHotkey() {
         guard let workspaceID = globalEditorWorkspaceID() else { return }
         openWorkspaceEditor(workspaceID: workspaceID)
@@ -11077,6 +11249,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let workspaceID = clientWorkspaceIDForFocusedWindow() { return workspaceID }
         if NSApp.isActive, let selectedWorkspaceID { return selectedWorkspaceID }
         if let workspaceID = clientActiveWorkspaceID() { return workspaceID }
+        return nil
+    }
+
+    /// Retargets the Editor window's orphaned pane — one `pruneOpenCodePanes` reports still pointed at
+    /// `goneWorkspaceID` after that workspace left a device's overview — to the workspace ⌘⌥E would open
+    /// next, or closes the window outright when no workspace remains anywhere to show. The Editor must
+    /// not simply keep pointing at the gone workspace: every bridge call it makes would fail.
+    func resolveOrphanedGlobalEditorPane(excluding goneWorkspaceID: String) {
+        if let fallback = globalEditorFallbackWorkspaceID(excluding: goneWorkspaceID, allowedWorkspaceKeys: nil) {
+            panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: fallback.deviceID, workspaceID: fallback.workspaceID)
+        } else {
+            panelCoordinator.closeGlobalEditorCodePane()
+        }
+    }
+
+    /// Mirrors `globalEditorWorkspaceID`'s own chain (focused tracked window, selected workspace,
+    /// daemon's last-active workspace) but skips a candidate that names `goneWorkspaceID` or no longer
+    /// exists, falling through to the next link exactly as the task's "same chain" rule asks. Reads
+    /// `deviceSections` rather than `findWorkspace`/`projects`: the overview-apply call sites that feed
+    /// `resolveOrphanedGlobalEditorPane` update `deviceSections` before pruning but rebuild the flat
+    /// sidebar data (what `findWorkspace` reads) only afterward, so `findWorkspace` would still report
+    /// the just-deleted workspace as present.
+    /// When every chain candidate is itself unusable, falls through to the first workspace found on any
+    /// device — otherwise a stray cached selection elsewhere could close the Editor while other
+    /// workspaces are still open. Nil only when no workspace exists anywhere.
+    /// `allowedWorkspaceKeys` constrains startup restoration to workspaces whose device overview is
+    /// loaded; the live deletion path passes nil because its already-open Editor follows the ordinary
+    /// device availability behavior.
+    func globalEditorFallbackWorkspaceID(excluding goneWorkspaceID: String?, allowedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>?) -> (
+        deviceID: String, workspaceID: String
+    )? {
+        func candidate(_ workspaceID: String?) -> (deviceID: String, workspaceID: String)? {
+            guard let workspaceID, workspaceID != goneWorkspaceID else { return nil }
+            guard let section = deviceSections.first(where: { $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } } })
+            else { return nil }
+            if let allowedWorkspaceKeys, !allowedWorkspaceKeys.contains(.init(deviceID: section.deviceID, workspaceID: workspaceID)) { return nil }
+            return (section.deviceID, workspaceID)
+        }
+        if let match = candidate(clientWorkspaceIDForFocusedWindow()) { return match }
+        if NSApp.isActive, let match = candidate(selectedWorkspaceID) { return match }
+        if let match = candidate(clientActiveWorkspaceID()) { return match }
+        for section in deviceSections {
+            for workspaces in section.workspacesByProject.values {
+                if let workspace = workspaces.first(where: { workspace in
+                    workspace.id != goneWorkspaceID
+                        && (allowedWorkspaceKeys?.contains(.init(deviceID: section.deviceID, workspaceID: workspace.id)) ?? true)
+                }) {
+                    return (section.deviceID, workspace.id)
+                }
+            }
+        }
         return nil
     }
 
@@ -11990,9 +12213,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: String?) -> Bool { returnTerminalSessionID != nil }
 
-    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?)
-        -> Bool
-    { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
+    /// A code pane has no session id, so it only wins the return-focus decision when the palette
+    /// captured no terminal session either — terminal focus always takes precedence when both are
+    /// somehow present (a focus request landing mid-selection could otherwise race the capture).
+    nonisolated static func shouldRestoreCodePaneFocusAfterPaletteHide(returnTerminalSessionID: String?, returnCodePaneID: String?) -> Bool {
+        returnTerminalSessionID == nil && returnCodePaneID != nil
+    }
+
+    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(
+        returnTerminalSessionID: String?, returnCodePaneID: String?, returnApplicationProcessID: pid_t?
+    ) -> Bool { return returnTerminalSessionID == nil && returnCodePaneID == nil && returnApplicationProcessID != nil }
 
     nonisolated static func commandPaletteDismissShortcutMatches(
         charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, selectedItemIsAlert: Bool, searchEditorCanCutSelectedText: Bool = false
@@ -12360,6 +12590,11 @@ struct CommandPaletteItem: Sendable {
     enum Source: Sendable {
         case alertsAttention
         case workspaceTarget
+        /// A workspace-scoped action row (currently only "Open in Editor") rather than a
+        /// focusable runtime target. Excluded from the empty-query recency ranking, which
+        /// only ever surfaces `.workspaceTarget` rows, so it appears in the palette only
+        /// once the user searches for its workspace or its label.
+        case editorAction
     }
 
     enum Status: Sendable {
@@ -12380,7 +12615,11 @@ struct CommandPaletteItem: Sendable {
     let label: String
     let detail: String?
     let status: Status
-    let focusRequest: AppKitController.WindowFocusRequest
+    /// Nil for a `.editorAction` row: opening the workspace's Editor is a synchronous,
+    /// in-process call to `openWorkspaceEditor(workspaceID:)`, not a window to focus, the
+    /// same reason `AlertsController`'s automation-run alert leaves its own `focusRequest`
+    /// nil in favor of `automationRunTarget`. Every other row focuses a runtime target.
+    let focusRequest: AppKitController.WindowFocusRequest?
     let recentFocusIdentity: String
 
     var workspaceContextText: String {
@@ -12411,6 +12650,10 @@ struct CommandPaletteItem: Sendable {
     }
 
     var focusIdentity: String {
+        // `.editorAction` rows never reach either dedup loop in `visibleCommandPaletteItems`
+        // (they're neither `.alertsAttention` nor `.workspaceTarget`), so this branch is
+        // unreachable in practice; it exists only to keep this property total.
+        guard let focusRequest else { return "editor:\(workspaceID)" }
         switch focusRequest {
         case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
         case .workspaceWindow(let workspaceID, let index): return "window:\(workspaceID):\(index)"
@@ -12931,6 +13174,17 @@ extension AppKitController {
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: .agentWindow(agentWindow), detail: detail)))
                     }
                 }
+                // Every visible workspace gets one editor row regardless of what runtime targets it
+                // has, mirroring the sidebar row's "Open in Editor" item, which is available whether
+                // or not the workspace is running. `kind: .window` reuses the same icon a foreground
+                // code pane gets (`iconSymbol`'s `.window` case falls back to the code-brackets glyph
+                // when `detail` isn't a URL), since this row is not itself a runtime target with an
+                // index in `WorkspaceRunShortcutTarget.Kind`'s numbered-shortcut vocabulary.
+                items.append(
+                    CommandPaletteItem(
+                        id: "\(workspace.id)::editor", source: .editorAction, alertsAttentionID: nil, workspaceID: workspace.id,
+                        workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name, kind: .window,
+                        label: "Open in Editor", detail: nil, status: .none, focusRequest: nil, recentFocusIdentity: "editor:\(workspace.id)"))
             }
         }
 

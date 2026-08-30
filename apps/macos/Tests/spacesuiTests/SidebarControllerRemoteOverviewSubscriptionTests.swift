@@ -763,6 +763,77 @@ extension ProcessProfileEnvironmentSuites {
                 "the stale overview's prune was skipped, so the already-claimed pane stayed put")
         }
 
+        /// Round-4 Fix 2: the terminal-session retarget/prune above is deliberately skipped for a stale
+        /// epoch (previous test), because retargeting or pruning against data older than a just-claimed
+        /// replacement could steal or close the pane that claim installed. A code pane has no session for
+        /// a replacement race to protect, so its own liveness prune (`pruneOpenCodePanes`) must keep
+        /// running against the very same stale-epoch overview rather than being caught by that same fence
+        /// — otherwise a workspace deletion this overview reports would never be acted on, since there is
+        /// no follow-up prune the way a terminal pane's self-heals via a later fresh overview. This
+        /// overview's device carries no workspace at all, so `resolveOrphanedGlobalEditorPane`'s fallback
+        /// chain finds nowhere to retarget the orphaned pane and closes the window instead — the same
+        /// prune, with a live workspace elsewhere, would retarget rather than close (see
+        /// `CodePanePlumbingTests`).
+        @Test func aStaleEpochStillPrunesACodePaneForAGoneWorkspace() throws {
+            let controller = makeController()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            // The code pane's only legitimate placement is the global singleton window (a workspace-scope
+            // layout has every code pane pruned out of it on restore), so this test's code pane is
+            // installed there directly rather than alongside the terminal pane above.
+            let codeLayout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: codeLayout, frame: nil)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the terminal pane is placed")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: "code") != nil, "precondition: the code pane's controller exists")
+            let epochBeforeClaim = controller.panelCoordinator.paneReplacementEpoch
+
+            let claimed = controller.panelCoordinator.retargetPaneForReplacement(
+                replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
+            #expect(claimed, "precondition: the claim succeeded")
+            #expect(controller.panelCoordinator.paneReplacementEpoch != epochBeforeClaim, "precondition: the epoch moved")
+
+            let staleOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: staleOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: epochBeforeClaim)
+
+            #expect(
+                controller.panelCoordinator.placement(forSessionID: "replacement") != nil,
+                "the stale overview's terminal prune was skipped, so the already-claimed pane stayed put (unchanged behavior)")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "code") == nil,
+                "the code pane's liveness prune ran despite the stale epoch, since it has no session for a replacement race to protect")
+        }
+
+        @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() throws {
+            let controller = makeController()
+            controller.deviceSections = [section(processSessionID: "predecessor")]
+            try controller.clientDatabase().writeCodePaneWorkspaceState(
+                deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
+
+            let deletedOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: deletedOverview), daemonStatus: nil, compatibility: nil)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            #expect(
+                try controller.clientDatabase().codePaneWorkspaceState(deviceID: deviceID, workspaceID: "workspace-1") == nil,
+                "a remote overview is authoritative for workspace deletion, so it must remove recovery text before it can be restored")
+        }
+
         /// The ordinary case: nothing bumped the epoch between this overview's data being read and it
         /// being applied, so its prune runs and a pane the fresh keep-set no longer retains is closed —
         /// here, the replacement's own session having genuinely ended in the time since the claim.

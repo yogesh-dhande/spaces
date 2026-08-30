@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 18
+    public static let currentVersion = 19
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -563,9 +563,8 @@ public enum DatabaseSchema {
         // The frozen pre-v18 shape is created first for the same reason the v8→v9 step creates its own: a
         // database old enough to predate the terminal tables carries none of them, and the ALTER needs a
         // table to alter; on a database that already has the table the CREATE is a no-op.
-        DatabaseMigrationStep(
-            fromVersion: 17, toVersion: 18, description: "Add terminal_runtime_states.bracketed_paste_active", requiresBackup: true
-        ) { handle in
+        DatabaseMigrationStep(fromVersion: 17, toVersion: 18, description: "Add terminal_runtime_states.bracketed_paste_active", requiresBackup: true)
+        { handle in
             try migrationExecuteBatch(
                 handle,
                 sql: """
@@ -592,6 +591,43 @@ public enum DatabaseSchema {
                       bell_at TEXT
                     );
                     ALTER TABLE terminal_runtime_states ADD COLUMN bracketed_paste_active INTEGER NOT NULL DEFAULT 0;
+                    """)
+        },
+        // Reconciles the two legitimate v18 releases. Main's v18 added `bracketed_paste_active`, while
+        // the Code pane branch's v18 added review comments; both histories are already in user profiles.
+        // This canonical v18→v19 step therefore adds whichever additive surface is absent, preserving
+        // every existing runtime row and review comment instead of treating either history as invalid.
+        //
+        // Adds the code pane's review-comment drafts: one row per draft or archived (sent) comment,
+        // anchored to a file/side/line with the anchored line's text captured for re-anchoring after a
+        // diff refresh. `sent_at` is NULL for a draft and the send timestamp once archived; there is no
+        // tombstone or thread state, matching the locked v1 decision that a sent comment simply leaves
+        // the tray. `CREATE TABLE IF NOT EXISTS` (rather than a bare `CREATE TABLE`) is defensive parity
+        // with the established migration convention for a table present in every fresh schema.
+        DatabaseMigrationStep(
+            fromVersion: 18, toVersion: 19, description: "Reconcile terminal paste state and code pane review comments", requiresBackup: true
+        ) { handle in
+            if !(try migrationColumnExists(handle, table: "terminal_runtime_states", column: "bracketed_paste_active")) {
+                try migrationExecuteBatch(
+                    handle, sql: "ALTER TABLE terminal_runtime_states ADD COLUMN bracketed_paste_active INTEGER NOT NULL DEFAULT 0;")
+            }
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS workspace_review_comments (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      file_path TEXT NOT NULL,
+                      side TEXT NOT NULL,
+                      line_number INTEGER NOT NULL,
+                      line_text TEXT NOT NULL,
+                      body TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      revision INTEGER NOT NULL DEFAULT 0,
+                      sent_at TEXT,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                    );
                     """)
         },
     ]
@@ -821,6 +857,21 @@ public enum DatabaseSchema {
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL,
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_review_comments (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              side TEXT NOT NULL,
+              line_number INTEGER NOT NULL,
+              line_text TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              revision INTEGER NOT NULL DEFAULT 0,
+              sent_at TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 

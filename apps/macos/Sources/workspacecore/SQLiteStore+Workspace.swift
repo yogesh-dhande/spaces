@@ -82,6 +82,7 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_service_ports WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_services WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_review_comments WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
         }
     }

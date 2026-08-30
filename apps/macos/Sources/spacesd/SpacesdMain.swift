@@ -2606,8 +2606,7 @@ enum SpacesDaemonErrorClassification {
             return TerminalServiceResponse(ok: false, message: "Missing device client ID.", errorCode: .invalidArgument)
         }
         if let liveCore = TerminalEngineActor.runSynchronously({ self.liveSessionCore(sessionID: sessionID) }) {
-            return liveControlResponse(
-                liveCore: liveCore, controlRequest: controlRequest, includeSessionState: command.includesSessionStateOnSuccess)
+            return liveControlResponse(liveCore: liveCore, controlRequest: controlRequest, includeSessionState: command.includesSessionStateOnSuccess)
         }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2809,8 +2808,7 @@ enum SpacesDaemonErrorClassification {
             childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
             launchConfiguration: launchConfiguration, runtimeState: runtimeState,
             attachmentSnapshot: ((try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot())
-                .liveWireProjection(),
-            hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
+                .liveWireProjection(), hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
     }
 
     /// Off-main state read for the `.state` handler. Only the live in-process core lookup is a narrow

@@ -1,0 +1,3411 @@
+#if canImport(Network) && canImport(Security)
+    import Darwin
+    import Foundation
+    import XCTest
+
+    @testable import spacesdeviceapi
+    @testable import spacesdevicecore
+    @testable import spacesterminalcore
+    import spacesruntimecore
+    import workspacecore
+
+    /// End-to-end coverage for `workspaceFileRead`/`workspaceFileWrite`/`workspaceDiff` over the real
+    /// TLS request/response path, complementing `SpacesDeviceWorkspaceGitTests.swift`'s pure-logic
+    /// coverage of the path resolver and diff engine. `SpacesDeviceAPIServer` holds its
+    /// `RemoteWorkspaceGitClient` as a non-injectable stored property, so these tests seed a real
+    /// on-disk git fixture (mirroring `SpacesDeviceWorkspaceGitTests.makeRepo`) and a real workspace
+    /// row pointed at it, rather than mocking the git client.
+    final class WorkspaceGitServerTests: XCTestCase {
+        private final class ManualDiffTransferClock: @unchecked Sendable {
+            private var value: Date
+
+            init(now: Date) { value = now }
+
+            func now() -> Date { value }
+
+            func advance(by interval: TimeInterval) { value = value.addingTimeInterval(interval) }
+        }
+
+        private final class ManualDiffTransferExpiryReaper: SpacesDeviceAPIServer.WorkspaceDiffTransferStore.ExpiryReaper, @unchecked Sendable {
+            private var action: (@Sendable () -> Void)?
+            private(set) var scheduledInterval: TimeInterval?
+
+            func start(interval: TimeInterval, action: @escaping @Sendable () -> Void) {
+                precondition(self.action == nil, "A test expiry reaper can only be started once.")
+                scheduledInterval = interval
+                self.action = action
+            }
+
+            func stop() { action = nil }
+
+            func fire() { action?() }
+        }
+
+        func testWorkspaceFileReadReturnsContentSHAAndSize() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileRead)
+                let data = try XCTUnwrap(Data(base64Encoded: result.base64Data))
+                XCTAssertEqual(String(data: data, encoding: .utf8), "hello workspace")
+                XCTAssertEqual(result.size, data.count)
+                XCTAssertEqual(result.sha256, SpacesDeviceWorkspaceGitHashing.sha256Hex(data))
+                XCTAssertFalse(result.isBinaryGuess)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadReturnsPinnedCommitBytesDespiteWorktreeEdits() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "committed bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "pin revision bytes"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "worktree bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertFalse(result.isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRecognizesACleanCheckoutAfterGitEOLTransformation() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "README.md text eol=crlf\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "line one\nline two\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "checkout eol transform"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
+                try runGit(["checkout", "--", "README.md"], cwd: repo.path)
+                let checkedOut = try Data(contentsOf: repo.appendingPathComponent("README.md"))
+                XCTAssertTrue(checkedOut.contains(0x0D))
+
+                let cleanResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(cleanResponse.ok, cleanResponse.message)
+                XCTAssertEqual(cleanResponse.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, true)
+
+                try "user changed\r\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let changedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(changedResponse.ok, changedResponse.message)
+                XCTAssertEqual(changedResponse.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, false)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadUsesALiteralPathspecForBracketedPaths() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let directory = repo.appendingPathComponent("app", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let route = directory.appendingPathComponent("[slug].tsx")
+                try "export default 'base'\n".write(to: route, atomically: true, encoding: .utf8)
+                try runGit(["add", ":(literal)app/[slug].tsx"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bracket route"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "export default 'changed'\n".write(to: route, atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "app/[slug].tsx")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadIgnoresIndexVisibilityFlags() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                for flag in ["--assume-unchanged", "--skip-worktree"] {
+                    try runGit(["update-index", flag, "README.md"], cwd: repo.path)
+                    try "changed despite \(flag)\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertFalse(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision, flag)
+                    try runGit(["update-index", "--no-assume-unchanged", "README.md"], cwd: repo.path)
+                    try runGit(["update-index", "--no-skip-worktree", "README.md"], cwd: repo.path)
+                    try runGit(["checkout", "--ignore-skip-worktree-bits", "--", "README.md"], cwd: repo.path)
+                }
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsASymlinkAtTheTargetRevision() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let link = repo.appendingPathComponent("link.txt")
+                try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "README.md")
+                try runGit(["add", "link.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "symlink target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "link.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsAnIdenticalLeafSymlinkInTheWorktree() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "initial".write(to: repo.appendingPathComponent("same-content.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("README.md").path, withDestinationPath: "same-content.txt")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsAnIdenticalAncestorSymlinkInTheWorktree() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let trackedDirectory = repo.appendingPathComponent("tracked", isDirectory: true)
+                try FileManager.default.createDirectory(at: trackedDirectory, withIntermediateDirectories: true)
+                try "same nested content\n".write(to: trackedDirectory.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "tracked/file.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "tracked nested file"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let redirectedDirectory = repo.appendingPathComponent("redirected", isDirectory: true)
+                try FileManager.default.createDirectory(at: redirectedDirectory, withIntermediateDirectories: true)
+                try "same nested content\n".write(to: redirectedDirectory.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.removeItem(at: trackedDirectory)
+                try FileManager.default.createSymbolicLink(atPath: trackedDirectory.path, withDestinationPath: "redirected")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "tracked/file.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRequiresTheTargetExecutableMode() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let firstRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let read = { (revision: String) throws -> SpacesDeviceWorkspaceRevisionFileReadResult in
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    return try XCTUnwrap(response.workspaceRevisionFileRead)
+                }
+
+                XCTAssertTrue(try read(firstRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(firstRevision).isWorktreeEquivalentToRevision)
+                // Git tracks only the owner executable bit. Group/other execute bits on a regular
+                // worktree leaf do not change a 100644 target's checkout mode.
+                try FileManager.default.setAttributes([.posixPermissions: 0o645], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertTrue(try read(firstRevision).isWorktreeEquivalentToRevision)
+
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "make readme executable"], cwd: repo.path)
+                let executableRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                XCTAssertTrue(try read(executableRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(executableRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o645], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(executableRevision).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadProvidesGitSmudgedComparisonOldContent() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["config", "filter.spaces.clean", "sed s/SMUDGE/CANON/g"], cwd: repo.path)
+                try runGit(["config", "filter.spaces.smudge", "sed s/CANON/SMUDGE/g"], cwd: repo.path)
+                try "filtered.txt filter=spaces\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "old SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered base"], cwd: repo.path)
+                try "new SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("filtered.txt"))
+                try runGit(["checkout", "--", "filtered.txt"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "filtered.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.comparisonOldBase64Data))), encoding: .utf8), "old SMUDGE\n")
+            }
+        }
+
+        func testWorkspaceFileReadProvidesGitFilteredComparisonOldContentForUncommittedEditing() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["config", "filter.spaces.clean", "sed s/SMUDGE/CANON/g"], cwd: repo.path)
+                try runGit(["config", "filter.spaces.smudge", "sed s/CANON/SMUDGE/g"], cwd: repo.path)
+                try "filtered.txt filter=spaces\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "old SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered comparison base"], cwd: repo.path)
+                let base = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "new SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "filtered.txt", comparisonBaseRevision: base)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let old = try XCTUnwrap(response.workspaceFileRead?.comparisonOldBase64Data)
+                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: old)), encoding: .utf8), "old SMUDGE\n")
+            }
+        }
+
+        func testWorkspaceFileReadTreatsAMissingComparisonPathAsNilWithoutParsingGitStderr() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-comparison-missing-localized-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("localized-missing-cat-file.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./missing-before.txt\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(.init(
+                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision, oldPath: "missing-before.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                // `ls-tree -z` returns structured absence, so the localized cat-file failure must
+                // never run. A stderr parser would call it and misclassify this as an internal error.
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNil(response.workspaceFileRead?.comparisonOldBase64Data)
+            }
+        }
+
+        func testWorkspaceFileReadPropagatesComparisonTreeLookupFailure() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-comparison-tree-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("fail-comparison-ls-tree.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"ls-tree\"*) echo 'beschädigter Baum' >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(.init(
+                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadUsesTheTargetPathAfterARename() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["mv", "README.md", "Renamed.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "rename readme"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "Renamed.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadTreatsAnAddedFilesMissingParentAsNilWithoutParsingGitStderr() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-parent-missing-localized-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("localized-parent-cat-file.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./ADDED.md\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "added\n".write(to: repo.appendingPathComponent("ADDED.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "ADDED.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "added file"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "ADDED.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNil(response.workspaceRevisionFileRead?.comparisonOldBase64Data)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadPreservesBinaryBytes() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let expected = Data([0, 0xFF, 0xC3, 0x28])
+                try expected.write(to: repo.appendingPathComponent("binary.dat"))
+                try runGit(["add", "binary.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add binary"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "binary.dat")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadEnforcesTheTenMiBReadCap() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try Data(count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: repo.appendingPathComponent("huge.dat"))
+                try runGit(["add", "huge.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "oversized comparison side"], cwd: repo.path)
+                try "small target\n".write(to: repo.appendingPathComponent("huge.dat"), atomically: true, encoding: .utf8)
+                try runGit(["add", "huge.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "small target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "huge.dat")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .payloadTooLarge)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadKeepsItsExactBaselineWhenCheckoutChurnsAfterRead() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-revision-file-read-race-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("mutate-on-filter.sh")
+            try "#!/bin/sh\ncase \" $* \" in *\" hash-object \"*) printf 'churned after baseline\\n' > \"$2/README.md\" ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                // The result verifies the exact bounded bytes it returns as the editor's CAS
+                // baseline. Checkout churn after that read must not make it inspect a different
+                // worktree snapshot; a later write's SHA CAS protects this changed checkout.
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(
+                    String(data: try XCTUnwrap(Data(base64Encoded: result.worktreeFile.base64Data)), encoding: .utf8), "initial")
+                XCTAssertEqual(try String(contentsOf: repo.appendingPathComponent("README.md")), "churned after baseline\n")
+            }
+        }
+
+        func testWorkspaceRevisionFileReadMapsAConfirmedMissingPathToNotFound() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "missing.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadPropagatesTreeLookupExecutionFailureAsInternalError() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-revision-file-read-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("fail-ls-tree.sh")
+            try "#!/bin/sh\ncase \"$*\" in *ls-tree*) echo injected-tree-lookup-failure >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            let gitClient = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: gitClient) { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsMutableOrInvalidRevisionAndEscapingPath() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                for (revision, path) in [("HEAD", "README.md"), (String(repeating: "z", count: 40), "README.md"), (String(repeating: "a", count: 40), "../README.md")] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: path)),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertFalse(response.ok)
+                    XCTAssertEqual(response.errorCode, .invalidArgument)
+                }
+            }
+        }
+
+        func testWorkspaceFileReadRejectsAPathThatEscapesTheWorkspace() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "../escape.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceFileReadOnAMissingFileReturnsNotFound() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "does-not-exist.txt")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceFileReadOnAnUnknownWorkspaceReturnsNotFound() throws {
+            try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            SpacesDeviceWorkspaceFileReadRequest(workspaceID: "no-such-workspace", relativePath: "README.md")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+                // Round-10 fix 3: the workspace-git routing chokepoint rejects an id that does not resolve
+                // to a real workspace before it ever mints that id's entry in the per-workspace queue
+                // registry, so an arbitrary/nonexistent id can never grow it without bound.
+                XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
+            }
+        }
+
+        func testWorkspaceFileListReturnsTrackedAndUntrackedFilesSortedAscendingExcludingIgnored() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // README.md is already tracked by the fixture's initial commit.
+                try FileManager.default.createDirectory(
+                    at: repo.appendingPathComponent("src/nested", isDirectory: true), withIntermediateDirectories: true)
+                try "tracked nested".write(to: repo.appendingPathComponent("src/nested/tracked.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "src/nested/tracked.txt"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add nested tracked file"], cwd: repo.path)
+
+                try "untracked".write(to: repo.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+                try "*.log\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+                try "ignored".write(to: repo.appendingPathComponent("ignored.log"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths, [".gitignore", "README.md", "src/nested/tracked.txt", "untracked.txt"])
+                XCTAssertFalse(result.truncated)
+            }
+        }
+
+        func testWorkspaceFileListReturnsAnUnresolvedConflictPathOnlyOnce() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // `ls-files --cached --stage` reports one record per unmerged index stage. Build that
+                // index shape directly so this test exercises the listing contract without leaving a
+                // merge command's non-zero conflict status to interpret.
+                let ours = try runGitWithStdin(["hash-object", "-w", "--stdin"], cwd: repo.path, stdin: "ours\n").trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                let theirs = try runGitWithStdin(["hash-object", "-w", "--stdin"], cwd: repo.path, stdin: "theirs\n").trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                try runGit(["update-index", "--force-remove", "README.md"], cwd: repo.path)
+                try runGitWithStdin(
+                    ["update-index", "--index-info"], cwd: repo.path, stdin: "100644 \(ours) 2\tREADME.md\n100644 \(theirs) 3\tREADME.md\n")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths.filter { $0 == "README.md" }.count, 1)
+            }
+        }
+
+        func testWorkspaceFileListExcludesATrackedFileDeletedOnDisk() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "will be deleted".write(to: repo.appendingPathComponent("gone.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "gone.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add gone.txt"], cwd: repo.path)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("gone.txt"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("gone.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// A submodule gitlink (mode 160000) is a directory on disk that `git ls-files` still reports as an
+        /// ordinary tracked path; `workspaceFileRead` can never read a directory, so it must be filtered out
+        /// of the listing rather than surfaced in the tree only to fail on selection. Fabricates a gitlink
+        /// without a real submodule via `git update-index --add --cacheinfo 160000`, matching how a real
+        /// submodule's index entry looks without the setup cost of `git submodule add`.
+        func testWorkspaceFileListExcludesASubmoduleGitlink() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try FileManager.default.createDirectory(
+                    at: repo.appendingPathComponent("vendor/sub", isDirectory: true), withIntermediateDirectories: true)
+                try runGit(["update-index", "--add", "--cacheinfo", "160000,\(String(repeating: "a", count: 40)),vendor/sub"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("vendor/sub"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// A `skip-worktree` entry (sparse checkout's mechanism for hiding a tracked file the working
+        /// tree doesn't materialize) stays in `git ls-files --cached` but never shows up in
+        /// `git ls-files --deleted`, which only reports paths git itself removed — so the listing's
+        /// tracked-minus-deleted set still names a path with nothing on disk. `workspaceFileRead` would
+        /// fail with notFound if it were surfaced, so the stat-failure filter (`filterToOpenableFiles`)
+        /// must drop it rather than keep it.
+        func testWorkspaceFileListExcludesASparseCheckoutAbsentFile() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "sparse".write(to: repo.appendingPathComponent("sparse.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "sparse.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add sparse.txt"], cwd: repo.path)
+                try runGit(["update-index", "--skip-worktree", "sparse.txt"], cwd: repo.path)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("sparse.txt"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("sparse.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// Fix A regression: the prior `filterToOpenableFiles` kept any non-directory lstat type, so a
+        /// tracked symlink pointing at a directory or at somewhere outside the workspace was listed even
+        /// though `workspaceFileRead` can never open it (a dead row in the Editor's file tree — opening it
+        /// always fails, since the reader resolves symlinks and rejects a non-file/an escape). `isOpenableFile`
+        /// must instead decide a symlink exactly the way `workspaceFileRead`'s own path resolver would: a
+        /// symlink to a regular file inside the workspace is listed, a symlink to a directory or to outside
+        /// the workspace is not.
+        func testWorkspaceFileListDecidesATrackedSymlinkByWhereItResolvesRatherThanItsOwnLstatType() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "linked content".write(to: repo.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("link-to-file").path, withDestinationPath: "linked-file.txt")
+
+                try FileManager.default.createDirectory(
+                    at: repo.appendingPathComponent("some-dir", isDirectory: true), withIntermediateDirectories: true)
+                try "inside dir".write(to: repo.appendingPathComponent("some-dir/inside.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("link-to-dir").path, withDestinationPath: "some-dir")
+
+                let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-file-list-outside-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: outside) }
+                try "outside content".write(to: outside.appendingPathComponent("outside.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    at: repo.appendingPathComponent("link-to-outside"), withDestinationURL: outside.appendingPathComponent("outside.txt"))
+
+                try runGit(["add", "linked-file.txt", "some-dir/inside.txt", "link-to-file", "link-to-dir", "link-to-outside"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add symlinks"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertTrue(result.paths.contains("link-to-file"), "a symlink to a regular file inside the workspace must be listed")
+                XCTAssertFalse(result.paths.contains("link-to-dir"), "a symlink to a directory must not be listed")
+                XCTAssertFalse(result.paths.contains("link-to-outside"), "a symlink resolving outside the workspace must not be listed")
+                XCTAssertTrue(result.paths.contains("linked-file.txt"))
+            }
+        }
+
+        /// A tracked file over `workspaceFileMaxBytes` (10 MiB) is stat-openable but `workspaceFileRead`
+        /// rejects it with `.payloadTooLarge`, so the listing must exclude it too or the Files tree/⌘P would
+        /// offer a file that can never actually be opened. A small tracked sibling stays listed to prove the
+        /// exclusion is size-specific rather than a wholesale failure of the listing.
+        func testWorkspaceFileListExcludesATrackedFileOverTheReadSizeCap() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: repo.appendingPathComponent("HUGE.bin"))
+                try "small sibling".write(to: repo.appendingPathComponent("small.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "HUGE.bin", "small.txt"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add huge and small files"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("HUGE.bin"), "a file over the read cap must never be listed as openable")
+                XCTAssertTrue(result.paths.contains("small.txt"))
+                XCTAssertTrue(result.paths.contains("README.md"))
+            }
+        }
+
+        /// Unlike `workspaceDiff`, `workspaceFileList` deliberately serves a non-git workspace instead of
+        /// rejecting it: a non-git project's Editor pane has no direct-path input, so the file tree and
+        /// ⌘P quick-open are the only way to open a file there (docs/spec.md's non-git project rows still
+        /// offer Open in Editor). This falls back to a plain filesystem walk — sorted, recursive, including
+        /// a dotfile and a nested subdirectory's file, at parity with what the git branch would list for
+        /// the same tree.
+        func testWorkspaceFileListOnANonGitWorkspaceListsFilesFromDisk() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                try "hello".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try ".env-example".write(to: dir.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
+                try FileManager.default.createDirectory(at: dir.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
+                try "nested".write(to: dir.appendingPathComponent("src/nested.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertEqual(result.paths, [".env", "README.md", "src/nested.txt"])
+                XCTAssertFalse(result.truncated)
+            }
+        }
+
+        /// Fix A regression on the non-git branch: `listFilesystemFiles` used to keep only `.typeRegular`,
+        /// dropping a symlink to a regular file inside the workspace even though `workspaceFileRead` can open
+        /// it fine (unreachable in practice before this fix, since the Editor has no direct-path input other
+        /// than this listing — but wrong once `isOpenableFile` is the shared predicate both branches use). A
+        /// symlink to a directory must still be excluded, since there is no git index here to say what kind of
+        /// entry it is meant to be and `workspaceFileRead` could never open a directory either way.
+        func testWorkspaceFileListOnANonGitWorkspaceListsASymlinkToARegularFileButNotToADirectory() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                try "linked content".write(to: dir.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(
+                    atPath: dir.appendingPathComponent("link-to-file").path, withDestinationPath: "linked-file.txt")
+
+                try FileManager.default.createDirectory(
+                    at: dir.appendingPathComponent("some-dir", isDirectory: true), withIntermediateDirectories: true)
+                try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("link-to-dir").path, withDestinationPath: "some-dir")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertTrue(result.paths.contains("link-to-file"), "a symlink to a regular file inside the workspace must be listed")
+                XCTAssertFalse(result.paths.contains("link-to-dir"), "a symlink to a directory must not be listed")
+            }
+        }
+
+        /// Same exclusion as the git-repo case, exercised on the plain-filesystem-walk strategy: a regular
+        /// file over `workspaceFileMaxBytes` is excluded while a small sibling stays listed.
+        func testWorkspaceFileListOnANonGitWorkspaceExcludesAFileOverTheReadSizeCap() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: dir.appendingPathComponent("HUGE.bin"))
+                try "small sibling".write(to: dir.appendingPathComponent("small.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(result.paths.contains("HUGE.bin"), "a file over the read cap must never be listed as openable")
+                XCTAssertTrue(result.paths.contains("small.txt"))
+            }
+        }
+
+        /// A symlink resolving to a regular file over the read cap must be excluded exactly like the
+        /// oversized regular-file case above: `isOpenableFile`'s symlink branch stats the RESOLVED target,
+        /// not the symlink itself (which is tiny), so this exercises the size check on that second lstat.
+        func testWorkspaceFileListOnANonGitWorkspaceExcludesASymlinkResolvingToAFileOverTheReadSizeCap() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                let cap = SpacesDeviceAPIServer.workspaceFileMaxBytes
+                try Data(count: cap + 1).write(to: dir.appendingPathComponent("huge-target.bin"))
+                try FileManager.default.createSymbolicLink(
+                    atPath: dir.appendingPathComponent("link-to-huge").path, withDestinationPath: "huge-target.bin")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileList)
+                XCTAssertFalse(
+                    result.paths.contains("link-to-huge"), "a symlink resolving to a file over the read cap must never be listed as openable")
+            }
+        }
+
+        func testWorkspaceFileListOnAnUnknownWorkspaceReturnsNotFound() throws {
+            try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: "no-such-workspace")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+                // Mirrors `testWorkspaceFileReadOnAnUnknownWorkspaceReturnsNotFound`'s queue-registry check.
+                XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
+            }
+        }
+
+        func testWorkspaceFileWriteCreatesANewFileWhenExpectedSHAIsNil() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let content = Data("brand new file".utf8)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "NEW.md", base64Data: content.base64EncodedString(), expectedSHA256: nil)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileWrite)
+                XCTAssertTrue(result.didWrite)
+                XCTAssertEqual(result.sha256, SpacesDeviceWorkspaceGitHashing.sha256Hex(content))
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("NEW.md")), content)
+            }
+        }
+
+        func testWorkspaceFileWriteWithAMatchingSHAOverwritesTheFile() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let original = Data("initial".utf8)
+                try original.write(to: repo.appendingPathComponent("README.md"))
+                let originalSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(original)
+
+                let updated = Data("updated content".utf8)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: originalSHA)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileWrite)
+                XCTAssertTrue(result.didWrite)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("README.md")), updated)
+            }
+        }
+
+        /// A stale `expectedSHA256` (the file changed on disk since the client last read it) is a CAS
+        /// conflict, not a transport error: the response is `ok: true` with `didWrite: false` and the
+        /// server's current content/hash so the client can three-way merge and retry.
+        func testWorkspaceFileWriteWithAStaleSHAReportsAConflictInsteadOfFailing() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let onDisk = Data("changed underneath you".utf8)
+                try onDisk.write(to: repo.appendingPathComponent("README.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: Data("my edit".utf8).base64EncodedString(),
+                                expectedSHA256: "stale-sha-that-does-not-match")), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileWrite)
+                XCTAssertFalse(result.didWrite)
+                XCTAssertEqual(result.currentSHA256, SpacesDeviceWorkspaceGitHashing.sha256Hex(onDisk))
+                let currentData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.currentBase64Data)))
+                XCTAssertEqual(currentData, onDisk)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("README.md")), onDisk, "the conflicting write must not land on disk")
+            }
+        }
+
+        /// round-13 Fix 4: a stale `expectedSHA256` whose bytes already match what's on disk is a retry of an
+        /// already-landed write (its original response lost to a transport drop or the client hibernating
+        /// mid-round-trip), not a genuine conflict — the client asks to write exactly the content that is
+        /// already there. This must report an idempotent success (`didWrite: true`), not the `.conflict`
+        /// shape `testWorkspaceFileWriteWithAStaleSHAReportsAConflictInsteadOfFailing` covers for genuinely
+        /// different bytes.
+        func testWorkspaceFileWriteRetryWithSameBytesAndStaleSHASucceedsIdempotently() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let original = Data("initial".utf8)
+                try original.write(to: repo.appendingPathComponent("README.md"))
+                let originalSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(original)
+
+                let updated = Data("updated content".utf8)
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: originalSHA)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                XCTAssertTrue(try XCTUnwrap(firstResponse.workspaceFileWrite).didWrite)
+                let updatedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(updated)
+
+                // Retries with the SAME new bytes but the now-stale ORIGINAL expected SHA, as a client would
+                // if it never learned the first write landed (its response was lost).
+                let retryResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: originalSHA)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(retryResponse.ok, retryResponse.message)
+                let retryResult = try XCTUnwrap(retryResponse.workspaceFileWrite)
+                XCTAssertTrue(retryResult.didWrite, "an identical-bytes retry of a landed write must report success, not a conflict")
+                XCTAssertEqual(retryResult.sha256, updatedSHA)
+                XCTAssertNil(retryResult.currentBase64Data, "an idempotent success carries no conflict payload")
+                XCTAssertEqual(
+                    try Data(contentsOf: repo.appendingPathComponent("README.md")), updated, "file contents are unchanged by the idempotent retry")
+            }
+        }
+
+        /// An oversized file already on disk makes the CAS comparison itself unusable regardless of what the
+        /// client sent, so the write handler must refuse it as a hard error (mirroring the read handler's
+        /// guard) rather than hash the whole file and/or report a CAS conflict.
+        func testWorkspaceFileWriteWithAnOversizedFileOnDiskReturnsPayloadTooLargeInsteadOfHashingIt() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let oversized = Data(repeating: 0x61, count: 11 * 1024 * 1024)
+                try oversized.write(to: repo.appendingPathComponent("HUGE.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "HUGE.md", base64Data: Data("small edit".utf8).base64EncodedString(),
+                                expectedSHA256: nil)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .payloadTooLarge)
+                XCTAssertEqual(
+                    try Data(contentsOf: repo.appendingPathComponent("HUGE.md")).count, oversized.count, "the oversized file must be left untouched")
+            }
+        }
+
+        /// `FileManager.contents(atPath:)` returns `nil` both for "does not exist" and "exists but could
+        /// not be opened/read" (e.g. permissions). Left unguarded, the latter would present as
+        /// `expectedSHA256 == nil` (create), pass the CAS guard, and silently overwrite content nobody
+        /// could compare against. `posixPermissions: 0` makes the file exist but unreadable so the write
+        /// handler must refuse it as a hard error rather than treat it as a fresh create.
+        func testWorkspaceFileWriteCreateOnAnExistingButUnreadableFileReturnsInternalErrorInsteadOfOverwritingIt() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("UNREADABLE.md")
+                let original = Data("original content nobody can read".utf8)
+                try original.write(to: path)
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: path.path)
+                defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "UNREADABLE.md",
+                                base64Data: Data("attempted overwrite".utf8).base64EncodedString(), expectedSHA256: nil)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path)
+                XCTAssertEqual(try Data(contentsOf: path), original, "an unreadable existing file must never be overwritten by a create")
+            }
+        }
+
+        /// Mirrors the write handler's fix: an existing-but-unreadable file must not be conflated with a
+        /// missing one on the read path either.
+        func testWorkspaceFileReadOnAnExistingButUnreadableFileReturnsInternalError() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("UNREADABLE.md")
+                try Data("secret".utf8).write(to: path)
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: path.path)
+                defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "UNREADABLE.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+            }
+        }
+
+        /// `FileHandle.read(upToCount:)` returns `nil` at EOF, which an existing zero-byte regular file hits
+        /// immediately — that must read back as a successful empty read (matching what
+        /// `FileManager.contents(atPath:)` returns for an empty file), not the "exists but could not be
+        /// read" unreadable-file branch the two tests above cover for a genuine open/read failure.
+        func testWorkspaceFileReadOfAZeroByteFileReturnsEmptyDataInsteadOfInternalError() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("EMPTY.md")
+                try Data().write(to: path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "EMPTY.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileRead)
+                let data = try XCTUnwrap(Data(base64Encoded: result.base64Data))
+                XCTAssertEqual(data, Data())
+                XCTAssertEqual(result.size, 0)
+                XCTAssertEqual(result.sha256, SpacesDeviceWorkspaceGitHashing.sha256Hex(Data()))
+            }
+        }
+
+        /// Companion to the read test: a CAS write over an existing zero-byte file, with `expectedSHA256`
+        /// set to the empty-data hash, must be recognized as a matching-content write rather than tripping
+        /// the unreadable-existing-file hard error `testWorkspaceFileWriteCreateOnAnExistingButUnreadableFileReturnsInternalErrorInsteadOfOverwritingIt`
+        /// covers for a genuine open/read failure.
+        func testWorkspaceFileWriteOverAnExistingZeroByteFileWithMatchingEmptyHashSucceeds() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("EMPTY.md")
+                try Data().write(to: path)
+                let emptySHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data())
+
+                let content = Data("no longer empty".utf8)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "EMPTY.md", base64Data: content.base64EncodedString(),
+                                expectedSHA256: emptySHA)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceFileWrite)
+                XCTAssertTrue(result.didWrite)
+                XCTAssertEqual(try Data(contentsOf: path), content)
+            }
+        }
+
+        /// A FIFO opened for reading blocks until a writer appears, with no timeout — `contents(atPath:)`
+        /// would wedge this workspace's serial queue forever. The regular-file type guard (checked from the
+        /// same `attributesOfItem` stat used for the size pre-check) must refuse it before any open happens,
+        /// so this request returns promptly with `.invalidArgument` instead of hanging.
+        func testWorkspaceFileReadOnAFIFORefusesItWithoutBlocking() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("FIFO")
+                XCTAssertEqual(mkfifo(path.path, 0o644), 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+                defer { try? FileManager.default.removeItem(at: path) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "FIFO")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        /// Mirrors the read test: a create-write targeting an existing FIFO must be refused (a CAS write
+        /// over a non-regular path is never meaningful) rather than blocking on `contents(atPath:)` or
+        /// replacing the FIFO on disk.
+        func testWorkspaceFileWriteOnAFIFORefusesItWithoutReplacingIt() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let path = repo.appendingPathComponent("FIFO")
+                XCTAssertEqual(mkfifo(path.path, 0o644), 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+                defer { try? FileManager.default.removeItem(at: path) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "FIFO", base64Data: Data("attempted overwrite".utf8).base64EncodedString(),
+                                expectedSHA256: nil)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                var statInfo = stat()
+                XCTAssertEqual(stat(path.path, &statInfo), 0)
+                XCTAssertTrue((statInfo.st_mode & S_IFMT) == S_IFIFO, "the FIFO must not have been replaced by the write attempt")
+            }
+        }
+
+        /// Round-3 codex finding: a dangling symlink (the link exists; its target does not) whose target
+        /// names a location OUTSIDE the workspace must not let a create-CAS write land there. Before the
+        /// fix, `fileExists` (which follows links) reported the dangling link as a plain missing component,
+        /// so the walk reappended the remaining path literally under the workspace root and containment
+        /// passed against the wrong (workspace-relative) candidate while the actual write followed the link
+        /// straight outside.
+        func testWorkspaceFileWriteThroughADanglingSymlinkToOutsideTheWorkspaceRejectsItAndCreatesNothing() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-outside-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: outside) }
+                let outsideTarget = outside.appendingPathComponent("new.txt")
+                try FileManager.default.createSymbolicLink(
+                    at: repo.appendingPathComponent("dangling-outside-link"), withDestinationURL: outsideTarget)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "dangling-outside-link",
+                                base64Data: Data("should not land".utf8).base64EncodedString(), expectedSHA256: nil)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertFalse(
+                    FileManager.default.fileExists(atPath: outsideTarget.path), "the write must not have created anything outside the workspace")
+            }
+        }
+
+        /// Companion to the outside case above: a dangling symlink whose target names a location INSIDE the
+        /// workspace must keep resolving there so the editor's "Keep mine" recreate (and a plain read of a
+        /// deleted-but-still-symlinked file) keeps working.
+        func testWorkspaceFileReadThenWriteThroughADanglingSymlinkToInsideTheWorkspaceRecreatesTheTarget() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("dangling-inside-link").path, withDestinationPath: "recreated.md")
+
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "dangling-inside-link")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(readResponse.ok)
+                XCTAssertEqual(readResponse.errorCode, .notFound, "the link's target does not exist yet")
+
+                let content = Data("keep mine".utf8)
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "dangling-inside-link", base64Data: content.base64EncodedString(),
+                                expectedSHA256: nil)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(writeResponse.ok, writeResponse.message)
+                XCTAssertTrue(try XCTUnwrap(writeResponse.workspaceFileWrite).didWrite)
+                XCTAssertEqual(
+                    try Data(contentsOf: repo.appendingPathComponent("recreated.md")), content,
+                    "the write must have landed inside the workspace, at the link's relative target")
+            }
+        }
+
+        func testInlineDiffFileReadAndWriteRejectAnInWorkspaceSymlinkWithoutTouchingItsTarget() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let target = repo.appendingPathComponent("target.md")
+                let original = Data("original target".utf8)
+                try original.write(to: target)
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-link.md").path, withDestinationPath: "target.md")
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-directory").path, withDestinationPath: ".")
+
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "inline-link.md", requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(readResponse.ok)
+                XCTAssertEqual(readResponse.errorCode, .invalidArgument)
+
+                let ancestorReadResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "inline-directory/target.md", requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(ancestorReadResponse.ok)
+                XCTAssertEqual(ancestorReadResponse.errorCode, .invalidArgument)
+
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            .init(
+                                workspaceID: workspaceID, relativePath: "inline-link.md", base64Data: Data("edited target".utf8).base64EncodedString(),
+                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(writeResponse.ok)
+                XCTAssertEqual(writeResponse.errorCode, .invalidArgument)
+                XCTAssertEqual(try Data(contentsOf: target), original, "an inline diff save must not follow the symlink into its target")
+            }
+        }
+
+        func testWorkspaceFileWriteOnAnUnknownWorkspaceReturnsNotFound() throws {
+            try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: "no-such-workspace", relativePath: "README.md", base64Data: Data("x".utf8).base64EncodedString(),
+                                expectedSHA256: nil)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceDiffReportsUncommittedChangesOverTheWire() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
+                let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
+                XCTAssertEqual(file.status, .modified)
+                XCTAssertFalse(result.scopeSignature.isEmpty)
+            }
+        }
+
+        func testWorkspaceDiffManifestReturnsIdentityBeforeFetchingItsPatch() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try "untracked content".write(to: repo.appendingPathComponent("NEW.md"), atomically: true, encoding: .utf8)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(manifest.files.map(\.path), ["README.md", "NEW.md"])
+                XCTAssertEqual(manifest.files.first?.status, .modified)
+                XCTAssertEqual(manifest.files.last?.status, .untracked)
+
+                let fileResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "NEW.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(fileResponse.ok, fileResponse.message)
+                let file = try XCTUnwrap(fileResponse.workspaceDiffFileChunk)
+                XCTAssertEqual(file.scopeSignature, manifest.scopeSignature)
+                XCTAssertEqual(file.file.path, "NEW.md")
+                XCTAssertEqual(file.file.status, .untracked)
+                let patch = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(file.patchBase64Data)))
+                XCTAssertTrue(String(data: patch, encoding: .utf8)?.contains("untracked content") == true)
+                XCTAssertNil(file.transferID)
+                XCTAssertNil(file.nextByteOffset)
+
+                // Both files use the one manifest plan. File patch generation may run git once per tracked
+                // file, but it must never rebuild the full status/name-status plan for each visible row.
+                let trackedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(trackedResponse.ok, trackedResponse.message)
+                XCTAssertEqual(try XCTUnwrap(trackedResponse.workspaceDiffFileChunk).file.status, .modified)
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1, "all file patches must reuse one enumeration session")
+            }
+        }
+
+        /// An untracked text file larger than one transport response must be generated once and streamed
+        /// through the real pinned-TLS request path. This is the same shape as the code-pane streaming
+        /// fixture: the manifest is cheap, while the file request exercises Git output, the private
+        /// transfer file, base64 expansion, and the response-size fitting loop together.
+        func testWorkspaceDiffFileChunkStreamsLargeUntrackedFileOverTLS() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let content = Data((0..<500_000).flatMap { _ in Array("agent churn\n".utf8) })
+                XCTAssertGreaterThan(content.count, 5 * 1024 * 1024)
+                try content.write(to: repo.appendingPathComponent("large-untracked.txt"), options: .atomic)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(manifest.files.map(\.path), ["large-untracked.txt"])
+
+                var byteOffset = 0
+                var transferID: String?
+                var patchData = Data()
+                var chunkCount = 0
+                while true {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceDiffFileChunk(
+                                .init(
+                                    workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "large-untracked.txt",
+                                    byteOffset: byteOffset, transferID: transferID)), authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
+                    let chunk = try XCTUnwrap(response.workspaceDiffFileChunk)
+                    XCTAssertEqual(chunk.file.path, "large-untracked.txt")
+                    if let encoded = chunk.patchBase64Data { patchData.append(try XCTUnwrap(Data(base64Encoded: encoded))) }
+                    chunkCount += 1
+                    guard let nextByteOffset = chunk.nextByteOffset else {
+                        XCTAssertNil(chunk.transferID)
+                        break
+                    }
+                    XCTAssertGreaterThan(nextByteOffset, byteOffset)
+                    transferID = try XCTUnwrap(chunk.transferID)
+                    byteOffset = nextByteOffset
+                }
+                XCTAssertGreaterThan(chunkCount, 1, "large patch must be delivered in multiple ranges")
+                XCTAssertTrue(patchData.range(of: Data("agent churn".utf8)) != nil)
+            }
+        }
+
+        func testWorkspaceDiffManifestMetadataChunksKeepTheEntireEncodedResponseWithinFourMiB() throws {
+            try withWorkspaceFixture { _, _, server, _, _, _ in
+                let plans = (0..<30_000).map { index in
+                    SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified, source: .untracked
+                    )
+                }
+                let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
+                let firstResponse = try server.workspaceDiffManifestChunkResponse(manifestID: "manifest", snapshot: snapshot, fileIndex: 0)
+                XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(firstResponse).count, 4 * 1024 * 1024)
+                let first = try XCTUnwrap(firstResponse.workspaceDiffManifestChunk)
+                let nextFileIndex = try XCTUnwrap(first.nextFileIndex)
+                XCTAssertGreaterThan(nextFileIndex, 0)
+                XCTAssertLessThan(nextFileIndex, plans.count)
+
+                let secondResponse = try server.workspaceDiffManifestChunkResponse(
+                    manifestID: "manifest", snapshot: snapshot, fileIndex: nextFileIndex)
+                XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(secondResponse).count, 4 * 1024 * 1024)
+                XCTAssertEqual(try XCTUnwrap(secondResponse.workspaceDiffManifestChunk).files.first?.path, plans[nextFileIndex].path)
+            }
+        }
+
+        func testSlashHeavyPatchBase64ExpandsInsideTheEncodedTransportEnvelope() throws {
+            let raw = Data(repeating: 0xff, count: 3 * 1024 * 1024)
+            let response = SpacesDeviceAPIResponse(
+                ok: true, message: "Loaded workspace diff patch chunk.",
+                result: .workspaceDiffFileChunk(
+                    .init(
+                        scopeSignature: "signature", file: .init(path: "README.md", status: .modified), transferID: "transfer",
+                        patchBase64Data: raw.base64EncodedString(), nextByteOffset: raw.count)))
+
+            let encodedLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
+            XCTAssertTrue(String(decoding: encodedLine, as: UTF8.self).contains("\\/\\/\\/\\/"))
+            XCTAssertGreaterThan(encodedLine.count, 4 * 1024 * 1024)
+        }
+
+        func testWorkspaceDiffFileChunksReuseOnePatchTransferAndReplayALostEOFResponse() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // A textual patch just over one 4 MiB range proves that resuming reads the already-generated
+                // patch file. The assertion on the daemon creation metric is stronger and less flaky than a
+                // wall-clock comparison: a replay implementation necessarily mints/runs a second producer.
+                // U+FFFF encodes as EF BF BF; its base64 representation contains `/` densely enough
+                // to exercise a slash-heavy payload in the full line-framed transport envelope.
+                let largeText = String(repeating: "\u{FFFF}\n", count: 1_100_000)
+                XCTAssertGreaterThan(largeText.utf8.count, 4 * 1024 * 1024)
+                try largeText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1)
+
+                let firstStart = Date()
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                let firstDuration = Date().timeIntervalSince(firstStart)
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                XCTAssertLessThanOrEqual(
+                    try SpacesDeviceAPICodec.encodeResponseLine(firstResponse).count, 4 * 1024 * 1024,
+                    "The base64 patch payload and its complete Device API envelope share the 4 MiB transport bound.")
+                var chunk = try XCTUnwrap(firstResponse.workspaceDiffFileChunk)
+                XCTAssertGreaterThan(try XCTUnwrap(chunk.patchBase64Data).filter { $0 == "/" }.count, 10_000)
+                let signature = chunk.scopeSignature
+                var received = Data(base64Encoded: try XCTUnwrap(chunk.patchBase64Data)) ?? Data()
+                var transferID = try XCTUnwrap(chunk.transferID)
+                var nextOffset = try XCTUnwrap(chunk.nextByteOffset)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1)
+
+                // The first response can be lost before a client learns transferID. Its retry is another
+                // offset-zero request, so it must find this manifest/path's active patch instead of creating
+                // an orphaned second transfer.
+                let initialReplayResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(initialReplayResponse.ok, initialReplayResponse.message)
+                let initialReplay = try XCTUnwrap(initialReplayResponse.workspaceDiffFileChunk)
+                XCTAssertEqual(initialReplay.transferID, transferID)
+                XCTAssertEqual(initialReplay.patchBase64Data, chunk.patchBase64Data)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1, "a lost initial response must not orphan another active patch")
+
+                var resumedDurations: [TimeInterval] = []
+                var lastRequestOffset: Int?
+                while true {
+                    lastRequestOffset = nextOffset
+                    let resumedStart = Date()
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceDiffFileChunk(
+                                SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                    workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                    transferID: transferID)), authToken: authToken, clientApp: clientApp))
+                    resumedDurations.append(Date().timeIntervalSince(resumedStart))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertLessThanOrEqual(try SpacesDeviceAPICodec.encodeResponseLine(response).count, 4 * 1024 * 1024)
+                    chunk = try XCTUnwrap(response.workspaceDiffFileChunk)
+                    XCTAssertEqual(chunk.scopeSignature, signature)
+                    received.append(Data(base64Encoded: try XCTUnwrap(chunk.patchBase64Data)) ?? Data())
+                    if let next = chunk.nextByteOffset {
+                        transferID = try XCTUnwrap(chunk.transferID)
+                        nextOffset = next
+                    } else {
+                        XCTAssertNil(chunk.transferID)
+                        break
+                    }
+                }
+
+                XCTAssertTrue(String(data: received, encoding: .utf8)?.contains("\u{FFFF}") == true)
+                XCTAssertGreaterThan(received.count, 4 * 1024 * 1024)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1, "later chunks must not replay the full git diff")
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 1, "retain the final range for an ambiguous EOF replay")
+                XCTAssertEqual(server.workspaceDiffManifestSessionCreationCount, 1, "later files/ranges must reuse the original enumeration")
+                XCTAssertFalse(resumedDurations.isEmpty)
+                XCTAssertGreaterThanOrEqual(firstDuration, 0, "capture the first-producer timing alongside resumed chunk timings")
+                XCTAssertTrue(resumedDurations.allSatisfy { $0 >= 0 }, "capture each resumed range timing without a flaky absolute threshold")
+
+                // Simulate a client that sent the final request but lost the response. It still has the
+                // request's transfer ID and offset, so the daemon must resend the exact final bytes without
+                // re-running git or reporting a spurious not-found.
+                let replayResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md",
+                                byteOffset: try XCTUnwrap(lastRequestOffset), transferID: transferID)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(replayResponse.ok, replayResponse.message)
+                let replayedChunk = try XCTUnwrap(replayResponse.workspaceDiffFileChunk)
+                XCTAssertNil(replayedChunk.nextByteOffset)
+                XCTAssertEqual(replayedChunk.patchBase64Data, chunk.patchBase64Data)
+                XCTAssertEqual(server.workspaceDiffPatchTransferCreationCount, 1, "an EOF replay must use the retained patch file")
+
+                let releaseResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, manifestID: manifest.manifestID)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(releaseResponse.ok, releaseResponse.message)
+                XCTAssertEqual(server.workspaceDiffManifestSessionActiveCount, 0, "explicit release removes the compact manifest plan")
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "manifest release removes the retained EOF patch")
+
+                let repeatedRelease = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, manifestID: manifest.manifestID)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(repeatedRelease.ok, repeatedRelease.message)
+            }
+        }
+
+        func testWorkspaceDiffFileChunkCancellationAndChurnKeepTheTransferSnapshotUsable() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // Leave more than two ranges so the resumed chunk remains incomplete and can exercise
+                // explicit cancellation after proving that churn did not reject it.
+                let initialText = String(repeating: "initial diff line 0123456789abcdefghijklmnopqrstuvwxyz\n", count: 200_000)
+                try initialText.write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                let firstResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(firstResponse.ok, firstResponse.message)
+                let first = try XCTUnwrap(firstResponse.workspaceDiffFileChunk)
+                let transferID = try XCTUnwrap(first.transferID)
+                let nextOffset = try XCTUnwrap(first.nextByteOffset)
+
+                // An agent can keep changing the worktree while a pane downloads. The established snapshot
+                // remains readable; its signature tells the client generation that it is the old view.
+                try "churned content\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let resumedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(resumedResponse.ok, resumedResponse.message)
+                XCTAssertEqual(try XCTUnwrap(resumedResponse.workspaceDiffFileChunk).scopeSignature, first.scopeSignature)
+
+                let cancelResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID, cancel: true)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(cancelResponse.ok, cancelResponse.message)
+                XCTAssertEqual(server.workspaceDiffPatchTransferActiveCount, 0, "explicit cancel must release an unfinished transfer")
+
+                let repeatedCancel = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: nextOffset,
+                                transferID: transferID, cancel: true)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(repeatedCancel.ok, repeatedCancel.message)
+
+                let currentManifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(currentManifestResponse.ok, currentManifestResponse.message)
+                let currentManifest = try XCTUnwrap(currentManifestResponse.workspaceDiffManifestChunk)
+
+                let currentResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            SpacesDeviceWorkspaceDiffFileChunkRequest(
+                                workspaceID: workspaceID, manifestID: currentManifest.manifestID, relativePath: "README.md", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(currentResponse.ok, currentResponse.message)
+                let current = try XCTUnwrap(currentResponse.workspaceDiffFileChunk)
+                XCTAssertNotEqual(current.scopeSignature, first.scopeSignature)
+                let currentPatch = Data(base64Encoded: try XCTUnwrap(current.patchBase64Data))
+                XCTAssertTrue(String(data: try XCTUnwrap(currentPatch), encoding: .utf8)?.contains("churned content") == true)
+            }
+        }
+
+        func testWorkspaceDiffManifestTTLRemovesItsAbandonedChildTemporaryFile() throws {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-diff-transfer-ttl-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let outputURL = directory.appendingPathComponent("patch")
+            XCTAssertTrue(FileManager.default.createFile(atPath: outputURL.path, contents: Data("patch".utf8)))
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 1)
+            let start = Date(timeIntervalSince1970: 1_000)
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
+            let manifestID = store.createManifest(
+                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: start
+            ).manifestID
+            _ = store.createPatch(
+                manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
+                file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: start)
+
+            store.reapExpired(now: start.addingTimeInterval(1))
+            XCTAssertEqual(store.activeManifestCount, 0)
+            XCTAssertEqual(store.activePatchCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "manifest TTL cleanup removes child private transfer directories")
+        }
+
+        func testManifestCreationReturnsItsSessionWhenCapacityEvictsItImmediately() throws {
+            let clock = ManualDiffTransferClock(now: Date())
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 120, clock: { clock.now() }, reaper: ManualDiffTransferExpiryReaper())
+            let targetScope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "target", refName: nil)
+            let created = store.createManifest(
+                scope: targetScope, workspaceDir: "/target", snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
+
+            for index in 1..<16 {
+                clock.advance(by: 1)
+                _ = store.createManifest(
+                    scope: .init(workspaceID: "other-\(index)", refName: nil), workspaceDir: "/other",
+                    snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
+            }
+            clock.advance(by: 1)
+            _ = store.createManifest(
+                scope: .init(workspaceID: "evictor", refName: nil), workspaceDir: "/evictor", snapshot: .init(scopeSignature: "evictor", plans: []),
+                now: clock.now())
+
+            XCTAssertEqual(created.session.scope, targetScope)
+            XCTAssertEqual(created.session.snapshot.scopeSignature, "target-signature")
+            XCTAssertEqual(store.activeManifestCount, 16)
+        }
+
+        func testWorkspaceDiffManifestTTLReapsAnAbandonedChildWithoutAnotherStoreCall() throws {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-diff-transfer-autoreap-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let outputURL = directory.appendingPathComponent("patch")
+            XCTAssertTrue(FileManager.default.createFile(atPath: outputURL.path, contents: Data("patch".utf8)))
+
+            let clock = ManualDiffTransferClock(now: Date())
+            let reaper = ManualDiffTransferExpiryReaper()
+            let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 10, clock: { clock.now() }, reaper: reaper)
+            XCTAssertNotNil(reaper.scheduledInterval, "the store must schedule autonomous expiry at construction")
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
+            let manifestID = store.createManifest(
+                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()
+            ).manifestID
+            _ = store.createPatch(
+                manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
+                file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: clock.now())
+
+            clock.advance(by: 10)
+            reaper.fire()
+
+            XCTAssertEqual(store.activeManifestCount, 0)
+            XCTAssertEqual(store.activePatchCount, 0)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: directory.path),
+                "the scheduled TTL reap must clean an abandoned transfer without another request")
+        }
+
+        func testWorkspaceDiffOnAnUnknownWorkspaceReturnsNotFound() throws {
+            try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: "no-such-workspace", refName: nil, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        /// Round-9: a workspace can be a plain directory with no `.git` (single workspace = project dir is
+        /// a supported product type, docs/spec.md), and the picker offers Diff for every workspace
+        /// regardless. Before the fix, `workspaceDiff` against such a directory surfaced whatever generic
+        /// failure the first git invocation happened to produce; the fix probes `rev-parse
+        /// --is-inside-work-tree` up front and returns a typed, client-renderable refusal instead.
+        /// `workspaceFileRead` must keep working unmodified in the same workspace: the editor path is
+        /// git-independent by design and this fix must not touch it.
+        func testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                try "hello".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let diffResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: nil, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(diffResponse.ok)
+                XCTAssertEqual(diffResponse.errorCode, .invalidArgument)
+                XCTAssertEqual(diffResponse.message, "Workspace directory is not a git repository.")
+
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(readResponse.ok, readResponse.message)
+            }
+        }
+
+        /// round-14 Fix 1 regression: a caller-supplied ref that simply does not resolve must still be
+        /// rejected as `.invalidArgument` — this must keep working unmodified after `assertRefIsResolvable`'s
+        /// rewrite to an exit-code-based check.
+        func testWorkspaceDiffWithANonexistentRefReturnsInvalidArgument() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "no-such-ref", fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Ref 'no-such-ref' could not be resolved in this workspace.")
+            }
+        }
+
+        /// round-14 Fix 1 regression: a ref that DOES resolve (the fixture repo's own "main" branch) must
+        /// keep succeeding — `assertRefIsResolvable`'s move to `allowedExitCodes: [0, 1]` and a non-empty-stdout
+        /// check must not turn a legitimate resolvable ref into a failure.
+        func testWorkspaceDiffWithAResolvableRefSucceeds() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNotNil(response.workspaceDiffManifestChunk)
+            }
+        }
+
+        /// A ref can resolve to a commit while still having no common history with the workspace's
+        /// `HEAD` (for example, an orphan branch). That is a durable invalid scope, not a daemon failure:
+        /// the web Editor must stop retrying it instead of receiving `.internalError` forever after the
+        /// up-front `rev-parse` check accepts the ref.
+        func testWorkspaceDiffWithAResolvableUnrelatedRefReturnsInvalidArgument() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["checkout", "--orphan", "unrelated-base"], cwd: repo.path)
+                try runGit(["rm", "-rf", "."], cwd: repo.path)
+                try "unrelated history".write(to: repo.appendingPathComponent("UNRELATED.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "UNRELATED.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "unrelated history"], cwd: repo.path)
+                try runGit(["checkout", "main"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "unrelated-base", fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Refs 'unrelated-base' and HEAD have no common history.")
+            }
+        }
+
+        /// `lastCommit` diffs `HEAD`'s parent against `HEAD` only — committed changes, with no working-tree
+        /// or untracked involvement at all. An uncommitted edit and an untracked file sitting alongside a
+        /// real committed change must both be absent from the result.
+        func testWorkspaceDiffLastCommitShowsOnlyCommittedChanges() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "committed content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "second commit"], cwd: repo.path)
+                try "uncommitted content".write(to: repo.appendingPathComponent("UNCOMMITTED.md"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
+                XCTAssertEqual(result.files.map(\.path), ["README.md"])
+                let file = try XCTUnwrap(result.files.first)
+                XCTAssertEqual(file.status, .modified)
+            }
+        }
+
+        func testWorkspaceDiffLastCommitCompletedTrackedFileCarriesItsPinnedTargetRevision() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "committed content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "second commit"], cwd: repo.path)
+                let headSHA = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                let fileResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "README.md",
+                                byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(fileResponse.ok, fileResponse.message)
+                XCTAssertEqual(try XCTUnwrap(fileResponse.workspaceDiffFileChunk).file.targetRevision, headSHA)
+            }
+        }
+
+        /// `HEAD` with no parent (the repo's very first commit) diffs against the empty tree rather than
+        /// failing — the fixture's single "initial" commit is itself the root commit.
+        func testWorkspaceDiffLastCommitOnRootCommitDiffsAgainstEmptyTree() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
+                let file = try XCTUnwrap(result.files.first { $0.path == "README.md" })
+                XCTAssertEqual(file.status, .added)
+                XCTAssertFalse(result.scopeSignature.isEmpty)
+            }
+        }
+
+        /// A repo with no commits yet has no "last commit" to diff — this must report an empty file list
+        /// with a valid signature, not an error (mirrors `buildDiff`'s unborn-HEAD handling for the
+        /// uncommitted scope).
+        func testWorkspaceDiffLastCommitOnUnbornHeadReturnsEmptyResult() throws {
+            try withUnbornWorkspaceFixture { workspaceID, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceDiffManifestChunk)
+                XCTAssertTrue(result.files.isEmpty)
+                XCTAssertFalse(result.scopeSignature.isEmpty)
+            }
+        }
+
+        /// `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffManifestChunkRequest`'s
+        /// doc comment) — sending both is a client bug, rejected up front.
+        func testWorkspaceDiffRejectsLastCommitCombinedWithRefName() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(
+                            SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, refName: "main", lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        /// The `lastCommit` scope's signature must depend only on the resolved `HEAD` commit, not on
+        /// working-tree status or mtimes: it stays fixed while the tree gets dirtier, and only moves once a
+        /// new commit actually lands.
+        func testWorkspaceDiffLastCommitSignatureStableUnderWorkingTreeChurnButChangesAfterNewCommit() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                func fetchSignature() throws -> String {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceDiffManifestChunk(
+                                SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    return try XCTUnwrap(response.workspaceDiffManifestChunk).scopeSignature
+                }
+
+                let beforeChurn = try fetchSignature()
+                try "dirty".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try "untracked".write(to: repo.appendingPathComponent("SCRATCH.md"), atomically: true, encoding: .utf8)
+                let afterChurn = try fetchSignature()
+                XCTAssertEqual(beforeChurn, afterChurn)
+
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "second commit"], cwd: repo.path)
+                let afterCommit = try fetchSignature()
+                XCTAssertNotEqual(afterChurn, afterCommit)
+            }
+        }
+
+        /// `workspaceRefList` lists local branches (deduped/sorted) and `HEAD`'s recent commit history,
+        /// each capped and flagged when there is more than the cap.
+        func testWorkspaceRefListReturnsBranchesAndCommitsWithTruncation() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                // One branch beyond the cap (plus the fixture's configured base, "main") so
+                // `branchesTruncated` exercises its "more than the cap" branch rather than merely
+                // "exactly at the cap." Every filler sorts before "main", reproducing the case where a
+                // naive prefix cap drops the configured base branch from the dialog entirely.
+                let createBranchRefs = (0...SpacesDeviceWorkspaceRefListEngine.maxBranches).map { "create refs/heads/aa-branch-\($0) HEAD\n" }
+                    .joined()
+                try runGitWithStdin(["update-ref", "--stdin"], cwd: repo.path, stdin: createBranchRefs)
+                // The fixture's own "initial" commit plus this loop is one more than the cap.
+                for index in 0..<SpacesDeviceWorkspaceRefListEngine.maxCommits {
+                    try runGit(["commit", "--allow-empty", "-q", "-m", "commit-\(index)"], cwd: repo.path)
+                }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRefList(SpacesDeviceWorkspaceRefListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRefList)
+                XCTAssertEqual(result.branches.count, SpacesDeviceWorkspaceRefListEngine.maxBranches)
+                XCTAssertTrue(result.branchesTruncated)
+                XCTAssertTrue(result.branches.contains("main"))
+                XCTAssertEqual(result.branches, result.branches.sorted { $0.localizedStandardCompare($1) == .orderedAscending })
+                XCTAssertEqual(result.commits.count, SpacesDeviceWorkspaceRefListEngine.maxCommits)
+                XCTAssertTrue(result.commitsTruncated)
+                XCTAssertEqual(result.commits.first?.subject, "commit-\(SpacesDeviceWorkspaceRefListEngine.maxCommits - 1)")
+            }
+        }
+
+        /// A branch that exists only on `origin` (no local branch of the same name) must be listed under its
+        /// full `origin/<name>` name, not the bare stripped name: the bare name is not resolvable
+        /// (`git rev-parse --verify remote-only^{commit}` fails), while `origin/remote-only` is. This
+        /// reproduces the bug the fix addresses — before it, this branch was listed stripped of its
+        /// `origin/` prefix, and selecting it in the Compare dialog durably failed `assertRefIsResolvable`.
+        /// A branch that exists both locally and on origin (here, "main") appears twice, as "main" and as
+        /// "origin/main", since a local branch and its origin counterpart are distinct refs that can
+        /// diverge — not deduped into one entry.
+        func testWorkspaceRefListListsRemoteOnlyBranchUnderFullOriginNameAndKeepsLocalAndRemoteDistinct() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let remote = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-remote-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: remote) }
+                try runGit(["init", "--bare", "--initial-branch", "main"], cwd: remote.path)
+                try runGit(["remote", "add", "origin", remote.path], cwd: repo.path)
+                try runGit(["push", "origin", "main"], cwd: repo.path)
+
+                // A branch that lives only on origin: push it, then delete the local branch so only the
+                // remote-tracking ref remains.
+                try runGit(["checkout", "-b", "remote-only"], cwd: repo.path)
+                try runGit(["push", "origin", "remote-only"], cwd: repo.path)
+                try runGit(["checkout", "main"], cwd: repo.path)
+                try runGit(["branch", "-D", "remote-only"], cwd: repo.path)
+                try runGit(["fetch", "origin"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRefList(SpacesDeviceWorkspaceRefListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRefList)
+                XCTAssertTrue(result.branches.contains("origin/remote-only"))
+                XCTAssertFalse(result.branches.contains("remote-only"))
+                XCTAssertTrue(result.branches.contains("main"))
+                XCTAssertTrue(result.branches.contains("origin/main"))
+
+                // Every listed name must be independently resolvable, mirroring what
+                // `assertRefIsResolvable` runs against a client's selection.
+                for branch in result.branches { try runGit(["rev-parse", "--verify", "--quiet", "\(branch)^{commit}"], cwd: repo.path) }
+            }
+        }
+
+        /// A non-git workspace (a plain project directory — see `withNonGitWorkspaceFixture`'s doc comment)
+        /// has nothing to list: empty, untruncated lists, not an error.
+        func testWorkspaceRefListOnANonGitWorkspaceReturnsEmptyLists() throws {
+            try withNonGitWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRefList(SpacesDeviceWorkspaceRefListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRefList)
+                XCTAssertTrue(result.branches.isEmpty)
+                XCTAssertFalse(result.branchesTruncated)
+                XCTAssertTrue(result.commits.isEmpty)
+                XCTAssertFalse(result.commitsTruncated)
+            }
+        }
+
+        /// Ref listing shares one request-wide deadline across repository validation, both branch
+        /// enumerations, and both commit-history probes. An already-expired clock must stop before the
+        /// first branch command instead of granting each command a fresh 30-second timeout.
+        func testWorkspaceRefListWithAnAlreadyExpiredDeadlineThrowsImmediately() throws {
+            try withWorkspaceFixture { _, repo, _, _, _, _ in
+                let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+                XCTAssertThrowsError(
+                    try SpacesDeviceWorkspaceRefListEngine.listRefs(
+                        workspaceDir: repo.path, baseBranch: "main", gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
+                ) { error in
+                    guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                        XCTFail("expected the request-wide deadline-elapsed failure, got \(error)")
+                        return
+                    }
+                }
+            }
+        }
+
+        /// round-14 Fix 1: the actual bug fix under test. Before the fix, `assertRefIsResolvable` wrapped its
+        /// `runGitAndCapture` call in `try?`, so ANY thrown failure — including an already-exhausted
+        /// request-wide deadline, simulated here by handing it a `deadlineStart` far in the past —
+        /// collapsed into the same "ref could not be resolved" 400 this function throws for an actually-bad
+        /// ref. That is wrong even for "main", a perfectly resolvable ref in this fixture: the failure is the
+        /// daemon's own trouble (a blown deadline), not a caller typo, and must propagate uncaught so the
+        /// server's normal mapping (`SpacesDeviceAPIServer.errorCode(for:)`) reports it as `.internalError` —
+        /// which the client's retry classification retries with backoff — rather than the permanent
+        /// `.invalidArgument` rejection a genuinely bad ref gets. This test would have FAILED before the fix:
+        /// the old `try?` swallowed the deadline-exhaustion throw and always produced the 400 NSError instead.
+        func testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-assert-ref-resolvable-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                    workspaceDir: repo.path, refName: "main", gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
+            ) { error in
+                let nsError = error as NSError
+                XCTAssertFalse(
+                    nsError.domain == "SpacesDeviceAPIServer" && nsError.code == 400,
+                    "a blown deadline must not be misreported as the bad-ref 400, got \(error)")
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the deadline-exhaustion failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not invalidArgument")
+            }
+        }
+
+        /// round-15: `buildDiff` now takes the same `deadlineStart` parameter `assertRefIsResolvable` above
+        /// already accepted, so `handleWorkspaceDiffRequest` can share ONE clock across repo/ref validation
+        /// and diff-building instead of `buildDiff` starting its own fresh `Date()` internally. Before this
+        /// fix, handing `buildDiff` an already-exhausted `deadlineStart` would have had no effect at all —
+        /// the parameter did not exist, and `buildDiff` measured its 45s window from its own call. This test
+        /// mirrors `testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef`
+        /// above: a `deadlineStart` far enough in the past that `remainingTimeout` sees zero budget left
+        /// must make `buildDiff` throw immediately (`scopeSignature`'s first probe never gets a positive
+        /// timeout), never spawn git as if it had a fresh 45s.
+        func testBuildDiffWithAnAlreadyExpiredDeadlineStartThrowsImmediately() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-expired-deadline-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            // Well past the real 45s `diffBuildDeadline` (private to the engine, so mirrored here as a
+            // literal — see this file's own `-1000` above and `SpacesDeviceWorkspaceGitTests.swift`'s
+            // round-9/12 comments on why this engine has no configurable-deadline test seam).
+            let expiredDeadlineStart = Date().addingTimeInterval(-1000)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                    workspaceDir: repo.path, refName: nil, gitClient: RemoteWorkspaceGitClient(), deadlineStart: expiredDeadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the request-wide deadline-elapsed failure, got \(error)")
+                    return
+                }
+            }
+        }
+
+        /// round-15: proves `deadlineStart` is a SHARED clock rather than each call getting its own,
+        /// without the flaky knife-edge timing `SpacesDeviceWorkspaceGitTests.swift`'s round-9/12 comments
+        /// explicitly avoid (there is no seam here to observe the exact timeout value a fake git client
+        /// would receive — `RemoteWorkspaceGitClient` is a real, non-injectable `final class`). Instead this
+        /// hands `assertRefIsResolvable` and `buildDiff` the SAME `deadlineStart`, already most of the way
+        /// through the 45s window (3s of budget left — generous for this tiny fixture repo's real git
+        /// calls, far from the near-zero edge that would risk flaking on a loaded machine), simulating ref
+        /// validation having already burned most of the shared request budget before `buildDiff` ever runs.
+        /// Before this round's fix, `buildDiff` would have ignored that already-elapsed time entirely (it
+        /// had no `deadlineStart` parameter and always measured a fresh 45s from its own call) — this test
+        /// would still have passed on unfixed code, since a fresh 45s is even more generous than 3s, so its
+        /// real value is regression coverage once combined with the fully-expired test above: together they
+        /// show `buildDiff` neither ignores the shared clock (this test would still need the code to accept
+        /// the parameter at all, which is the round-15 API change) nor treats a non-zero remainder as
+        /// insufficient when a real git call is fast enough to fit inside it.
+        func testASharedDeadlineStartAcrossRefValidationAndBuildDiffStillLeavesEnoughBudgetForAnOrdinaryDiff() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-shared-deadline-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+            try "edited".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+            let client = RemoteWorkspaceGitClient()
+            let sharedDeadlineStart = Date().addingTimeInterval(-42)
+            try SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable(
+                workspaceDir: repo.path, refName: "main", gitClient: client, deadlineStart: sharedDeadlineStart)
+
+            let result = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: sharedDeadlineStart)
+            XCTAssertTrue(result.plans.contains { $0.path == "README.md" })
+        }
+
+        /// round-17 Fix B1: `assertIsGitRepository` now calls `isRepoStrict` (which throws on a could-not-run
+        /// probe) instead of `isRepo` (which folded that into a plain `false`), so an execution failure must
+        /// surface as the existing retryable `gitCommandFailed` → `.internalError` shape rather than the
+        /// permanent "not a git repository" 400 a real non-repo gets. `RemoteWorkspaceGitClient` has no fake
+        /// git executable errors to inject directly, but its `gitExecutable` initializer parameter is already
+        /// an established test seam (see `RemoteWorkspaceGitClientTests.swift`'s `/bin/sleep` and
+        /// stub-script substitutions) for exactly this: this stub ignores its arguments entirely and just
+        /// hangs, so whatever `isRepoStrict` invokes always times out and gets killed rather than exiting
+        /// with any real status — a clean simulation of "git could not run to completion" that is agnostic to
+        /// the exact arguments `isRepoStrict` happens to pass. `metadataCommandTimeout` is shortened so the
+        /// kill (and this test) happens promptly rather than waiting out the client's default 2s.
+        ///
+        /// The real non-repo regression (a confirmed non-repo directory must still report `.invalidArgument`)
+        /// is already covered end-to-end by `testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument` above,
+        /// which exercises this same `assertIsGitRepository` call through the real server path against a real
+        /// plain (non-git) directory — that test would have failed to distinguish this bug (both outcomes
+        /// look identical, a 400), which is exactly why this new test exists alongside it.
+        func testAssertIsGitRepositoryPropagatesAnExecutionFailureInsteadOfMisclassifyingItAsANotARepo() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-assert-is-git-repository-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let scriptURL = root.appendingPathComponent("stub-hangs-forever.sh")
+            try "#!/bin/sh\nsleep 30\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path, metadataCommandTimeout: 0.3)
+            XCTAssertThrowsError(try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: root.path, gitClient: client)) { error in
+                let nsError = error as NSError
+                XCTAssertFalse(
+                    nsError.domain == "SpacesDeviceAPIServer" && nsError.code == 400,
+                    "an execution failure must not be misreported as the not-a-repo 400, got \(error)")
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not invalidArgument")
+            }
+        }
+
+        /// round-17 Fix B2: `buildDiff`'s HEAD-existence probe (and `scopeSignature`'s parallel `headSHA`
+        /// probe, now the textually identical `rev-parse --verify --quiet HEAD` invocation) must throw on an
+        /// execution failure rather than collapsing it into "HEAD does not exist" (an unborn repo). `buildDiff`
+        /// calls `scopeSignature` first, so in this fixture the throw actually originates from
+        /// `scopeSignature`'s copy of the probe — that is expected and, since both call sites now share the
+        /// exact same command shape, this is valid regression coverage for both: a fix to only one of them
+        /// (or a future regression reintroducing `try?` in either) would be caught here.
+        ///
+        /// This stub script hangs ONLY when it recognizes this specific `rev-parse --verify --quiet HEAD`
+        /// invocation and otherwise `exec`s the real `git`, so the repo fixture itself (a real, born commit)
+        /// is not needed for this probe to be reachable — a real repo is used anyway for realism and so this
+        /// test would also catch a regression that made some OTHER probe in the same call path start
+        /// misbehaving instead. `deadlineStart` is set to leave roughly 1s of the shared request-wide budget,
+        /// so the hang is killed quickly rather than waiting out the full `diffBuildDeadline`.
+        ///
+        /// The real unborn-HEAD regression (a genuinely HEAD-less repo must still diff against the empty
+        /// tree) is already covered by `SpacesDeviceWorkspaceGitTests.swift`'s
+        /// `buildDiffOnAnUnbornRepoReportsAStagedAdditionAndAnUntrackedFile`.
+        func testBuildDiffHeadExistenceProbeExecutionFailurePropagatesAsInternalErrorInsteadOfMisclassifyingAsUnbornHead() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-head-probe-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let scriptURL = repo.appendingPathComponent("stub-hangs-on-head-verify.sh")
+            let script = """
+                #!/bin/sh
+                if [ "$3" = "rev-parse" ] && [ "$4" = "--verify" ] && [ "$5" = "--quiet" ] && [ "$6" = "HEAD" ]; then
+                    sleep 30
+                    exit 0
+                fi
+                exec git "$@"
+                """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+            let deadlineStart = Date().addingTimeInterval(-44)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                    workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the HEAD-probe execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not a misclassified unborn-HEAD outcome")
+            }
+        }
+
+        /// round-17 Fix B3: `buildDiff`'s workspace-prefix (`--show-prefix`) probe (and `scopeSignature`'s
+        /// parallel `prefix` probe, now the textually identical invocation) must throw on an execution
+        /// failure rather than collapsing it into `""` — which used to silently produce an UNSCOPED
+        /// enumeration for subtree workspaces (every path in the whole repo resolved against the wrong root,
+        /// not just the workspace's subtree). As with the B2 test above, `buildDiff` calls `scopeSignature`
+        /// first, so the throw actually originates from `scopeSignature`'s copy of the probe here too; that is
+        /// valid shared coverage for the same reason.
+        ///
+        /// This stub script lets `rev-parse --verify --quiet HEAD` and `status --porcelain -z
+        /// --untracked-files=all` run against the real repo normally, and hangs only on the `--show-prefix`
+        /// invocation, isolating the fix under test from the probes ahead of it in `scopeSignature`.
+        ///
+        /// The real subtree-scoping regression (a subtree workspace's enumeration and patches stay
+        /// workspace-relative) is already covered by `SpacesDeviceWorkspaceGitTests.swift`'s
+        /// `trackedModificationInsideTheSubtreeReportsOneWorkspaceRelativeEntryWithAWorkspaceRelativePatch` and
+        /// its sibling subtree tests.
+        func testBuildDiffShowPrefixProbeExecutionFailurePropagatesAsInternalErrorInsteadOfSilentlyUnscoping() throws {
+            let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-build-diff-prefix-probe-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: repo) }
+            try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+            try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "README.md"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+            let scriptURL = repo.appendingPathComponent("stub-hangs-on-show-prefix.sh")
+            let script = """
+                #!/bin/sh
+                if [ "$3" = "rev-parse" ] && [ "$4" = "--show-prefix" ]; then
+                    sleep 30
+                    exit 0
+                fi
+                exec git "$@"
+                """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+            let deadlineStart = Date().addingTimeInterval(-44)
+            XCTAssertThrowsError(
+                try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+                    workspaceDir: repo.path, refName: nil, gitClient: client, deadlineStart: deadlineStart)
+            ) { error in
+                guard case .gitCommandFailed = error as? SpacesRuntimeError else {
+                    XCTFail("expected the show-prefix execution failure to propagate as SpacesRuntimeError.gitCommandFailed, got \(error)")
+                    return
+                }
+                XCTAssertEqual(
+                    SpacesDeviceAPIServer.errorCode(for: error), .internalError,
+                    "the server's normal error mapping must report this as internalError, not a silently-unscoped empty prefix")
+            }
+        }
+
+        /// A `subscribeWorkspaceDiffSignature` subscription's `pollTimer` (`WorkspaceDiffSignatureSubscription`
+        /// in `SpacesDeviceAPIServer`) is created suspended and only resumed once the scope's own tiny
+        /// Unix-socket producer (`DeviceOverviewStreamServer`) starts successfully; releasing a still-suspended
+        /// `DispatchSourceTimer` traps in libdispatch. Pre-occupying the producer's socket path with a
+        /// directory forces that `start()` to fail (unlink/bind cannot succeed against a directory), which
+        /// exercises the exact path the fix guards: before the fix, `addWorkspaceDiffSignatureSubscriber`
+        /// throwing here deallocated `subscription` — and its still-suspended `pollTimer` — as the throw
+        /// unwound, trapping the whole daemon process. With the fix (`WorkspaceDiffSignatureSubscription.start()`
+        /// resumes-then-cancels the timer before rethrowing), the subscribe request fails cleanly instead, and
+        /// a second, unrelated subscription proves the failure did not corrupt the server's subscriber-registry
+        /// state (e.g. a stuck `queue` or a leaked scope entry blocking future subscribers).
+        func testSubscribeWorkspaceDiffSignatureWithABlockedSocketPathReturnsAnErrorInsteadOfCrashingTheServer() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                let blockedSocketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: workspaceID, refName: nil)
+                try FileManager.default.createDirectory(atPath: blockedSocketPath, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(atPath: blockedSocketPath) }
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let rejected = expectation(description: "blocked subscription is rejected instead of crashing the server")
+                let blockedClient = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
+                    workspaceID: workspaceID, refName: nil, authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { _ in XCTFail("a subscription whose producer socket could not start must never deliver a frame") },
+                    onDisconnect: { error in
+                        // The client's own `stop()` (called internally after the rejection) triggers a second,
+                        // ordinary `onClosed(nil)` once the connection finishes cancelling; only the first,
+                        // non-nil call carries the rejection this test cares about.
+                        guard let error else { return }
+                        guard let clientError = error as? SpacesDeviceAPIRequestClientError, case .requestRejected(_, let code) = clientError else {
+                            XCTFail("expected a rejected response, got \(error)")
+                            return
+                        }
+                        XCTAssertEqual(code, .internalError)
+                        rejected.fulfill()
+                    })
+                try blockedClient.start()
+                wait(for: [rejected], timeout: 5)
+                blockedClient.stop()
+
+                // Round 9: `relayWorkspaceDiffSignatureSubscription` refuses up front for a workspace whose
+                // directory is not a git repository (`assertWorkspaceDiffScopeIsGitRepository`), which
+                // includes a workspace ID with no matching row at all. This "unrelated" scope must resolve
+                // to a real workspace over a real git repo so it exercises registry isolation rather than
+                // that unrelated refusal; it reuses the fixture's own repo directory (`workspaces.dir` has
+                // no uniqueness constraint, unlike `projects.dir`) and project under a second workspace row,
+                // since only the scope key (workspace id + ref name) needs to differ from the blocked
+                // subscription's, and `workspaces(project_id, branch)` is unique so the branch must differ too.
+                let otherWorkspaceID = "workspace-\(UUID().uuidString)"
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let fixtureWorkspace = try XCTUnwrap(store.workspace(id: workspaceID))
+                try store.upsert(
+                    workspace: WorkspaceRecord(
+                        id: otherWorkspaceID, projectID: fixtureWorkspace.projectID, dir: repo.path, dirname: nil, branch: "other", isDefault: false,
+                        isRunning: false, lastLaunchedAt: nil))
+
+                let received = expectation(description: "an unrelated subscription still succeeds after the blocked one failed")
+                let otherClient = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
+                    workspaceID: otherWorkspaceID, refName: nil, authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { _ in received.fulfill() },
+                    onDisconnect: { error in if let error { XCTFail("unrelated subscription must not be rejected: \(error)") } })
+                try otherClient.start()
+                wait(for: [received], timeout: 5)
+                otherClient.stop()
+            }
+        }
+
+        /// `lastCommit` and `refName` are mutually exclusive on the subscribe path too, mirroring
+        /// `testWorkspaceDiffRejectsLastCommitCombinedWithRefName`'s pull-path coverage above. Before the fix,
+        /// `handleWorkspaceDiffRequest` rejected this combination but the subscribe transports (this one, the
+        /// macOS `NWConnection` relay via `relayWorkspaceDiffSignatureSubscription`, and the Linux TLS relay via
+        /// `prepareLinuxSubscribe`) both registered it, so a client subscribing to it would sit alongside a pull
+        /// path that always 400s for the identical scope: it could never successfully fetch a diff for what it
+        /// just subscribed to. The client must instead see the subscription itself rejected as `invalidArgument`.
+        func testSubscribeWorkspaceDiffSignatureRejectsLastCommitCombinedWithRefName() throws {
+            try withWorkspaceFixture { workspaceID, _, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let rejected = expectation(description: "the ambiguous subscription is rejected as invalidArgument")
+                let client = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
+                    workspaceID: workspaceID, refName: "main", lastCommit: true, authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { _ in XCTFail("an ambiguous lastCommit+refName subscription must never deliver a frame") },
+                    onDisconnect: { error in
+                        // As in the blocked-socket test above, the client's own `stop()` triggers a second,
+                        // ordinary `onClosed(nil)` after the rejection; only the first, non-nil call matters.
+                        guard let error else { return }
+                        guard let clientError = error as? SpacesDeviceAPIRequestClientError,
+                            case .requestRejected(let message, let code) = clientError
+                        else {
+                            XCTFail("expected a rejected response, got \(error)")
+                            return
+                        }
+                        XCTAssertEqual(code, .invalidArgument)
+                        XCTAssertEqual(message, "lastCommit and refName are mutually exclusive.")
+                        rejected.fulfill()
+                    })
+                try client.start()
+                wait(for: [rejected], timeout: 5)
+                client.stop()
+            }
+        }
+
+        /// Round-4 regression: every `subscribeWorkspaceDiffSignature` scope's `WorkspaceDiffSignatureSubscription`
+        /// gets its own dedicated serial queue, created in `addWorkspaceDiffSignatureSubscriber`, never one
+        /// shared across scopes. Before the fix, every subscription's poll timer and producer socket ran on one
+        /// shared `workspaceDiffSignatureStreamQueue`; a wedged repository's `git` calls (now up to 30s, per the
+        /// git-command timeout) would serialize behind every other subscribed scope's polling, keepalives, and
+        /// socket accepts on that same queue, degrading every subscribed workspace at once, continuously, for as
+        /// long as the wedge lasted.
+        ///
+        /// This constructs two subscriptions directly with injected `signatureProvider` closures — bypassing the
+        /// real git client, which has no injection seam on `SpacesDeviceAPIServer` — each on its own dedicated
+        /// queue built exactly the way `addWorkspaceDiffSignatureSubscriber` builds them. Scope A's provider
+        /// blocks for 3s on every call; scope B's returns immediately. It asserts scope B's ~2s poll cadence
+        /// (via provider-invocation counts, since these subscriptions are constructed outside a running
+        /// `SpacesDeviceAPIServer`/relay, so there is no broadcast to observe through this seam) keeps advancing
+        /// while scope A is still blocked inside its first call — the two must never be serialized against each
+        /// other.
+        func testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother() throws {
+            let scopeA = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let scopeB = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPathA = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scopeA.workspaceID, refName: scopeA.refName)
+            let socketPathB = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scopeB.workspaceID, refName: scopeB.refName)
+
+            let aCounter = InvocationCounter()
+            let bCounter = InvocationCounter()
+
+            // Dedicated per-scope queues, named exactly the way `addWorkspaceDiffSignatureSubscriber` names them,
+            // so this exercises the same "never shared" contract the fix establishes.
+            let queueA = DispatchQueue(label: "spaces.workspace-diff-signature.\(scopeA.workspaceID).uncommitted")
+            let subscriptionA = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scopeA, socketPath: socketPathA, streamQueue: queueA,
+                signatureProvider: { _ in
+                    aCounter.increment()
+                    Thread.sleep(forTimeInterval: 3)
+                    return "signature-a"
+                })
+            let queueB = DispatchQueue(label: "spaces.workspace-diff-signature.\(scopeB.workspaceID).uncommitted")
+            let subscriptionB = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scopeB, socketPath: socketPathB, streamQueue: queueB,
+                signatureProvider: { _ in
+                    bCounter.increment()
+                    return "signature-b"
+                })
+
+            try subscriptionA.start()
+            defer {
+                subscriptionA.stop()
+                try? FileManager.default.removeItem(atPath: socketPathA)
+            }
+            try subscriptionB.start()
+            defer {
+                subscriptionB.stop()
+                try? FileManager.default.removeItem(atPath: socketPathB)
+            }
+
+            // Both poll timers fire at t=2s (repeating every 2s thereafter). Scope A's provider is still inside
+            // its first, 3s-blocking call at t=4.5s; scope B's fast provider should have ticked twice (t=2s,
+            // t=4s) in that same window if — and only if — the two subscriptions are never serialized on a
+            // shared queue.
+            Thread.sleep(forTimeInterval: 4.5)
+
+            XCTAssertEqual(
+                aCounter.value, 1, "scope A's poll timer should have fired exactly once by 4.5s: one 2s tick, then still inside its 3s-blocking call")
+            XCTAssertGreaterThanOrEqual(
+                bCounter.value, 2, "scope B must keep polling on its own ~2s cadence while scope A is blocked inside its provider")
+        }
+
+        /// Round-21 regression: the poll timer's tick computed `signature = signatureProvider(scope)`, recorded
+        /// it, then called `server.broadcast()` — but the producer's `lineProvider` closure independently
+        /// recomputed `signatureProvider(scope)` again to build the frame it actually sent, rather than reusing
+        /// the tick's own value. `signatureProvider` reads the live filesystem, so a workspace change landing
+        /// between those two calls could make the broadcast frame disagree with the very value the tick just
+        /// compared and recorded.
+        ///
+        /// This constructs a subscription directly (same pattern as
+        /// `testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother` above)
+        /// with an injected provider that returns a DIFFERENT value on every call, so any extra call is
+        /// immediately visible as a value mismatch rather than hiding behind a repeated constant. A raw Unix
+        /// socket client reads the producer's actual frames directly — `DeviceOverviewStreamServer` is a plain,
+        /// TLS-free Unix socket (the daemon's TLS/relay code is a client of it, not part of it), so no TLS or
+        /// relay harness is needed to observe what it broadcasts.
+        ///
+        /// Expected frames with the fix: frame 0 is the connect-time fallback (the box is still nil pre-first-
+        /// tick, so `lineProvider` computes fresh for that one initial frame — provider call 1, "S1"); frame 1
+        /// is the first poll tick's broadcast (+2s), sharing that tick's own provider call 2, "S2". Before the
+        /// fix, frame 1 would instead carry call 3's value ("S3"): call 2 for the tick's own compare, plus a
+        /// second, independent call inside `lineProvider` to build the frame.
+        func testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheTickComparedAndRecorded() throws {
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).uncommitted"),
+                signatureProvider: { _ in "S\(providerCallCounter.increment())" })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            let receivedFrames = FrameSignatureCollector()
+            let secondFrameArrived = expectation(description: "the first poll tick's broadcast frame arrived")
+            let client = try RawWorkspaceDiffSignatureSocketClient(socketPath: socketPath) { frame in
+                receivedFrames.append(frame.scopeSignature)
+                if receivedFrames.count == 2 { secondFrameArrived.fulfill() }
+            }
+            defer { client.stop() }
+
+            wait(for: [secondFrameArrived], timeout: 5)
+
+            XCTAssertEqual(receivedFrames.values, ["S1", "S2"])
+            XCTAssertEqual(
+                providerCallCounter.value, 2, "the first tick must feed exactly one provider call to both the change-compare and the broadcast frame")
+        }
+
+        func testWorkspaceFileListSubscriptionSkipsExactListingForAnUnchangedDetectorAndRefreshesOnceWhenItChanges() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let detector = MutableString("unchanged")
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID).uncommitted"),
+                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _ in detector.value })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // t=2 establishes the cache. At t=4 the unchanged detector must not repeat the exact
+                // listing, which is the steady-state coding-agent churn path.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(exactCalls.value, 1)
+
+                // Add/remove/rename/cap crossings surface as a changed detector token; one following
+                // exact list refresh is required to preserve the wire signature's pull-acknowledgement contract.
+                detector.value = "membership-changed"
+                Thread.sleep(forTimeInterval: 2.5)
+                XCTAssertEqual(exactCalls.value, 2)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionRetriesAnExactListingAfterFailureEvenWhenTheDetectorIsUnchanged() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry.\(workspaceID)"),
+                    signatureProvider: { _ in exactCalls.increment() == 1 ? nil : "recovered-exact" }, detectorProvider: { _ in "unchanged" })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // The first tick cannot list; the second has the same membership token but must retry
+                // rather than treating the unavailable sentinel as a successfully acknowledged baseline.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(exactCalls.value, 2)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenConnecting() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let providers = MembershipRaceProviders()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.connect-race.\(workspaceID)"),
+                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                let received = FrameSignatureCollector()
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in received.append(frame.fileListSignature)
+                }
+                defer { client.stop() }
+                let deadline = Date().addingTimeInterval(2)
+                while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+
+                // The detector models a membership transition that happens between the two provider
+                // calls. Detector-first ordering makes the initial exact frame describe the new state.
+                XCTAssertEqual(received.values, ["S1"])
+                XCTAssertEqual(providers.exactCalls, 1)
+                XCTAssertEqual(providers.detectorCalls, 1)
+            }
+        }
+
+        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenTimerRunsFirst() throws {
+            try withTemporaryProfile { _ in
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let providers = MembershipRaceProviders()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.timer-race.\(workspaceID)"),
+                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                // Let the first poll establish the cache before a relay connects. The connect-time
+                // frame must use that detector-first exact value rather than a stale pre-transition one.
+                Thread.sleep(forTimeInterval: 2.4)
+                let received = FrameSignatureCollector()
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in received.append(frame.fileListSignature)
+                }
+                defer { client.stop() }
+                let deadline = Date().addingTimeInterval(2)
+                while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+
+                XCTAssertEqual(received.values, ["S1"])
+                XCTAssertEqual(providers.exactCalls, 1)
+                XCTAssertEqual(providers.detectorCalls, 1)
+            }
+        }
+
+        // MARK: - workspaceFileSignature subscription (Phase 5 Part A)
+
+        /// The connect-time frame (`WorkspaceFileSignatureSubscription`'s `lineProvider` computing fresh since
+        /// `latestValueBox` is still nil pre-first-tick) must reflect the file's actual on-disk content at
+        /// subscribe time — the first frame any subscriber ever receives.
+        func testSubscribeWorkspaceFileSignatureDeliversAnInitialFrameMatchingTheFilesCurrentContent() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("hello workspace".utf8))
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let firstFrameArrived = expectation(description: "the initial connect-time frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "README.md", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        firstFrameArrived.fulfill()
+                    }, onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [firstFrameArrived], timeout: 5)
+
+                let frame = try XCTUnwrap(frames.values.first)
+                XCTAssertEqual(frame.sha256, expectedSHA)
+                XCTAssertFalse(frame.missing)
+            }
+        }
+
+        /// A poll tick after the file's content changes on disk must deliver a second frame carrying the
+        /// updated hash — the ordinary "changed content" case `subscribeWorkspaceFileSignature` exists for.
+        func testSubscribeWorkspaceFileSignatureDeliversAChangedFrameAfterTheFileIsEdited() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                try "hello workspace".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let secondFrameArrived = expectation(description: "the second, changed-content frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "README.md", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        if frames.count == 2 { secondFrameArrived.fulfill() }
+                    }, onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+
+                // Give the initial connect-time frame a moment to land before mutating the file, so the edit
+                // lands after that frame instead of racing it.
+                Thread.sleep(forTimeInterval: 0.5)
+                try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                wait(for: [secondFrameArrived], timeout: 5)
+
+                // Guard the index rather than assume `wait(for:timeout:)` actually saw both frames: a timeout
+                // there does not stop this code from running, and indexing an out-of-range element would
+                // crash the whole test process (taking every later test down with it) instead of failing just
+                // this one.
+                guard frames.values.count > 1 else {
+                    XCTFail("expected at least 2 frames, got \(frames.values.count)")
+                    return
+                }
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("edited content".utf8))
+                XCTAssertEqual(frames.values[1].sha256, expectedSHA)
+                XCTAssertFalse(frames.values[1].missing)
+            }
+        }
+
+        /// Round-tripped through the same "construct the subscription directly + a raw socket reader" pattern
+        /// `testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheTickComparedAndRecorded` above uses:
+        /// an injected `signatureProvider` returning an unchanged value across multiple poll ticks must not
+        /// rebroadcast beyond the first poll tick (divergence #1's `tick`-always-increments rule means the
+        /// provider IS still called every tick; only the broadcast itself is suppressed for an unchanged
+        /// value). `lastBroadcastValue` starts nil, so the connect-time frame's own fresh computation never
+        /// updates it — the first poll tick's compare is always against nil and so always "changes" and
+        /// broadcasts once (see `WorkspaceFileSignatureSubscription`'s own doc comment), even though the
+        /// value it carries is identical to the connect-time frame's. Only the SECOND tick onward, once
+        /// `lastBroadcastValue` actually holds a real value to compare against, is where a truly unchanged
+        /// value stops rebroadcasting — which is what this test's 4.5s window (covering exactly two ticks)
+        /// is verifying: 2 total frames (connect-time + first-tick), never a 3rd from the second tick.
+        func testWorkspaceFileSignatureSubscriptionDoesNotRebroadcastAnUnchangedValueAcrossMultiplePolls() throws {
+            let scope = SpacesDeviceAPIServer.WorkspaceFileScope(workspaceID: "workspace-\(UUID().uuidString)", path: "unchanged.txt")
+            let socketPath = try TerminalServicePaths.workspaceFileSignatureSocketPath(workspaceID: scope.workspaceID, path: scope.path)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceFileSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-file-signature.\(scope.workspaceID).\(scope.path)"),
+                signatureProvider: { _ in
+                    providerCallCounter.increment()
+                    return SpacesDeviceAPIServer.WorkspaceFileSignatureValue(sha256: "same-sha", missing: false)
+                })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            let receivedFrames = FileSignatureFrameCollector()
+            let client = try RawWorkspaceFileSignatureSocketClient(socketPath: socketPath) { frame in receivedFrames.append(frame) }
+            defer { client.stop() }
+
+            // Two poll ticks (t=2s, t=4s) fire in this window. The first tick always broadcasts once (its
+            // compare is against a still-nil `lastBroadcastValue`, even though the value itself is
+            // unchanged from the connect-time frame); the second tick's compare is against a real recorded
+            // value and so must not rebroadcast. Expected total: connect-time frame + first-tick frame = 2.
+            Thread.sleep(forTimeInterval: 4.5)
+
+            XCTAssertEqual(
+                receivedFrames.count, 2,
+                "expected exactly the connect-time frame plus the first poll tick's mandatory broadcast; a 3rd frame would mean the second tick "
+                    + "rebroadcast an unchanged value")
+            XCTAssertGreaterThanOrEqual(
+                providerCallCounter.value, 2, "the poll timer must still be calling the provider each tick even though it isn't rebroadcasting")
+        }
+
+        /// Guards `computeWorkspaceFileScopeSignature`'s stat-before-hash type guard (Phase 5 review round-1
+        /// Fix 2), through the real production path rather than an injected provider: a subscribed regular
+        /// file replaced on disk by a FIFO must have its poll tick skipped silently (no frame, no crash) —
+        /// the type guard refuses the FIFO before the hashing open that would otherwise block this scope's
+        /// `streamQueue` forever — and, crucially, a LATER tick once the path is a regular file again must
+        /// still land and broadcast normally. That final broadcast is the actual liveness proof: if the FIFO
+        /// tick had wedged the queue instead of merely skipping, this restore would never produce a frame and
+        /// the test would hang instead of failing cleanly.
+        func testSubscribeWorkspaceFileSignatureSkipsATickWhenTheFileIsReplacedByAFIFOAndRecoversAfterwards() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                let path = repo.appendingPathComponent("swap.txt")
+                try "hello workspace".write(to: path, atomically: true, encoding: .utf8)
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "swap.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in frames.append(frame) }, onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } }
+                )
+                try client.start()
+                defer { client.stop() }
+
+                // Let the connect-time frame land before swapping the file out from under it.
+                Thread.sleep(forTimeInterval: 0.5)
+                let framesBeforeSwap = frames.count
+
+                try FileManager.default.removeItem(at: path)
+                XCTAssertEqual(mkfifo(path.path, 0o644), 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+                // Two poll ticks (t≈2s, t≈4s from subscribe) land inside this window. Neither may produce a
+                // frame: the type guard refuses the FIFO before any hashing open, so the tick is skipped
+                // exactly like a read failure. Were the guard missing, the first of these ticks would block
+                // this scope's `streamQueue` on the FIFO's open forever, and every assertion below —
+                // including the recovery one — would hang rather than fail.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(
+                    frames.count, framesBeforeSwap,
+                    "a poll tick landing on a FIFO must be skipped entirely — no frame for content that was never hashed")
+
+                // Restore a regular file with new content at the same path. A fresh, correct frame arriving
+                // here is the liveness proof: it can only happen if the poll timer kept firing and the
+                // `streamQueue` kept servicing ticks straight through the FIFO ticks above.
+                try FileManager.default.removeItem(at: path)
+                try "restored content".write(to: path, atomically: true, encoding: .utf8)
+                let expectedSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("restored content".utf8))
+
+                let deadline = Date().addingTimeInterval(5)
+                while frames.count == framesBeforeSwap, Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+
+                guard let latest = frames.values.last else {
+                    XCTFail("expected a frame reporting the restored regular file's content")
+                    return
+                }
+                XCTAssertEqual(latest.sha256, expectedSHA)
+                XCTAssertFalse(latest.missing)
+            }
+        }
+
+        /// Guards the round-11 finding that `computeWorkspaceFileScopeSignature` hashed a watched file's
+        /// entire content on every 2s poll tick with no size bound, unlike `handleWorkspaceFileReadRequest`'s
+        /// bounded read — so a client's recovery subscription for a file whose *open* was rejected as
+        /// oversized (see the comment block in `CodePaneContentController.restoreFileSignatureMonitoringAfterFailedOpen`)
+        /// would re-hash a multi-GB file indefinitely for as long as the pane stayed subscribed. Also guards
+        /// the shrink-recovery contract that same client subscription depends on: crossing back under the
+        /// cap must still produce a real content-hash frame, not a stuck sentinel.
+        func testSubscribeWorkspaceFileSignatureReportsAStableOversizedSentinelAndRecoversWhenTheFileShrinks() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
+                let path = repo.appendingPathComponent("big.txt")
+                try "small content".write(to: path, atomically: true, encoding: .utf8)
+                let smallSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data("small content".utf8))
+
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "big.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in frames.append(frame) }, onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } }
+                )
+                try client.start()
+                defer { client.stop() }
+
+                // Step 1: the connect-time frame carries the small file's real content hash.
+                let connectDeadline = Date().addingTimeInterval(5)
+                while frames.count == 0, Date() < connectDeadline { Thread.sleep(forTimeInterval: 0.1) }
+                guard let firstFrame = frames.values.first else {
+                    XCTFail("expected a connect-time frame carrying the small file's real hash")
+                    return
+                }
+                XCTAssertEqual(firstFrame.sha256, smallSHA)
+                XCTAssertFalse(firstFrame.missing)
+
+                // Step 2: overwrite the file past the 10 MiB cap (atomically, so no poll tick can observe a
+                // partially-written file). The next distinct frame must carry the stable oversized sentinel,
+                // never a real hash of that much content.
+                let oversizedData = Data(repeating: 0x61, count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1)
+                try oversizedData.write(to: path, options: .atomic)
+
+                let oversizedDeadline = Date().addingTimeInterval(5)
+                while frames.values.last?.sha256 == smallSHA, Date() < oversizedDeadline { Thread.sleep(forTimeInterval: 0.1) }
+                let oversizedFrame = try XCTUnwrap(frames.values.last)
+                XCTAssertEqual(oversizedFrame.sha256, SpacesDeviceAPIServer.workspaceFileSignatureOversizedSentinel)
+                XCTAssertFalse(oversizedFrame.missing)
+                let framesAtOversized = frames.count
+
+                // Step 3: the sentinel must be STABLE — at least 2 further poll ticks (this 4.5s window
+                // covers t≈+2s and t≈+4s from the oversized frame) must not produce another frame while the
+                // file stays oversized. This is the "stable" half of the fix: without it, an actively
+                // oversized file would keep broadcasting every tick just like the unbounded-hash bug it
+                // replaces, only with a constant payload instead of a real hash.
+                Thread.sleep(forTimeInterval: 4.5)
+                XCTAssertEqual(
+                    frames.count, framesAtOversized,
+                    "the oversized sentinel must dedupe across ticks the same way a real unchanged hash does — no repeat frames while the file "
+                        + "stays oversized")
+
+                // Step 4: shrink back to different small content. The recovery contract: a real content-hash
+                // frame must arrive again, proving the provider resumes hashing once the file is back under
+                // the cap — this is what the client's rejected-open recovery subscription depends on.
+                let recoveredContent = "recovered content"
+                try recoveredContent.write(to: path, atomically: true, encoding: .utf8)
+                let recoveredSHA = SpacesDeviceWorkspaceGitHashing.sha256Hex(Data(recoveredContent.utf8))
+
+                let recoverDeadline = Date().addingTimeInterval(5)
+                while frames.values.last?.sha256 != recoveredSHA, Date() < recoverDeadline { Thread.sleep(forTimeInterval: 0.1) }
+                let recoveredFrame = try XCTUnwrap(frames.values.last)
+                XCTAssertEqual(recoveredFrame.sha256, recoveredSHA)
+                XCTAssertFalse(recoveredFrame.missing)
+            }
+        }
+
+        /// A subscribed path that does not exist is a legitimate reportable state (`missing: true`, `sha256:
+        /// nil`), not a subscribe-time refusal — mirrors `testWorkspaceFileReadOnAMissingFileReturnsNotFound`'s
+        /// scenario, but for the signature stream, whose contract is to report absence rather than error on it.
+        func testSubscribeWorkspaceFileSignatureOnAMissingFileDeliversAFrameWithNoSha256() throws {
+            try withWorkspaceFixture { workspaceID, _, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let frameArrived = expectation(description: "the missing-file frame arrived")
+                let frames = FileSignatureFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "does-not-exist.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in
+                        frames.append(frame)
+                        frameArrived.fulfill()
+                    }, onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [frameArrived], timeout: 5)
+
+                let frame = try XCTUnwrap(frames.values.first)
+                XCTAssertNil(frame.sha256)
+                XCTAssertTrue(frame.missing)
+            }
+        }
+
+        /// Mirrors `testWorkspaceFileReadRejectsAPathThatEscapesTheWorkspace`, but through the full subscribe
+        /// relay path: `assertWorkspaceFileScopeIsValid` runs before subscriber registration (divergence #2),
+        /// so an escaping path is rejected synchronously with a typed error rather than ever reaching the poll
+        /// loop.
+        func testSubscribeWorkspaceFileSignatureRejectsAPathThatEscapesTheWorkspace() throws {
+            try withWorkspaceFixture { workspaceID, _, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                let rejected = expectation(description: "an escaping path is rejected instead of subscribed")
+                let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
+                    workspaceID: workspaceID, path: "../escape.txt", authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { _ in XCTFail("a rejected subscription must never deliver a frame") },
+                    onDisconnect: { error in
+                        guard let error else { return }
+                        guard let clientError = error as? SpacesDeviceAPIRequestClientError, case .requestRejected(_, let code) = clientError else {
+                            XCTFail("expected a rejected response, got \(error)")
+                            return
+                        }
+                        XCTAssertEqual(code, .invalidArgument)
+                        rejected.fulfill()
+                    })
+                try client.start()
+                defer { client.stop() }
+                wait(for: [rejected], timeout: 5)
+            }
+        }
+
+        // MARK: - Test helpers
+
+        /// Thread-safe invocation counter for `signatureProvider` closures under test, which
+        /// `WorkspaceDiffSignatureSubscription` calls from its own dedicated queue and which must be `@Sendable`.
+        /// A local `var` capture cannot satisfy that; a lock-guarded reference type can.
+        private final class InvocationCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+
+            @discardableResult func increment() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                count += 1
+                return count
+            }
+
+            var value: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return count
+            }
+        }
+
+        private final class MutableString: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: String
+
+            init(_ value: String) { storage = value }
+
+            var value: String {
+                get {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage
+                }
+                set {
+                    lock.lock()
+                    storage = newValue
+                    lock.unlock()
+                }
+            }
+        }
+
+        /// Models a membership transition that occurs when the detector is sampled. An exact-first
+        /// implementation returns S0 but records the post-transition detector token, so it can never
+        /// discover that stale initial listing; detector-first returns S1 and remains safe.
+        private final class MembershipRaceProviders: @unchecked Sendable {
+            private let lock = NSLock()
+            private var generation = 0
+            private var didTransition = false
+            private(set) var exactCalls = 0
+            private(set) var detectorCalls = 0
+
+            func detector() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                detectorCalls += 1
+                if !didTransition {
+                    didTransition = true
+                    generation = 1
+                }
+                return "D\(generation)"
+            }
+
+            func exact() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                exactCalls += 1
+                return "S\(generation)"
+            }
+        }
+
+        /// Thread-safe ordered collector for the `scopeSignature` values a
+        /// `RawWorkspaceDiffSignatureSocketClient` decodes, appended from that client's own read queue.
+        private final class FrameSignatureCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [String] = []
+
+            func append(_ value: String) {
+                lock.lock()
+                defer { lock.unlock() }
+                storage.append(value)
+            }
+
+            var values: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage.count
+            }
+        }
+
+        /// Thread-safe ordered collector for `SpacesDeviceWorkspaceFileSignatureFrame` values delivered to a
+        /// `SpacesDeviceWorkspaceFileSignatureStreamClient`'s `onFrame` callback — mirrors
+        /// `FrameSignatureCollector` above, just holding whole frames instead of a bare signature string
+        /// (a file-signature frame's `sha256`/`missing` pair needs both fields asserted, not one).
+        private final class FileSignatureFrameCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [SpacesDeviceWorkspaceFileSignatureFrame] = []
+
+            func append(_ value: SpacesDeviceWorkspaceFileSignatureFrame) {
+                lock.lock()
+                defer { lock.unlock() }
+                storage.append(value)
+            }
+
+            var values: [SpacesDeviceWorkspaceFileSignatureFrame] {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage.count
+            }
+        }
+
+        /// Minimal raw Unix-domain-socket line reader for a `WorkspaceDiffSignatureSubscription`'s producer
+        /// socket. Used only by tests that construct the subscription directly (bypassing the full TLS
+        /// request/relay path, as `testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother`
+        /// above does) and still need to observe the actual frames it broadcasts.
+        /// `DeviceOverviewStreamServer` (the producer) is payload-agnostic newline-delimited `Data` over a
+        /// plain Unix socket — the daemon's TLS/relay code is just one consumer of it, not part of it — so a
+        /// client this small is enough; no TLS and no `SpacesDeviceWorkspaceDiffSignatureStreamClient` needed.
+        private final class RawWorkspaceDiffSignatureSocketClient: @unchecked Sendable {
+            private let fileDescriptor: Int32
+            private let queue = DispatchQueue(label: "test.raw-workspace-diff-signature-client")
+            private var source: DispatchSourceRead?
+            /// Confined to `queue`: only the read source's event handler, always dispatched there, touches it.
+            private var pendingBytes = Data()
+            private let onFrame: (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void
+
+            init(socketPath: String, onFrame: @escaping (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void) throws {
+                self.onFrame = onFrame
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                var address = sockaddr_un()
+                address.sun_family = sa_family_t(AF_UNIX)
+                let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+                let utf8Path = socketPath.utf8CString
+                guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
+                withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                    utf8Path.withUnsafeBufferPointer { if let baseAddress = $0.baseAddress { memcpy(pointer, baseAddress, $0.count) } }
+                }
+                let connectResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                }
+                guard connectResult == 0 else {
+                    let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                    close(fd)
+                    throw POSIXError(code)
+                }
+                fileDescriptor = fd
+                let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+                readSource.setEventHandler { [weak self] in self?.drain() }
+                readSource.setCancelHandler { close(fd) }
+                source = readSource
+                readSource.resume()
+            }
+
+            private func drain() {
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(fileDescriptor, &readBuffer, readBuffer.count)
+                guard count > 0 else { return }
+                pendingBytes.append(contentsOf: readBuffer[0..<count])
+                while let newlineIndex = pendingBytes.firstIndex(of: 0x0A) {
+                    let line = pendingBytes[..<newlineIndex]
+                    pendingBytes.removeSubrange(...newlineIndex)
+                    if let frame = try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.decodeLine(Data(line)) { onFrame(frame) }
+                }
+            }
+
+            func stop() { source?.cancel() }
+        }
+
+        /// Minimal producer-socket reader for the workspace-wide file-list signature tests.
+        private final class RawWorkspaceFileListSignatureSocketClient: @unchecked Sendable {
+            private let fileDescriptor: Int32
+            private let queue = DispatchQueue(label: "test.raw-workspace-file-list-signature-client")
+            private var source: DispatchSourceRead?
+            private var pendingBytes = Data()
+            private let onFrame: (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void
+
+            init(socketPath: String, onFrame: @escaping (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void) throws {
+                self.onFrame = onFrame
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                var address = sockaddr_un()
+                address.sun_family = sa_family_t(AF_UNIX)
+                let utf8Path = socketPath.utf8CString
+                guard utf8Path.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw POSIXError(.ENAMETOOLONG) }
+                withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                    utf8Path.withUnsafeBufferPointer { if let baseAddress = $0.baseAddress { memcpy(pointer, baseAddress, $0.count) } }
+                }
+                let connectResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                }
+                guard connectResult == 0 else {
+                    let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                    close(fd)
+                    throw POSIXError(code)
+                }
+                fileDescriptor = fd
+                let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+                readSource.setEventHandler { [weak self] in self?.drain() }
+                readSource.setCancelHandler { close(fd) }
+                source = readSource
+                readSource.resume()
+            }
+
+            private func drain() {
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(fileDescriptor, &readBuffer, readBuffer.count)
+                guard count > 0 else { return }
+                pendingBytes.append(contentsOf: readBuffer[0..<count])
+                while let newlineIndex = pendingBytes.firstIndex(of: 0x0A) {
+                    let line = pendingBytes[..<newlineIndex]
+                    pendingBytes.removeSubrange(...newlineIndex)
+                    if let frame = try? SpacesDeviceWorkspaceFileListSignatureStreamCodec.decodeLine(Data(line)) { onFrame(frame) }
+                }
+            }
+
+            func stop() { source?.cancel() }
+        }
+
+        /// Mirrors `RawWorkspaceDiffSignatureSocketClient` exactly, decoding
+        /// `SpacesDeviceWorkspaceFileSignatureFrame` lines instead — used only by
+        /// `testWorkspaceFileSignatureSubscriptionDoesNotRebroadcastAnUnchangedValueAcrossMultiplePolls`, which
+        /// constructs a `WorkspaceFileSignatureSubscription` directly and needs to observe its raw producer
+        /// broadcasts without a TLS/relay harness.
+        private final class RawWorkspaceFileSignatureSocketClient: @unchecked Sendable {
+            private let fileDescriptor: Int32
+            private let queue = DispatchQueue(label: "test.raw-workspace-file-signature-client")
+            private var source: DispatchSourceRead?
+            /// Confined to `queue`: only the read source's event handler, always dispatched there, touches it.
+            private var pendingBytes = Data()
+            private let onFrame: (SpacesDeviceWorkspaceFileSignatureFrame) -> Void
+
+            init(socketPath: String, onFrame: @escaping (SpacesDeviceWorkspaceFileSignatureFrame) -> Void) throws {
+                self.onFrame = onFrame
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                var address = sockaddr_un()
+                address.sun_family = sa_family_t(AF_UNIX)
+                let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+                let utf8Path = socketPath.utf8CString
+                guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
+                withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                    utf8Path.withUnsafeBufferPointer { if let baseAddress = $0.baseAddress { memcpy(pointer, baseAddress, $0.count) } }
+                }
+                let connectResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                }
+                guard connectResult == 0 else {
+                    let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                    close(fd)
+                    throw POSIXError(code)
+                }
+                fileDescriptor = fd
+                let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+                readSource.setEventHandler { [weak self] in self?.drain() }
+                readSource.setCancelHandler { close(fd) }
+                source = readSource
+                readSource.resume()
+            }
+
+            private func drain() {
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(fileDescriptor, &readBuffer, readBuffer.count)
+                guard count > 0 else { return }
+                pendingBytes.append(contentsOf: readBuffer[0..<count])
+                while let newlineIndex = pendingBytes.firstIndex(of: 0x0A) {
+                    let line = pendingBytes[..<newlineIndex]
+                    pendingBytes.removeSubrange(...newlineIndex)
+                    if let frame = try? SpacesDeviceWorkspaceFileSignatureStreamCodec.decodeLine(Data(line)) { onFrame(frame) }
+                }
+            }
+
+            func stop() { source?.cancel() }
+        }
+
+        // MARK: - Fixture helpers
+
+        /// Seeds a real git repo, a matching `ProjectRecord`/`WorkspaceRecord` pointed at it, and a live
+        /// TLS server/client pair, then runs `body`. Modeled on `TerminalTranscriptServerTests`'
+        /// `withTemporaryProfile`/`makeServerAndClient`, extended with the workspace-git fixture that
+        /// `SpacesDeviceWorkspaceGitTests.makeRepo` uses for the pure-logic suite.
+        private func withWorkspaceFixture(
+            workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient(),
+            _ body: (
+                _ workspaceID: String, _ repo: URL, _ server: SpacesDeviceAPIServer, _ requestClient: SpacesDeviceAPIRequestSessionClient,
+                _ clientApp: SpacesDeviceClientApp, _ authToken: String
+            ) throws -> Void
+        ) throws {
+            try withTemporaryProfile { _ in
+                let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: repo) }
+                try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+                try "initial".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: repo.path)
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let projectID = "project-\(UUID().uuidString)"
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                try store.upsert(
+                    project: ProjectRecord(id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+                try store.upsert(
+                    workspace: WorkspaceRecord(
+                        id: workspaceID, projectID: projectID, dir: repo.path, dirname: nil, branch: "main", baseBranch: "main", isDefault: true,
+                        isRunning: false, lastLaunchedAt: nil))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient(workspaceGitClient: workspaceGitClient)
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                try body(workspaceID, repo, server, requestClient, clientApp, authToken)
+            }
+        }
+
+        /// Same shape as `withWorkspaceFixture`, but `dir` is never `git init`'d: a plain project directory,
+        /// exercising the non-git workspace product type `testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument`
+        /// needs (`workspaceDiff` requires a repo; `workspaceFileRead`/`Write` do not).
+        private func withNonGitWorkspaceFixture(
+            _ body: (
+                _ workspaceID: String, _ dir: URL, _ server: SpacesDeviceAPIServer, _ requestClient: SpacesDeviceAPIRequestSessionClient,
+                _ clientApp: SpacesDeviceClientApp, _ authToken: String
+            ) throws -> Void
+        ) throws {
+            try withTemporaryProfile { _ in
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-nongit-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let projectID = "project-\(UUID().uuidString)"
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                try store.upsert(project: ProjectRecord(id: projectID, name: "Fixture Project", dir: dir.path, isGitRepo: false, defaultBranch: nil))
+                try store.upsert(
+                    workspace: WorkspaceRecord(
+                        id: workspaceID, projectID: projectID, dir: dir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+                        lastLaunchedAt: nil))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                try body(workspaceID, dir, server, requestClient, clientApp, authToken)
+            }
+        }
+
+        /// Same shape as `withWorkspaceFixture`, but `git init` runs with no commit at all: `HEAD` is
+        /// unborn, exercising the diff/ref-list "nothing to show yet" paths that a freshly initialized repo
+        /// hits before its first commit.
+        private func withUnbornWorkspaceFixture(
+            _ body: (
+                _ workspaceID: String, _ repo: URL, _ requestClient: SpacesDeviceAPIRequestSessionClient, _ clientApp: SpacesDeviceClientApp,
+                _ authToken: String
+            ) throws -> Void
+        ) throws {
+            try withTemporaryProfile { _ in
+                let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-unborn-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: repo) }
+                try runGit(["init", "--initial-branch", "main"], cwd: repo.path)
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let projectID = "project-\(UUID().uuidString)"
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                try store.upsert(
+                    project: ProjectRecord(id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+                try store.upsert(
+                    workspace: WorkspaceRecord(
+                        id: workspaceID, projectID: projectID, dir: repo.path, dirname: nil, branch: "main", isDefault: true, isRunning: false,
+                        lastLaunchedAt: nil))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                try body(workspaceID, repo, requestClient, clientApp, authToken)
+            }
+        }
+
+        private func makeServerAndClient(
+            workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
+        ) throws -> (SpacesDeviceAPIServer, SpacesDeviceAPIRequestSessionClient, SpacesDeviceClientApp, String) {
+            let identity = try workspaceGitTestTLSIdentity()
+            let pairingStore = AlwaysAuthorizedWorkspaceGitPairingStore()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, workspaceGitClient: workspaceGitClient)
+            try server.start()
+            let requestClient = try SpacesDeviceAPIRequestSessionClient(
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "workspace-git-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                appVersion: "1.0")
+            return (server, requestClient, clientApp, pairingStore.authToken)
+        }
+
+        private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+            let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+            setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
+            unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            defer {
+                if let originalDatabasePath {
+                    setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+                } else {
+                    unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+                }
+                if let originalRuntimePath {
+                    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimePath, 1)
+                } else {
+                    unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+                }
+                try? FileManager.default.removeItem(at: root)
+            }
+            try body(root)
+        }
+
+        @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["git"] + arguments
+            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "GIT_DIR")
+            environment.removeValue(forKey: "GIT_WORK_TREE")
+            environment.removeValue(forKey: "GIT_INDEX_FILE")
+            process.environment = environment
+            let output = Pipe()
+            let errorOutput = Pipe()
+            process.standardOutput = output
+            process.standardError = errorOutput
+            try process.run()
+            process.waitUntilExit()
+            let outputData = output.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus == 0 else {
+                let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+                let message = String(data: errorData, encoding: .utf8) ?? "unknown git failure"
+                struct GitFixtureError: Error, CustomStringConvertible { let description: String }
+                throw GitFixtureError(description: "git \(arguments.joined(separator: " ")) failed: \(message)")
+            }
+            return String(data: outputData, encoding: .utf8) ?? ""
+        }
+
+        /// Like `runGit`, but feeds `stdin` to the subprocess — for batched commands such as
+        /// `update-ref --stdin`, which creates a large number of refs in a single git invocation instead of
+        /// spawning one process per ref.
+        @discardableResult private func runGitWithStdin(_ arguments: [String], cwd: String, stdin: String) throws -> String {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["git"] + arguments
+            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "GIT_DIR")
+            environment.removeValue(forKey: "GIT_WORK_TREE")
+            environment.removeValue(forKey: "GIT_INDEX_FILE")
+            process.environment = environment
+            let input = Pipe()
+            let output = Pipe()
+            let errorOutput = Pipe()
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = errorOutput
+            try process.run()
+            input.fileHandleForWriting.write(stdin.data(using: .utf8) ?? Data())
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            let outputData = output.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus == 0 else {
+                let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+                let message = String(data: errorData, encoding: .utf8) ?? "unknown git failure"
+                struct GitFixtureError: Error, CustomStringConvertible { let description: String }
+                throw GitFixtureError(description: "git \(arguments.joined(separator: " ")) failed: \(message)")
+            }
+            return String(data: outputData, encoding: .utf8) ?? ""
+        }
+    }
+
+    private let workspaceGitTestTLSRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "spaces-workspace-git-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+    private func workspaceGitTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
+        try TerminalServiceTLSIdentityStore.loadOrCreate(root: workspaceGitTestTLSRoot)
+    }
+
+    private final class AlwaysAuthorizedWorkspaceGitPairingStore: SpacesDevicePairingStoreProtocol {
+        let authToken = "valid-token"
+
+        func issueToken(for _: SpacesDeviceClientApp, presentedToken _: String?) throws -> String { authToken }
+        func listDevices() throws -> [SpacesDevicePairedClient] { [] }
+        func revoke(installationID _: String) throws {}
+        func removeAll() throws {}
+        func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
+            guard clientApp != nil, authToken == self.authToken else {
+                throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
+            }
+        }
+        func validate(clientApp _: SpacesDeviceClientApp) throws {}
+    }
+#endif

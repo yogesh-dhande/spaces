@@ -63,9 +63,8 @@ final class LiveInMemorySessionMergeTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell),
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "both", servicePID: getpid(), childPID: 4242, state: .running, updatedAt: "2026-01-01T00:00:05Z", title: "stale",
-                workingDirectory: "/tmp/db-cwd", columns: 120, rows: 40),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), paths: TerminalSessionPaths(rootDirectory: "/tmp/spaces-test/both"),
-            isControlAvailable: true, isSubscriptionAvailable: true)
+                workingDirectory: "/tmp/db-cwd", columns: 120, rows: 40), attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            paths: TerminalSessionPaths(rootDirectory: "/tmp/spaces-test/both"), isControlAvailable: true, isSubscriptionAvailable: true)
         let inMemoryEntry = makeEntry(id: "both", state: .running, servicePID: getpid(), title: "fresh")
 
         let merged = TerminalSessionCatalog.mergingLiveInMemorySessions([dbEntry], inMemory: [inMemoryEntry])
@@ -115,8 +114,7 @@ final class LiveInMemorySessionMergeTests: XCTestCase {
     private func makeSummary(id: String, title: String, reportedTitle: String? = nil) -> TerminalServiceSessionSummary {
         TerminalServiceSessionSummary(
             id: id, title: title, workingDirectory: "/tmp", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, state: .running,
-            servicePID: getpid(), childPID: 456, controlSocketPath: "/tmp/control-\(id)", outputPath: "/tmp/output-\(id)",
-            launchConfiguration: nil,
+            servicePID: getpid(), childPID: 456, controlSocketPath: "/tmp/control-\(id)", outputPath: "/tmp/output-\(id)", launchConfiguration: nil,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: id, servicePID: getpid(), childPID: 456, state: .running, updatedAt: "2026-01-01T00:00:05Z", title: reportedTitle))
     }

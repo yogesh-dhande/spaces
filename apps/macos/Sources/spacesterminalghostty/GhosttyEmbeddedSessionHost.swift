@@ -72,9 +72,7 @@
         /// Default: no shared selection to read, so callers fall back to `copySelectionToPasteboard()`
         /// immediately. Only `RemoteGhosttySessionHost` overrides this with the real `readSelectionText`
         /// round trip; every other conformer (test fakes included) reports nothing shared to find.
-        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
-            completion(false)
-        }
+        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) { completion(false) }
     }
 
     /// The daemon-side embedded renderer host, run on the terminal engine actor. It deliberately does
@@ -230,7 +228,10 @@
 
         @discardableResult public func setSelectionAbsolute(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, rectangle: Bool)
             -> Bool
-        { sessionDriver.setSelectionAbsolute(startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, rectangle: rectangle) }
+        {
+            sessionDriver.setSelectionAbsolute(
+                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, rectangle: rectangle)
+        }
 
         public func clearSelection() { sessionDriver.clearSelection() }
 
@@ -457,9 +458,7 @@
         /// `Orchestrator.markReservedWorkspaceTerminalLaunchFailed` — act exclusively on sessions with NO live
         /// core (crashed-prior-daemon sessions, never-started reservations), so they can never race one. A
         /// fresh core (daemon restart, exec-in-place handoff) reseeds from the mirror.
-        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot? {
-            didSet { cachedLiveWireAttachmentSnapshot = nil }
-        }
+        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { didSet { cachedLiveWireAttachmentSnapshot = nil } }
         /// `cachedAttachmentSnapshot` reduced to what a subscriber is sent, memoized so a session's attach
         /// history is scanned once per attachment change instead of once per broadcast. The broadcast path
         /// runs on the shared `TerminalEngineActor`, where the scan would otherwise grow with the session's
@@ -971,9 +970,7 @@
             let paths = paths
             persistence.enqueueLifecycleWrite(
                 "agent_signal",
-                write: { databasePath in
-                    try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath)
-                },
+                write: { databasePath in try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths, databasePath: databasePath) },
                 onFailure: { [weak self] in Task { @TerminalEngineActor in self?.trace("lifecycle_write_failed write=agent_signal") } })
         }
 
@@ -1259,8 +1256,8 @@
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(), hasFinalRender: false)
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(),
+                hasFinalRender: false)
         }
 
         /// The catalog entry built entirely from this core's in-memory state, with no DB read. Serves the
@@ -1273,9 +1270,8 @@
         public func inMemoryCatalogEntry(fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
             guard let runtimeState = latestRuntimeState else { return nil }
             return TerminalSessionCatalogEntry(
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(), paths: paths,
-                isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: inMemoryLiveWireAttachmentSnapshot(),
+                paths: paths, isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
                 isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
 
@@ -1328,23 +1324,24 @@
                 "control_request command=\(command.name) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
             )
             if case .send = command { return controlResponseForSendRequest(request) }
-            let response: TerminalControlResponse = switch command {
-            case .attach: controlResponseForAttachRequest(request)
-            case .detach: controlResponseForDetachRequest(request)
-            case .heartbeat: controlResponseForHeartbeatRequest(request)
-            case .send: preconditionFailure("send is handled above so its write acknowledgement is carried out to the caller")
-            case .key: controlResponseForKeyRequest(request)
-            case .clearScreen: controlResponseForClearScreenRequest(request)
-            case .takeover: controlResponseForTakeoverRequest(request)
-            case .resize: controlResponseForResizeRequest(request)
-            case .scroll: controlResponseForScrollRequest(request)
-            case .mouseButton: controlResponseForMouseButtonRequest(request)
-            case .setAppearance: controlResponseForSetAppearanceRequest(request)
-            case .setSelection: controlResponseForSetSelectionRequest(request)
-            case .clearSelection: controlResponseForClearSelectionRequest(request)
-            case .readSelectionText: controlResponseForReadSelectionTextRequest(request)
-            case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
-            }
+            let response: TerminalControlResponse =
+                switch command {
+                case .attach: controlResponseForAttachRequest(request)
+                case .detach: controlResponseForDetachRequest(request)
+                case .heartbeat: controlResponseForHeartbeatRequest(request)
+                case .send: preconditionFailure("send is handled above so its write acknowledgement is carried out to the caller")
+                case .key: controlResponseForKeyRequest(request)
+                case .clearScreen: controlResponseForClearScreenRequest(request)
+                case .takeover: controlResponseForTakeoverRequest(request)
+                case .resize: controlResponseForResizeRequest(request)
+                case .scroll: controlResponseForScrollRequest(request)
+                case .mouseButton: controlResponseForMouseButtonRequest(request)
+                case .setAppearance: controlResponseForSetAppearanceRequest(request)
+                case .setSelection: controlResponseForSetSelectionRequest(request)
+                case .clearSelection: controlResponseForClearSelectionRequest(request)
+                case .readSelectionText: controlResponseForReadSelectionTextRequest(request)
+                case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
+                }
             return TerminalControlHandling(response: response)
         }
 
@@ -2645,8 +2642,7 @@
         /// complexity this corner does not justify.
         private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
             if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
-            guard !forceAttachmentSnapshotReseedFailureForTesting,
-                var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            guard !forceAttachmentSnapshotReseedFailureForTesting, var snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
             else { return nil }
             for transform in pendingAttachmentMutations { snapshot = transform(snapshot) }
             pendingAttachmentMutations.removeAll()
@@ -3140,8 +3136,7 @@
         /// had pending when it was taken. Passing one of these back into the export path is what lets a
         /// caller emit the exact frame it already inspected instead of racing a second capture against it.
         private typealias LiveSessionScreenState = (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation],
-            scrollRectsOverflowed: Bool
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool
         )
 
         private func resolveRemoteScreenState(
@@ -3175,7 +3170,8 @@
             // carrying it forward would only cost carry capacity for no product benefit.
             return (
                 snapshot: nil, snapshotText: nil, scrollRects: [], scrollRectsOverflowed: false,
-                source: isLiveRuntime ? "session_empty" : "session_unavailable")
+                source: isLiveRuntime ? "session_empty" : "session_unavailable"
+            )
         }
 
         private func captureLiveSessionScreenState() -> LiveSessionScreenState {
@@ -3186,7 +3182,8 @@
             let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
             return (
                 snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: capturedRenderState?.scrollRects ?? [],
-                scrollRectsOverflowed: capturedRenderState?.scrollRectsOverflowed ?? false)
+                scrollRectsOverflowed: capturedRenderState?.scrollRectsOverflowed ?? false
+            )
         }
 
         static func remoteStateShouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
@@ -3252,9 +3249,7 @@
         /// on the real reconcile path.
         func debugInvalidateAttachmentSnapshotCacheForTesting() { invalidateAttachmentSnapshotCache() }
         /// Test-only: see `forceAttachmentSnapshotReseedFailureForTesting`.
-        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) {
-            forceAttachmentSnapshotReseedFailureForTesting = forced
-        }
+        func debugSetForceAttachmentSnapshotReseedFailureForTesting(_ forced: Bool) { forceAttachmentSnapshotReseedFailureForTesting = forced }
 
         private func trace(_ message: @autoclosure () -> String) { ghosttyEmbeddedSessionTrace(launchConfiguration.sessionID, message()) }
 

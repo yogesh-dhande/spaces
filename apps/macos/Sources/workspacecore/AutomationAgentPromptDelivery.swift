@@ -92,9 +92,7 @@ struct AutomationAgentPromptDelivery: Equatable {
     private var enterAttempts = 0
 
     /// Starts the ladder watching a session that is ready for input but has not been written to yet.
-    init(observedMark mark: AutomationSessionOutputMark) {
-        phase = .settling(mark: mark, quietTicks: 0)
-    }
+    init(observedMark mark: AutomationSessionOutputMark) { phase = .settling(mark: mark, quietTicks: 0) }
 
     /// Advances one tick and reports what to write, assuming the caller performs it. `mark` is the
     /// session's output mark as of this tick; when the returned action writes, that same mark is what the

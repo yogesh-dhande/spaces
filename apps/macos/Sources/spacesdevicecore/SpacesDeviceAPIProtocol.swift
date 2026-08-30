@@ -946,6 +946,689 @@ public struct SpacesDeviceWorkspaceReference: Codable, Sendable, Equatable {
     public init(workspaceID: String) { self.workspaceID = workspaceID }
 }
 
+/// Reads one file inside a workspace's checkout, capped at 10 MiB (see
+/// `SpacesDeviceAPIServer.terminalPasteImageMaxBytes`, the existing precedent for this cap). `relativePath`
+/// is resolved against the workspace directory and must stay inside it after symlink resolution; `..` and
+/// symlink escapes are rejected as `.invalidArgument`.
+public struct SpacesDeviceWorkspaceFileReadRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let relativePath: String
+    /// Immutable old-side tree requested only by inline diff editing; ordinary Editor reads omit it.
+    public let comparisonBaseRevision: String?
+    public let oldPath: String?
+    /// Inline diff editing uses a lexical path and rejects every symbolic-link component, so the
+    /// separately rendered patch cannot be read from one file and saved through another.
+    public let requiresDirectPath: Bool
+
+    public init(
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
+        requiresDirectPath: Bool = false
+    ) {
+        self.workspaceID = workspaceID
+        self.relativePath = relativePath
+        self.comparisonBaseRevision = comparisonBaseRevision
+        self.oldPath = oldPath
+        self.requiresDirectPath = requiresDirectPath
+    }
+}
+
+/// `sha256` is the content's hash so a client can present it back as `expectedSHA256` on a later
+/// `workspaceFileWrite`, making that write a compare-and-swap against the exact bytes read here.
+public struct SpacesDeviceWorkspaceFileReadResult: Codable, Sendable, Equatable {
+    public let base64Data: String
+    public let sha256: String
+    public let size: Int
+    public let isBinaryGuess: Bool
+    /// Git-filtered old comparison text only for an inline-diff baseline request.
+    public let comparisonOldBase64Data: String?
+
+    public init(
+        base64Data: String, sha256: String, size: Int, isBinaryGuess: Bool,
+        comparisonOldBase64Data: String? = nil
+    ) {
+        self.base64Data = base64Data
+        self.sha256 = sha256
+        self.size = size
+        self.isBinaryGuess = isBinaryGuess
+        self.comparisonOldBase64Data = comparisonOldBase64Data
+    }
+}
+
+/// Reads a regular file as it existed at one immutable Git object in a workspace repository. `revision`
+/// must be a full 40- or 64-hex object id; symbolic and abbreviated refs are intentionally rejected so a
+/// caller that received it in diff metadata always reads the same bytes. `relativePath` is workspace-relative.
+public struct SpacesDeviceWorkspaceRevisionFileReadRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let revision: String
+    public let relativePath: String
+    public let oldPath: String?
+
+    public init(workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil) {
+        self.workspaceID = workspaceID
+        self.revision = revision
+        self.relativePath = relativePath
+        self.oldPath = oldPath
+    }
+}
+
+/// Last Commit inline-edit verification. `worktreeFile` is the exact live baseline whose Git
+/// equivalence was checked by this operation, so the browser never has to race a separate file
+/// read against the immutable-revision guard. The target blob is checked only for existence and
+/// type; it is not transferred. Only the live baseline and Git-filtered comparison old side carry
+/// bounded payload bytes.
+public struct SpacesDeviceWorkspaceRevisionFileReadResult: Codable, Sendable, Equatable {
+    public let worktreeFile: SpacesDeviceWorkspaceFileReadResult
+    public let isWorktreeEquivalentToRevision: Bool
+    public let comparisonOldBase64Data: String?
+
+    public init(
+        worktreeFile: SpacesDeviceWorkspaceFileReadResult, isWorktreeEquivalentToRevision: Bool,
+        comparisonOldBase64Data: String?
+    ) {
+        self.worktreeFile = worktreeFile
+        self.isWorktreeEquivalentToRevision = isWorktreeEquivalentToRevision
+        self.comparisonOldBase64Data = comparisonOldBase64Data
+    }
+}
+
+/// Lists every path inside a workspace's checkout the user would consider part of the workspace: tracked
+/// files plus untracked, non-ignored files, excluding a tracked file that has been deleted on disk (git
+/// still tracks it, but there is nothing left to show). Read-only. Powers the Editor pane's file tree and
+/// quick-open.
+public struct SpacesDeviceWorkspaceFileListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+/// Result of `workspaceFileList`. `paths` are workspace-relative and sorted ascending. `truncated` is
+/// `true` when the workspace has more paths than `SpacesDeviceWorkspaceFileListEngine.maxPaths`, in
+/// which case `paths` holds only the first (sorted) slice up to that cap.
+public struct SpacesDeviceWorkspaceFileListResult: Codable, Sendable, Equatable {
+    public let paths: [String]
+    public let truncated: Bool
+
+    public init(paths: [String], truncated: Bool) {
+        self.paths = paths
+        self.truncated = truncated
+    }
+}
+
+/// Stable change token for the exact `workspaceFileList` wire contract: same `paths` + `truncated`
+/// means same token, and any membership/truncation change yields a different one. Shared by the
+/// daemon's `subscribeWorkspaceFileListSignature` producer and the host-side baseline recorded after
+/// a successful `workspaceFileList` pull, so reconnect dedupe compares identical logic on both sides.
+public enum SpacesDeviceWorkspaceFileListSignature {
+    public static func value(for result: SpacesDeviceWorkspaceFileListResult) -> String {
+        var data = Data()
+        data.append(result.truncated ? 0x01 : 0x00)
+        for path in result.paths {
+            // Length-prefix each UTF-8 payload so a legal filename containing newlines cannot collide
+            // with a different membership shape when serialized for hashing.
+            let utf8 = Data(path.utf8)
+            var length = UInt64(utf8.count).bigEndian
+            withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+            data.append(utf8)
+        }
+        return TerminalServiceSHA256.hexDigest(data)
+    }
+}
+
+/// Lists a workspace's local branches and recent commit history, for the diff scope picker's ref-search
+/// dialog (the web app resolves the user's typed text against these lists instead of round-tripping every
+/// keystroke to the daemon). Read-only, local-only: no network call is made, so this never reflects a
+/// remote's branches the workspace hasn't fetched.
+public struct SpacesDeviceWorkspaceRefListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+/// One commit in a `workspaceRefList` result's `commits` list. `sha` is the full (not abbreviated) commit
+/// hash, so it can be sent back as `SpacesDeviceWorkspaceDiffRequest.refName` unambiguously.
+public struct SpacesDeviceWorkspaceRefListCommit: Codable, Sendable, Equatable {
+    public let sha: String
+    public let subject: String
+
+    public init(sha: String, subject: String) {
+        self.sha = sha
+        self.subject = subject
+    }
+}
+
+/// Result of `workspaceRefList`. `branches` are resolvable branch names: local branches (`refs/heads`)
+/// under their own short name, and remote branches (`refs/remotes/origin`, minus the synthetic
+/// `origin/HEAD`) under their full `origin/<name>` short name — a local `foo` and `origin/foo` are
+/// distinct refs and both appear when both exist. The combined list is deduped and sorted, capped at
+/// `SpacesDeviceWorkspaceRefListEngine.maxBranches` with `branchesTruncated` when there are more.
+/// `commits` are `HEAD`'s ancestry, most recent first, capped at
+/// `SpacesDeviceWorkspaceRefListEngine.maxCommits` with `commitsTruncated` when there are more. A non-git
+/// workspace, or one with an unborn `HEAD`, returns both lists empty with both truncation flags `false`.
+public struct SpacesDeviceWorkspaceRefListResult: Codable, Sendable, Equatable {
+    public let branches: [String]
+    public let branchesTruncated: Bool
+    public let commits: [SpacesDeviceWorkspaceRefListCommit]
+    public let commitsTruncated: Bool
+
+    public init(branches: [String], branchesTruncated: Bool, commits: [SpacesDeviceWorkspaceRefListCommit], commitsTruncated: Bool) {
+        self.branches = branches
+        self.branchesTruncated = branchesTruncated
+        self.commits = commits
+        self.commitsTruncated = commitsTruncated
+    }
+}
+
+/// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` is the hash of the
+/// disk content the client last read (from `workspaceFileRead`); `nil` asserts the file must not exist yet
+/// (create). When the disk content does not match `expectedSHA256`, the daemon does not write — it reports
+/// the current disk content in the `SpacesDeviceWorkspaceFileWriteResult` conflict shape (not a transport
+/// error) so the client can run its own three-way merge and retry. This is the only write path: there is no
+/// force-overwrite option.
+public struct SpacesDeviceWorkspaceFileWriteRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let relativePath: String
+    public let base64Data: String
+    public let expectedSHA256: String?
+    /// See `SpacesDeviceWorkspaceFileReadRequest.requiresDirectPath`.
+    public let requiresDirectPath: Bool
+
+    public init(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
+        requiresDirectPath: Bool = false
+    ) {
+        self.workspaceID = workspaceID
+        self.relativePath = relativePath
+        self.base64Data = base64Data
+        self.expectedSHA256 = expectedSHA256
+        self.requiresDirectPath = requiresDirectPath
+    }
+}
+
+/// Result of `workspaceFileWrite`. `didWrite` is `true` on a successful compare-and-swap, with `sha256`
+/// carrying the newly written content's hash. `didWrite` is `false` on a CAS conflict: the write did not
+/// happen, and `currentBase64Data`/`currentSHA256` carry the disk content the client's `expectedSHA256`
+/// didn't match, so it can merge and retry without a second round trip to re-read the file.
+public struct SpacesDeviceWorkspaceFileWriteResult: Codable, Sendable, Equatable {
+    public let didWrite: Bool
+    public let sha256: String?
+    public let currentBase64Data: String?
+    public let currentSHA256: String?
+
+    public init(didWrite: Bool, sha256: String? = nil, currentBase64Data: String? = nil, currentSHA256: String? = nil) {
+        self.didWrite = didWrite
+        self.sha256 = sha256
+        self.currentBase64Data = currentBase64Data
+        self.currentSHA256 = currentSHA256
+    }
+}
+
+/// Selects what `workspaceDiffManifestChunk` enumerates and its subsequent `workspaceDiffFileChunk` calls compare.
+/// `refName == nil, lastCommit == false` diffs uncommitted changes
+/// against `HEAD` (tracked edits plus untracked files synthesized as add-diffs). A non-nil `refName` diffs
+/// the merge-base of `refName` and `HEAD` against the working tree, so it also includes uncommitted changes:
+/// reviewing an agent's work against a base branch means "everything since it diverged, including what it
+/// hasn't committed yet." `lastCommit == true` diffs `HEAD`'s parent against `HEAD` — committed changes
+/// only, with no working-tree or untracked involvement at all — and is mutually exclusive with `refName`
+/// (both set is `.invalidArgument`). The daemon takes only the explicit ref the client sends — it never
+/// invents a base branch; the client resolves "base branch" from `SpacesDeviceWorkspaceSummary.baseBranch`
+/// and omits that preset from its UI when the workspace has none.
+public struct SpacesDeviceWorkspaceDiffRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let refName: String?
+    public let lastCommit: Bool
+
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false) {
+        self.workspaceID = workspaceID
+        self.refName = refName
+        self.lastCommit = lastCommit
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit }
+
+    /// Custom decode so an encoder that omits a `false` field (rather than sending it explicitly) still
+    /// decodes correctly: absent `lastCommit` decodes as `false`, matching `init`'s default.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+    }
+}
+
+public enum SpacesDeviceWorkspaceDiffFileStatus: String, Codable, Sendable, Equatable {
+    case added
+    case modified
+    case deleted
+    case renamed
+    case untracked
+}
+
+/// Metadata discovered while producing one file's patch. The patch body itself crosses the Device API in
+/// bounded binary ranges, so this value never embeds patch text or exposes a size-cap/truncation state.
+public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatable {
+    public let path: String
+    public let oldPath: String?
+    public let status: SpacesDeviceWorkspaceDiffFileStatus
+    public let isBinary: Bool
+    public let oldSHA: String?
+    public let newSHA: String?
+    /// The immutable target revision that owns `path`, when this file came from a tracked revision-to-revision diff.
+    /// A client can use it to read the post-change file without consulting the mutable working tree.
+    public let targetRevision: String?
+
+    public init(
+        path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, isBinary: Bool = false, oldSHA: String? = nil,
+        newSHA: String? = nil, targetRevision: String? = nil
+    ) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.isBinary = isBinary
+        self.oldSHA = oldSHA
+        self.newSHA = newSHA
+        self.targetRevision = targetRevision
+    }
+}
+
+/// A changed file's stable identity, sent before its patch so an Editor can populate its change tree
+/// immediately and schedule individual patch fetches in viewport order.
+public struct SpacesDeviceWorkspaceDiffManifestFile: Codable, Sendable, Equatable {
+    public let path: String
+    public let oldPath: String?
+    public let status: SpacesDeviceWorkspaceDiffFileStatus
+    /// Immutable old-side tree for on-demand Git-filtered inline-edit hydration.
+    public let comparisonBaseRevision: String?
+
+    public init(path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, comparisonBaseRevision: String? = nil) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.comparisonBaseRevision = comparisonBaseRevision
+    }
+}
+
+/// Requests one bounded, metadata-first manifest chunk. The initial `fileIndex == 0` request omits
+/// `manifestID` and creates a daemon-held enumeration; every later cursor request names that same plan.
+public struct SpacesDeviceWorkspaceDiffManifestChunkRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let refName: String?
+    public let lastCommit: Bool
+    public let manifestID: String?
+    public let fileIndex: Int
+
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String? = nil, fileIndex: Int) {
+        self.workspaceID = workspaceID
+        self.refName = refName
+        self.lastCommit = lastCommit
+        self.manifestID = manifestID
+        self.fileIndex = fileIndex
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, manifestID, fileIndex }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+        manifestID = try container.decodeIfPresent(String.self, forKey: .manifestID)
+        fileIndex = try container.decode(Int.self, forKey: .fileIndex)
+    }
+}
+
+/// One bounded metadata chunk. `fileIndex` is a semantic file cursor, not a serialized-byte offset; the
+/// daemon measures the complete encoded response against its 4 MiB cap before returning it.
+public struct SpacesDeviceWorkspaceDiffManifestChunkResult: Codable, Sendable, Equatable {
+    public let manifestID: String
+    public let scopeSignature: String
+    public let files: [SpacesDeviceWorkspaceDiffManifestFile]
+    public let nextFileIndex: Int?
+
+    public init(manifestID: String, scopeSignature: String, files: [SpacesDeviceWorkspaceDiffManifestFile], nextFileIndex: Int? = nil) {
+        self.manifestID = manifestID
+        self.scopeSignature = scopeSignature
+        self.files = files
+        self.nextFileIndex = nextFileIndex
+    }
+}
+
+/// Requests one bounded byte range of a patch. Offset zero creates an opaque, daemon-owned transfer and
+/// returns its `transferID`; every later range (and an explicit cancellation) names that transfer. This
+/// prevents two panes or refresh generations reading the same path from replacing each other's immutable
+/// patch snapshot. The scope fields deliberately mirror `SpacesDeviceWorkspaceDiffRequest`; the response
+/// carries the snapshot signature and file metadata so a client generation can reconcile ordinary worktree
+/// churn without the daemon rejecting every later range.
+public struct SpacesDeviceWorkspaceDiffFileChunkRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let refName: String?
+    public let lastCommit: Bool
+    /// Opaque id returned by `workspaceDiffManifestChunk`; every file range must name the manifest whose plan
+    /// contains the requested path.
+    public let manifestID: String
+    public let relativePath: String
+    public let byteOffset: Int
+    /// Nil only for the initial zero-offset request. A subsequent request must echo the opaque id returned
+    /// by that request; the daemon rejects ids that do not belong to this workspace/scope/path.
+    public let transferID: String?
+    /// Releases a transfer without reading another range. EOF keeps its final range briefly replayable;
+    /// the next file, explicit release, or the daemon's short TTL removes it.
+    public let cancel: Bool
+
+    public init(
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
+        transferID: String? = nil, cancel: Bool = false
+    ) {
+        self.workspaceID = workspaceID
+        self.refName = refName
+        self.lastCommit = lastCommit
+        self.manifestID = manifestID
+        self.relativePath = relativePath
+        self.byteOffset = byteOffset
+        self.transferID = transferID
+        self.cancel = cancel
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, manifestID, relativePath, byteOffset, transferID, cancel }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+        manifestID = try container.decode(String.self, forKey: .manifestID)
+        relativePath = try container.decode(String.self, forKey: .relativePath)
+        byteOffset = try container.decode(Int.self, forKey: .byteOffset)
+        transferID = try container.decodeIfPresent(String.self, forKey: .transferID)
+        cancel = try container.decodeIfPresent(Bool.self, forKey: .cancel) ?? false
+    }
+}
+
+/// Explicitly releases one daemon-held diff manifest plan and every patch transfer descended
+/// from it. A client sends this when its streaming generation is superseded or complete; daemon TTL
+/// cleanup covers an abandoned client.
+public struct SpacesDeviceWorkspaceDiffManifestReleaseRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let refName: String?
+    public let lastCommit: Bool
+    public let manifestID: String
+
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String) {
+        self.workspaceID = workspaceID
+        self.refName = refName
+        self.lastCommit = lastCommit
+        self.manifestID = manifestID
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, manifestID }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+        manifestID = try container.decode(String.self, forKey: .manifestID)
+    }
+}
+
+/// One bounded raw-patch range. `patchBase64Data` is raw git stdout rather than a lossy string so a
+/// client can decode UTF-8 across chunk boundaries. A non-nil `nextByteOffset` asks it to request the
+/// next range with `transferID`; the daemon never streams a whole generated patch into one response.
+public struct SpacesDeviceWorkspaceDiffFileChunkResult: Codable, Sendable, Equatable {
+    public let scopeSignature: String
+    public let file: SpacesDeviceWorkspaceDiffFileMetadata
+    /// Non-nil when more ranges remain. The client treats it as opaque and returns it unchanged on each
+    /// later request; the id is absent for binary/empty patches that complete in the initial response.
+    public let transferID: String?
+    public let patchBase64Data: String?
+    public let nextByteOffset: Int?
+
+    public init(
+        scopeSignature: String, file: SpacesDeviceWorkspaceDiffFileMetadata, transferID: String? = nil, patchBase64Data: String? = nil,
+        nextByteOffset: Int? = nil
+    ) {
+        self.scopeSignature = scopeSignature
+        self.file = file
+        self.transferID = transferID
+        self.patchBase64Data = patchBase64Data
+        self.nextByteOffset = nextByteOffset
+    }
+}
+
+/// One frame of the `subscribeWorkspaceDiffSignature` stream: notify-then-pull. The daemon pushes this
+/// whenever a workspace/ref scope's `scopeSignature` changes (polled every 2s while subscribed; see
+/// `SpacesDeviceAPIServer` for why polling rather than filesystem watching), and the client re-issues
+/// `workspaceDiffManifestChunk` for its active scope when it sees a new signature. Patch content is fetched
+/// separately in bounded file chunks, so this stream carries only the small signature.
+///
+/// Also broadcast unconditionally (with an unchanged `scopeSignature`) roughly every 20s: this is the
+/// disconnect-detection mechanism for a Linux relay blocked reading a quiet per-scope producer socket (see
+/// `WorkspaceDiffSignatureSubscription`), not a convenience for the client. A client compares
+/// `scopeSignature` against the last one it acted on and ignores a repeat.
+///
+/// `refName`/`lastCommit` mirror the subscribe request's scope (both false/nil for the uncommitted-changes
+/// scope) so a client multiplexing more than one `subscribeWorkspaceDiffSignature` stream for the same
+/// workspace can route an incoming frame to the right one.
+public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let refName: String?
+    public let lastCommit: Bool
+    public let scopeSignature: String
+
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, scopeSignature: String) {
+        self.workspaceID = workspaceID
+        self.refName = refName
+        self.lastCommit = lastCommit
+        self.scopeSignature = scopeSignature
+    }
+
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, scopeSignature }
+
+    /// Mirrors `SpacesDeviceWorkspaceDiffRequest`'s custom decode: absent `lastCommit` decodes as `false`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        refName = try container.decodeIfPresent(String.self, forKey: .refName)
+        lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
+        scopeSignature = try container.decode(String.self, forKey: .scopeSignature)
+    }
+}
+
+/// Identifies one `subscribeWorkspaceFileSignature` request's target: a single workspace-relative path
+/// within one workspace.
+public struct SpacesDeviceWorkspaceFileSignatureRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let path: String
+
+    public init(workspaceID: String, path: String) {
+        self.workspaceID = workspaceID
+        self.path = path
+    }
+}
+
+/// Identifies one `subscribeWorkspaceFileListSignature` request's target: a single workspace's full
+/// `workspaceFileList` contract, with no diff-scope or per-file qualifier.
+public struct SpacesDeviceWorkspaceFileListSignatureRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+/// One frame of the `subscribeWorkspaceFileListSignature` stream: notify-then-pull. The daemon pushes
+/// this whenever the exact `workspaceFileList` result changes for the workspace, and the client
+/// re-issues `workspaceFileList` rather than trusting any listing payload carried on the frame.
+public struct SpacesDeviceWorkspaceFileListSignatureFrame: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let fileListSignature: String
+
+    public init(workspaceID: String, fileListSignature: String) {
+        self.workspaceID = workspaceID
+        self.fileListSignature = fileListSignature
+    }
+}
+
+/// `sha256` is nil iff `missing` is true — the file does not currently exist at `path`. Otherwise `sha256`
+/// is usually the same hash `workspaceFileRead`/`workspaceFileWrite` traffic in, so the web side can
+/// compare it directly against its own CAS baseline without any translation — except when the file exists
+/// but is over the daemon's 10 MiB read cap, in which case `sha256` carries a stable non-hash sentinel
+/// (`"oversized"`) rather than a content hash. No client needs to special-case that value: the web side
+/// treats every frame as a content-free "go look" signal (`EditorView.subscribeToFileSignature`), and the
+/// Swift host only ever compares values for change-detection dedupe, so the sentinel simply never matches
+/// any real CAS baseline — correctly, since the content is not readable at that size.
+public struct SpacesDeviceWorkspaceFileSignatureFrame: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let path: String
+    public let sha256: String?
+    public let missing: Bool
+
+    public init(workspaceID: String, path: String, sha256: String?, missing: Bool) {
+        self.workspaceID = workspaceID
+        self.path = path
+        self.sha256 = sha256
+        self.missing = missing
+    }
+}
+
+/// Which side of a diff a review comment is anchored to, mirroring `workspacecore`'s
+/// `WorkspaceReviewCommentSide` without a cross-module dependency (the Device API wire types stand alone
+/// from the daemon's storage types, same as every other command's payload in this file).
+public enum SpacesDeviceReviewCommentSide: String, Codable, Sendable, Equatable {
+    case old
+    case new
+}
+
+/// One review-comment draft on the wire. Sent-and-archived comments are never returned to a client — v1
+/// has no archive-browsing UI (see docs/spec.md) — so unlike the store's record this carries no `sentAt`.
+/// Carries no `updatedAt` either: nothing in the code pane UI displays it, and the one thing it used to
+/// back — the send endpoint's concurrency check — reads `revision` instead (see
+/// `SpacesDeviceReviewCommentSendEntry`), so keeping a wire-level `updatedAt` around would just be unused
+/// surface. The store's own `WorkspaceReviewCommentRecord.updatedAt` still exists for
+/// display/debugging; it simply isn't echoed to clients.
+public struct SpacesDeviceReviewComment: Codable, Sendable, Equatable {
+    public let id: String
+    public let filePath: String
+    public let side: SpacesDeviceReviewCommentSide
+    public let lineNumber: Int
+    public let lineText: String
+    public let body: String
+    public let createdAt: String
+    public let revision: Int
+
+    public init(
+        id: String, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String, createdAt: String,
+        revision: Int
+    ) {
+        self.id = id
+        self.filePath = filePath
+        self.side = side
+        self.lineNumber = lineNumber
+        self.lineText = lineText
+        self.body = body
+        self.createdAt = createdAt
+        self.revision = revision
+    }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentListRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+
+    public init(workspaceID: String) { self.workspaceID = workspaceID }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentListResult: Codable, Sendable, Equatable {
+    public let comments: [SpacesDeviceReviewComment]
+
+    public init(comments: [SpacesDeviceReviewComment]) { self.comments = comments }
+}
+
+/// Creates a draft when `id` is nil (the server mints a UUID) or updates an existing draft's body/anchor
+/// when `id` names one. The device-API layer rejects an `id` that already belongs to an archived
+/// (sent) comment, so this can never resurrect one as a draft.
+///
+/// Accepted risk (round-12): unlike `SpacesDeviceWorkspaceReviewCommentsSendRequest`'s per-comment
+/// revision CAS, this request carries no revision token, so two panes upserting the SAME draft
+/// concurrently resolve last-write-wins on whichever blur-persist lands last. The revision token guards
+/// `reviewCommentsSend` only. Deliberate: a single user editing the same draft in two panes at once is a
+/// rare edge case, last-write-wins is conventional draft semantics, and a CAS here would need a
+/// conflict-merge UX (what does a pane do with a rejected blur?) disproportionate to the risk.
+public struct SpacesDeviceWorkspaceReviewCommentUpsertRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let id: String?
+    public let filePath: String
+    public let side: SpacesDeviceReviewCommentSide
+    public let lineNumber: Int
+    public let lineText: String
+    public let body: String
+
+    public init(
+        workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String, body: String
+    ) {
+        self.workspaceID = workspaceID
+        self.id = id
+        self.filePath = filePath
+        self.side = side
+        self.lineNumber = lineNumber
+        self.lineText = lineText
+        self.body = body
+    }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentUpsertResult: Codable, Sendable, Equatable {
+    public let comment: SpacesDeviceReviewComment
+
+    public init(comment: SpacesDeviceReviewComment) { self.comment = comment }
+}
+
+public struct SpacesDeviceWorkspaceReviewCommentDeleteRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let id: String
+
+    public init(workspaceID: String, id: String) {
+        self.workspaceID = workspaceID
+        self.id = id
+    }
+}
+
+/// One review comment named in a send request: its id plus the `revision` the caller last saw for it.
+/// The server compares this against the draft's current `revision` before sending anything — see
+/// `SpacesDeviceWorkspaceReviewCommentsSendRequest`'s doc comment — so a client that read a draft, let
+/// it go stale (another edit landed, from this client or another surface), and then sent it without
+/// re-reading first is told so instead of silently sending outdated text. `revision` (not `updatedAt`) is
+/// the token because `updatedAt` has whole-second resolution: two edits inside the same second would
+/// leave it unchanged and let a stale send through undetected, while `revision` increments on every edit.
+public struct SpacesDeviceReviewCommentSendEntry: Codable, Sendable, Equatable {
+    public let id: String
+    public let revision: Int
+
+    public init(id: String, revision: Int) {
+        self.id = id
+        self.revision = revision
+    }
+}
+
+/// Writes `text` to `sessionID`'s terminal input, then — only once that write succeeds — archives every
+/// comment in `comments` whose current `revision` still matches the entry's echoed `revision`. See
+/// `SpacesDeviceAPIServer.handleWorkspaceReviewCommentsSendRequest` for why this is one endpoint rather
+/// than a client-side send-then-archive: the ordering guarantee is that a comment is never archived
+/// unless the text carrying it was actually sent, not the reverse (a sent comment can still fail to
+/// archive if the daemon crashes between the write and `markReviewCommentsSent`, an accepted low-impact
+/// gap — see docs/implementation.md). `text` is pre-formatted by the caller (prompt formatting is a
+/// web-app UX concern, not a daemon one). `comments` must be non-empty; every id must be a draft
+/// belonging to `workspaceID` with a matching `revision`, or the request is rejected before anything is
+/// sent.
+public struct SpacesDeviceWorkspaceReviewCommentsSendRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let text: String
+    public let comments: [SpacesDeviceReviewCommentSendEntry]
+
+    public init(workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry]) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.text = text
+        self.comments = comments
+    }
+}
+
 public struct SpacesDeviceWorkspaceLifecycleRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
 
@@ -1273,8 +1956,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
-        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil,
-        selectionEndRow: UInt32? = nil, selectionRectangle: Bool? = nil
+        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
+        selectionRectangle: Bool? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1375,6 +2058,31 @@ public struct SpacesDeviceServiceTunnelRequest: Codable, Sendable, Equatable {
     public init(workspaceID: String, serviceName: String) {
         self.workspaceID = workspaceID
         self.serviceName = serviceName
+    }
+}
+
+/// Starts an arbitrary command in a new background workspace terminal on a paired device. The command
+/// runs through the workspace's interactive login shell, matching a command typed into a Spaces terminal.
+/// It intentionally does not require a recognized coding-agent executable: foreground detection promotes
+/// a supported agent after it actually starts, while other commands remain ordinary workspace terminals.
+public struct SpacesDeviceStartWorkspaceCommandSessionRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let command: String
+
+    public init(workspaceID: String, command: String) {
+        self.workspaceID = workspaceID
+        self.command = command
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID
+        case command
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        command = try container.decode(String.self, forKey: .command)
     }
 }
 
@@ -1572,6 +2280,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case updateWorkspaceConfig(SpacesDeviceWorkspaceConfigUpdateRequest)
     case updateWorkspaceMetadata(SpacesDeviceWorkspaceMetadataUpdateRequest)
     case openWorkspaceTerminal(SpacesDeviceWorkspaceReference)
+    /// Starts an arbitrary command in a background workspace terminal. Agent classification is deferred
+    /// to the regular foreground detector so the command is never constrained to configured presets.
+    case startWorkspaceCommandSession(SpacesDeviceStartWorkspaceCommandSessionRequest)
     case stopWorkspaceTerminal(SpacesDeviceWorkspaceTerminalRequest)
     /// Stops a workspace terminal only when the daemon finds it idle at a bare shell prompt: the
     /// close of the pane that owned an ad hoc terminal. A terminal with a real foreground process, a
@@ -1632,6 +2343,44 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Ends the still-live coding-agent sessions attributed to a terminal automation run. The remote
     /// counterpart of the profile-socket `automationEndAgents` command; leaves the run status untouched.
     case endAutomationAgents(SpacesDeviceAutomationRunReference)
+    /// Reads one file inside a workspace's checkout, capped at 10 MiB. Read-only.
+    case workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest)
+    /// Reads one file from an explicit immutable Git revision inside a workspace repository, capped at 10 MiB. Read-only.
+    case workspaceRevisionFileRead(SpacesDeviceWorkspaceRevisionFileReadRequest)
+    /// Compare-and-swap write to one file inside a workspace's checkout; see
+    /// `SpacesDeviceWorkspaceFileWriteRequest`.
+    case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteRequest)
+    /// Lists every path inside a workspace's checkout the user would consider part of the workspace; see
+    /// `SpacesDeviceWorkspaceFileListRequest`. Read-only.
+    case workspaceFileList(SpacesDeviceWorkspaceFileListRequest)
+    case workspaceRefList(SpacesDeviceWorkspaceRefListRequest)
+    /// Reads one bounded metadata chunk before the client starts fetching bounded patch ranges.
+    case workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest)
+    /// Releases a daemon-held diff manifest and any unfinished child patch transfers.
+    case workspaceDiffManifestRelease(SpacesDeviceWorkspaceDiffManifestReleaseRequest)
+    case workspaceDiffFileChunk(SpacesDeviceWorkspaceDiffFileChunkRequest)
+    /// Long-lived subscription that streams a workspace/ref scope's `scopeSignature` whenever it changes
+    /// (notify-then-pull; see `SpacesDeviceWorkspaceDiffSignatureFrame`). The client re-issues
+    /// `workspaceDiffManifestChunk` when it sees a new signature. Shares its payload shape with that manifest
+    /// (`refName == nil` scopes to uncommitted changes; a non-nil `refName` scopes to that ref's
+    /// merge-base) since the two commands are subscribing to and fetching the same scope's diff.
+    case subscribeWorkspaceDiffSignature(SpacesDeviceWorkspaceDiffRequest)
+    /// Long-lived subscription that streams a single workspace-relative file's content hash whenever it
+    /// changes (notify-then-pull; see `SpacesDeviceWorkspaceFileSignatureFrame`). Mirrors
+    /// `subscribeWorkspaceDiffSignature`'s architecture but scopes to one file's `sha256`/`missing` state
+    /// rather than a diff scope's `scopeSignature`; the Swift host (not the web app) decides when to
+    /// (re)point this subscription, driven by `workspaceFileRead` completions.
+    case subscribeWorkspaceFileSignature(SpacesDeviceWorkspaceFileSignatureRequest)
+    /// Long-lived subscription that streams one workspace's full `workspaceFileList` signature whenever
+    /// membership changes (notify-then-pull; see `SpacesDeviceWorkspaceFileListSignatureFrame`).
+    case subscribeWorkspaceFileListSignature(SpacesDeviceWorkspaceFileListSignatureRequest)
+    /// Draft review comments for the code pane's diff view (see `SpacesDeviceReviewComment`). Comments
+    /// are DB-backed per the locked v1 architecture decision (survive-restart and iOS/remote-Linux
+    /// parity fall out of daemon-side storage), not held client-side.
+    case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListRequest)
+    case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertRequest)
+    case workspaceReviewCommentDelete(SpacesDeviceWorkspaceReviewCommentDeleteRequest)
+    case workspaceReviewCommentsSend(SpacesDeviceWorkspaceReviewCommentsSendRequest)
 
     public var name: String {
         switch self {
@@ -1659,6 +2408,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .updateWorkspaceConfig: "updateWorkspaceConfig"
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
+        case .startWorkspaceCommandSession: "startWorkspaceCommandSession"
         case .stopWorkspaceTerminal: "stopWorkspaceTerminal"
         case .stopWorkspaceTerminalIfBareShell: "stopWorkspaceTerminalIfBareShell"
         case .renameTerminalSession: "renameTerminalSession"
@@ -1693,6 +2443,21 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .triggerAutomation: "triggerAutomation"
         case .cancelAutomationRun: "cancelAutomationRun"
         case .endAutomationAgents: "endAutomationAgents"
+        case .workspaceFileRead: "workspaceFileRead"
+        case .workspaceRevisionFileRead: "workspaceRevisionFileRead"
+        case .workspaceFileWrite: "workspaceFileWrite"
+        case .workspaceFileList: "workspaceFileList"
+        case .workspaceRefList: "workspaceRefList"
+        case .workspaceDiffManifestChunk: "workspaceDiffManifestChunk"
+        case .workspaceDiffManifestRelease: "workspaceDiffManifestRelease"
+        case .workspaceDiffFileChunk: "workspaceDiffFileChunk"
+        case .subscribeWorkspaceDiffSignature: "subscribeWorkspaceDiffSignature"
+        case .subscribeWorkspaceFileSignature: "subscribeWorkspaceFileSignature"
+        case .subscribeWorkspaceFileListSignature: "subscribeWorkspaceFileListSignature"
+        case .workspaceReviewCommentList: "workspaceReviewCommentList"
+        case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
+        case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
+        case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
         }
     }
 
@@ -1705,6 +2470,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .terminalControl(let payload): payload.sessionID
         case .terminalPasteImage(let payload): payload.sessionID
         case .sendTerminalInput(let payload): payload.sessionID
+        case .workspaceReviewCommentsSend(let payload): payload.sessionID
         case .tailTerminalOutput(let payload): payload.sessionID
         case .terminalTranscript(let payload): payload.sessionID
         case .subscribe(let payload): payload.sessionID
@@ -1730,7 +2496,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     public var isSubscriptionCommand: Bool {
         switch self {
-        case .subscribe, .subscribeDeviceOverview: true
+        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+            .subscribeWorkspaceFileListSignature:
+            true
         default: false
         }
     }
@@ -1740,6 +2508,44 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     public var isDeviceOverviewSubscription: Bool {
         if case .subscribeDeviceOverview = self { return true }
         return false
+    }
+
+    /// True for the per-workspace diff-signature subscription (notify-then-pull; see
+    /// `SpacesDeviceWorkspaceDiffSignatureFrame`), which streams a small change-detection token rather than
+    /// terminal state and is not tied to a terminal session.
+    public var isWorkspaceDiffSignatureSubscription: Bool {
+        if case .subscribeWorkspaceDiffSignature = self { return true }
+        return false
+    }
+
+    /// The (workspace, ref, lastCommit) scope a `subscribeWorkspaceDiffSignature` subscription is for, so
+    /// the transport layer can key its per-scope producer socket without re-decoding the command payload.
+    /// `refName == nil, lastCommit == false` is the uncommitted-changes scope, matching the manifest's
+    /// convention.
+    public var workspaceDiffSignatureScope: (workspaceID: String, refName: String?, lastCommit: Bool)? {
+        if case .subscribeWorkspaceDiffSignature(let payload) = self { return (payload.workspaceID, payload.refName, payload.lastCommit) }
+        return nil
+    }
+
+    /// True for the per-file signature subscription, which streams a single file's content-hash state
+    /// rather than terminal state and is not tied to a terminal session.
+    public var isWorkspaceFileSignatureSubscription: Bool {
+        if case .subscribeWorkspaceFileSignature = self { return true }
+        return false
+    }
+
+    /// The (workspace, path) scope a `subscribeWorkspaceFileSignature` subscription is for, so the
+    /// transport layer can key its per-scope producer socket without re-decoding the command payload.
+    /// Unlike `workspaceDiffSignatureScope`'s `refName`, `path` is not optional — a file-signature
+    /// subscription always names exactly one path.
+    public var workspaceFileSignatureScope: (workspaceID: String, path: String)? {
+        if case .subscribeWorkspaceFileSignature(let payload) = self { return (payload.workspaceID, payload.path) }
+        return nil
+    }
+
+    public var workspaceFileListSignatureWorkspaceID: String? {
+        if case .subscribeWorkspaceFileListSignature(let payload) = self { return payload.workspaceID }
+        return nil
     }
 
     /// True for commands that hand the connection over to a raw byte tunnel after one `ok` response line.
@@ -1753,11 +2559,17 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// treat the connection as request/response after issuing the response.
     public var hijacksConnection: Bool { isSubscriptionCommand || isTunnelCommand }
 
+    // Every case below is a pure read of product state, except the diff stream's daemon-private lifecycle.
+    // Its manifest release and patch cancellation are idempotent cleanup; chunk retries reuse the
+    // manifest-bound patch file (including the retained final range) rather than duplicating a visible
+    // effect. Commands that mutate durable user state stay excluded even if they are read-heavy (e.g.
+    // review-comment upsert/delete/send).
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns:
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList, .workspaceRefList, .workspaceDiffManifestChunk,
+            .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
             true
         default: false
         }
@@ -1790,6 +2602,7 @@ extension SpacesDeviceAPICommand: Codable {
         case updateWorkspaceConfig
         case updateWorkspaceMetadata
         case openWorkspaceTerminal
+        case startWorkspaceCommandSession
         case stopWorkspaceTerminal
         case stopWorkspaceTerminalIfBareShell
         case renameTerminalSession
@@ -1824,6 +2637,21 @@ extension SpacesDeviceAPICommand: Codable {
         case triggerAutomation
         case cancelAutomationRun
         case endAutomationAgents
+        case workspaceFileRead
+        case workspaceRevisionFileRead
+        case workspaceFileWrite
+        case workspaceFileList
+        case workspaceRefList
+        case workspaceDiffManifestChunk
+        case workspaceDiffManifestRelease
+        case workspaceDiffFileChunk
+        case subscribeWorkspaceDiffSignature
+        case subscribeWorkspaceFileSignature
+        case subscribeWorkspaceFileListSignature
+        case workspaceReviewCommentList
+        case workspaceReviewCommentUpsert
+        case workspaceReviewCommentDelete
+        case workspaceReviewCommentsSend
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1867,6 +2695,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateWorkspaceMetadata:
             self = .updateWorkspaceMetadata(try container.decode(SpacesDeviceWorkspaceMetadataUpdateRequest.self, forKey: key))
         case .openWorkspaceTerminal: self = .openWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceReference.self, forKey: key))
+        case .startWorkspaceCommandSession:
+            self = .startWorkspaceCommandSession(try container.decode(SpacesDeviceStartWorkspaceCommandSessionRequest.self, forKey: key))
         case .stopWorkspaceTerminal: self = .stopWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
         case .stopWorkspaceTerminalIfBareShell:
             self = .stopWorkspaceTerminalIfBareShell(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
@@ -1909,6 +2739,32 @@ extension SpacesDeviceAPICommand: Codable {
         case .triggerAutomation: self = .triggerAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
         case .cancelAutomationRun: self = .cancelAutomationRun(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         case .endAutomationAgents: self = .endAutomationAgents(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
+        case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadRequest.self, forKey: key))
+        case .workspaceRevisionFileRead:
+            self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadRequest.self, forKey: key))
+        case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteRequest.self, forKey: key))
+        case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListRequest.self, forKey: key))
+        case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListRequest.self, forKey: key))
+        case .workspaceDiffManifestChunk:
+            self = .workspaceDiffManifestChunk(try container.decode(SpacesDeviceWorkspaceDiffManifestChunkRequest.self, forKey: key))
+        case .workspaceDiffManifestRelease:
+            self = .workspaceDiffManifestRelease(try container.decode(SpacesDeviceWorkspaceDiffManifestReleaseRequest.self, forKey: key))
+        case .workspaceDiffFileChunk:
+            self = .workspaceDiffFileChunk(try container.decode(SpacesDeviceWorkspaceDiffFileChunkRequest.self, forKey: key))
+        case .subscribeWorkspaceDiffSignature:
+            self = .subscribeWorkspaceDiffSignature(try container.decode(SpacesDeviceWorkspaceDiffRequest.self, forKey: key))
+        case .subscribeWorkspaceFileSignature:
+            self = .subscribeWorkspaceFileSignature(try container.decode(SpacesDeviceWorkspaceFileSignatureRequest.self, forKey: key))
+        case .subscribeWorkspaceFileListSignature:
+            self = .subscribeWorkspaceFileListSignature(try container.decode(SpacesDeviceWorkspaceFileListSignatureRequest.self, forKey: key))
+        case .workspaceReviewCommentList:
+            self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListRequest.self, forKey: key))
+        case .workspaceReviewCommentUpsert:
+            self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertRequest.self, forKey: key))
+        case .workspaceReviewCommentDelete:
+            self = .workspaceReviewCommentDelete(try container.decode(SpacesDeviceWorkspaceReviewCommentDeleteRequest.self, forKey: key))
+        case .workspaceReviewCommentsSend:
+            self = .workspaceReviewCommentsSend(try container.decode(SpacesDeviceWorkspaceReviewCommentsSendRequest.self, forKey: key))
         }
     }
 
@@ -1939,6 +2795,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateWorkspaceConfig(let payload): try container.encode(payload, forKey: .updateWorkspaceConfig)
         case .updateWorkspaceMetadata(let payload): try container.encode(payload, forKey: .updateWorkspaceMetadata)
         case .openWorkspaceTerminal(let payload): try container.encode(payload, forKey: .openWorkspaceTerminal)
+        case .startWorkspaceCommandSession(let payload): try container.encode(payload, forKey: .startWorkspaceCommandSession)
         case .stopWorkspaceTerminal(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminal)
         case .stopWorkspaceTerminalIfBareShell(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminalIfBareShell)
         case .renameTerminalSession(let payload): try container.encode(payload, forKey: .renameTerminalSession)
@@ -1973,6 +2830,21 @@ extension SpacesDeviceAPICommand: Codable {
         case .triggerAutomation(let payload): try container.encode(payload, forKey: .triggerAutomation)
         case .cancelAutomationRun(let payload): try container.encode(payload, forKey: .cancelAutomationRun)
         case .endAutomationAgents(let payload): try container.encode(payload, forKey: .endAutomationAgents)
+        case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
+        case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
+        case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
+        case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
+        case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
+        case .workspaceDiffManifestChunk(let payload): try container.encode(payload, forKey: .workspaceDiffManifestChunk)
+        case .workspaceDiffManifestRelease(let payload): try container.encode(payload, forKey: .workspaceDiffManifestRelease)
+        case .workspaceDiffFileChunk(let payload): try container.encode(payload, forKey: .workspaceDiffFileChunk)
+        case .subscribeWorkspaceDiffSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceDiffSignature)
+        case .subscribeWorkspaceFileSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceFileSignature)
+        case .subscribeWorkspaceFileListSignature(let payload): try container.encode(payload, forKey: .subscribeWorkspaceFileListSignature)
+        case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
+        case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
+        case .workspaceReviewCommentDelete(let payload): try container.encode(payload, forKey: .workspaceReviewCommentDelete)
+        case .workspaceReviewCommentsSend(let payload): try container.encode(payload, forKey: .workspaceReviewCommentsSend)
         }
     }
 }
@@ -2005,6 +2877,9 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     public let projectID: String?
     public let workspaceID: String?
     public let sessionID: String?
+    /// The exact terminal session a mutation launched, carried directly so a client can still open it
+    /// even if the refreshed overview no longer lists it by the time the response is built.
+    public let launchedTerminalSession: SpacesDeviceTerminalSessionSummary?
     /// A failure-only report on something the user asked for beyond the mutation itself: deleting a
     /// workspace's branches reports a branch skipped as protected, no branch name recorded, or a git error
     /// deleting the branch. `nil` when there is nothing to report, including when the requested branches
@@ -2019,12 +2894,13 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
 
     public init(
         overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        notice: String? = nil, terminatedTerminalSession: Bool? = nil
+        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil
     ) {
         self.overview = overview
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.sessionID = sessionID
+        self.launchedTerminalSession = launchedTerminalSession
         self.notice = notice
         self.terminatedTerminalSession = terminatedTerminalSession
     }
@@ -2050,6 +2926,15 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case agentSessions(SpacesDeviceAgentSessionsResult)
     case automations(SpacesDeviceAutomationsResult)
     case automationRuns(SpacesDeviceAutomationRunsResult)
+    case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
+    case workspaceRevisionFileRead(SpacesDeviceWorkspaceRevisionFileReadResult)
+    case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteResult)
+    case workspaceFileList(SpacesDeviceWorkspaceFileListResult)
+    case workspaceRefList(SpacesDeviceWorkspaceRefListResult)
+    case workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkResult)
+    case workspaceDiffFileChunk(SpacesDeviceWorkspaceDiffFileChunkResult)
+    case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
+    case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -2073,6 +2958,15 @@ extension SpacesDeviceAPIResult: Codable {
         case agentSessions
         case automations
         case automationRuns
+        case workspaceFileRead
+        case workspaceRevisionFileRead
+        case workspaceFileWrite
+        case workspaceFileList
+        case workspaceRefList
+        case workspaceDiffManifestChunk
+        case workspaceDiffFileChunk
+        case workspaceReviewCommentList
+        case workspaceReviewCommentUpsert
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2101,6 +2995,18 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentSessions: self = .agentSessions(try container.decode(SpacesDeviceAgentSessionsResult.self, forKey: key))
         case .automations: self = .automations(try container.decode(SpacesDeviceAutomationsResult.self, forKey: key))
         case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
+        case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
+        case .workspaceRevisionFileRead: self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadResult.self, forKey: key))
+        case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
+        case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListResult.self, forKey: key))
+        case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListResult.self, forKey: key))
+        case .workspaceDiffManifestChunk:
+            self = .workspaceDiffManifestChunk(try container.decode(SpacesDeviceWorkspaceDiffManifestChunkResult.self, forKey: key))
+        case .workspaceDiffFileChunk: self = .workspaceDiffFileChunk(try container.decode(SpacesDeviceWorkspaceDiffFileChunkResult.self, forKey: key))
+        case .workspaceReviewCommentList:
+            self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListResult.self, forKey: key))
+        case .workspaceReviewCommentUpsert:
+            self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertResult.self, forKey: key))
         }
     }
 
@@ -2126,6 +3032,15 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentSessions(let payload): try container.encode(payload, forKey: .agentSessions)
         case .automations(let payload): try container.encode(payload, forKey: .automations)
         case .automationRuns(let payload): try container.encode(payload, forKey: .automationRuns)
+        case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
+        case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
+        case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
+        case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
+        case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
+        case .workspaceDiffManifestChunk(let payload): try container.encode(payload, forKey: .workspaceDiffManifestChunk)
+        case .workspaceDiffFileChunk(let payload): try container.encode(payload, forKey: .workspaceDiffFileChunk)
+        case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
+        case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         }
     }
 }
@@ -2183,6 +3098,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
 
     public var sessionID: String? { if case .mutation(let payload) = result { payload.sessionID } else { nil } }
 
+    public var launchedTerminalSession: SpacesDeviceTerminalSessionSummary? {
+        if case .mutation(let payload) = result { payload.launchedTerminalSession } else { nil }
+    }
+
     public var terminalLinkMetadata: SpacesDeviceTerminalLinkMetadata? {
         if case .terminalLinkMetadata(let payload) = result { payload } else { nil }
     }
@@ -2206,6 +3125,36 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var automations: [TerminalServiceAutomationSummary]? { if case .automations(let payload) = result { payload.rows } else { nil } }
 
     public var automationRuns: [TerminalServiceAutomationRunSummary]? { if case .automationRuns(let payload) = result { payload.rows } else { nil } }
+
+    public var workspaceFileRead: SpacesDeviceWorkspaceFileReadResult? { if case .workspaceFileRead(let payload) = result { payload } else { nil } }
+
+    public var workspaceRevisionFileRead: SpacesDeviceWorkspaceRevisionFileReadResult? {
+        if case .workspaceRevisionFileRead(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceFileWrite: SpacesDeviceWorkspaceFileWriteResult? {
+        if case .workspaceFileWrite(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceFileList: SpacesDeviceWorkspaceFileListResult? { if case .workspaceFileList(let payload) = result { payload } else { nil } }
+
+    public var workspaceRefList: SpacesDeviceWorkspaceRefListResult? { if case .workspaceRefList(let payload) = result { payload } else { nil } }
+
+    public var workspaceDiffManifestChunk: SpacesDeviceWorkspaceDiffManifestChunkResult? {
+        if case .workspaceDiffManifestChunk(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceDiffFileChunk: SpacesDeviceWorkspaceDiffFileChunkResult? {
+        if case .workspaceDiffFileChunk(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceReviewCommentList: SpacesDeviceWorkspaceReviewCommentListResult? {
+        if case .workspaceReviewCommentList(let payload) = result { payload } else { nil }
+    }
+
+    public var workspaceReviewCommentUpsert: SpacesDeviceWorkspaceReviewCommentUpsertResult? {
+        if case .workspaceReviewCommentUpsert(let payload) = result { payload } else { nil }
+    }
 }
 
 public enum SpacesDeviceAPICodec {

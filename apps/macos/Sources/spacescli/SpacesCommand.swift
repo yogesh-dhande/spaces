@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
-              - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
+              - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the detected agent is ready for input: its foreground kind is identified and its TUI enables bracketed paste (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
               - `agent spawn`/`list`/`status`/`annotate`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
@@ -197,7 +197,7 @@ struct AgentCommand: ParsableCommand {
 /// `open` deep link); missing optional values render as `-`. `deviceID`, when present, qualifies the
 /// `open` deep link so it points at the agent on its paired device (`?device=<id>`). `signaled=`
 /// reports whether the agent has emitted at least one lifecycle hook signal (`lastSignalAt` is set) —
-/// informational hook-health, distinct from spawn's foreground-detection readiness.
+/// informational hook-health, distinct from spawn's input-readiness gate.
 func agentSessionRow(
     terminalSessionID: String, agent: String?, status: String, signaled: Bool, note: String?, projectName: String, workspaceName: String,
     branch: String?, deviceID: String? = nil
@@ -400,10 +400,11 @@ struct AgentSpawnResult: Codable, Equatable {
     }
 }
 
-/// Spawns a coding agent on this machine and blocks until the daemon's foreground classifier identifies
-/// it in the new terminal (readiness = detection, NOT a hook signal). It delivers no prompt: spawn
-/// returns at detection, and the orchestrator sends the prompt with `terminal send text --submit` and
-/// confirms work with `terminal tail`/`agent status`. A child that ends before it is identified fails
+/// Spawns a coding agent on this machine and blocks until the daemon identifies its foreground kind and
+/// its TUI keeps bracketed paste enabled for the input-readiness confirmation (readiness is not a hook
+/// signal). It delivers no prompt: spawn returns when the agent is ready for input, and the orchestrator
+/// sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`.
+/// A child that ends before it is identified fails
 /// the spawn at that moment, reporting its exit and last output. Auto-subscribes the spawning terminal
 /// when the child already has an agent row. Shared by `agent spawn` and the `spaces_agent_spawn` MCP
 /// tool so both block identically.
@@ -420,10 +421,10 @@ func performAgentSpawn(
     let childSessionID = session.id
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
 
-    // Readiness = foreground detection: block until the daemon's classifier identifies a coding agent in
-    // this terminal. This does not wait for a hook signal (a promptless Codex never emits one), and the
-    // agent orchestration row may not exist yet at this point. A child that ends first ends the wait
-    // immediately with its own exit as the cause.
+    // Readiness requires the daemon's foreground classification and a stable bracketed-paste interval from
+    // the agent TUI. It does not wait for a hook signal (a promptless Codex never emits one), and the agent
+    // orchestration row may not exist yet at this point. A child that ends first ends the wait immediately
+    // with its own exit as the cause.
     let detected: TerminalDetectedAgentKind
     switch try AgentSpawnReadiness.awaitReadiness(
         deadline: deadline, pollInterval: pollInterval, snapshot: { try spawnedSessionSnapshot(childSessionID: childSessionID) })
@@ -472,8 +473,8 @@ private func spawnedSessionSnapshot(childSessionID: String) throws -> AgentSpawn
     try snapshotOrPending {
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: try TerminalSessionPaths.forSession(id: childSessionID))
         return .init(
-            detectedKind: runtimeState.foregroundDetectedAgentKind, bracketedPasteActive: runtimeState.bracketedPasteActive,
-            state: runtimeState.state)
+            detectedKind: runtimeState.foregroundDetectedAgentKind, bracketedPasteActive: runtimeState.bracketedPasteActive, state: runtimeState.state
+        )
     }
 }
 
@@ -536,11 +537,11 @@ private func resolvedAgentRowIDIfPresent(forChildTerminalSessionID childSessionI
 }
 
 /// Spawns a coding agent on a paired device and blocks until the device's foreground classifier
-/// identifies it — detection-based readiness, matching the local path. The Device API carries the
-/// daemon's foreground detection over the wire on the terminal session summary
-/// (`SpacesDeviceTerminalSessionSummary.foregroundDetectedAgentKind`), read from the device overview, so
-/// a remote client polls detection and the child's run state just as the local CLI polls the session's
-/// own runtime state — including the fail-fast on a child that ends first. Detection is read from
+/// identifies its foreground kind and its TUI maintains bracketed paste through the input confirmation,
+/// matching the local readiness gate.
+/// The Device API carries both runtime facts over the wire on the terminal session summary, read from the
+/// device overview, so a remote client polls readiness and the child's run state just as the local CLI
+/// polls the session's own runtime state — including the fail-fast on a child that ends first. Detection is read from
 /// the terminal summary, not `listAgentSessions`, because the spawned `.agent` session has no
 /// agent-orchestration row until its first hook signal (a promptless Codex never signals). It delivers
 /// no prompt: the orchestrator sends the prompt through the device terminal-input path and confirms work
@@ -646,28 +647,28 @@ func resolvedAutomationRunID(environment: [String: String] = ProcessInfo.process
 
 struct AgentSpawnCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "spawn", abstract: "Start a coding agent in a new Spaces terminal and block until it is detected running.",
+        commandName: "spawn", abstract: "Start a coding agent in a new Spaces terminal and block until it is ready for input.",
         discussion: """
-            Readiness is foreground detection: spawn returns once the daemon's foreground classifier
-            identifies the coding agent in the new terminal — not when it emits a hook signal (a
-            promptless Codex never does). Hooks are not required to spawn; they enrich live status when
-            present. Spawn delivers no prompt — to give the agent work, the orchestrator sends input
+            Spawn returns when the daemon identifies the coding agent in the new terminal and its TUI
+            enables bracketed paste, which means it is ready for input — not when it emits a hook signal
+            (a promptless Codex never does). Hooks are not required to spawn; they enrich live status
+            when present. Spawn delivers no prompt — to give the agent work, the orchestrator sends input
             with `spaces terminal send text <id> <prompt> --submit` (`--submit` is the provider-neutral
             prompt submit across the supported agent TUIs) and confirms progress with
             `spaces terminal tail <id>` / `spaces agent status`; the orchestrator can also see and answer
-            any first-run trust, onboarding, or auth dialog that spawn's detection cannot. The command
-            runs through an interactive login shell, so it resolves the same binaries a Spaces terminal
-            does. If the command ends without ever being detected spawn fails at that moment and reports
-            the child's exit and last output; if it keeps running but is never detected, spawn errors at
-            the timeout and leaves the session running for inspection with `spaces terminal tail <id>`.
-            --device spawns on a paired device, detected the same way over the Device API.
+            any first-run trust, onboarding, or auth dialog that readiness cannot. The command runs
+            through an interactive login shell, so it resolves the same binaries a Spaces terminal does.
+            If the command ends without ever being detected spawn fails at that moment and reports the
+            child's exit and last output; if it keeps running but never becomes ready for input, spawn
+            errors at the timeout and leaves the session running for inspection with `spaces terminal tail <id>`.
+            --device spawns on a paired device and waits for the same readiness facts over the Device API.
             """)
 
     @Option(name: .long, help: "Command that launches a supported coding agent (\(CodingAgent.commandListText)).") var command: String
     @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory. Required with --device.") var workspace:
         String?
     @Option(name: .long, help: "Window or session title. Defaults to the coding agent's name.") var title: String?
-    @Option(name: .long, help: "Seconds to wait for detection before giving up.") var timeout: Int = 90
+    @Option(name: .long, help: "Seconds to wait for the agent to be ready for input before giving up.") var timeout: Int = 90
     @Option(name: .long, help: "Paired device name or ID. Spawns on that device and requires --workspace. Defaults to this machine.") var device:
         String?
     @Flag(name: .long, help: "Emit machine-readable JSON.") var json = false

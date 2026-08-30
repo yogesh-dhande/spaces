@@ -53,8 +53,8 @@ import Testing
         let expired = GhosttyRemoteSessionStateTimestamp.string(from: now.addingTimeInterval(-600))
         let snapshot = TerminalSessionAttachmentSnapshot(
             clients: [
-                client("owner", kind: .localWindow), client("fresh-viewer", leaseRefreshedAt: fresh), client("expired-viewer", leaseRefreshedAt: expired),
-                client("detached-viewer", leaseRefreshedAt: fresh),
+                client("owner", kind: .localWindow), client("fresh-viewer", leaseRefreshedAt: fresh),
+                client("expired-viewer", leaseRefreshedAt: expired), client("detached-viewer", leaseRefreshedAt: fresh),
             ],
             attachments: [
                 attachment("owner", mode: .owner), attachment("fresh-viewer"), attachment("expired-viewer"),

@@ -298,9 +298,9 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws
-        -> [(sessionID: String, effectiveName: String, launchName: String)]
-    {
+    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws -> [(
+        sessionID: String, effectiveName: String, launchName: String
+    )] {
         var seenSessionIDs = Set<String>()
         return try store.windows(workspaceID: workspaceID).compactMap { window in
             guard !excludingWindowIDs.contains(window.id), window.roleValue == .terminal, terminalHost(for: window.app) == .spaces,

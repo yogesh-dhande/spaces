@@ -206,9 +206,7 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         }
         // The owed flag is the deterministic half of this assertion: the notification count can only show
         // that nothing was posted, while the flag shows the burst was recorded rather than dropped.
-        await TerminalEngineActor.run {
-            XCTAssertTrue(hostBox.value.debugOwesOverviewSignalForMetadata, "the burst leaves exactly one signal owed")
-        }
+        await TerminalEngineActor.run { XCTAssertTrue(hostBox.value.debugOwesOverviewSignalForMetadata, "the burst leaves exactly one signal owed") }
         XCTAssertEqual(counter.value, 0, "no title frame posts an overview signal on its own")
 
         await TerminalEngineActor.run { hostBox.value.debugFlushPendingOverviewSignalForMetadata() }
@@ -258,8 +256,7 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
 
             // The foreground process changing is in the signature, so this write happens for that reason.
             host.debugSetForegroundProcessResolverForTesting { pid in
-                TerminalForegroundProcessSnapshot(
-                    pid: pid, executablePath: "/opt/homebrew/bin/claude", executableName: "claude", argv: ["claude"])
+                TerminalForegroundProcessSnapshot(pid: pid, executablePath: "/opt/homebrew/bin/claude", executableName: "claude", argv: ["claude"])
             }
             host.debugPersistRuntimeState(force: false)
             host.debugDrainPersistenceQueue()

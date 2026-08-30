@@ -1036,8 +1036,7 @@ extension OrchestratorTests {
         let gitdirPrefix = "gitdir: "
         guard gitFile.hasPrefix(gitdirPrefix) else { return XCTFail("linked worktree .git file does not contain a gitdir pointer") }
         let administrativeDirectory = URL(
-            fileURLWithPath: String(gitFile.dropFirst(gitdirPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines),
-            isDirectory: true)
+            fileURLWithPath: String(gitFile.dropFirst(gitdirPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
         try "".write(to: administrativeDirectory.appendingPathComponent("gitdir"), atomically: false, encoding: .utf8)
 
         let worktreeListOutput = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)

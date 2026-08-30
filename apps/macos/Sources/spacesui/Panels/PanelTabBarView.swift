@@ -25,6 +25,12 @@ import systembridge
     var onRenameTab: ((_ tabID: String, _ title: String?) -> Void)?
     /// Split request for the selected tab's focused pane.
     var onSplitFocusedPane: ((PaneSplitDirection) -> Void)?
+    /// Tab-header context menu's "Open Tab in New Window": moves the whole tab (every pane in its
+    /// split) into a fresh global window.
+    var onOpenTabInNewWindow: ((_ tabID: String) -> Void)?
+    /// Tab-header context menu's "Open Selected Pane in New Window": moves only the tab's own
+    /// currently (or most recently) focused pane. Offered only on a tab with more than one pane.
+    var onOpenSelectedPaneInNewWindow: ((_ tabID: String) -> Void)?
 
     private let tabsStack = NSStackView()
     private let scrollView = NSScrollView()
@@ -36,6 +42,10 @@ import systembridge
     private var titlesByTabID: [String: String] = [:]
     private var selectedTabID: String?
     private var tabIDs: [String] = []
+    /// Whether each tab has more than one pane, gating "Open Selected Pane in New Window" in its
+    /// context menu (a single-pane tab has nothing left behind if that pane moves out — the same as
+    /// "Open Tab in New Window").
+    private var hasMultiplePanesByTabID: [String: Bool] = [:]
     /// The tab whose title currently renders as an inline editor.
     private var renamingTabID: String?
     /// A rebuild requested while the rename editor was open, replayed when it ends.
@@ -74,11 +84,13 @@ import systembridge
         scrollView.verticalScrollElasticity = .none
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let splitRightButton = actionButton(
-            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", action: #selector(splitRightClicked))
-        let splitDownButton = actionButton(
-            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", action: #selector(splitDownClicked))
-        let newTabButton = actionButton(symbol: "plus", tooltip: "New terminal tab", identifier: "panel-new-tab", action: #selector(newTabClicked))
+        let splitRightButton = Self.actionButton(
+            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", target: self, action: #selector(splitRightClicked)
+        )
+        let splitDownButton = Self.actionButton(
+            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", target: self, action: #selector(splitDownClicked))
+        let newTabButton = Self.actionButton(
+            symbol: "plus", tooltip: "New terminal tab", identifier: "panel-new-tab", target: self, action: #selector(newTabClicked))
 
         let row = NSStackView(views: [scrollView, splitRightButton, splitDownButton, newTabButton])
         row.orientation = .horizontal
@@ -150,10 +162,12 @@ import systembridge
         return clampedOffset
     }
 
-    private func actionButton(symbol: String, tooltip: String, identifier: String, action: Selector) -> NSButton {
+    /// Shared with `PanelWindowIdentityStripView`, whose split buttons must read identically to
+    /// this strip's own — Option B keeps them in the same 28px row across both chrome kinds.
+    static func actionButton(symbol: String, tooltip: String, identifier: String, target: AnyObject, action: Selector) -> NSButton {
         let button = NSButton(
             image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(
-                .init(pointSize: 10, weight: .medium)) ?? NSImage(), target: self, action: action)
+                .init(pointSize: 10, weight: .medium)) ?? NSImage(), target: target, action: action)
         button.bezelStyle = .inline
         button.isBordered = false
         button.toolTip = tooltip
@@ -163,13 +177,17 @@ import systembridge
         return button
     }
 
-    func update(tabIDs: [String], titlesByTabID: [String: String], selectedTabID: String?) {
+    func update(tabIDs: [String], titlesByTabID: [String: String], selectedTabID: String?, hasMultiplePanesByTabID: [String: Bool] = [:]) {
         // Renders arrive on every layout pass (including overview ticks that changed
         // nothing); only a real change rebuilds the strip.
-        guard tabIDs != self.tabIDs || titlesByTabID != self.titlesByTabID || selectedTabID != self.selectedTabID else { return }
+        guard
+            tabIDs != self.tabIDs || titlesByTabID != self.titlesByTabID || selectedTabID != self.selectedTabID
+                || hasMultiplePanesByTabID != self.hasMultiplePanesByTabID
+        else { return }
         self.tabIDs = tabIDs
         self.titlesByTabID = titlesByTabID
         self.selectedTabID = selectedTabID
+        self.hasMultiplePanesByTabID = hasMultiplePanesByTabID
         requestRebuild()
     }
 
@@ -182,12 +200,16 @@ import systembridge
     /// Clears the strip immediately, bypassing rename-time rebuild deferral used for
     /// ordinary layout refreshes.
     func clear() {
-        guard !tabIDs.isEmpty || !titlesByTabID.isEmpty || selectedTabID != nil || renamingTabID != nil || rebuildDeferredForRename else { return }
+        guard
+            !tabIDs.isEmpty || !titlesByTabID.isEmpty || selectedTabID != nil || renamingTabID != nil || rebuildDeferredForRename
+                || !hasMultiplePanesByTabID.isEmpty
+        else { return }
         renamingTabID = nil
         rebuildDeferredForRename = false
         tabIDs = []
         titlesByTabID = [:]
         selectedTabID = nil
+        hasMultiplePanesByTabID = [:]
         rebuildTabs()
     }
 
@@ -210,11 +232,14 @@ import systembridge
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
-                    onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
+                    hasMultiplePanes: hasMultiplePanesByTabID[tabID] ?? false, onSelect: { [weak self] id in self?.onSelectTab?(id) },
+                    onClose: { [weak self] id in self?.onCloseTab?(id) },
                     onBeginDrag: { [weak self] id, event in self?.beginDragging(tabID: id, event: event) },
                     onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
-                    onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
+                    onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) },
+                    onOpenTabInNewWindow: { [weak self] id in self?.onOpenTabInNewWindow?(id) },
+                    onOpenSelectedPaneInNewWindow: { [weak self] id in self?.onOpenSelectedPaneInNewWindow?(id) }))
         }
     }
 
@@ -400,12 +425,15 @@ import systembridge
 /// focus loss commits, Esc cancels.
 @MainActor private final class PanelTabItemView: NSView, NSTextFieldDelegate {
     private let tabID: String
+    private let hasMultiplePanes: Bool
     private let onSelect: (String) -> Void
     private let onClose: (String) -> Void
     private let onBeginDrag: (String, NSEvent) -> Void
     private let onRenameRequest: (String) -> Void
     private let onRenameCommit: (String, String) -> Void
     private let onRenameCancel: (String) -> Void
+    private let onOpenTabInNewWindow: (String) -> Void
+    private let onOpenSelectedPaneInNewWindow: (String) -> Void
     /// One rename outcome per editor: Esc sets it before the blur that follows, and
     /// removal from the hierarchy can end editing a second time.
     private var renameResolved = false
@@ -418,17 +446,21 @@ import systembridge
     private var widthConstraint: NSLayoutConstraint?
 
     init(
-        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
-        onBeginDrag: @escaping (String, NSEvent) -> Void, onRenameRequest: @escaping (String) -> Void,
-        onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, hasMultiplePanes: Bool, onSelect: @escaping (String) -> Void,
+        onClose: @escaping (String) -> Void, onBeginDrag: @escaping (String, NSEvent) -> Void, onRenameRequest: @escaping (String) -> Void,
+        onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void,
+        onOpenTabInNewWindow: @escaping (String) -> Void, onOpenSelectedPaneInNewWindow: @escaping (String) -> Void
     ) {
         self.tabID = tabID
+        self.hasMultiplePanes = hasMultiplePanes
         self.onSelect = onSelect
         self.onClose = onClose
         self.onBeginDrag = onBeginDrag
         self.onRenameRequest = onRenameRequest
         self.onRenameCommit = onRenameCommit
         self.onRenameCancel = onRenameCancel
+        self.onOpenTabInNewWindow = onOpenTabInNewWindow
+        self.onOpenSelectedPaneInNewWindow = onOpenSelectedPaneInNewWindow
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         setAccessibilityIdentifier("panel-tab-\(tabID)")
@@ -570,6 +602,20 @@ import systembridge
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        let openTab = NSMenuItem(title: "Open Tab in New Window", action: #selector(openTabInNewWindowClicked), keyEquivalent: "")
+        openTab.target = self
+        openTab.image = NSImage(systemSymbolName: "macwindow.badge.plus", accessibilityDescription: nil)
+        menu.addItem(openTab)
+        // Hidden rather than disabled on a single-pane tab: moving its only pane out is exactly
+        // "Open Tab in New Window" above, so offering both would be a confusing duplicate action.
+        if hasMultiplePanes {
+            let openPane = NSMenuItem(
+                title: "Open Selected Pane in New Window", action: #selector(openSelectedPaneInNewWindowClicked), keyEquivalent: "")
+            openPane.target = self
+            openPane.image = NSImage(systemSymbolName: "macwindow.badge.plus", accessibilityDescription: nil)
+            menu.addItem(openPane)
+        }
+        menu.addItem(.separator())
         let rename = NSMenuItem(title: "Rename Tab", action: #selector(renameClicked), keyEquivalent: "")
         rename.target = self
         rename.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
@@ -594,6 +640,10 @@ import systembridge
     }
 
     @objc private func renameClicked() { onRenameRequest(tabID) }
+
+    @objc private func openTabInNewWindowClicked() { onOpenTabInNewWindow(tabID) }
+
+    @objc private func openSelectedPaneInNewWindowClicked() { onOpenSelectedPaneInNewWindow(tabID) }
 
     @objc private func closeClicked() { onClose(tabID) }
 }

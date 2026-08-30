@@ -7,44 +7,20 @@ import workspacecore
 /// private state; the pane content factory itself (`makeTerminalPaneContent`) lives in
 /// `AppKitController.swift` beside the terminal state-model machinery it reuses.
 extension AppKitController {
-    /// The workspace a fresh terminal session in `scope` belongs to: the panel's own
-    /// workspace for a workspace scope, or the focused pane's workspace (falling back to
-    /// the selected workspace) for a global panel window.
-    private func newTerminalWorkspaceID(for scope: PanelScope) -> String? {
-        switch scope {
-        case .workspace(_, let scopeWorkspaceID): return scopeWorkspaceID
-        case .globalWindow:
-            // A global panel's new tab targets the focused pane's workspace.
-            return panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
-        }
-    }
-
-    /// Starts a fresh ad hoc terminal session for the panel's workspace and opens it as
-    /// a new tab (the leader `New terminal` shortcut, direct creation with no picker).
-    func openNewTerminalTab(scope: PanelScope) {
-        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
-        guard beginNewTerminalSessionCreation(workspaceID: workspaceID) else { return }
-        createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
-            guard let self else { return }
-            defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
-            guard let request else { return }
-            self.panelCoordinator.openSessionInNewTab(request, in: scope)
-        }
-    }
-
     /// Picker-backed new tab (⌘T and the workspace tab strip's "+"): choose a
     /// not-yet-open target or create a fresh session; the result lands as a new
-    /// selected, focused tab in the workspace's panel. Only `.workspace` scopes reach
-    /// this (a panel window's "+" creates directly), so the request's workspace panel
-    /// and `scope` are the same panel — the completion routes through the
-    /// open-or-focus chokepoint rather than appending unconditionally, so a session
-    /// that opened elsewhere while the picker was up (panel-window restore, IPC)
-    /// focuses its existing pane instead of duplicating it.
+    /// selected, focused tab in the workspace's panel. Global windows carry no tabs and
+    /// no "+" of their own, so only `.workspace` scopes ever reach this — the
+    /// completion routes through the open-or-focus chokepoint rather than appending
+    /// unconditionally, so a session that opened elsewhere while the picker was up
+    /// (panel-window restore, IPC) focuses its existing pane instead of duplicating it.
     func presentNewTabSessionPicker(scope: PanelScope) {
-        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
-        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
-            guard let self, let request else { return }
-            self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+        guard case .workspace(_, let workspaceID) = scope else { return }
+        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] result in
+            guard let self, let result else { return }
+            switch result {
+            case .terminal(let request): self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+            }
         }
     }
 
@@ -79,6 +55,7 @@ extension AppKitController {
         guard let sessionID = item.sessionID, let request = paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID) else { return }
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }
+
 }
 
 // MARK: - Panel layout persistence
@@ -121,6 +98,12 @@ extension AppKitController {
     /// terminal-session keep-set so dead sessions drop before the panel materializes. Uses the same
     /// contract as live pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell
     /// survives relaunch exactly as it survives a live overview refresh.
+    ///
+    /// Also unconditionally drops every code pane (`keepingWorkspaceKeys: []`): the editor's only
+    /// legitimate placement is the global singleton window (`.globalWindow` scope), so a code pane
+    /// found in a `.workspace`-scope layout can only be a leftover from before that constraint —
+    /// pruned here rather than migrated, since decode-time pruning already carries every other kind of
+    /// staleness in this layout.
     /// - Parameter additionalKeepSessionIDs: Sessions this particular restoration must not prune, beyond
     ///   the recorded holds. A replacement's open restores the panel itself, and when it is processed
     ///   before its predecessor's close there is no hold yet: the open passes its own predecessor here so
@@ -134,7 +117,7 @@ extension AppKitController {
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overview: overview(forWorkspaceID: workspaceID),
             heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement.union(additionalKeepSessionIDs))
-        return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
+        return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: [])
     }
 }
 
@@ -155,19 +138,47 @@ extension AppKitController {
         case open(PanelLayout)
     }
 
-    nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>)
-        -> PanelWindowRestoreDecision
-    {
-        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
+    /// - Parameter retainedWorkspaceKeys: The live `(deviceID, workspaceID)` pairs across every
+    ///   ready device's overview — a global panel window's code panes can reference any workspace, not
+    ///   only one belonging to the window's own scope, unlike a workspace panel's own restore, so this
+    ///   decision (unlike `restoredWorkspacePanelLayout`) prunes code panes against workspace liveness
+    ///   too. A workspace deleted while the app was closed must not reopen its code pane on relaunch.
+    /// - Parameter editorAlreadyOpen: Whether a live global code pane (the Editor) already exists in
+    ///   some other window (`PanelCoordinator.anyGlobalCodePanePlacement()`), evaluated fresh for each
+    ///   pending record so a window this same restore pass just opened counts too. Enforces the Editor
+    ///   singleton against the offline-device race: a persisted window whose code pane's device was
+    ///   unreachable at launch stays pending, and by the time its device reconnects the user may already
+    ///   have opened a fresh Editor via ⌘⌥E — restoring this window's own code pane on top would
+    ///   duplicate the singleton, so it is dropped here instead, same as any other dead pane.
+    /// - Parameter orphanedEditorFallback: A live workspace selected through the same fallback chain
+    ///   used for an Editor whose workspace is deleted while the app is running. Before pruning, a
+    ///   persisted code pane whose workspace disappeared while the app was closed is retargeted here,
+    ///   preserving its pane and window identity. Nil keeps the close-when-no-workspace-remains rule.
+    nonisolated static func panelWindowRestoreDecision(
+        layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>, retainedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>,
+        editorAlreadyOpen: Bool, orphanedEditorFallback: PanelLayoutEngine.WorkspaceKey? = nil
+    ) -> PanelWindowRestoreDecision {
+        guard var layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
         else { return .skip }
         let referencedDeviceIDs = Set(
             PanelLayoutEngine.allPanes(in: layout).map { pane in
                 switch pane.content {
                 case .terminalSession(let deviceID, _): deviceID
+                case .codePane(let deviceID, _): deviceID
                 }
             })
         guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
-        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
+        if !editorAlreadyOpen, let fallback = orphanedEditorFallback, retainedWorkspaceKeys.contains(fallback) {
+            for pane in PanelLayoutEngine.allPanes(in: layout) {
+                guard case .codePane(let deviceID, let workspaceID) = pane.content,
+                    !retainedWorkspaceKeys.contains(.init(deviceID: deviceID, workspaceID: workspaceID))
+                else { continue }
+                layout = PanelLayoutEngine.retargetPane(
+                    paneID: pane.id, to: .codePane(deviceID: fallback.deviceID, workspaceID: fallback.workspaceID), in: layout)
+            }
+        }
+        let pruned = PanelLayoutEngine.prunedLayout(
+            layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: retainedWorkspaceKeys, droppingAllCodePanes: editorAlreadyOpen)
         return pruned.isEmpty ? .discard : .open(pruned)
     }
 
@@ -210,20 +221,66 @@ extension AppKitController {
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
+        // Hidden workspaces stay listed in their device's overview with `isHidden` set, so this is a
+        // deletion-only keep-set exactly like the live overview-driven code-pane prune
+        // (`PanelCoordinator.pruneOpenCodePanes`).
+        let retainedWorkspaceKeys = Set(
+            readySections.flatMap { section in
+                (section.overview?.workspaces ?? []).map { PanelLayoutEngine.WorkspaceKey(deviceID: section.deviceID, workspaceID: $0.id) }
+            })
+        let orphanedEditorFallback = globalEditorFallbackWorkspaceID(excluding: nil, allowedWorkspaceKeys: retainedWorkspaceKeys).map {
+            PanelLayoutEngine.WorkspaceKey(deviceID: $0.deviceID, workspaceID: $0.workspaceID)
+        }
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
+            // Re-read fresh on every iteration, not hoisted above the loop: a `.open` decision below
+            // installs the window's panes synchronously (`restorePanelWindow`), so a code pane this
+            // same pass just restored must already count as "live" for the next pending record.
             switch Self.panelWindowRestoreDecision(
-                layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs)
+                layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs,
+                retainedWorkspaceKeys: retainedWorkspaceKeys, editorAlreadyOpen: panelCoordinator.hasLiveGlobalCodePane,
+                orphanedEditorFallback: orphanedEditorFallback)
             {
             case .waitForDevices: remaining.append(record)
             case .skip: break
             case .discard: try? clientDatabase().deletePanelWindow(id: record.id)
             case .open(let layout):
+                // Keep the row aligned with the effective restored layout. This makes an offline
+                // deletion's Editor retarget durable (and avoids re-pruning dead panes on every launch)
+                // while preserving the stored frame before the window exists to report one itself.
+                if let data = try? JSONEncoder().encode(layout) {
+                    try? clientDatabase().upsertPanelWindow(
+                        .init(id: record.id, layoutJSON: String(decoding: data, as: UTF8.self), frame: record.frame))
+                }
                 let frame = record.frame.map { NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
-                panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: layout, frame: frame)
+                reopenPersistedPanelWindow(record: record, layout: layout, frame: frame)
             }
         }
         pendingPanelWindowRestores = remaining
+    }
+
+    /// Restores one `.open` decision's window, splitting a legacy multi-tab global window (from
+    /// before global windows dropped tabs) into one single-tab window per tab so no tab is lost or
+    /// silently collapsed into another. The record's own id and frame stay with its first tab; every
+    /// other tab gets a freshly minted, persisted row of its own, cascaded off the original frame so
+    /// the split-off windows don't stack exactly on top of one another. Persisting the split result
+    /// (rather than leaving the original multi-tab JSON on disk) makes this a one-time migration: the
+    /// next launch finds only single-tab rows and takes the ordinary, non-splitting branch below.
+    private func reopenPersistedPanelWindow(record: SpacesClientDatabase.PanelWindowRecord, layout: PanelLayout, frame: NSRect?) {
+        guard layout.tabs.count > 1 else {
+            panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: layout, frame: frame)
+            return
+        }
+        let soloLayouts = PanelLayoutEngine.splitIntoSoloTabLayouts(layout)
+        panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: soloLayouts[0], frame: frame)
+        persistPanelLayout(scope: .globalWindow(panelWindowID: record.id), layout: soloLayouts[0])
+        for (offset, soloLayout) in soloLayouts.dropFirst().enumerated() {
+            let newPanelWindowID = UUID().uuidString
+            let cascadedOffset = CGFloat(offset + 1) * 24
+            let newFrame = frame.map { $0.offsetBy(dx: cascadedOffset, dy: -cascadedOffset) }
+            panelCoordinator.restorePanelWindow(panelWindowID: newPanelWindowID, layout: soloLayout, frame: newFrame)
+            persistPanelLayout(scope: .globalWindow(panelWindowID: newPanelWindowID), layout: soloLayout)
+        }
     }
 }
 
@@ -240,17 +297,22 @@ extension AppKitController {
         case startProcess(workspaceID: String, processKey: String, processTemplateID: String?)
     }
 
+    /// What a pane-split/new-tab session picker resolved to. A code pane is never a picker result: it
+    /// has no in-panel placement, so it is never one of the split/new-tab picker's rows — see
+    /// `openOrFocusGlobalEditorWindow` for its one entry point.
+    enum PaneSessionPickerResult { case terminal(DeviceTerminalOpenRequest) }
+
     /// Presents the command palette in session-picker mode for filling a pane split or
-    /// opening a new tab, and delivers the resulting open request (creating a fresh
-    /// session when "New terminal session" is chosen), or nil when dismissed.
-    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
+    /// opening a new tab, and delivers the resulting choice (creating a fresh session when
+    /// "New terminal session" is chosen), or nil when dismissed.
+    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (PaneSessionPickerResult?) -> Void) {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
             scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
         ) { [weak self] choice in
             switch choice {
             case nil: completion(nil)
-            case .existingSession(let request): completion(request)
+            case .existingSession(let request): completion(.terminal(request))
             case .newTerminalSession(let workspaceID):
                 guard let self else {
                     completion(nil)
@@ -263,7 +325,7 @@ extension AppKitController {
                 self.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
                     guard let self else { return }
                     defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
-                    completion(request)
+                    completion(request.map { .terminal($0) })
                 }
             case .startProcess(let workspaceID, let processKey, let processTemplateID):
                 guard let self else {
@@ -271,12 +333,12 @@ extension AppKitController {
                     return
                 }
                 Task { @MainActor in
-                    completion(
-                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
-                            try SpacesDeviceClient.runWorkspaceProcess(
-                                workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                        })
+                    let request = await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
+                        try SpacesDeviceClient.runWorkspaceProcess(
+                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    }
+                    completion(request.map { .terminal($0) })
                 }
             }
         }

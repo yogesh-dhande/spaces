@@ -63,8 +63,7 @@ import Foundation
     /// caller that only wants the existing coupled behavior does not have to spell it out. Pass `false`
     /// explicitly to force-refresh without clearing any device's backoff — see `ReloadRequest`.
     func request(
-        scope: ReloadScope = .fullSnapshot, failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false,
-        bypassesBackoff: Bool? = nil
+        scope: ReloadScope = .fullSnapshot, failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil
     ) {
         let request = ReloadRequest(
             scope: scope, failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh,

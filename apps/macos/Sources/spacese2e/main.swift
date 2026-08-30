@@ -23,14 +23,14 @@ struct SpacesE2ECommand: ParsableCommand {
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
             LookupWorkspaceCommand.self, ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self,
             SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self,
-            RestartWorkspaceProcessCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
-            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
-            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
-            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, TerminalSessionWindowShortcutCommand.self,
-            StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self,
-            TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
+            OpenWorkspaceEditorCommand.self, RestartWorkspaceProcessCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
+            ArchiveWorkspaceCommand.self, HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self,
+            SetWorkspaceBrowserSessionURLsCommand.self, ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self,
+            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self,
+            FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
+            CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
+            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
+            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, SeedPairedDeviceCommand.self, RecordScreenCommand.self, ProfileShowCommand.self,
             ProfileAppOwnerCommand.self, MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
@@ -241,6 +241,19 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
         let workspace = try resolveWorkspace(dir: workspaceDir).workspace
         try IPCNotification.post(IPCNotification.openWorkspaceTerminal, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
         try emitJSON(workspaceSummaryPayload(workspace))
+    }
+}
+
+private struct OpenWorkspaceEditorCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "open-workspace-editor", abstract: "Open the built-in Editor for a workspace through the running app.")
+
+    @Option(name: .long) var workspaceID: String
+
+    func run() throws {
+        guard !workspaceID.isEmpty else { throw ValidationError("--workspace-id must not be empty.") }
+        try IPCNotification.post(IPCNotification.openWorkspaceEditor, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspaceID])
+        try emitJSON(["workspaceID": workspaceID])
     }
 }
 
@@ -502,8 +515,7 @@ private struct MacClientInstallationIDCommand: ParsableCommand {
 }
 
 private struct WindowStackingCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "window-stacking", abstract: "Print the on-screen window stack, front to back.")
+    static let configuration = CommandConfiguration(commandName: "window-stacking", abstract: "Print the on-screen window stack, front to back.")
 
     /// Cross-application z-order (which app's window is above which) is not something any app can observe
     /// about itself; it is only visible through the window server. `CGWindowListCopyWindowInfo` already
@@ -3537,9 +3549,7 @@ private func axCGSizeAttribute(_ element: AXUIElement, attribute: String) -> CGS
 // When applicationPID is provided, target that exact running instance instead of matching by executable
 // name: multiple Spaces profiles (the installed app plus dev worktrees) can all run executables named
 // SpacesApp, and synthetic events must land on the instance the harness itself launched.
-private func targetApplicationWindow(executableName: String, applicationPID: Int32?, windowTitleContains: String?) throws
-    -> TargetApplicationWindow
-{
+private func targetApplicationWindow(executableName: String, applicationPID: Int32?, windowTitleContains: String?) throws -> TargetApplicationWindow {
     let executableName = executableName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !executableName.isEmpty else { throw ValidationError("Missing executable name.") }
     let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -250,6 +250,7 @@ import workspacecore
         hideWindowIssueToast()
         if host.commandPalette.commandPalettePanel?.isVisible == true {
             host.commandPalette.commandPaletteReturnTerminalSessionID = nil
+            host.commandPalette.commandPaletteReturnCodePaneID = nil
             host.commandPalette.commandPaletteReturnApplicationProcessID = nil
             host.commandPalette.dismissCommandPalette()
         }

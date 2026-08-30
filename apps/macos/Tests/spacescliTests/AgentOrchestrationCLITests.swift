@@ -332,7 +332,36 @@ final class AgentOrchestrationCLITests: XCTestCase {
             return .init(detectedKind: reads >= 3 ? .codex : nil, bracketedPasteActive: reads >= 3, state: .running)
         }
         XCTAssertEqual(outcome, .ready(.codex))
-        XCTAssertEqual(reads, 3)
+        XCTAssertEqual(reads, 9)
+    }
+
+    /// DECSET 2004 precedes Claude's usable composer by up to 2.2 seconds. Spawn must not hand the
+    /// orchestrator a session during that measured window: a continuously ready runtime state needs a
+    /// full confirmation interval before the first immediate submit is safe.
+    func testAwaitReadinessRequiresAStableInputReadinessConfirmation() throws {
+        let clock = FakeClock()
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) {
+            reads += 1
+            return .init(detectedKind: .claude, bracketedPasteActive: true, state: .running)
+        }
+        XCTAssertEqual(outcome, .ready(.claude))
+        XCTAssertEqual(reads, 7)
+    }
+
+    func testAwaitReadinessRestartsConfirmationWhenTheTUILosesInputReadiness() throws {
+        let clock = FakeClock()
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) {
+            reads += 1
+            return .init(detectedKind: .claude, bracketedPasteActive: reads != 3, state: .running)
+        }
+        XCTAssertEqual(outcome, .ready(.claude))
+        XCTAssertEqual(reads, 10)
     }
 
     /// The gap this closes: foreground classification fires on process identity, a second or two before
@@ -352,8 +381,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertGreaterThan(reads, 1)
     }
 
-    /// And the wait resolves the moment that same session reports the mode, without needing a fresh
-    /// detection.
+    /// Once the agent enables the mode, the same detected kind needs the full confirmation interval;
+    /// a fresh detection is not required.
     func testAwaitReadinessResolvesWhenADetectedAgentStartsReadingInput() throws {
         var reads = 0
         let outcome = try AgentSpawnReadiness.awaitReadiness(
@@ -363,7 +392,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
             return .init(detectedKind: .claude, bracketedPasteActive: reads >= 2, state: .running)
         }
         XCTAssertEqual(outcome, .ready(.claude))
-        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(reads, 8)
     }
 
     /// Bracketed paste without a detected agent is not readiness either: a plain program that enables the
@@ -446,7 +475,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
             }
         }
         XCTAssertEqual(outcome, .ready(.codex))
-        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(reads, 8)
     }
 
     /// Only the specific unknown-session case is swallowed. A genuinely broken read (a corrupt profile

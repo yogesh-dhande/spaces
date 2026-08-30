@@ -35,6 +35,21 @@ func migrationTableExists(_ handle: OpaquePointer, table: String) throws -> Bool
     return sqlite3_step(statement) == SQLITE_ROW
 }
 
+/// Whether `table` has `column`. This is only needed when two released branches assigned the same
+/// schema version to different additive changes: the reconciliation step must recognize either v18
+/// shape and converge both without losing the data each branch already persisted.
+func migrationColumnExists(_ handle: OpaquePointer, table: String, column: String) throws -> Bool {
+    var statement: OpaquePointer?
+    let sql = "SELECT 1 FROM pragma_table_info(?) WHERE name = ?"
+    guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw SpacesDatabaseError.migrationFailed(message: String(cString: sqlite3_errmsg(handle)))
+    }
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_text(statement, 1, table, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+    sqlite3_bind_text(statement, 2, column, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+    return sqlite3_step(statement) == SQLITE_ROW
+}
+
 public struct DatabaseMigrationStep: Sendable {
     public let fromVersion: Int
     public let toVersion: Int

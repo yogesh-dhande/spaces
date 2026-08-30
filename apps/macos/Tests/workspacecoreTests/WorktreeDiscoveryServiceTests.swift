@@ -17,10 +17,21 @@ import Testing
         private let delay: TimeInterval
         private let onStartEntered: @Sendable () -> Void
         private let queue = DispatchQueue(label: "test.blocking-start-watcher")
+        private let lock = NSLock()
+        private var finishedStart = false
 
         init(delay: TimeInterval, onStartEntered: @escaping @Sendable () -> Void) {
             self.delay = delay
             self.onStartEntered = onStartEntered
+        }
+
+        /// Set on the background queue right before `continuation.resume()`, so the test
+        /// can tell "start() is still blocked" from "start() returned" without racing the
+        /// continuation itself.
+        var hasFinishedStart: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finishedStart
         }
 
         func start() async throws {
@@ -28,6 +39,9 @@ import Testing
                 queue.async {
                     self.onStartEntered()
                     Thread.sleep(forTimeInterval: self.delay)
+                    self.lock.lock()
+                    self.finishedStart = true
+                    self.lock.unlock()
                     continuation.resume()
                 }
             }
@@ -39,7 +53,11 @@ import Testing
     /// The freeze this guards against: the daemon's main actor is its terminal-I/O
     /// engine, and installing a git-project watcher used to run the (slow, IPC-bound)
     /// FSEvents setup synchronously on it. Installs now suspend across the watcher's
-    /// `start()`, so a stalled install must not stall the main actor.
+    /// `start()`, so a stalled install must not stall the main actor. A regressed
+    /// install that awaited `start()` while holding the main actor would still be
+    /// sitting on that await when the round-trips below try to run, so they could not
+    /// complete until `start()` returned — completing them while `start()` is
+    /// unmistakably still blocked is the proof, with no wall-clock bound needed.
     @MainActor @Test func slowWatcherInstallKeepsMainActorResponsive() async throws {
         let repo = try makeTempGitRepo(name: "repo")
         let databaseDirectory = try makeTempDirectory()
@@ -47,12 +65,17 @@ import Testing
         let store = try SQLiteStore(path: databasePath)
         try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
 
-        // Block far longer than the responsiveness bound we assert, so a main-actor
-        // stall would be unmistakable rather than a tight-margin flake.
-        let blockingDelay: TimeInterval = 2
+        // Wall clock can't tell a captive main actor from ordinary scheduler starvation:
+        // Swift Testing runs many sibling @MainActor suites concurrently in one process,
+        // so on a loaded CI runner the round-trips below can queue behind unrelated
+        // main-actor work for well over the old 500ms bound even though this watcher
+        // install never touched the main actor. Block for 20s instead: long enough that
+        // starvation can't plausibly outlast it, and check ordering (start() still
+        // blocked) rather than elapsed time.
+        let blockingDelay: TimeInterval = 20
         let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
-        let service = WorktreeDiscoveryService(
-            databasePath: databasePath, watcherFactory: { _, _, _ in BlockingStartWatcher(delay: blockingDelay) { enteredContinuation.yield() } })
+        let watcher = BlockingStartWatcher(delay: blockingDelay) { enteredContinuation.yield() }
+        let service = WorktreeDiscoveryService(databasePath: databasePath, watcherFactory: { _, _, _ in watcher })
 
         service.start()
         defer { service.stop() }
@@ -62,11 +85,12 @@ import Testing
         _ = await iterator.next()
 
         // With the install stalled on a background thread, the main actor must stay
-        // free: several round-trips through its executor complete in a fraction of the
-        // blocking delay.
-        let clock = ContinuousClock()
-        let elapsed = await clock.measure { for _ in 0..<5 { await Task { @MainActor in }.value } }
-        #expect(elapsed < .milliseconds(500))
+        // free: several round-trips through its executor complete on their own.
+        for _ in 0..<5 { await Task { @MainActor in }.value }
+
+        // Proof that the round-trips above did not simply wait out the install: start()
+        // has not returned yet.
+        #expect(watcher.hasFinishedStart == false)
     }
 
     /// Thread-safe tally of watchers built by the injected factory. `created` counts

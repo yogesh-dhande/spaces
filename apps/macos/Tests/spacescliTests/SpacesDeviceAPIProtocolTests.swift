@@ -223,9 +223,66 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "file:///tmp/a")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 128)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .workspaceDiffManifestChunk(.init(workspaceID: "workspace-1", fileIndex: 0)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceDiffManifestRelease(.init(workspaceID: "workspace-1", manifestID: "manifest-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceDiffFileChunk(
+                    .init(workspaceID: "workspace-1", manifestID: "manifest-1", relativePath: "README.md", byteOffset: 0)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceRevisionFileRead(
+                    .init(workspaceID: "workspace-1", revision: String(repeating: "a", count: 40), relativePath: "README.md")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
+    func testWorkspaceRevisionFileReadRoundTripsThroughTheProtocol() throws {
+        let revision = String(repeating: "a", count: 40)
+        let request = SpacesDeviceAPIRequest(
+            command: .workspaceRevisionFileRead(
+                .init(workspaceID: "workspace-1", revision: revision, relativePath: "Sources/App.swift", oldPath: "Sources/OldApp.swift")),
+            authToken: "SECRET")
+        let response = SpacesDeviceAPIResponse(
+            ok: true, message: "Read workspace revision file.",
+            result: .workspaceRevisionFileRead(.init(
+                worktreeFile: .init(base64Data: "d29ya3RyZWU=", sha256: "worktree-sha", size: 8, isBinaryGuess: false),
+                isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: "aGVsbG8=")))
+
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+        let decodedResponse = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+        XCTAssertEqual(decodedResponse, response)
+        XCTAssertEqual(decodedResponse.workspaceRevisionFileRead?.worktreeFile.sha256, "worktree-sha")
+        XCTAssertEqual(decodedResponse.workspaceRevisionFileRead?.comparisonOldBase64Data, "aGVsbG8=")
+    }
+
+    func testDiffManifestChunkRequiresAnExplicitSemanticFileIndex() {
+        let data = Data(#"{"workspaceID":"workspace-1"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(SpacesDeviceWorkspaceDiffManifestChunkRequest.self, from: data))
+    }
+
+    /// `.workspaceReviewCommentList` is a pure read (its handler only SELECTs from the review-comment
+    /// store), so it joins `.workspaceFileRead`/the workspace diff manifest as safe to replay after a
+    /// dropped/stale persistent socket. The sibling mutation commands must stay excluded: an upsert/delete/
+    /// send is not idempotent on the wire, so a blind replay could double-create or double-send.
+    func testWorkspaceReviewCommentListIsReplaySafeButItsMutationsAreNot() throws {
+        let listRequest = SpacesDeviceAPIRequest(command: .workspaceReviewCommentList(.init(workspaceID: "workspace-1")), authToken: "SECRET")
+        XCTAssertTrue(listRequest.isSafeToReplayAfterConnectionFailure)
+
+        let upsertRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentUpsert(
+                .init(workspaceID: "workspace-1", filePath: "a.swift", side: .new, lineNumber: 1, lineText: "let x = 1", body: "comment")),
+            authToken: "SECRET")
+        XCTAssertFalse(upsertRequest.isSafeToReplayAfterConnectionFailure)
+
+        let deleteRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentDelete(.init(workspaceID: "workspace-1", id: "comment-1")), authToken: "SECRET")
+        XCTAssertFalse(deleteRequest.isSafeToReplayAfterConnectionFailure)
+
+        let sendRequest = SpacesDeviceAPIRequest(
+            command: .workspaceReviewCommentsSend(.init(workspaceID: "workspace-1", sessionID: "session-1", text: "please address", comments: [])),
+            authToken: "SECRET")
+        XCTAssertFalse(sendRequest.isSafeToReplayAfterConnectionFailure)
     }
 
     func testMutatingRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {

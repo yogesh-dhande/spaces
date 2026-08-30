@@ -19,6 +19,7 @@ BUILD_CMD="${BUILD_CMD:-'$ROOT_DIR/scripts/swiftpm.sh' build}"
 SPACES_APP="${SPACES_APP:-$MACOS_DIR/.build/debug/SpacesApp}"
 SPACES_CLI="${SPACES_CLI:-$MACOS_DIR/.build/debug/spaces}"
 SPACES_E2E_CLI="${SPACES_E2E_CLI:-$MACOS_DIR/.build/debug/spacese2e}"
+SPACESD_EXECUTABLE="${SPACESD_EXECUTABLE:-$MACOS_DIR/.build/debug/spacesd}"
 REMOTE_DEVICE_E2E_SCRIPT="$MACOS_DIR/Tests/e2e_remote_device_api.sh"
 GHOSTTYKIT_XCFRAMEWORK="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$MACOS_DIR/.local/ghosttykit/GhosttyKit.xcframework}"
 if [[ ! -d "$GHOSTTYKIT_XCFRAMEWORK" ]]; then
@@ -83,6 +84,7 @@ LANTERN_BRANCH_WORKSPACE_NOTES="Redesign the API error console hero section"
 MOCK_AGENT_TERMINAL_TITLE="Mock Agent"
 MOCK_AGENT_LABEL="Coding Agent"
 SPACES_PID=""
+CODE_PANE_RESOURCE_SAMPLER_PID=""
 CAFFEINATE_PID=""
 RECORDER_PID=""
 UNRELATED_CHROME_WINDOW_ID=""
@@ -98,6 +100,14 @@ SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
 ONLY_WINDOW_CYCLE_PROFILE=0
 ONLY_WINDOW_CYCLE_SMALL=0
+ONLY_CODE_PANE=0
+ONLY_CODE_PANE_STREAMING=0
+ONLY_CODE_PANE_SOAK=0
+ONLY_CODE_PANE_CHURN=0
+SPACES_CODE_PANE_SOAK_SECONDS="${SPACES_CODE_PANE_SOAK_SECONDS:-1800}"
+SPACES_CODE_PANE_CHURN_ITERATIONS="${SPACES_CODE_PANE_CHURN_ITERATIONS:-8}"
+SPACES_CODE_PANE_LOCAL_LATENCY_BUDGET_MS="${SPACES_CODE_PANE_LOCAL_LATENCY_BUDGET_MS:-3000}"
+SPACES_CODE_PANE_REMOTE_LATENCY_BUDGET_MS="${SPACES_CODE_PANE_REMOTE_LATENCY_BUDGET_MS:-8000}"
 PROFILE_RECORD_METRICS=1
 # Service names are DNS-safe labels; the port each service binds is injected as SPACES_<SERVICE>_PORT.
 APP_SERVICE_NAME="app"
@@ -133,6 +143,8 @@ REMOTE_DEVICE_PROJECT_ID=""
 REMOTE_DEVICE_WORKSPACE_ID=""
 REMOTE_DEVICE_DEFAULT_WORKSPACE_ID=""
 REMOTE_DEVICE_WEB_BROWSER_URL=""
+REMOTE_DEVICE_WORKSPACE_DIR=""
+CODE_PANE_RESOURCE_LOG="$TMP_ROOT/code-pane-resources.tsv"
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
 : >"$EVENT_LOG"
@@ -159,6 +171,10 @@ cleanup() {
   # recorder. Recording mode intentionally starts from a minimized desktop.
   stop_screen_recording
   stop_desktop_awake_assertion
+  if [[ -n "$CODE_PANE_RESOURCE_SAMPLER_PID" ]]; then
+    kill "$CODE_PANE_RESOURCE_SAMPLER_PID" >/dev/null 2>&1 || true
+    wait "$CODE_PANE_RESOURCE_SAMPLER_PID" >/dev/null 2>&1 || true
+  fi
   "$SPACES_E2E_CLI" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   close_unrelated_chrome_window || true
@@ -229,6 +245,7 @@ record_case_result() {
   fi
   [[ -n "$duration_ms" ]] || duration_ms="-"
   python3 - "$RESULTS_LOG" "$name" "$status" "$duration_ms" "$detail" <<'PY'
+import subprocess
 import sys
 from pathlib import Path
 
@@ -292,6 +309,10 @@ Options:
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
   --only-window-cycle-profile    Run only the single-workspace focus/cycle profiling path.
   --only-window-cycle-small      Run only the small local+remote app-side window-cycle profiling loop.
+  --only-code-pane               Run code-pane local/remote correctness and scale profiling.
+  --only-code-pane-streaming     Run progressive-diff and inline right-side editing coverage.
+  --only-code-pane-churn         Compare multi-worktree agent churn with the Editor visible and closed.
+  --only-code-pane-soak          Run the alternating local/remote code-pane soak.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
@@ -324,6 +345,25 @@ parse_args() {
         ;;
       --only-window-cycle-small)
         ONLY_WINDOW_CYCLE_SMALL=1
+        shift
+        ;;
+      --only-code-pane)
+        ONLY_CODE_PANE=1
+        shift
+        ;;
+      --only-code-pane-streaming)
+        ONLY_CODE_PANE=1
+        ONLY_CODE_PANE_STREAMING=1
+        shift
+        ;;
+      --only-code-pane-soak)
+        ONLY_CODE_PANE=1
+        ONLY_CODE_PANE_SOAK=1
+        shift
+        ;;
+      --only-code-pane-churn)
+        ONLY_CODE_PANE=1
+        ONLY_CODE_PANE_CHURN=1
         shift
         ;;
       --transition-pause-seconds)
@@ -394,12 +434,14 @@ build_binaries() {
     require_file "$SPACES_APP"
     require_file "$SPACES_CLI"
     require_file "$SPACES_E2E_CLI"
+    require_file "$SPACESD_EXECUTABLE"
     return 0
   fi
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
   require_file "$SPACES_APP"
   require_file "$SPACES_CLI"
   require_file "$SPACES_E2E_CLI"
+  require_file "$SPACESD_EXECUTABLE"
 }
 
 stop_stale_fixture_port_listeners() {
@@ -635,7 +677,7 @@ launch_spaces() {
   log_step "launching Spaces with isolated HOME=$TMP_HOME"
   : >"$APP_LOG"
   APP_LOG_SEARCH_FROM_LINE=1
-  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" SPACESD_EXECUTABLE="$MACOS_DIR/.build/debug/spacesd" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" SPACESD_EXECUTABLE="$SPACESD_EXECUTABLE" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
   ensure_profile_spaces_owner "$SPACES_PID"
   start_desktop_awake_assertion
@@ -655,6 +697,33 @@ wait_for_spaces_launch_ready() {
     sleep 0.1
   done
   fail "timed out waiting for Spaces launch readiness"
+}
+
+# The launch hotkey becomes available before the optional setup flow has handed the window back to
+# the workspace UI. Code-pane-only lanes open the seeded workspace through the CLI, so wait for the
+# same sidebar row a user would see first. If the coding-agent step is offered, skip it through its
+# real accessibility control; this keeps the fixture focused on code-pane behavior without making
+# an implicit product decision or adding a timing delay.
+wait_for_code_pane_workspace_ready() {
+  local workspace_id="$1"
+  # SetupFlowController's documented local-agent probe is 25 seconds. The generic action timeout is
+  # shorter, so allow that probe to finish and then the same ordinary UI-render bound for the main
+  # workspace. Keep polling both controls throughout the combined window so a setup screen rendered
+  # on the probe boundary is still driven through its real Skip/Continue action.
+  local setup_status_timeout_seconds=25
+  local deadline=$((SECONDS + setup_status_timeout_seconds + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ui_identifier_exists "sidebar-workspace-title-$workspace_id"; then
+      return 0
+    fi
+    if ui_identifier_exists "setup-coding-agents-skip"; then
+      ui_click_identifier "setup-coding-agents-skip" || true
+    elif ui_identifier_exists "setup-coding-agents-continue"; then
+      ui_click_identifier "setup-coding-agents-continue" || true
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for seeded code-pane workspace row: $workspace_id"
 }
 
 activate_spaces_pid() {
@@ -964,10 +1033,12 @@ seed_remote_device_for_macos() {
   REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
   REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
   REMOTE_DEVICE_DEFAULT_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "defaultWorkspaceID")"
+  REMOTE_DEVICE_WORKSPACE_DIR="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceDir")"
   REMOTE_DEVICE_WEB_BROWSER_URL="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteWebBrowserURL")"
   [[ -n "$REMOTE_DEVICE_PROJECT_ID" ]] || fail "remote Device API result missing projectID"
   [[ -n "$REMOTE_DEVICE_WORKSPACE_ID" ]] || fail "remote Device API result missing workspaceID"
   [[ -n "$REMOTE_DEVICE_DEFAULT_WORKSPACE_ID" ]] || fail "remote Device API result missing defaultWorkspaceID"
+  [[ -n "$REMOTE_DEVICE_WORKSPACE_DIR" ]] || fail "remote Device API result missing workspaceDir"
   [[ -n "$REMOTE_DEVICE_WEB_BROWSER_URL" ]] || fail "remote Device API result missing remoteWebBrowserURL"
 }
 
@@ -1109,7 +1180,99 @@ remote_device_ssh() {
   if [[ -n "${SPACES_E2E_REMOTE_SSH_USER:-}" ]]; then
     destination="$SPACES_E2E_REMOTE_SSH_USER@$destination"
   fi
-  ssh "${args[@]}" "$destination" "$@"
+  local remote_command="${1:?missing remote command}"
+  shift
+  # Tailscale SSH can report exit 0 even when the remote command failed, so every remote E2E action
+  # appends a one-shot completion marker on stderr and this wrapper refuses a response that does not echo it.
+  local marker="__spaces_remote_ssh_ok_${RANDOM}_$$_${RANDOM}__"
+  local stdout_file stderr_file status_file stdin_file=""
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stdout.XXXXXX")" || return 1
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stderr.XXXXXX")" || {
+    rm -f "$stdout_file"
+    return 1
+  }
+  status_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-status.XXXXXX")" || {
+    rm -f "$stdout_file" "$stderr_file"
+    return 1
+  }
+  # SSH consumes stdin on each attempt. Preserve heredoc/pipe input once so a marker-missing
+  # retry executes the same remote program instead of an empty `python3 -` that exits successfully.
+  # A terminal has no buffered program input and retains SSH's ordinary interactive stdin behavior.
+  if [[ ! -t 0 ]]; then
+    stdin_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stdin.XXXXXX")" || {
+      rm -f "$stdout_file" "$stderr_file" "$status_file"
+      return 1
+    }
+    if ! cat >"$stdin_file"; then
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      return 1
+    fi
+  fi
+  local attempt max_attempts ssh_status remote_status
+  max_attempts=3
+  for attempt in 1 2 3; do
+    : >"$stdout_file"
+    : >"$stderr_file"
+    : >"$status_file"
+    ssh_status=0
+    if [[ -n "$stdin_file" ]]; then
+      ssh "${args[@]}" "$destination" "{ $remote_command; }; spaces_rc=\$?; printf '%s %s\\n' '$marker' \"\$spaces_rc\" >&2" "$@" \
+        <"$stdin_file" >"$stdout_file" 2>"$stderr_file" \
+        || ssh_status=$?
+    else
+      ssh "${args[@]}" "$destination" "{ $remote_command; }; spaces_rc=\$?; printf '%s %s\\n' '$marker' \"\$spaces_rc\" >&2" "$@" \
+        >"$stdout_file" 2>"$stderr_file" \
+        || ssh_status=$?
+    fi
+    if (( ssh_status == 0 )) && strip_remote_device_ssh_success_marker "$stderr_file" "$marker" "$status_file"; then
+      remote_status="$(cat "$status_file")"
+      if [[ "$remote_status" == "0" ]]; then
+        break
+      fi
+      cat "$stdout_file" >&2
+      cat "$stderr_file" >&2
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      return "$remote_status"
+    fi
+    if (( attempt == max_attempts )); then
+      cat "$stderr_file" >&2
+      echo "Remote SSH command did not confirm completion after ${max_attempts} attempts: $remote_command" >&2
+      cat "$stdout_file" >&2
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      # A transport that returns 0 without our completion marker is not a successful command.
+      # Preserve a real SSH failure when present, otherwise make the exhausted marker failure
+      # observable to the caller instead of accidentally returning success.
+      if (( ssh_status != 0 )); then
+        return "$ssh_status"
+      fi
+      return 1
+    fi
+  done
+  cat "$stderr_file" >&2
+  rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+}
+
+strip_remote_device_ssh_success_marker() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+
+marker_path = Path(sys.argv[1])
+marker_prefix = sys.argv[2].encode("utf-8") + b" "
+status_path = Path(sys.argv[3])
+data = marker_path.read_bytes()
+lines = data.splitlines(keepends=True)
+if not lines:
+    raise SystemExit(1)
+tail = lines[-1]
+if not tail.startswith(marker_prefix):
+    raise SystemExit(1)
+status = tail[len(marker_prefix):].strip()
+if not status.isdigit():
+    raise SystemExit(1)
+status_path.write_text(status.decode("utf-8"), encoding="utf-8")
+marker_path.write_bytes(b"".join(lines[:-1]))
+PY
 }
 
 remote_device_wait_service_port_state() {
@@ -1500,8 +1663,8 @@ PY
 }
 
 create_mock_agent_script() {
-  local project_dir="$1"
-  local script_path="$project_dir/.spaces-e2e-mock-agent"
+  local project_dir="$1" script_suffix="${2:-}"
+  local script_path="$project_dir/.spaces-e2e-mock-agent${script_suffix:+-$script_suffix}"
   python3 - "$script_path" "$SPACES_CLI" "$EVENT_LOG" <<'PY'
 import os
 import sys
@@ -1538,12 +1701,16 @@ PY
 # session id, which is how the row is addressed until its focus name resolves.
 start_mock_agent_terminal_session() {
   local workspace_dir="$1"
-  local agent_script session_json
-  agent_script="$(create_mock_agent_script "$workspace_dir")"
+  local terminal_title="${2:-$MOCK_AGENT_TERMINAL_TITLE}"
+  local agent_script session_json script_suffix
+  # Keep concurrent fixtures on separate script files: Bash reads a script lazily, so rewriting a
+  # shared path while the first mock agent is sleeping can truncate its remaining lifecycle hooks.
+  script_suffix="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  agent_script="$(create_mock_agent_script "$workspace_dir" "$script_suffix")"
   session_json="$TMP_ROOT/mock-agent-session.json"
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
     "$SPACES_E2E_CLI" start-workspace-terminal-session --workspace-dir "$workspace_dir" \
-    --title "$MOCK_AGENT_TERMINAL_TITLE" --command "$agent_script" >"$session_json" \
+    --title "$terminal_title" --command "$agent_script" >"$session_json" \
     || fail "failed to start the mock coding agent terminal session in $workspace_dir"
   json_get "$session_json" "id"
 }
@@ -1791,6 +1958,9 @@ on elementMatchesIdentifier(targetElement, targetID)
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
     end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
   end tell
   return false
 end elementMatchesIdentifier
@@ -1836,6 +2006,20 @@ end run
 APPLESCRIPT
 }
 
+wait_and_click_ui_identifier() {
+  local identifier="$1" description="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  # Search and press in the same accessibility traversal. A separate wait followed by a second
+  # traversal can lose the node while a large streamed CodeView subtree is being attached.
+  while (( SECONDS < deadline )); do
+    if ui_click_identifier "$identifier" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting to click UI identifier: $description ($identifier)"
+}
+
 ui_identifier_exists() {
   local identifier="$1"
   osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT' >/dev/null 2>/dev/null
@@ -1843,6 +2027,9 @@ on elementMatchesIdentifier(targetElement, targetID)
   tell application "System Events"
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
     end try
   end tell
   return false
@@ -1907,6 +2094,10 @@ on firstMatchingIdentifier(targetElement, targetPrefix)
       if idVal starts with targetPrefix then return idVal
     end try
     try
+      set idVal to (value of attribute "AXDOMIdentifier" of targetElement) as text
+      if idVal starts with targetPrefix then return idVal
+    end try
+    try
       repeat with childElement in UI elements of targetElement
         set foundID to my firstMatchingIdentifier(childElement, targetPrefix)
         if foundID is not "" then return foundID
@@ -1962,6 +2153,9 @@ on elementMatchesIdentifier(targetElement, targetID)
   tell application "System Events"
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
     end try
   end tell
   return false
@@ -2033,6 +2227,9 @@ on elementMatchesIdentifier(targetElement, targetID)
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
     end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
   end tell
   return false
 end elementMatchesIdentifier
@@ -2073,14 +2270,301 @@ end run
 APPLESCRIPT
 }
 
-ui_select_popup_identifier() {
+# Pierre's inline editor is a contenteditable element. Assigning its AXValue changes the
+# accessibility snapshot but does not dispatch the input events that enable Save. Paste through
+# the focused editor instead, preserving the user's clipboard even when AppleScript fails. Keep
+# this keyboard path scoped to code-pane editors; the generic setter remains the right operation
+# for ordinary native/WebKit form controls.
+ui_replace_code_pane_editor_value() {
   local identifier="$1"
   local value="$2"
-  osascript - "$SPACES_PID" "$identifier" "$value" <<'APPLESCRIPT'
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  # Pierre may replace the contenteditable between an accessibility wait and the next traversal.
+  # Keep locating, focusing, selecting, and typing in one attempt so a replacement can only make
+  # an attempt miss; the next attempt starts from the current editor node.
+  while (( SECONDS < deadline )); do
+    activate_spaces_pid "$SPACES_PID"
+    if osascript - "$SPACES_PID" "$identifier" "$value" >/dev/null 2>&1 <<'APPLESCRIPT'
 on elementMatchesIdentifier(targetElement, targetID)
   tell application "System Events"
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on focusAndReplaceIdentifier(targetElement, targetID, targetValue)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      set focused of targetElement to true
+      key code 0 using {command down}
+      key code 9 using {command down}
+    end tell
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my focusAndReplaceIdentifier(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my focusAndReplaceIdentifier(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end focusAndReplaceIdentifier
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  set targetValue to item 3 of argv
+  set savedClipboard to the clipboard
+  try
+    set the clipboard to targetValue
+    set replaced to false
+    tell application "System Events"
+      repeat with proc in every process whose unix id is targetPID
+        set frontmost of proc to true
+        repeat with targetWindow in windows of proc
+          try
+            perform action "AXRaise" of targetWindow
+          end try
+          if my focusAndReplaceIdentifier(targetWindow, targetID, targetValue) then
+            set replaced to true
+            exit repeat
+          end if
+        end repeat
+        if replaced then exit repeat
+      end repeat
+    end tell
+    if not replaced then error "identifier not found: " & targetID
+    -- Cmd+V is delivered to WebKit asynchronously; let its input event consume the temporary
+    -- clipboard before restoring the user's original contents.
+    delay 0.1
+    set the clipboard to savedClipboard
+  on error errorMessage number errorNumber
+    try
+      set the clipboard to savedClipboard
+    end try
+    error errorMessage number errorNumber
+  end try
+end run
+APPLESCRIPT
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out replacing code-pane editor value: $identifier"
+}
+
+# Sends navigation keystrokes to the current code-pane editor rather than whichever application
+# happens to be frontmost. Pierre can replace its editor node while a large diff is settling, so
+# activation, lookup, focus, and all four Page Downs stay in one retried accessibility operation.
+ui_page_down_code_pane_editor() {
+  local identifier="$1"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    activate_spaces_pid "$SPACES_PID"
+    if osascript - "$SPACES_PID" "$identifier" >/dev/null 2>&1 <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on focusAndPageDown(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      set focused of targetElement to true
+      repeat 4 times
+        key code 121
+      end repeat
+    end tell
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my focusAndPageDown(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my focusAndPageDown(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end focusAndPageDown
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      repeat with targetWindow in windows of proc
+        try
+          perform action "AXRaise" of targetWindow
+        end try
+        if my focusAndPageDown(targetWindow, targetID) then return
+      end repeat
+    end repeat
+  end tell
+  error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out sending Page Down to code-pane editor: $identifier"
+}
+
+# Reads an accessibility property from one WebKit-backed control. Keeping this at the AX boundary
+# makes the Editor lanes assert the user-visible state (including disabled/focused controls) rather
+# than reaching into the page's private JavaScript state.
+ui_identifier_attribute() {
+  local identifier="$1"
+  local attribute="$2"
+  osascript - "$SPACES_PID" "$identifier" "$attribute" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on valueForMatchingIdentifier(targetElement, targetID, attributeName)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      try
+        return (value of attribute attributeName of targetElement) as text
+      end try
+    end tell
+    return ""
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        set foundValue to my valueForMatchingIdentifier(childElement, targetID, attributeName)
+        if foundValue is not "__spaces_e2e_not_found__" then return foundValue
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        set foundValue to my valueForMatchingIdentifier(childElement, targetID, attributeName)
+        if foundValue is not "__spaces_e2e_not_found__" then return foundValue
+      end repeat
+    end try
+  end tell
+  return "__spaces_e2e_not_found__"
+end valueForMatchingIdentifier
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  set attributeName to item 3 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        set foundValue to my valueForMatchingIdentifier(targetWindow, targetID, attributeName)
+        if foundValue is not "__spaces_e2e_not_found__" then return foundValue
+      end repeat
+    end repeat
+  end tell
+  error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+}
+
+assert_ui_identifier_attribute() {
+  local identifier="$1" attribute="$2" expected="$3" description="${4:-$identifier}"
+  local actual
+  actual="$(ui_identifier_attribute "$identifier" "$attribute")"
+  [[ "$actual" == "$expected" ]] || fail "$description $attribute expected=$expected actual=$actual"
+}
+
+assert_ui_identifier_attribute_contains() {
+  local identifier="$1" attribute="$2" expected_fragment="$3" description="${4:-$identifier}"
+  local actual
+  actual="$(ui_identifier_attribute "$identifier" "$attribute")"
+  [[ "$actual" == *"$expected_fragment"* ]] || fail "$description $attribute did not contain '$expected_fragment': $actual"
+}
+
+wait_for_ui_identifier_attribute_contains() {
+  local identifier="$1" attribute="$2" expected_fragment="$3" description="${4:-$identifier}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local actual
+    actual="$(ui_identifier_attribute "$identifier" "$attribute" 2>/dev/null || true)"
+    if [[ "$actual" == *"$expected_fragment"* ]]; then return 0; fi
+    sleep 0.2
+  done
+  fail "timed out waiting for $description $attribute to contain '$expected_fragment'"
+}
+
+wait_for_ui_identifier_absent() {
+  local identifier="$1" description="${2:-$identifier}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! ui_identifier_exists "$identifier"; then return 0; fi
+    sleep 0.2
+  done
+  fail "timed out waiting for UI identifier to disappear: $description ($identifier)"
+}
+
+wait_for_ui_identifier_attribute() {
+  local identifier="$1" attribute="$2" expected="$3" description="${4:-$identifier}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(ui_identifier_attribute "$identifier" "$attribute" 2>/dev/null || true)" == "$expected" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for $description $attribute=$expected"
+}
+
+ui_select_popup_identifier() {
+  local identifier="$1"
+  local value="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  # Find and select in one AX traversal. The agent toolbar can be rebuilt while
+  # hook status changes, so a separate existence check can succeed just before
+  # the selector disappears. This is a WebKit HTML select (not an AppKit popup),
+  # so set its AX value directly instead of looking for an AppKit menu child.
+  # Retrying the atomic action handles the lifecycle boundary without weakening
+  # the selection assertion.
+  while (( SECONDS < deadline )); do
+    if osascript - "$SPACES_PID" "$identifier" "$value" 2>/dev/null <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
     end try
   end tell
   return false
@@ -2089,8 +2573,8 @@ end elementMatchesIdentifier
 on selectMatchingPopupValue(targetElement, targetID, targetValue)
   if my elementMatchesIdentifier(targetElement, targetID) then
     tell application "System Events"
-      click targetElement
-      click menu item targetValue of menu 1 of targetElement
+      set focused of targetElement to true
+      set value of targetElement to targetValue
     end tell
     return true
   end if
@@ -2123,6 +2607,12 @@ on run argv
   error "identifier not found: " & targetID
 end run
 APPLESCRIPT
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out selecting popup value '$value' from $identifier"
 }
 
 ui_double_click_identifier() {
@@ -2132,6 +2622,9 @@ on elementMatchesIdentifier(targetElement, targetID)
   tell application "System Events"
     try
       if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
     end try
   end tell
   return false
@@ -6344,6 +6837,1407 @@ run_agent_status_assertions() {
   pass_case
 }
 
+prepare_code_pane_local_diff() {
+  local workspace_dir="$1" size_bytes="$2" marker="$3"
+  python3 - "$workspace_dir/code-pane-scale.txt" "$size_bytes" "$marker" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+size = int(sys.argv[2])
+marker = sys.argv[3]
+line = f"{marker} code pane render scale payload --------------------------------\n"
+payload = (line * (size // len(line) + 1))[:size]
+path.write_text(payload, encoding="ascii")
+PY
+}
+
+prepare_code_pane_remote_diff() {
+  local workspace_dir="$1" size_bytes="$2" marker="$3" quoted_dir
+  quoted_dir="$(shell_quote "$workspace_dir")"
+  remote_device_ssh "python3 - $quoted_dir $(shell_quote "$size_bytes") $(shell_quote "$marker")" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]) / "code-pane-scale.txt"
+size = int(sys.argv[2])
+marker = sys.argv[3]
+line = f"{marker} code pane render scale payload --------------------------------\n"
+payload = (line * (size // len(line) + 1))[:size]
+path.write_text(payload, encoding="ascii")
+PY
+}
+
+wait_for_code_pane_metric() {
+  local workspace_id="$1" kind="$2" trigger="$3" start_line="$4"
+  wait_for_app_log_pattern_from_line \
+    "spaces: perf metric=code_pane_${kind}_render workspace=${workspace_id} target=trigger=${trigger} success=1 elapsed_ms=" \
+    "$start_line"
+}
+
+wait_for_code_pane_progressive_complete() {
+  local workspace_id="$1" start_line="$2"
+  # Every refresh publishes its manifest before patch bytes and closes with one completion
+  # milestone. Waiting for both keeps refresh assertions tied to the current protocol rather than
+  # accepting an obsolete one-shot initial/scope/live-refresh event.
+  wait_for_code_pane_metric "$workspace_id" diff manifest "$start_line" >/dev/null
+  wait_for_code_pane_metric "$workspace_id" diff complete "$start_line"
+}
+
+assert_code_pane_metric_has_content() {
+  local line="$1" context="$2" files content_bytes
+  files="$(extract_metric_field "$line" "files")"
+  content_bytes="$(extract_metric_field "$line" "content_bytes")"
+  [[ "$files" =~ ^[0-9]+$ && "$content_bytes" =~ ^[0-9]+$ ]] || fail "$context emitted malformed size metadata: $line"
+  (( files > 0 && content_bytes > 0 )) || fail "$context rendered no real diff content: $line"
+}
+
+assert_code_pane_latency_budget() {
+  local elapsed_ms="$1" host="$2" context="$3" budget
+  if [[ "$host" == "local" ]]; then
+    budget="$SPACES_CODE_PANE_LOCAL_LATENCY_BUDGET_MS"
+  else
+    budget="$SPACES_CODE_PANE_REMOTE_LATENCY_BUDGET_MS"
+  fi
+  (( elapsed_ms <= budget )) || fail "$context latency ${elapsed_ms}ms exceeded ${host} budget ${budget}ms"
+}
+
+record_code_pane_metric() {
+  local line="$1" metric="$2" host="$3" scale="$4" enforce_budget="${5:-1}" elapsed_ms fetch_ms phase_ms phase_field phase_metric
+  elapsed_ms="$(extract_metric_field "$line" "elapsed_ms")"
+  if [[ "$enforce_budget" == "1" ]]; then
+    assert_code_pane_latency_budget "$elapsed_ms" "$host" "$metric/$scale"
+  fi
+  record_metric_sample "$metric" "$elapsed_ms" "$host" "$scale"
+  fetch_ms="$(extract_metric_field "$line" "fetch_ms")"
+  if [[ "$fetch_ms" =~ ^[0-9]+$ ]]; then
+    record_metric_sample "code_pane.diff_fetch" "$fetch_ms" "$host" "$scale"
+    record_metric_sample "code_pane.diff_dom_to_paint" "$((elapsed_ms - fetch_ms))" "$host" "$scale"
+  fi
+  for phase_field in bridge_ms decode_ms update_ms paint_ms; do
+    phase_ms="$(extract_metric_field "$line" "$phase_field")"
+    if [[ "$phase_ms" =~ ^[0-9]+$ ]]; then
+      phase_metric="code_pane.diff_${phase_field%_ms}"
+      record_metric_sample "$phase_metric" "$phase_ms" "$host" "$scale"
+    fi
+  done
+}
+
+record_code_pane_resource_snapshot() {
+  local phase="$1" host="$2" scale="$3" include_fds="${4:-1}"
+  python3 - "$SPACES_PID" "$CODE_PANE_RESOURCE_LOG" "$phase" "$host" "$scale" "$include_fds" <<'PY'
+import ctypes
+import subprocess
+import sys
+import time
+
+root_pid = int(sys.argv[1])
+output_path, phase, host, scale, include_fds = sys.argv[2:]
+rows = []
+for raw in subprocess.check_output(
+    ["ps", "-axo", "pid=,ppid=,rss=,%cpu=,time=,comm="], text=True
+).splitlines():
+    parts = raw.strip().split(None, 5)
+    if len(parts) != 6:
+        continue
+    try:
+        rows.append((int(parts[0]), int(parts[1]), int(parts[2]), float(parts[3]), parts[4], parts[5]))
+    except ValueError:
+        continue
+
+def cpu_time_ms(value):
+    days = 0
+    if "-" in value:
+        day_text, value = value.split("-", 1)
+        days = int(day_text)
+    raw_fields = value.split(":")
+    fields = [int(field) for field in raw_fields[:-1]] + [float(raw_fields[-1])]
+    if len(fields) == 2:
+        hours, minutes, seconds = 0, fields[0], fields[1]
+    else:
+        hours, minutes, seconds = fields
+    return int(((days * 24 + hours) * 3600 + minutes * 60 + seconds) * 1000)
+
+children = {}
+for row in rows:
+    children.setdefault(row[1], []).append(row[0])
+owned = {root_pid}
+frontier = [root_pid]
+while frontier:
+    pid = frontier.pop()
+    for child in children.get(pid, []):
+        if child not in owned:
+            owned.add(child)
+            frontier.append(child)
+
+# WebKit XPC services are launchd-owned rather than descendants. macOS places an app and the XPC
+# services acting on its behalf in the same process coalitions, so compare the kernel's two
+# coalition identifiers instead of guessing from process names or machine-wide launch timing.
+class CoalitionInfo(ctypes.Structure):
+    _fields_ = [("coalition_id", ctypes.c_uint64 * 2), ("reserved", ctypes.c_uint64 * 3)]
+
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+
+def coalition_ids(pid):
+    info = CoalitionInfo()
+    copied = libproc.proc_pidinfo(pid, 20, 0, ctypes.byref(info), ctypes.sizeof(info))
+    return tuple(info.coalition_id) if copied == ctypes.sizeof(info) else None
+
+root_coalitions = coalition_ids(root_pid)
+webkit_owned = {
+    row[0]
+    for row in rows
+    if root_coalitions is not None
+    and "/com.apple.WebKit." in row[5]
+    and coalition_ids(row[0]) == root_coalitions
+}
+selected = [
+    row for row in rows
+    if row[0] in owned or row[0] in webkit_owned
+]
+rss_kb = sum(row[2] for row in selected)
+cpu_pct = sum(row[3] for row in selected)
+cpu_ms = sum(cpu_time_ms(row[4]) for row in selected)
+threads = -1
+fd_count = -1
+if include_fds == "1":
+    try:
+        pids = ",".join(str(row[0]) for row in selected)
+        fd_count = max(len(subprocess.check_output(["lsof", "-n", "-P", "-a", "-p", pids], text=True).splitlines()) - 1, 0)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+    threads = 0
+    for row in selected:
+        try:
+            threads += max(len(subprocess.check_output(["ps", "-M", "-p", str(row[0])], text=True).splitlines()) - 1, 0)
+        except subprocess.CalledProcessError:
+            pass
+with open(output_path, "a", encoding="utf-8") as handle:
+    handle.write(f"{int(time.time() * 1000)}\t{phase}\t{host}\t{scale}\t{rss_kb}\t{cpu_pct:.2f}\t{cpu_ms}\t{threads}\t{fd_count}\t{len(selected)}\n")
+PY
+}
+
+start_code_pane_resource_sampling() {
+  local phase="$1" host="$2" scale="$3"
+  [[ -z "$CODE_PANE_RESOURCE_SAMPLER_PID" ]] || fail "code-pane resource sampler is already running"
+  (
+    while true; do
+      record_code_pane_resource_snapshot "$phase" "$host" "$scale" 0
+      sleep 0.2
+    done
+  ) &
+  CODE_PANE_RESOURCE_SAMPLER_PID=$!
+}
+
+stop_code_pane_resource_sampling() {
+  [[ -n "$CODE_PANE_RESOURCE_SAMPLER_PID" ]] || return 0
+  kill "$CODE_PANE_RESOURCE_SAMPLER_PID" >/dev/null 2>&1 || true
+  wait "$CODE_PANE_RESOURCE_SAMPLER_PID" >/dev/null 2>&1 || true
+  CODE_PANE_RESOURCE_SAMPLER_PID=""
+}
+
+capture_code_pane_vmmap() {
+  local label="$1"
+  mkdir -p "$PROFILE_ARTIFACT_DIR"
+  vmmap -summary "$SPACES_PID" >"$PROFILE_ARTIFACT_DIR/code-pane-${label}-vmmap.txt" 2>>"$DEBUG_LOG" || true
+}
+
+click_code_pane_relative() {
+  local offset_x="$1" offset_y="$2"
+  osascript - "$SPACES_PID" "$offset_x" "$offset_y" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set offsetX to (item 2 of argv) as integer
+  set offsetY to (item 3 of argv) as integer
+  tell application "System Events"
+    set proc to first process whose unix id is targetPID
+    repeat 20 times
+      try
+        set targetWindows to every window of proc
+        repeat with targetWindow in targetWindows
+          set windowTitle to ""
+          set windowTitle to (name of targetWindow) as text
+          if windowTitle starts with "Editor — " then
+            set frontmost of proc to true
+            perform action "AXRaise" of targetWindow
+            set windowPosition to position of targetWindow
+            click at {((item 1 of windowPosition) + offsetX), ((item 2 of windowPosition) + offsetY)}
+            return
+          end if
+        end repeat
+      end try
+      delay 0.1
+    end repeat
+  end tell
+  error "code pane window not found"
+end run
+APPLESCRIPT
+}
+
+click_code_pane_mode() {
+  case "$1" in
+    # The code-pane toolbar exposes stable DOM identifiers. Press those instead of aiming at the
+    # compact global window's chrome: a mode switch is supposed to preserve the comparison scope,
+    # so this test must not turn a shifted coordinate into a misleading scope failure.
+    Diff) wait_and_click_ui_identifier "code-pane-mode-diff" "Code Pane Diff mode" ;;
+    Editor) wait_and_click_ui_identifier "code-pane-mode-editor" "Code Pane Editor mode" ;;
+    *) fail "unknown code-pane mode: $1" ;;
+  esac
+}
+
+choose_code_pane_scope() {
+  local scope="$1" scope_identifier
+  case "$scope" in
+    Uncommitted) scope_identifier="code-pane-scope-uncommitted" ;;
+    "Last commit") scope_identifier="code-pane-scope-last-commit" ;;
+    *) fail "unknown code-pane scope: $scope" ;;
+  esac
+  wait_and_click_ui_identifier "code-pane-scope-menu" "Code Pane scope menu"
+  wait_and_click_ui_identifier "$scope_identifier" "Code Pane $scope scope"
+}
+
+open_code_pane_file() {
+  local path="$1"
+  click_code_pane_mode "Editor"
+  sleep 0.5
+  # Give the WKWebView first-responder status before sending the Monaco shortcut.
+  # Raising the native window alone is insufficient when the mode switch has just
+  # replaced the diff DOM with the editor DOM.
+  click_code_pane_relative 500 200
+  sleep 0.2
+  osascript - "$SPACES_PID" "$path" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetPath to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      key code 35 using command down
+      delay 0.5
+      keystroke targetPath
+      delay 0.8
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+  CODE_PANE_EDITOR_REQUESTED_AT="$(timestamp_ms)"
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      key code 36
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+}
+
+open_code_pane_quick_open_query() {
+  local path="$1"
+  click_code_pane_relative 500 200
+  sleep 0.2
+  osascript - "$SPACES_PID" "$path" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetPath to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      key code 35 using command down
+      delay 0.5
+      keystroke targetPath
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+}
+
+submit_code_pane_quick_open_selection() {
+  CODE_PANE_EDITOR_REQUESTED_AT="$(timestamp_ms)"
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      key code 36
+      return
+    end repeat
+  end tell
+  error "Spaces process not found"
+end run
+APPLESCRIPT
+}
+
+open_and_measure_code_pane_file() {
+  local workspace_id="$1" host="$2" scale="$3" path="$4" record_sample="${5:-1}"
+  local line wall_ms log_start_line
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  start_code_pane_resource_sampling "editor-render" "$host" "$scale"
+  open_code_pane_file "$path"
+  line="$(wait_for_code_pane_metric "$workspace_id" editor fileOpen "$log_start_line")"
+  stop_code_pane_resource_sampling
+  # Exclude the deterministic quick-open focus and typing delays: the product
+  # latency begins when the user submits the selected path.
+  wall_ms="$(( $(timestamp_ms) - CODE_PANE_EDITOR_REQUESTED_AT ))"
+  if [[ "$record_sample" == "1" ]]; then
+    record_code_pane_metric "$line" "code_pane.editor_open_to_first_render.internal" "$host" "$scale"
+    assert_code_pane_latency_budget "$wall_ms" "$host" "editor open wall/$scale"
+    record_metric_sample "code_pane.editor_open_to_first_render.wall" "$wall_ms" "$host" "$scale"
+  fi
+  click_code_pane_mode "Diff"
+}
+
+open_code_pane_for_workspace() {
+  local workspace_id="$1" host="$2" scale="$3" enforce_budget="${4:-1}" started_at manifest_line complete_line wall_ms log_start_line
+  wait_for_ui_identifier "sidebar-workspace-title-$workspace_id" "$host code-pane workspace row"
+  started_at="$(timestamp_ms)"
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  start_code_pane_resource_sampling "workspace-switch" "$host" "$scale"
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_id" >"$TMP_ROOT/open-code-pane-${host}.json"
+  # Diff loading is progressive: the manifest establishes the sidebar/file order, then each
+  # patch paints independently, and completion marks the first complete diff generation. The
+  # completion metric is the workspace-switch render milestone because a manifest has no content
+  # bytes to validate.
+  manifest_line="$(wait_for_code_pane_metric "$workspace_id" diff manifest "$log_start_line")"
+  record_code_pane_stream_metric "$manifest_line" "code_pane.workspace_switch_to_manifest" "$host" "$scale"
+  complete_line="$(wait_for_code_pane_metric "$workspace_id" diff complete "$log_start_line")"
+  stop_code_pane_resource_sampling
+  wall_ms="$(( $(timestamp_ms) - started_at ))"
+  assert_code_pane_metric_has_content "$complete_line" "$host complete render"
+  record_code_pane_metric "$complete_line" "code_pane.workspace_switch_to_first_render.internal" "$host" "$scale" "$enforce_budget"
+  if [[ "$enforce_budget" == "1" ]]; then
+    assert_code_pane_latency_budget "$wall_ms" "$host" "workspace switch wall/$scale"
+  fi
+  record_metric_sample "code_pane.workspace_switch_to_first_render.wall" "$wall_ms" "$host" "$scale"
+}
+
+profile_code_pane_scales() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4"
+  local -a labels=(tiny medium large)
+  local -a sizes=(4096 131072 786432)
+  local total_iterations=$((REAL_SYSTEM_PROFILE_WARMUPS + REAL_SYSTEM_PROFILE_REPETITIONS))
+  local scale_index iteration marker line log_start_line
+  for scale_index in "${!labels[@]}"; do
+    for (( iteration = 1; iteration <= total_iterations; iteration++ )); do
+      marker="${host}-${labels[$scale_index]}-${iteration}-$(timestamp_ms)"
+      log_start_line=$(( $(app_log_line_count) + 1 ))
+      start_code_pane_resource_sampling "diff-render" "$host" "${labels[$scale_index]}"
+      if [[ "$remote" == "1" ]]; then
+        prepare_code_pane_remote_diff "$workspace_dir" "${sizes[$scale_index]}" "$marker"
+      else
+        prepare_code_pane_local_diff "$workspace_dir" "${sizes[$scale_index]}" "$marker"
+      fi
+      line="$(wait_for_code_pane_progressive_complete "$workspace_id" "$log_start_line")"
+      stop_code_pane_resource_sampling
+      assert_code_pane_metric_has_content "$line" "$host ${labels[$scale_index]} render"
+      record_code_pane_resource_snapshot "render" "$host" "${labels[$scale_index]}"
+      if (( iteration > REAL_SYSTEM_PROFILE_WARMUPS )); then
+        record_code_pane_metric "$line" "code_pane.diff_render" "$host" "${labels[$scale_index]}"
+        open_and_measure_code_pane_file "$workspace_id" "$host" "${labels[$scale_index]}" "code-pane-scale.txt"
+      else
+        open_and_measure_code_pane_file "$workspace_id" "$host" "${labels[$scale_index]}" "code-pane-scale.txt" 0
+      fi
+    done
+  done
+}
+
+assert_code_pane_resource_growth() {
+  python3 - "$CODE_PANE_RESOURCE_LOG" <<'PY'
+import sys
+
+rows = []
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        fields = line.rstrip().split("\t")
+        if len(fields) == 10:
+            rows.append(fields)
+if len(rows) < 2:
+    raise SystemExit("not enough code-pane resource samples")
+rss = [int(row[4]) for row in rows]
+cpu = [float(row[5]) for row in rows]
+warm_start_index = next((index for index, row in enumerate(rows) if row[1] == "warm-baseline"), None)
+if warm_start_index is None:
+    raise SystemExit("code-pane resource samples are missing the post-render warm baseline")
+warm_rss_start = int(rows[warm_start_index][4])
+growth_mb = (rss[-1] - warm_rss_start) / 1024
+cold_allocation_mb = (warm_rss_start - rss[0]) / 1024
+cpu_sorted = sorted(cpu)
+p95 = cpu_sorted[min(int(len(cpu_sorted) * 0.95), len(cpu_sorted) - 1)]
+print(
+    f"Code pane resources: cold_rss={rss[0] / 1024:.1f}MiB warm_rss={warm_rss_start / 1024:.1f}MiB "
+    f"cold_allocation={cold_allocation_mb:.1f}MiB rss_end={rss[-1] / 1024:.1f}MiB "
+    f"warm_growth={growth_mb:.1f}MiB cpu_p95={p95:.1f}%"
+)
+if growth_mb > 200:
+    raise SystemExit(f"warmed code-pane process-tree RSS grew by {growth_mb:.1f} MiB (budget 200 MiB)")
+if p95 > 300:
+    raise SystemExit(f"code-pane process-tree CPU p95 was {p95:.1f}% (budget 300%)")
+PY
+}
+
+close_editor_window() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    set proc to first process whose unix id is targetPID
+    repeat with targetWindow in (every window of proc)
+      try
+        if ((name of targetWindow) as text) starts with "Editor — " then
+          perform action "AXClose" of targetWindow
+          return
+        end if
+      end try
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+  # Closing the Editor deactivates its WKWebView; let that teardown settle before
+  # recording the hidden arm's baseline.
+  sleep 1
+}
+
+prepare_local_churn_workspaces() {
+  python3 - "$@" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+for raw in sys.argv[1:]:
+    root = Path(raw)
+    churn = root / ".spaces-e2e-churn"
+    churn.mkdir(exist_ok=True)
+    for index in range(16):
+        (churn / f"agent-{index:02d}.txt").write_text(f"baseline {index}\n" * 256, encoding="ascii")
+    subprocess.run(["git", "-C", str(root), "add", ".spaces-e2e-churn"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "Seed code pane churn fixture"],
+        check=True,
+    )
+PY
+}
+
+prepare_remote_churn_workspaces() {
+  local quoted_args="" workspace_dir
+  for workspace_dir in "$@"; do quoted_args+=" $(shell_quote "$workspace_dir")"; done
+  remote_device_ssh "python3 -$quoted_args" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+for raw in sys.argv[1:]:
+    root = Path(raw)
+    churn = root / ".spaces-e2e-churn"
+    churn.mkdir(exist_ok=True)
+    for index in range(16):
+        (churn / f"agent-{index:02d}.txt").write_text(f"baseline {index}\n" * 256, encoding="ascii")
+    subprocess.run(["git", "-C", str(root), "add", ".spaces-e2e-churn"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "Seed code pane churn fixture"],
+        check=True,
+    )
+PY
+}
+
+churn_local_workspaces() {
+  local iteration="$1"
+  shift
+  python3 - "$iteration" "$@" <<'PY'
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+iteration = sys.argv[1]
+roots = [Path(raw) for raw in sys.argv[2:]]
+
+def rewrite(root):
+    for index in range(16):
+        line = f"agent-churn iteration={iteration} file={index:02d} workspace={root.name} " + ("x" * 960) + "\n"
+        (root / ".spaces-e2e-churn" / f"agent-{index:02d}.txt").write_text(line * 16, encoding="ascii")
+
+with ThreadPoolExecutor(max_workers=len(roots)) as pool:
+    list(pool.map(rewrite, roots))
+PY
+}
+
+churn_remote_workspaces() {
+  local iteration="$1" quoted_args="" workspace_dir
+  shift
+  for workspace_dir in "$@"; do quoted_args+=" $(shell_quote "$workspace_dir")"; done
+  remote_device_ssh "python3 - $(shell_quote "$iteration")$quoted_args" <<'PY'
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+iteration = sys.argv[1]
+roots = [Path(raw) for raw in sys.argv[2:]]
+
+def rewrite(root):
+    for index in range(16):
+        line = f"agent-churn iteration={iteration} file={index:02d} workspace={root.name} " + ("x" * 960) + "\n"
+        (root / ".spaces-e2e-churn" / f"agent-{index:02d}.txt").write_text(line * 16, encoding="ascii")
+
+with ThreadPoolExecutor(max_workers=len(roots)) as pool:
+    list(pool.map(rewrite, roots))
+PY
+}
+
+run_code_pane_churn_arm() {
+  local host="$1" workspace_id="$2" remote="$3" visibility="$4" arm="$5" open_editor="$6"
+  shift 6
+  local -a workspace_dirs=("$@")
+  local iteration log_start_line line
+
+  if [[ "$visibility" == "visible" ]]; then
+    if [[ "$open_editor" == "1" ]]; then
+      open_code_pane_for_workspace "$workspace_id" "$host" "churn-$arm" 0
+      record_code_pane_resource_snapshot "warm-baseline" "$host" "multi-worktree"
+    fi
+  else
+    close_editor_window
+  fi
+  record_code_pane_resource_snapshot "churn-$visibility-$arm-start" "$host" "multi-worktree"
+  start_code_pane_resource_sampling "churn-$visibility-$arm" "$host" "multi-worktree"
+  for (( iteration = 1; iteration <= SPACES_CODE_PANE_CHURN_ITERATIONS; iteration++ )); do
+    log_start_line=$(( $(app_log_line_count) + 1 ))
+    if [[ "$remote" == "1" ]]; then
+      churn_remote_workspaces "$host-$arm-$iteration" "${workspace_dirs[@]}"
+    else
+      churn_local_workspaces "$host-$arm-$iteration" "${workspace_dirs[@]}"
+    fi
+    if [[ "$visibility" == "visible" ]]; then
+      line="$(wait_for_code_pane_progressive_complete "$workspace_id" "$log_start_line")"
+      record_code_pane_metric "$line" "code_pane.churn_diff_render" "$host" "$arm" 0
+    else
+      sleep 0.4
+    fi
+  done
+  stop_code_pane_resource_sampling
+  record_code_pane_resource_snapshot "churn-$visibility-$arm-end" "$host" "multi-worktree"
+}
+
+summarize_code_pane_churn() {
+  local output="$PROFILE_ARTIFACT_DIR/code-pane-churn-summary.tsv"
+  python3 - "$CODE_PANE_RESOURCE_LOG" "$output" <<'PY'
+import statistics
+import sys
+from collections import defaultdict
+
+source, output = sys.argv[1:]
+groups = defaultdict(list)
+with open(source, encoding="utf-8") as handle:
+    for raw in handle:
+        fields = raw.rstrip().split("\t")
+        if len(fields) != 10 or not fields[1].startswith("churn-"):
+            continue
+        phase = fields[1]
+        for suffix in ("-start", "-end"):
+            if phase.endswith(suffix):
+                phase = phase[:-len(suffix)]
+        groups[(fields[2], phase)].append(fields)
+
+header = "host\tarm\tduration_ms\tcpu_time_ms\taverage_cpu_pct\trss_median_mb\trss_peak_mb"
+lines = [header]
+for (host, arm), rows in sorted(groups.items()):
+    rows.sort(key=lambda row: int(row[0]))
+    duration = max(int(rows[-1][0]) - int(rows[0][0]), 1)
+    cpu_time = max(int(rows[-1][6]) - int(rows[0][6]), 0)
+    rss = [int(row[4]) / 1024 for row in rows]
+    lines.append(
+        f"{host}\t{arm}\t{duration}\t{cpu_time}\t{cpu_time / duration * 100:.1f}\t"
+        f"{statistics.median(rss):.1f}\t{max(rss):.1f}"
+    )
+with open(output, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+print("\n".join(lines))
+PY
+}
+
+run_code_pane_churn() {
+  local local_workspace_id="$1"
+  shift
+  local -a local_dirs=("$1" "$2" "$3")
+  local -a remote_dirs=("$4" "$5")
+  prepare_local_churn_workspaces "${local_dirs[@]}"
+  prepare_remote_churn_workspaces "${remote_dirs[@]}"
+
+  # ABBA order reduces the chance that cache warming or time drift is mistaken
+  # for an Editor-visible cost.
+  run_code_pane_churn_arm "local" "$local_workspace_id" 0 "hidden" "a" 0 "${local_dirs[@]}"
+  run_code_pane_churn_arm "local" "$local_workspace_id" 0 "visible" "b" 1 "${local_dirs[@]}"
+  run_code_pane_churn_arm "local" "$local_workspace_id" 0 "visible" "b2" 0 "${local_dirs[@]}"
+  run_code_pane_churn_arm "local" "$local_workspace_id" 0 "hidden" "a2" 0 "${local_dirs[@]}"
+  run_code_pane_churn_arm "remote" "$REMOTE_DEVICE_WORKSPACE_ID" 1 "hidden" "a" 0 "${remote_dirs[@]}"
+  run_code_pane_churn_arm "remote" "$REMOTE_DEVICE_WORKSPACE_ID" 1 "visible" "b" 1 "${remote_dirs[@]}"
+  run_code_pane_churn_arm "remote" "$REMOTE_DEVICE_WORKSPACE_ID" 1 "visible" "b2" 0 "${remote_dirs[@]}"
+  run_code_pane_churn_arm "remote" "$REMOTE_DEVICE_WORKSPACE_ID" 1 "hidden" "a2" 0 "${remote_dirs[@]}"
+  summarize_code_pane_churn
+}
+
+run_code_pane_soak() {
+  local local_workspace_id="$1" local_workspace_dir="$2"
+  local deadline=$((SECONDS + SPACES_CODE_PANE_SOAK_SECONDS)) iteration=0 host workspace_id workspace_dir remote size marker
+  local -a sizes=(4096 131072 786432)
+  capture_code_pane_vmmap "soak-start"
+  while (( SECONDS < deadline )); do
+    iteration=$((iteration + 1))
+    size="${sizes[$((iteration % ${#sizes[@]}))]}"
+    if (( iteration % 2 == 0 )); then
+      host="local"; workspace_id="$local_workspace_id"; workspace_dir="$local_workspace_dir"; remote=0
+    else
+      host="remote"; workspace_id="$REMOTE_DEVICE_WORKSPACE_ID"; workspace_dir="$REMOTE_DEVICE_WORKSPACE_DIR"; remote=1
+    fi
+    marker="soak-${iteration}-$(timestamp_ms)"
+    if [[ "$remote" == "1" ]]; then
+      prepare_code_pane_remote_diff "$workspace_dir" "$size" "$marker"
+    else
+      prepare_code_pane_local_diff "$workspace_dir" "$size" "$marker"
+    fi
+    open_code_pane_for_workspace "$workspace_id" "$host" "soak"
+    open_and_measure_code_pane_file "$workspace_id" "$host" "$size" "code-pane-scale.txt"
+    if (( iteration == 1 )); then
+      record_code_pane_resource_snapshot "warm-baseline" "$host" "$size"
+    fi
+    record_code_pane_resource_snapshot "soak" "$host" "$size"
+  done
+  sleep 2
+  record_code_pane_resource_snapshot "settled" "mixed" "soak"
+  capture_code_pane_vmmap "soak-end"
+  assert_code_pane_resource_growth
+}
+
+# The progressive protocol deliberately exposes a manifest before it starts reading patch bytes.
+# These helpers keep the real-system assertions tied to browser paint milestones rather than an
+# implementation-specific request count: the data source may use a different chunk size without
+# changing the UX contract.
+wait_for_code_pane_stream_metric() {
+  local workspace_id="$1" trigger="$2" start_line="$3"
+  wait_for_app_log_pattern_from_line \
+    "spaces: perf metric=code_pane_diff_render workspace=${workspace_id} target=trigger=${trigger} success=1 elapsed_ms=" \
+    "$start_line"
+}
+
+# A scope click races an already-running workspace refresh.  Require both streaming bookends from
+# the selected comparison so the membership lane cannot mistake that older generation for success.
+wait_for_code_pane_scoped_stream_metric() {
+  local workspace_id="$1" scope="$2" trigger="$3" start_line="$4"
+  wait_for_app_log_pattern_from_line \
+    "spaces: perf metric=code_pane_diff_render workspace=${workspace_id} target=trigger=${trigger} success=1 elapsed_ms=.* scope=${scope}( |$)" \
+    "$start_line"
+}
+
+wait_for_code_pane_scoped_progressive_complete() {
+  local workspace_id="$1" scope="$2" start_line="$3"
+  wait_for_code_pane_scoped_stream_metric "$workspace_id" "$scope" manifest "$start_line" >/dev/null
+  wait_for_code_pane_scoped_stream_metric "$workspace_id" "$scope" complete "$start_line"
+}
+
+wait_for_code_pane_restored_state() {
+  local workspace_id="$1" mode="$2" scope="$3" layout="$4" path="$5" dirty="$6" start_line="$7"
+  wait_for_app_log_pattern_from_line \
+    "spaces: perf metric=code_pane_diff_render workspace=${workspace_id} target=trigger=workspaceStateRestored success=1 elapsed_ms=.* mode=${mode} scope=${scope} layout=${layout} path=${path} .* dirty=${dirty}( |$)" \
+    "$start_line"
+}
+
+assert_code_pane_restored_scroll_and_focus() {
+  local line="$1" description="$2"
+  [[ "$line" =~ "scroll_top=" ]] || fail "$description did not report a restored scroll position"
+  [[ "$line" =~ "focused_line=" ]] || fail "$description did not report a restored focused line"
+  [[ ! "$line" =~ "focused_line=" ]] || [[ ! "$line" =~ "focused_line=0" ]] || fail "$description restored no focused line"
+}
+
+assert_code_pane_restored_scroll_line() {
+  local line="$1" description="$2" expected_line="$3"
+  [[ "$line" =~ "scroll_top=${expected_line}"(\ |$) ]] || fail "$description restored the wrong logical scroll line (expected $expected_line): $line"
+}
+
+code_pane_persisted_diff_scroll_line() {
+  local workspace_id="$1"
+  python3 - "$TMP_CLIENT_DB" "$workspace_id" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as connection:
+    row = connection.execute(
+        """
+        SELECT state_json
+        FROM code_pane_workspace_states
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+
+if row is None:
+    raise SystemExit(1)
+state = json.loads(row[0])
+line = state.get("diffScrollLine")
+if not isinstance(line, int) or isinstance(line, bool) or line < 0 or state.get("diffScrollSide") != "new":
+    raise SystemExit(1)
+print(line)
+PY
+}
+
+wait_for_code_pane_persisted_diff_scroll_line() {
+  local workspace_id="$1"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local line
+    line="$(code_pane_persisted_diff_scroll_line "$workspace_id" 2>/dev/null || true)"
+    # The fixture contains 240 lines; require a deep position so a missing/initial snapshot cannot
+    # accidentally become the baseline for the exact restore assertions below.
+    if [[ "$line" =~ ^[0-9]+$ ]] && (( line >= 100 )); then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for a deep persisted diff scroll line: $workspace_id"
+}
+
+wait_for_code_pane_persisted_editor_dirty() {
+  local workspace_id="$1" expected_path="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if python3 - "$TMP_CLIENT_DB" "$workspace_id" "$expected_path" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, workspace_id, expected_path = sys.argv[1:]
+with sqlite3.connect(db_path) as connection:
+    row = connection.execute(
+        """
+        SELECT state_json
+        FROM code_pane_workspace_states
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+
+if row is None:
+    raise SystemExit(1)
+state = json.loads(row[0])
+editor = state.get("editorState")
+if not isinstance(editor, dict) or editor.get("path") != expected_path or editor.get("dirty") is not True:
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for a persisted dirty Editor state: $workspace_id $expected_path"
+}
+
+assert_no_code_pane_stream_metric() {
+  local workspace_id="$1" trigger="$2" start_line="$3" seconds="${4:-1}"
+  local deadline=$((SECONDS + seconds))
+  while (( SECONDS < deadline )); do
+    if find_app_log_pattern_once_from_line \
+      "spaces: perf metric=code_pane_diff_render workspace=${workspace_id} target=trigger=${trigger} success=1 elapsed_ms=" \
+      "$start_line" >/dev/null; then
+      fail "unexpected progressive diff metric: $trigger"
+    fi
+    sleep 0.1
+  done
+}
+
+prepare_code_pane_streaming_diff() {
+  local workspace_dir="$1" remote="$2"
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    remote_device_ssh "python3 - $quoted_dir" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+stream = root / ".spaces-e2e-stream"
+stream.mkdir(exist_ok=True)
+# Keep the large transfer late in path order so a long, low-memory queue of small files exercises
+# sustained streaming without inflating the first paint.
+(stream / "stream-99-large.txt").write_text(("large stream fixture " + "x" * 960 + "\n") * 5000, encoding="ascii")
+for index in range(1, 51):
+    (stream / f"stream-{index:02d}.txt").write_text(f"stream fixture {index:02d}\n", encoding="ascii")
+edit = stream / "stream-edit.txt"
+# An edit fixture must have both old and new sides. Commit its small baseline once, then rewrite it
+# on every preparation; the large streaming files intentionally remain untracked fixture churn.
+if not (subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", str(edit.relative_to(root))], capture_output=True).returncode == 0):
+    edit.write_text("const editable = 'base';\n", encoding="ascii")
+    subprocess.run(["git", "-C", str(root), "add", str(edit.relative_to(root))], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "Seed code pane inline-edit fixture"], check=True)
+edit.write_text("const editable = 'before';\n", encoding="ascii")
+(stream / "stream-state.txt").write_text("".join(f"state line {index:03d}\n" for index in range(1, 241)), encoding="ascii")
+PY
+  else
+    python3 - "$workspace_dir" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+stream = root / ".spaces-e2e-stream"
+stream.mkdir(exist_ok=True)
+# Keep the large transfer late in path order so a long, low-memory queue of small files exercises
+# sustained streaming without inflating the first paint.
+(stream / "stream-99-large.txt").write_text(("large stream fixture " + "x" * 960 + "\n") * 5000, encoding="ascii")
+for index in range(1, 51):
+    (stream / f"stream-{index:02d}.txt").write_text(f"stream fixture {index:02d}\n", encoding="ascii")
+edit = stream / "stream-edit.txt"
+# An edit fixture must have both old and new sides. Commit its small baseline once, then rewrite it
+# on every preparation; the large streaming files intentionally remain untracked fixture churn.
+if not (subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", str(edit.relative_to(root))], capture_output=True).returncode == 0):
+    edit.write_text("const editable = 'base';\n", encoding="ascii")
+    subprocess.run(["git", "-C", str(root), "add", str(edit.relative_to(root))], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "Seed code pane inline-edit fixture"], check=True)
+edit.write_text("const editable = 'before';\n", encoding="ascii")
+(stream / "stream-state.txt").write_text("".join(f"state line {index:03d}\n" for index in range(1, 241)), encoding="ascii")
+PY
+  fi
+}
+
+assert_code_pane_streaming_order() {
+  local workspace_id="$1" start_line="$2"
+  python3 - "$APP_LOG" "$workspace_id" "$start_line" <<'PY'
+import re
+import sys
+
+log_path, workspace_id, start_line = sys.argv[1:]
+start_line = int(start_line)
+metrics = []
+field = re.compile(r"(?:^|\s)([a-z_]+)=([^\s]+)")
+trigger_field = re.compile(r"\btarget=trigger=([^\s]+)")
+with open(log_path, encoding="utf-8", errors="replace") as handle:
+    for number, line in enumerate(handle, 1):
+        if number < start_line or "metric=code_pane_diff_render" not in line:
+            continue
+        fields = dict(field.findall(line))
+        if fields.get("workspace") != workspace_id:
+            continue
+        trigger_match = trigger_field.search(line)
+        trigger = trigger_match.group(1) if trigger_match is not None else fields.get("trigger")
+        if trigger in {"manifest", "filePatch", "complete"}:
+            metrics.append((number, trigger, fields))
+
+manifest = next((metric for metric in metrics if metric[1] == "manifest"), None)
+complete = next((metric for metric in metrics if metric[1] == "complete"), None)
+if manifest is None or complete is None:
+    raise SystemExit("missing progressive manifest or completion metric")
+if manifest[0] >= complete[0]:
+    raise SystemExit("completion was logged before the manifest")
+patches = [metric for metric in metrics if metric[1] == "filePatch"]
+if len(patches) != 53:
+    raise SystemExit(f"expected all 53 queued fixture files to be patched, got {len(patches)}")
+if any(metric[0] < manifest[0] or metric[0] > complete[0] for metric in patches):
+    raise SystemExit("a patch painted outside its manifest/completion generation")
+
+indices = [int(metric[2]["file_index"]) for metric in patches if metric[2].get("file_index", "").isdigit()]
+if indices != list(range(53)):
+    raise SystemExit(f"patches were not painted in manifest order: {indices}")
+large = next((metric for metric in patches if metric[2].get("path") == ".spaces-e2e-stream/stream-99-large.txt"), None)
+if large is None or int(large[2].get("chunk_count", "0")) < 2:
+    raise SystemExit("large patch did not complete through multiple transport chunks")
+PY
+}
+
+record_code_pane_stream_metric() {
+  local line="$1" metric="$2" host="$3" scale="$4"
+  record_code_pane_metric "$line" "$metric" "$host" "$scale" 0
+}
+
+record_code_pane_stream_file_patch_metrics() {
+  local start_line="$1" workspace_id="$2" host="$3" scale="$4" line_number=0 line
+  while IFS= read -r line; do
+    line_number=$((line_number + 1))
+    (( line_number >= start_line )) || continue
+    [[ "$line" == *"metric=code_pane_diff_render"* && "$line" == *"workspace=${workspace_id} "* && "$line" == *"target=trigger=filePatch"* ]] || continue
+    record_code_pane_stream_metric "$line" "code_pane.stream_file_patch" "$host" "$scale"
+  done <"$APP_LOG"
+}
+
+exercise_code_pane_progressive_diff() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4"
+  local start_line manifest_line complete_line
+  prepare_code_pane_streaming_diff "$workspace_dir" "$remote"
+  start_line=$(( $(app_log_line_count) + 1 ))
+  start_code_pane_resource_sampling "streaming-diff" "$host" "multi-chunk"
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_id" >"$TMP_ROOT/open-code-pane-stream-${host}.json"
+  manifest_line="$(wait_for_code_pane_stream_metric "$workspace_id" manifest "$start_line")"
+  record_code_pane_stream_metric "$manifest_line" "code_pane.stream_manifest_to_sidebar" "$host" "multi-chunk"
+  complete_line="$(wait_for_code_pane_stream_metric "$workspace_id" complete "$start_line")"
+  stop_code_pane_resource_sampling
+  record_code_pane_resource_snapshot "streaming-complete" "$host" "multi-chunk"
+  record_code_pane_stream_file_patch_metrics "$start_line" "$workspace_id" "$host" "multi-chunk"
+  record_code_pane_stream_metric "$complete_line" "code_pane.stream_all_patches" "$host" "multi-chunk"
+  assert_code_pane_streaming_order "$workspace_id" "$start_line"
+}
+
+discard_large_stream_fixture() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4" start_line
+  # Remove the expensive CodeView before the following inline-edit actions so accessibility
+  # traversal measures the editor controls, not a retained multi-megabyte diff subtree.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    remote_device_ssh "python3 - $quoted_dir" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], ".spaces-e2e-stream", "stream-99-large.txt").unlink(missing_ok=True)
+PY
+  else
+    python3 - "$workspace_dir" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], ".spaces-e2e-stream", "stream-99-large.txt").unlink(missing_ok=True)
+PY
+  fi
+  wait_for_code_pane_stream_metric "$workspace_id" manifest "$start_line" >/dev/null
+  wait_for_code_pane_stream_metric "$workspace_id" complete "$start_line" >/dev/null
+  record_code_pane_resource_snapshot "streaming-after-large-removal" "$host" "multi-chunk"
+  sleep 5
+  record_code_pane_resource_snapshot "streaming-after-large-removal-settled" "$host" "multi-chunk"
+}
+
+exercise_code_pane_inline_diff_edit() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4"
+  local start_line
+  # The old side has an equally visible line affordance, but it must never enter edit mode.
+  # Streaming priority leaves the selected row focused; retarget the virtualized diff to the edit
+  # fixture before asking AX for its line affordances.
+  wait_for_spaces_frontmost_ready
+  expand_streaming_diff_tree "$host"
+  activate_spaces_pid "$SPACES_PID"
+  ui_click_identifier "code-pane-change-.spaces-e2e-stream%2Fstream-edit.txt" "$host inline-edit fixture row"
+  wait_for_ui_identifier "code-pane-diff-old-line-.spaces-e2e-stream%2Fstream-edit.txt-1" "$host inline-edit old line"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-edit.txt-1"
+  wait_for_code_pane_stream_metric "$workspace_id" diffEdit "$start_line" >/dev/null
+  ui_replace_code_pane_editor_value "code-pane-diff-edit-input" "const editable = 'cancelled';"
+  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "$host cancelled inline edit"
+  ui_click_identifier "code-pane-diff-edit-cancel"
+  wait_for_code_pane_stream_metric "$workspace_id" diffEditCancel "$start_line" >/dev/null
+  wait_for_ui_identifier_absent "code-pane-diff-edit-input" "$host inline edit after Cancel"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-edit.txt-1"
+  wait_for_code_pane_stream_metric "$workspace_id" diffEdit "$start_line" >/dev/null
+  ui_replace_code_pane_editor_value "code-pane-diff-edit-input" "const editable = 'saved';"
+  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "$host saved inline edit"
+  ui_click_identifier "code-pane-diff-edit-save"
+  local save_line
+  save_line="$(wait_for_code_pane_stream_metric "$workspace_id" diffEditSave "$start_line")"
+  wait_for_ui_identifier_absent "code-pane-diff-edit-input" "$host inline edit after Save"
+  record_code_pane_stream_metric "$save_line" "code_pane.diff_inline_edit_save" "$host" "single-line"
+  if [[ "$remote" == "1" ]]; then
+    remote_device_ssh "grep -Fqx $(shell_quote "const editable = 'saved';") $(shell_quote "$workspace_dir/.spaces-e2e-stream/stream-edit.txt")" \
+      || fail "$host inline diff Save did not write the new/right side"
+  else
+    grep -Fqx "const editable = 'saved';" "$workspace_dir/.spaces-e2e-stream/stream-edit.txt" \
+      || fail "$host inline diff Save did not write the new/right side"
+  fi
+}
+
+# State recovery intentionally uses the same singleton Editor retargeting path as ⌘⌥↑/⌘⌥↓ rather
+# than constructing another window. Each workspace gets a deliberately different state, then the
+# A→B→A→B sequence proves that hibernating one page neither overwrites nor leaks into the other.
+open_streaming_workspace_for_state_recovery() {
+  local workspace_id="$1" host="$2" start_line
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_id" >"$TMP_ROOT/open-code-pane-state-${host}.json"
+  wait_for_code_pane_stream_metric "$workspace_id" manifest "$start_line" >/dev/null
+  wait_for_code_pane_stream_metric "$workspace_id" complete "$start_line" >/dev/null
+}
+
+make_dirty_diff_state_and_scroll() {
+  local input_id="$1"
+  local content
+  # Keep the edit compact enough for AX transport while providing enough logical lines for an
+  # unambiguous Page Down restoration check. The command substitution removes only the final newline.
+  content="$(python3 - <<'PY'
+print("".join(f"unsaved state line {index:03d}\n" for index in range(1, 241)), end="")
+PY
+)"
+  ui_replace_code_pane_editor_value "$input_id" "$content"
+  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "workspace A dirty diff editor"
+  ui_page_down_code_pane_editor "$input_id"
+}
+
+expand_streaming_diff_tree() {
+  local host="$1"
+  # An explicit disclosure identifier avoids binding a user-state test to the file-list DOM shape.
+  local directory_identifier="code-pane-diff-directory-.spaces-e2e-stream"
+  wait_for_ui_identifier "$directory_identifier" "$host stream directory"
+  # A fresh diff uses the renderer's default (expanded) state, while a restored workspace may have
+  # an explicit collapsed snapshot. Toggle only the latter; unconditionally pressing the row would
+  # collapse the fresh tree and make the queued file rows disappear.
+  if [[ "$(ui_identifier_attribute "$directory_identifier" "AXExpanded" 2>/dev/null || true)" != "true" ]]; then
+    wait_and_click_ui_identifier "$directory_identifier" "$host stream directory"
+  fi
+  wait_for_ui_identifier "code-pane-change-.spaces-e2e-stream%2Fstream-state.txt" "$host expanded stream-state row"
+}
+
+exercise_code_pane_workspace_state_recovery() {
+  local workspace_a_dir="$1" workspace_a_id="$2" workspace_b_dir="$3" workspace_b_id="$4" remote_workspace_dir="$5" remote_workspace_id="$6"
+  local start_line restored workspace_a_scroll_line
+  prepare_code_pane_streaming_diff "$workspace_a_dir" 0
+  prepare_code_pane_streaming_diff "$workspace_b_dir" 0
+
+  open_streaming_workspace_for_state_recovery "$workspace_a_id" "state-a-initial"
+  expand_streaming_diff_tree "workspace A"
+  ui_click_identifier "code-pane-change-.spaces-e2e-stream%2Fstream-state.txt"
+  # A keeps a dirty right-side buffer focused at a real, immediately rendered line while B is made a distinct editor
+  # state. The one-line replacement makes recovery inspectable without leaving fixture churn.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-state.txt-1"
+  wait_for_code_pane_stream_metric "$workspace_a_id" diffEdit "$start_line" >/dev/null
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty diff editor"
+  make_dirty_diff_state_and_scroll "code-pane-diff-edit-input"
+  ui_click_identifier "code-pane-layout-split"
+
+  open_streaming_workspace_for_state_recovery "$workspace_b_id" "state-b-initial"
+  expand_streaming_diff_tree "workspace B"
+  ui_click_identifier "code-pane-change-.spaces-e2e-stream%2Fstream-state.txt"
+  choose_code_pane_scope "Last commit"
+  ui_click_identifier "code-pane-layout-unified"
+  open_code_pane_file ".spaces-e2e-stream/stream-state.txt"
+  wait_for_ui_identifier "code-pane-mode-editor" "workspace B Editor mode"
+  wait_for_ui_identifier "code-pane-editor-input" "workspace B editor input"
+  ui_replace_code_pane_editor_value "code-pane-editor-input" "workspace B unsaved editor state\n"
+  wait_for_code_pane_persisted_editor_dirty "$workspace_b_id" ".spaces-e2e-stream/stream-state.txt"
+  workspace_a_scroll_line="$(wait_for_code_pane_persisted_diff_scroll_line "$workspace_a_id")"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-restored.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "workspace A recovery"
+  assert_code_pane_restored_scroll_line "$restored" "workspace A recovery" "$workspace_a_scroll_line"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A restored dirty buffer"
+  assert_ui_identifier_attribute "code-pane-diff-directory-.spaces-e2e-stream" "AXExpanded" "true" "workspace A diff tree"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_b_id" >"$TMP_ROOT/open-code-pane-state-b-restored.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$workspace_b_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "workspace B recovery"
+  wait_for_ui_identifier "code-pane-mode-editor" "workspace B restored Editor mode"
+
+  # Retarget once more across the paired device. This deliberately gives the remote workspace a
+  # different Editor state, then proves both its `(device, workspace)` key and A's local key survive
+  # the local→remote→local→remote sequence without using the restart matrix a second time.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-before-remote.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "workspace A before remote retarget"
+  assert_code_pane_restored_scroll_line "$restored" "workspace A before remote retarget" "$workspace_a_scroll_line"
+
+  prepare_code_pane_streaming_diff "$remote_workspace_dir" 1
+  open_streaming_workspace_for_state_recovery "$remote_workspace_id" "state-remote-initial"
+  expand_streaming_diff_tree "remote workspace"
+  ui_click_identifier "code-pane-change-.spaces-e2e-stream%2Fstream-state.txt"
+  choose_code_pane_scope "Last commit"
+  ui_click_identifier "code-pane-layout-unified"
+  open_code_pane_file ".spaces-e2e-stream/stream-state.txt"
+  wait_for_ui_identifier "code-pane-editor-input" "remote workspace editor input"
+  ui_replace_code_pane_editor_value "code-pane-editor-input" "remote workspace unsaved editor state\n"
+  wait_for_code_pane_persisted_editor_dirty "$remote_workspace_id" ".spaces-e2e-stream/stream-state.txt"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-after-remote.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "workspace A after remote retarget"
+  assert_code_pane_restored_scroll_line "$restored" "workspace A after remote retarget" "$workspace_a_scroll_line"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$remote_workspace_id" >"$TMP_ROOT/open-code-pane-state-remote-restored.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$remote_workspace_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "remote workspace recovery"
+  wait_for_ui_identifier "code-pane-mode-editor" "remote workspace restored Editor mode"
+
+  # A process restart is stricter than an in-memory retarget: it exercises the durable workspace
+  # document and the hibernation collector. Reopen A through the normal app IPC after the relaunch.
+  relaunch_spaces_after_remote_device_parity
+  wait_for_ui_identifier "code-pane-mode-editor" "restored Editor after app restart"
+  wait_for_ui_identifier "code-pane-editor-input" "restored Editor input after app restart"
+  start_line=$(( $(app_log_line_count) + 1 ))
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-restart.json"
+  restored="$(wait_for_code_pane_restored_state \
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+  assert_code_pane_restored_scroll_and_focus "$restored" "workspace A app-restart recovery"
+  assert_code_pane_restored_scroll_line "$restored" "workspace A app-restart recovery" "$workspace_a_scroll_line"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty buffer after app restart"
+}
+
+remove_code_pane_membership_fixture() {
+  local workspace_dir="$1" relative_path="$2" remote="$3"
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir quoted_path
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    quoted_path="$(shell_quote "$relative_path")"
+    remote_device_ssh "python3 - $quoted_dir $quoted_path" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], sys.argv[2]).unlink(missing_ok=True)
+PY
+  else
+    python3 - "$workspace_dir" "$relative_path" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1], sys.argv[2]).unlink(missing_ok=True)
+PY
+  fi
+}
+
+create_code_pane_membership_fixture() {
+  local workspace_dir="$1" relative_path="$2" content="$3" remote="$4"
+  if [[ "$remote" == "1" ]]; then
+    local quoted_dir quoted_path quoted_content
+    quoted_dir="$(shell_quote "$workspace_dir")"
+    quoted_path="$(shell_quote "$relative_path")"
+    quoted_content="$(shell_quote "$content")"
+    remote_device_ssh "python3 - $quoted_dir $quoted_path $quoted_content" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1], sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(sys.argv[3], encoding="ascii")
+PY
+  else
+    python3 - "$workspace_dir" "$relative_path" "$content" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1], sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(sys.argv[3], encoding="ascii")
+PY
+  fi
+}
+
+exercise_code_pane_file_membership_refresh() {
+  local host="$1" workspace_id="$2" workspace_dir="$3" remote="$4"
+  local relative_path=".spaces-e2e-stream/stream-membership-${host}.txt"
+  local content="stream membership ${host} fixture"
+  local quick_open_row="code-pane-quick-open-$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$relative_path")"
+  local start_line line
+
+  # Re-adding the large streaming fixture starts an Uncommitted refresh.  Drain that exact
+  # generation before selecting Last Commit. The daemon can publish its manifest while a remote
+  # mutation command is still returning, so the causal boundary has to precede both mutations.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  prepare_code_pane_streaming_diff "$workspace_dir" "$remote"
+  remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_id" >"$TMP_ROOT/open-code-pane-state-${host}-membership.json"
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "uncommitted" "$start_line" >/dev/null
+  start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Last commit"
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "lastCommit" "$start_line" >/dev/null
+
+  # Open quick-open before the file exists so the first `workspaceFileList` fetch has already
+  # completed, the workspace-level file-membership stream is armed, and the overlay must refresh in
+  # place when the new untracked file appears without any scope change.
+  open_code_pane_quick_open_query "$relative_path"
+  wait_for_ui_identifier "code-pane-quick-open-empty" "$host quick-open empty state before file creation"
+
+  create_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$content" "$remote"
+  wait_for_ui_identifier "$quick_open_row" "$host quick-open discovered new workspace file"
+
+  start_line=$(( $(app_log_line_count) + 1 ))
+  submit_code_pane_quick_open_selection
+  line="$(wait_for_code_pane_metric "$workspace_id" editor fileOpen "$start_line")"
+  record_code_pane_metric "$line" "code_pane.editor_open_to_first_render.internal" "$host" "workspace-membership"
+  assert_ui_identifier_attribute_contains "code-pane-editor-input" "AXValue" "$content" "$host discovered file content"
+  click_code_pane_mode "Diff"
+  # The Quick Open path changes only the mode. Verify that the reviewed comparison itself survived
+  # before deliberately selecting Uncommitted for the next independent fixture section.
+  wait_for_ui_identifier_attribute_contains "code-pane-scope-menu" "AXTitle" "Last commit" "$host preserved Last Commit scope"
+  # Opening the discovered file intentionally switches to Editor, and returning to Diff restores the
+  # user's last scope. Reset it explicitly so the following workspace-state section starts from the
+  # uncommitted fixture for both local and remote lanes.
+  start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Uncommitted"
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "uncommitted" "$start_line" >/dev/null
+  remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
+}
+
+exercise_code_pane_start_agent_requirements() {
+  local workspace_dir="$1"
+  # The comment gutter is covered by the real-Pierre browser test. Quartz/AX-generated pointer
+  # moves do not reach WKWebView as a mouse PointerEvent, and Pierre intentionally ignores those
+  # synthetic moves; this lane therefore starts at the real agent controls.
+  local before_agents after_agents agent_session
+  # The preceding restart assertion intentionally leaves A's recovered buffer open. Cancel only
+  # after that proof so the ordinary diff surface is available for the independent agent flow.
+  ui_click_identifier "code-pane-diff-edit-cancel"
+  local cancel_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < cancel_deadline )); do
+    if ! ui_identifier_exists "code-pane-diff-edit-input"; then break; fi
+    sleep 0.2
+  done
+  ! ui_identifier_exists "code-pane-diff-edit-input" || fail "did not leave restored diff edit before agent coverage"
+
+  wait_for_ui_identifier "code-pane-start-agent" "Start agent button without agents"
+  ui_click_identifier "code-pane-start-agent"
+  wait_for_ui_identifier "code-pane-start-agent-dialog" "Start agent dialog"
+  wait_for_ui_identifier "code-pane-start-agent-command" "Start agent command input"
+  # Empty submission is disabled at the control, so there is no bridge RPC / background terminal to
+  # clean up. The absent selector is the observable proof no agent was created by that interaction.
+  assert_ui_identifier_attribute "code-pane-start-agent-submit" "AXEnabled" "false" "blank Start agent command"
+  ui_click_identifier "code-pane-start-agent-submit"
+  [[ "$(ui_identifier_attribute "code-pane-start-agent-command" "AXValue")" == "" ]] || fail "blank Start agent command changed"
+  before_agents="$(find_ui_identifier_with_prefix "code-pane-agent-selector" || true)"
+  [[ -z "$before_agents" ]] || fail "blank Start agent command unexpectedly created an agent selector"
+
+  # `sleep 1` is harmless, bounded, and not an agent command. The dialog closes while the background
+  # terminal runs, preserving Editor focus; its exit then returns the explicit no-detection state with
+  # the command retained for correction/retry.
+  ui_set_identifier_value "code-pane-start-agent-command" "sleep 1"
+  ui_click_identifier "code-pane-start-agent-submit"
+  wait_for_ui_identifier_attribute "code-pane-editor-focus" "AXFocused" "true" "Editor focus after Start agent launch"
+  wait_for_ui_identifier_attribute_contains \
+    "code-pane-start-agent-status" "AXDescription" "No agent detected" "non-agent command status"
+  assert_ui_identifier_attribute "code-pane-start-agent-command" "AXValue" "sleep 1" "retained non-agent command"
+  after_agents="$(find_ui_identifier_with_prefix "code-pane-agent-selector" || true)"
+  [[ -z "$after_agents" ]] || fail "non-agent command was incorrectly assigned as an agent"
+
+  # Two hook-backed fixtures are needed here: with exactly one running agent the product correctly
+  # auto-assigns it, and the second running agent preserves that assignment. Assert the assigned
+  # selector and exercise its Start new… entry so this covers the multi-agent path users actually
+  # see without forcing an impossible unassigned state.
+  agent_session="$(start_mock_agent_terminal_session "$workspace_dir")"
+  wait_for_agent_row_for_session "$workspace_dir" "$agent_session"
+  local second_agent_session
+  second_agent_session="$(start_mock_agent_terminal_session "$workspace_dir" "${MOCK_AGENT_TERMINAL_TITLE} 2")"
+  wait_for_agent_row_for_session "$workspace_dir" "$second_agent_session"
+  ui_select_popup_identifier "code-pane-agent-selector" "Start new…"
+  wait_for_ui_identifier "code-pane-start-agent-dialog" "Start new dialog from assigned agent selector"
+  ui_click_identifier "code-pane-start-agent-cancel"
+  wait_for_ui_identifier_attribute "code-pane-editor-focus" "AXFocused" "true" "Editor focus after cancelling Start new agent"
+  assert_ui_identifier_attribute_contains \
+    "code-pane-agent-selector" "AXValue" "Send to:" "assigned agent selector after cancelling Start new agent"
+}
+
+run_code_pane_streaming_assertions() {
+  local local_workspace_dir="$1" local_workspace_id="$2" second_workspace_dir="$3" second_workspace_id="$4" remote_workspace_dir="$5" remote_workspace_id="$6"
+  begin_case "code pane: progressive manifest, queued patch priority, and inline edit"
+  : >"$CODE_PANE_RESOURCE_LOG"
+  exercise_code_pane_progressive_diff "local" "$local_workspace_id" "$local_workspace_dir" 0
+  discard_large_stream_fixture "local" "$local_workspace_id" "$local_workspace_dir" 0
+  exercise_code_pane_inline_diff_edit "local" "$local_workspace_id" "$local_workspace_dir" 0
+  exercise_code_pane_file_membership_refresh "local" "$local_workspace_id" "$local_workspace_dir" 0
+  exercise_code_pane_progressive_diff "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
+  discard_large_stream_fixture "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
+  exercise_code_pane_inline_diff_edit "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
+  exercise_code_pane_file_membership_refresh "remote" "$remote_workspace_id" "$remote_workspace_dir" 1
+  pass_case
+
+  begin_case "code pane: workspace state, app restart, and Start agent requirements"
+  exercise_code_pane_workspace_state_recovery \
+    "$local_workspace_dir" "$local_workspace_id" "$second_workspace_dir" "$second_workspace_id" \
+    "$remote_workspace_dir" "$remote_workspace_id"
+  exercise_code_pane_start_agent_requirements "$local_workspace_dir"
+  pass_case
+}
+
+run_code_pane_assertions() {
+  local local_workspace_dir="$1" local_workspace_id="$2" second_workspace_dir="$3" second_workspace_id="$4" third_workspace_dir="$5"
+  [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]] || fail "code-pane E2E requires the paired remote lane"
+  : >"$CODE_PANE_RESOURCE_LOG"
+  mkdir -p "$PROFILE_ARTIFACT_DIR"
+
+  if (( ONLY_CODE_PANE_STREAMING == 1 )); then
+    run_code_pane_streaming_assertions \
+      "$local_workspace_dir" "$local_workspace_id" "$second_workspace_dir" "$second_workspace_id" \
+      "$REMOTE_DEVICE_WORKSPACE_DIR" "$REMOTE_DEVICE_WORKSPACE_ID"
+    cp "$CODE_PANE_RESOURCE_LOG" "$PROFILE_ARTIFACT_DIR/code-pane-streaming-resources.tsv"
+    return 0
+  fi
+
+  if (( ONLY_CODE_PANE_CHURN == 1 )); then
+    begin_case "code pane: local/remote multi-worktree churn with Editor hidden vs visible"
+    capture_code_pane_vmmap "churn-start"
+    run_code_pane_churn \
+      "$local_workspace_id" "$local_workspace_dir" "$second_workspace_dir" "$third_workspace_dir" \
+      "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectDir")" "$REMOTE_DEVICE_WORKSPACE_DIR"
+    capture_code_pane_vmmap "churn-end"
+    assert_code_pane_resource_growth
+    cp "$CODE_PANE_RESOURCE_LOG" "$PROFILE_ARTIFACT_DIR/code-pane-churn-resources.tsv"
+    pass_case
+    return 0
+  fi
+
+  if (( ONLY_CODE_PANE_SOAK == 1 )); then
+    begin_case "code pane: ${SPACES_CODE_PANE_SOAK_SECONDS}s local/remote soak"
+    prepare_code_pane_local_diff "$local_workspace_dir" 4096 "soak-initial-local"
+    prepare_code_pane_remote_diff "$REMOTE_DEVICE_WORKSPACE_DIR" 4096 "soak-initial-remote"
+    run_code_pane_soak "$local_workspace_id" "$local_workspace_dir"
+    cp "$CODE_PANE_RESOURCE_LOG" "$PROFILE_ARTIFACT_DIR/code-pane-soak-resources.tsv"
+    pass_case
+    return 0
+  fi
+
+  begin_case "code pane: local diff, scope, editor, and live refresh"
+  prepare_code_pane_local_diff "$local_workspace_dir" 4096 "local-initial"
+  open_code_pane_for_workspace "$local_workspace_id" "local" "tiny"
+  record_code_pane_resource_snapshot "warm-baseline" "local" "tiny"
+  local line log_start_line
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  prepare_code_pane_local_diff "$local_workspace_dir" 8192 "local-live-change"
+  line="$(wait_for_code_pane_progressive_complete "$local_workspace_id" "$log_start_line")"
+  assert_code_pane_metric_has_content "$line" "local live refresh"
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Last commit"
+  line="$(wait_for_code_pane_progressive_complete "$local_workspace_id" "$log_start_line")"
+  assert_code_pane_metric_has_content "$line" "local Last commit scope"
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  choose_code_pane_scope "Uncommitted"
+  line="$(wait_for_code_pane_progressive_complete "$local_workspace_id" "$log_start_line")"
+  assert_code_pane_metric_has_content "$line" "local Uncommitted scope"
+  open_and_measure_code_pane_file "$local_workspace_id" "local" "small" "README.md"
+  pass_case
+
+  begin_case "code pane: local and remote diff-size scaling"
+  capture_code_pane_vmmap "profile-start"
+  profile_code_pane_scales "local" "$local_workspace_id" "$local_workspace_dir" 0
+  prepare_code_pane_remote_diff "$REMOTE_DEVICE_WORKSPACE_DIR" 4096 "remote-initial"
+  open_code_pane_for_workspace "$REMOTE_DEVICE_WORKSPACE_ID" "remote" "tiny"
+  profile_code_pane_scales "remote" "$REMOTE_DEVICE_WORKSPACE_ID" "$REMOTE_DEVICE_WORKSPACE_DIR" 1
+  prepare_code_pane_local_diff "$local_workspace_dir" 4096 "local-retarget"
+  open_code_pane_for_workspace "$local_workspace_id" "local" "workspace-retarget"
+  # Opening another workspace retargets the existing singleton Editor window.
+  prepare_code_pane_local_diff "$second_workspace_dir" 4096 "sidebar-retarget"
+  open_code_pane_for_workspace "$second_workspace_id" "local" "workspace-retarget-second"
+  capture_code_pane_vmmap "profile-end"
+  assert_code_pane_resource_growth
+  cp "$CODE_PANE_RESOURCE_LOG" "$PROFILE_ARTIFACT_DIR/code-pane-profile-resources.tsv"
+  pass_case
+}
+
 main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
@@ -6375,6 +8269,19 @@ main() {
     start_screen_recording
   fi
   launch_spaces
+  if (( ONLY_CODE_PANE == 1 )); then
+    local code_pane_workspace_dir code_pane_workspace_id code_pane_second_workspace_dir code_pane_second_workspace_id code_pane_third_workspace_dir
+    code_pane_workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
+    code_pane_workspace_id="$(json_get "$SEED_FILE" "defaultWorkspace.id")"
+    code_pane_second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
+    code_pane_second_workspace_id="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.id")"
+    code_pane_third_workspace_dir="$(json_get "$THIRD_SEED_FILE" "defaultWorkspace.dir")"
+    wait_for_code_pane_workspace_ready "$code_pane_workspace_id"
+    run_code_pane_assertions \
+      "$code_pane_workspace_dir" "$code_pane_workspace_id" "$code_pane_second_workspace_dir" "$code_pane_second_workspace_id" \
+      "$code_pane_third_workspace_dir"
+    return 0
+  fi
   if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
     run_remote_device_ui_parity
     relaunch_spaces_after_remote_device_parity

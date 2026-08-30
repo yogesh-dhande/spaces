@@ -83,9 +83,9 @@ public enum TerminalSessionCatalog {
     /// RPC listing and the Device API overview apply one rule rather than two copies of it. Unlike that
     /// merge this only overlays; appending in-memory-only sessions stays with the caller, whose summaries
     /// carry fields this has no view of.
-    public static func overlayingLiveTitles(
-        _ summaries: [TerminalServiceSessionSummary], liveInMemory: [TerminalServiceSessionSummary]
-    ) -> [TerminalServiceSessionSummary] {
+    public static func overlayingLiveTitles(_ summaries: [TerminalServiceSessionSummary], liveInMemory: [TerminalServiceSessionSummary])
+        -> [TerminalServiceSessionSummary]
+    {
         guard !liveInMemory.isEmpty else { return summaries }
         let liveByID = Dictionary(liveInMemory.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return summaries.map { summary in
@@ -111,9 +111,9 @@ public enum TerminalSessionCatalog {
     /// write-behind on the per-core persistence queue, so without this merge a freshly created live
     /// session would vanish from a listing (and, for the Device API overview specifically, its terminal
     /// window would render as ended) until its queued writes commit.
-    public static func mergingLiveInMemorySessions(
-        _ dbSessions: [TerminalSessionCatalogEntry], inMemory: [TerminalSessionCatalogEntry]
-    ) -> [TerminalSessionCatalogEntry] {
+    public static func mergingLiveInMemorySessions(_ dbSessions: [TerminalSessionCatalogEntry], inMemory: [TerminalSessionCatalogEntry])
+        -> [TerminalSessionCatalogEntry]
+    {
         let inMemoryByID = Dictionary(inMemory.map { ($0.sessionID, $0) }, uniquingKeysWith: { first, _ in first })
         // A live session's reported title is owned by its in-memory core, which advances `currentTitle` the
         // moment the program reports one. The DB row is a mirror that no longer tracks title changes (see

@@ -157,8 +157,7 @@
             // The send answers only once its bytes reached the PTY, so the round trip itself measures the
             // separation: an immediate CR would return in milliseconds.
             #expect(
-                sentAt.duration(to: .now) >= .milliseconds(450),
-                "an unframed submit's CR landed immediately instead of waiting out the separation")
+                sentAt.duration(to: .now) >= .milliseconds(450), "an unframed submit's CR landed immediately instead of waiting out the separation")
 
             try await waitAsync { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
         }

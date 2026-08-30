@@ -35,9 +35,7 @@ import systembridge
         for status: ChromeAutomationStatus in [.denied, .granted, .notDetermined, .unavailable] {
             let message = AppKitController.browserSessionFocusFailureMessage(automationStatus: status)
             #expect(message.contains("Google Chrome"))
-            for otherBrowser in ["Safari", "Firefox", "Edge", "Arc"] {
-                #expect(!message.contains(otherBrowser))
-            }
+            for otherBrowser in ["Safari", "Firefox", "Edge", "Arc"] { #expect(!message.contains(otherBrowser)) }
         }
     }
 }

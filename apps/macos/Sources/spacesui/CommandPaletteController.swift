@@ -43,11 +43,15 @@ final class CommandPalettePanel: NSPanel {
     var commandPaletteMainWindowVisibility: Bool?
     var recentCommandPaletteFocusIdentities: [String] = []
     var commandPaletteReturnTerminalSessionID: String?
+    /// The code-pane counterpart of `commandPaletteReturnTerminalSessionID`, captured when a focused
+    /// code pane has no session id of its own to remember. See `restoreCommandPaletteReturnFocus`.
+    var commandPaletteReturnCodePaneID: String?
     var commandPaletteReturnApplicationProcessID: pid_t?
 
     private struct PendingSelectionExecution {
         let id = UUID()
         let returnTerminalSessionID: String?
+        let returnCodePaneID: String?
         let returnApplicationProcessID: pid_t?
     }
 
@@ -141,6 +145,7 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteContextWorkspaceID = nil
             commandPaletteMainWindowVisibility = nil
             commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnCodePaneID = nil
             commandPaletteReturnApplicationProcessID = nil
             isDismissingCommandPalette = true
             panel.makeFirstResponder(nil)
@@ -150,6 +155,31 @@ final class CommandPalettePanel: NSPanel {
             // `dismissCommandPalette()`: its completion must be delivered exactly once.
             takeSessionPickerContext()?.completion(nil)
         }
+    }
+
+    /// The funnel every "open a built-in window" action (⌘⌥E, the sidebar's "Open in Editor" item,
+    /// the palette's own row) routes through so none of them has to know the palette is involved.
+    /// Built-in window opens key their window synchronously: if the palette is currently key, that
+    /// keying makes it resign key, and an ORDINARY resign-key dismissal would restore the palette's
+    /// captured return focus, pulling key straight back from the window `open()` just raised. So when
+    /// the palette is visible, this dismisses it (via `dismissCommandPaletteForBuiltInWindowNavigation`,
+    /// which is built exactly for this reentrancy) BEFORE calling `open()`, not after. A failed open
+    /// still owes the user their prior focus — dismissing up front must not silently drop whatever the
+    /// palette interrupted — so `open()` returning `false` restores the return focus captured before
+    /// the dismissal. When the palette isn't visible there is nothing to protect against, so `open()`
+    /// just runs directly.
+    func withPaletteDismissedForBuiltInOpen(_ open: () -> Bool) -> Bool {
+        guard let panel = commandPalettePanel, panel.isVisible else { return open() }
+        let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
+        let returnCodePaneID = commandPaletteReturnCodePaneID
+        let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
+        dismissCommandPaletteForBuiltInWindowNavigation()
+        let opened = open()
+        if !opened {
+            restoreCommandPaletteReturnFocus(
+                terminalSessionID: returnTerminalSessionID, codePaneID: returnCodePaneID, applicationProcessID: returnApplicationProcessID)
+        }
+        return opened
     }
 
     func commandPaletteDefaultWorkspaceID() -> String? {
@@ -279,11 +309,15 @@ final class CommandPalettePanel: NSPanel {
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
         let focusedTerminalSessionID = host.panelCoordinator.focusedSessionID()
+        // A focused code pane has no session id, so it needs its own capture; only checked when no
+        // terminal session was focused, mirroring the precedence the restore side gives terminal focus.
+        let focusedCodePaneID = focusedTerminalSessionID == nil ? host.panelCoordinator.focusedCodePaneID() : nil
         let returnApplicationProcessID = AppKitController.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
         commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
-        commandPaletteReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
+        commandPaletteReturnCodePaneID = focusedCodePaneID
+        commandPaletteReturnApplicationProcessID = (focusedTerminalSessionID == nil && focusedCodePaneID == nil) ? returnApplicationProcessID : nil
         let contextLookupStartedAt = Date()
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
         host.logPerfMetric(
@@ -328,12 +362,14 @@ final class CommandPalettePanel: NSPanel {
         // key while focus is in flight dismisses the panel without racing either outcome.
         if pendingSelectionExecution == nil {
             restoreCommandPaletteReturnFocus(
-                terminalSessionID: commandPaletteReturnTerminalSessionID, applicationProcessID: commandPaletteReturnApplicationProcessID)
+                terminalSessionID: commandPaletteReturnTerminalSessionID, codePaneID: commandPaletteReturnCodePaneID,
+                applicationProcessID: commandPaletteReturnApplicationProcessID)
         }
         isDismissingCommandPalette = false
         host.logHotkeyDebug("dismiss_palette end \(host.hotkeyWindowStateSummary())")
         commandPaletteMainWindowVisibility = nil
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         if let perfContext { host.logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
         // Dismissing while picking (esc, click-away) resolves the picker as cancelled;
@@ -341,11 +377,20 @@ final class CommandPalettePanel: NSPanel {
         takeSessionPickerContext()?.completion(nil)
     }
 
-    private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, applicationProcessID: pid_t?) {
+    /// Restores the palette's captured return focus in priority order: the terminal session it was
+    /// focused on, else the code pane it was focused on (a code pane has no session id, so it needs its
+    /// own field — see `commandPaletteReturnCodePaneID`), else the application that was frontmost before
+    /// the palette, else revealing the main window if it was visible.
+    private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, codePaneID: String?, applicationProcessID: pid_t?) {
         if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: terminalSessionID), let terminalSessionID {
             host.panelCoordinator.focusPane(forSessionID: terminalSessionID)
+        } else if AppKitController.shouldRestoreCodePaneFocusAfterPaletteHide(
+            returnTerminalSessionID: terminalSessionID, returnCodePaneID: codePaneID), let codePaneID
+        {
+            host.panelCoordinator.focusPane(forCodePaneID: codePaneID)
         } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
-            returnTerminalSessionID: terminalSessionID, returnApplicationProcessID: applicationProcessID), let applicationProcessID
+            returnTerminalSessionID: terminalSessionID, returnCodePaneID: codePaneID, returnApplicationProcessID: applicationProcessID),
+            let applicationProcessID
         {
             host.activateReturnApplication(processIdentifier: applicationProcessID)
         } else if host.rawMainWindowVisibility(), let window = host.window {
@@ -604,6 +649,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteItems = items
         commandPaletteContextWorkspaceID = newTerminalWorkspaceID
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         setCommandPaletteLoading(false)
         panel.center()
@@ -728,26 +774,48 @@ final class CommandPalettePanel: NSPanel {
             context?.completion(choice)
             return
         }
+        guard let focusRequest = item.focusRequest else {
+            // An `.editorAction` row (currently just "Open in Editor") carries no focus
+            // request: opening the workspace's Editor is a synchronous, in-process call, not
+            // a window to await, so it skips the pending-execution/return-focus machinery
+            // below entirely. Mirrors AlertsController's `automationRunTarget` branch, which
+            // is the same "no focusRequest means a different, synchronous action" shape.
+            //
+            // Palette dismissal and failure-restore for a builtin Editor open are owned by the
+            // funnel itself (`AppKitController.openWorkspaceEditor`, via
+            // `withPaletteDismissedForBuiltInOpen`) rather than here, since ⌘⌥E and the sidebar's
+            // "Open in Editor" item need that exact same dismiss-before-open contract and would
+            // otherwise have to duplicate it. For a failed EXTERNAL editor launch the palette
+            // intentionally stays open — the external branch dismisses only after a successful
+            // launch, see its comment in `openWorkspaceEditor`.
+            host.openWorkspaceEditor(workspaceID: item.workspaceID)
+            host.reloadData()
+            return
+        }
         // Return focus is a cancellation contract. Selection keeps a private copy so a
         // failed execution can still restore it, while the dismissal callback cannot race
         // a successful target focus.
         let execution = PendingSelectionExecution(
-            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnCodePaneID: commandPaletteReturnCodePaneID,
+            returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
         pendingSelectionExecution = execution
         commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let focused = await self.host.executeWindowFocus(item.focusRequest)
+            let focused = await self.host.executeWindowFocus(focusRequest)
             guard self.pendingSelectionExecution?.id == execution.id else { return }
             self.pendingSelectionExecution = nil
             guard focused else {
                 if self.commandPalettePanel?.isVisible == true {
                     self.commandPaletteReturnTerminalSessionID = execution.returnTerminalSessionID
+                    self.commandPaletteReturnCodePaneID = execution.returnCodePaneID
                     self.commandPaletteReturnApplicationProcessID = execution.returnApplicationProcessID
                 } else {
                     self.restoreCommandPaletteReturnFocus(
-                        terminalSessionID: execution.returnTerminalSessionID, applicationProcessID: execution.returnApplicationProcessID)
+                        terminalSessionID: execution.returnTerminalSessionID, codePaneID: execution.returnCodePaneID,
+                        applicationProcessID: execution.returnApplicationProcessID)
                 }
                 return
             }

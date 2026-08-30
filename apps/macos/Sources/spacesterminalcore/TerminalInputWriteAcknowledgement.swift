@@ -41,9 +41,7 @@ public struct TerminalInputWriteBatch: Sendable {
     /// reached the PTY. Sequential because the writes themselves run in order on one serial queue.
     public func outcome() async -> TerminalInputWriteOutcome {
         guard !acknowledgements.isEmpty else { return .notDelivered }
-        for acknowledgement in acknowledgements {
-            if await acknowledgement.outcome() == .notDelivered { return .notDelivered }
-        }
+        for acknowledgement in acknowledgements { if await acknowledgement.outcome() == .notDelivered { return .notDelivered } }
         return .delivered
     }
 }

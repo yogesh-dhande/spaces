@@ -494,9 +494,7 @@
         /// Only the submit path pays for this: it blocks the terminal engine actor for one mailbox round
         /// trip, which is nothing against a submit's own pacing but would be a real per-keystroke cost on
         /// interactive input — and interactive input has no delivery record to be honest about.
-        private func awaitGhosttyInputEmission(_ session: ghostty_session_t) {
-            ghostty_session_sync_io(session)
-        }
+        private func awaitGhosttyInputEmission(_ session: ghostty_session_t) { ghostty_session_sync_io(session) }
 
         /// Sends a key press through ghostty's own key encoder, which reads the live terminal state
         /// (Kitty keyboard flags, DECCKM, `modifyOtherKeys`) to pick the right sequence.

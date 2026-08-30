@@ -144,6 +144,17 @@ import workspacecore
         #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
     }
 
+    @Test func aFreshCodePaneIsRefusedForADeviceThatCannotAct() {
+        // A code pane has no daemon-side session to attach, but building its content still means
+        // installing a pane into the layout and persisting it, so an unreachable device must not have
+        // one created on its behalf — the code-pane counterpart of `canOpenOrFocusTerminalPane`'s
+        // creation branch. Unlike that function, there is no `hasExistingPane` flag here:
+        // `openOrFocusGlobalEditorWindow` already handles "a pane exists" by focusing it before creation
+        // is ever considered, so this only ever answers "can we create."
+        #expect(!AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: true))
+    }
+
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
         // The refusal a user reads has to match what they can see: the device's rows are on screen, so
         // "Spaces has not finished loading" would be plainly wrong. It names the device and says offline,
@@ -202,7 +213,7 @@ import workspacecore
         let editorMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .openEditor, deviceName: "Build Host")
         let revealMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .revealInFinder, deviceName: "Build Host")
 
-        #expect(editorMessage.contains("Open editor"))
+        #expect(editorMessage.contains("Open Editor"))
         #expect(revealMessage.contains("Reveal in Finder"))
         #expect(editorMessage.contains("Build Host"))
         #expect(revealMessage.contains("SSH-capable workflow"))
@@ -331,6 +342,31 @@ import workspacecore
         #expect(items.contains { $0.kind == .process && $0.label == "web" && $0.detail == "npm run dev" })
         #expect(items.contains { $0.kind == .agent && $0.label == "Codex" })
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
+    }
+
+    /// Every visible workspace gets an "Open in Editor" row, matching the sidebar item's label,
+    /// even when the workspace has no running processes, agents, or terminals to surface as
+    /// runtime targets: the Editor opens independent of what a workspace is running. Dispatch
+    /// carries no `focusRequest`, since opening the Editor is a synchronous in-process call
+    /// (`AppKitController.openWorkspaceEditor(workspaceID:)`) rather than a window to focus.
+    @Test func deviceOverviewBuildsCommandPaletteEditorAction() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: false, isHidden: false, isDefault: false, notes: nil, sessionCount: 0,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig())
+            ], sessions: [])
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        let editorItems = items.filter { $0.workspaceID == "workspace-1" && $0.source == .editorAction }
+        #expect(editorItems.count == 1)
+        let editorItem = try #require(editorItems.first)
+        #expect(editorItem.label == "Open in Editor")
+        #expect(editorItem.kind == .window)
+        #expect(editorItem.focusRequest == nil)
     }
 
     /// The palette lists what the sidebar lists: a hidden workspace, and every workspace of a hidden
@@ -500,7 +536,9 @@ import workspacecore
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
-                    config: SpacesDeviceWorkspaceConfig(processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")]),
+                    config: SpacesDeviceWorkspaceConfig(processes: [
+                        SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
+                    ]),
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
@@ -512,15 +550,22 @@ import workspacecore
         let exitAlertID = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.attentionID)
 
         let undismissedRow = try #require(
-            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first { $0.source == .workspaceTarget && $0.kind == .process }
-        )
-        guard case .process(.exited) = undismissedRow.status else { Issue.record("expected an undismissed exit to read as exited"); return }
+            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first {
+                $0.source == .workspaceTarget && $0.kind == .process
+            })
+        guard case .process(.exited) = undismissedRow.status else {
+            Issue.record("expected an undismissed exit to read as exited")
+            return
+        }
 
         let dismissedRow = try #require(
             AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID]).first {
                 $0.source == .workspaceTarget && $0.kind == .process
             })
-        guard case .idle = dismissedRow.status else { Issue.record("expected an acknowledged exit to read as idle"); return }
+        guard case .idle = dismissedRow.status else {
+            Issue.record("expected an acknowledged exit to read as idle")
+            return
+        }
     }
 
     @Test func commandPaletteBellAlertFallsBackToSessionForegroundCommand() throws {

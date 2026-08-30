@@ -43,8 +43,9 @@ public final class TerminalControlInputSequencer: @unchecked Sendable {
     /// Enqueues an input write, ordered after everything already enqueued and held back until a
     /// preceding separated submit CR's trailing separation has elapsed. The returned acknowledgement
     /// resolves when the write has run, carrying what that write reported reaching the PTY.
-    @discardableResult
-    public func enqueueWrite(_ write: @escaping @Sendable () async -> TerminalInputWriteOutcome) -> TerminalInputWriteAcknowledgement {
+    @discardableResult public func enqueueWrite(_ write: @escaping @Sendable () async -> TerminalInputWriteOutcome)
+        -> TerminalInputWriteAcknowledgement
+    {
         let acknowledgement = TerminalInputWriteAcknowledgement()
         queue.enqueue {
             if let earliest = self.takeEarliestNextWrite() { try? await Task.sleep(until: earliest, clock: .continuous) }
@@ -65,8 +66,7 @@ public final class TerminalControlInputSequencer: @unchecked Sendable {
     /// its CR by `separation`, and the next write is held back by the same interval, keeping that CR a
     /// lone burst on both sides. A text write that never reached the PTY resolves the acknowledgement
     /// there and sends no CR: there is nothing to submit.
-    @discardableResult
-    public func enqueueSubmit(
+    @discardableResult public func enqueueSubmit(
         writeText: @escaping @Sendable () async -> TerminalSubmitTextWriteOutcome,
         writeCarriageReturn: @escaping @Sendable () async -> TerminalInputWriteOutcome
     ) -> TerminalInputWriteAcknowledgement {

@@ -42,9 +42,9 @@ import workspacecore
             guard let self else { return }
             while !self.stopped {
                 self.pending = false
-                do {
-                    _ = try await self.reconcileStore.run { try PortReservationReconciler(store: $0).reconcile() }
-                } catch { self.onError("\(error)") }
+                do { _ = try await self.reconcileStore.run { try PortReservationReconciler(store: $0).reconcile() } } catch {
+                    self.onError("\(error)")
+                }
                 guard self.pending else { break }
             }
             self.reconcileTask = nil

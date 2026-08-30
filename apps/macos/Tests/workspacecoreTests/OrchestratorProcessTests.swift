@@ -2832,8 +2832,8 @@ extension OrchestratorTests {
             try markBuiltInSessionLive(sessionID: sessionID)
             try store.upsert(
                 window: WindowRecord(
-                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                    targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             _ = try orchestrator.checkAndUpdateProcessStatuses()
             XCTAssertTrue(

@@ -396,8 +396,7 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         // and nothing reads stdin, so the submitted bytes never come back as output of their own.
         let host = try await startSubmitHost(
             command: "stty -echo; /usr/bin/printf '\\033[?2004h'; echo SUBMIT_READY; /usr/bin/printf '\\342'; sleep 2;"
-                + " /usr/bin/printf '\\234\\223UTF8_TAIL\\n'; sleep 30",
-            paths: paths)
+                + " /usr/bin/printf '\\234\\223UTF8_TAIL\\n'; sleep 30", paths: paths)
         let hostBox = Box(host)
         defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
 
