@@ -48,9 +48,18 @@ production build.
   raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
   later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
   transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers.
-- `workspaceFileRead(path, purpose)` — content, `sha256`, size. `editor` makes the native host's
-  single file-signature watcher follow the standalone editor; `inlineDiff` does not retarget that
-  watcher. Every caller must identify one of these purposes.
+- `workspaceFileRead(path, purpose, comparison?)` — content, `sha256`, size. `editor` makes the
+  native host's single file-signature watcher follow the standalone editor; `inlineDiff` does not
+  retarget that watcher. An inline-diff request with an immutable `comparison.baseRevision` also
+  returns Git-filtered `comparisonOldContent` for that revision (and its optional rename
+  `oldPath`), without adding old text to the streamed patch. Every caller must identify one of
+  these purposes.
+- `workspaceRevisionFileRead({path, revision, oldPath?})` — the exact live-checkout `content`,
+  `sha256`, and size whose Git-filter-aware equivalence was checked against the manifest-pinned
+  revision, plus the first-parent filtered `comparisonOldContent` (using `oldPath` for renames).
+  The revision target is existence/type checked but never transferred. Last Commit inline editing
+  uses this one response as its CAS baseline and guard, so it never races a separate live read;
+  it never moves the standalone editor watcher.
 - `workspaceFileWrite(path, content, {baseSHA256})` — compare-and-swap write; returns
   `{ok:true, sha256}` (the hash of exactly what was just written, adopted directly as the next
   save's CAS baseline) or `{conflict:true, currentSHA256}` (`currentSHA256` omitted and

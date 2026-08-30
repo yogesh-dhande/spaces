@@ -836,7 +836,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             // typing leaves the diff buffer dirty, its future conflict target is obtained by a
             // fresh comparison rather than carrying the old disk hash into a new baseline.
             return CodePaneBridge.DiffEditorState(
-                path: state.path, baseSHA256: write.sha256, baseContent: write.content, content: state.content, dirty: newDirty,
+                path: state.path, baseSHA256: write.sha256, baseContent: write.content, comparisonOldContent: state.comparisonOldContent,
+                content: state.content, dirty: newDirty,
                 conflict: newConflict, conflictBaseSHA256: nil)
         }
         editorState = adoptEditor(editorState)
@@ -906,6 +907,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     + [
                         metric.path.map { " path=\($0)" }, metric.fileIndex.map { " file_index=\($0)" },
                         metric.selectedPriority ? " selected_priority=1" : nil, metric.chunkCount.map { " chunk_count=\($0)" },
+                        metric.scope.map { " scope=\($0)" },
                     ].compactMap { $0 }.joined()
             }
             TerminalPerformance.logWorkspaceMetric(
@@ -1154,8 +1156,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 generation: generation, hosting: hosting)
         case .workspaceDiffManifestRelease(let scope, let manifestID):
             performWorkspaceDiffManifestRelease(scope: scope, manifestID: manifestID, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileRead(let path, let ownsFileSignature):
-            performFileRead(path: path, ownsFileSignature: ownsFileSignature, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileRead(let path, let ownsFileSignature, let comparisonBaseRevision, let oldPath):
+            performFileRead(
+                path: path, ownsFileSignature: ownsFileSignature, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                id: id, generation: generation, hosting: hosting)
+        case .workspaceRevisionFileRead(let path, let revision, let oldPath):
+            performWorkspaceRevisionFileRead(path: path, revision: revision, oldPath: oldPath, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256):
             performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
         case .reviewCommentList: performReviewCommentList(id: id, generation: generation, hosting: hosting)
@@ -1323,7 +1329,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
-    private func performFileRead(path: String, ownsFileSignature: Bool, id: String, generation: Int, hosting: any CodePaneHosting) {
+    private func performFileRead(
+        path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, id: String, generation: Int,
+        hosting: any CodePaneHosting
+    ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
                 id: id, generation: generation,
@@ -1373,7 +1382,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let deviceGateway = deviceGateway
         Task { [weak self] in
             do {
-                let result = try await deviceGateway.workspaceFileRead(workspaceID: workspaceID, relativePath: path, device: device)
+                let result = try await deviceGateway.workspaceFileRead(
+                    workspaceID: workspaceID, relativePath: path, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, device: device)
                 guard let self else { return }
                 switch CodePaneBridge.fileReadPayload(result) {
                 case .success(let payload):
@@ -1421,6 +1431,32 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 self.reply(id: id, generation: generation, error: bridgeError)
                 self.restoreFileSignatureMonitoringAfterFailedOpen(
                     path: path, error: bridgeError, pathChanged: pathChanged, dispatchGeneration: dispatchGeneration, device: device)
+            }
+        }
+    }
+
+    private func performWorkspaceRevisionFileRead(
+        path: String, revision: String, oldPath: String?, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceRevisionFileRead(
+                    workspaceID: workspaceID, revision: revision, relativePath: path, oldPath: oldPath, device: device)
+                guard let self else { return }
+                switch CodePaneBridge.revisionFileReadPayload(result) {
+                case .success(let payload): self.reply(id: id, generation: generation, result: payload)
+                case .failure(let error): self.reply(id: id, generation: generation, error: error)
+                }
+            } catch {
+                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
             }
         }
     }

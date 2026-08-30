@@ -78,6 +78,7 @@ function makeBridge(): SpacesBridge & {
     workspaceDiffFileChunkCancel: notUsed,
     workspaceDiffManifestRelease: notUsed,
     workspaceFileRead: notUsed,
+    workspaceRevisionFileRead: notUsed,
     workspaceFileWrite: notUsed,
     workspaceFileList: notUsed,
     workspaceRefList: notUsed,

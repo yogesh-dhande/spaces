@@ -189,8 +189,14 @@ class RealSpacesBridge implements SpacesBridge {
     await this.post("workspaceDiffManifestRelease", { scope, ...request });
   }
 
-  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult> {
-    return (await this.post("workspaceFileRead", { path, purpose })) as WorkspaceFileReadResult;
+  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose, comparison?: { baseRevision: string; oldPath?: string }): Promise<WorkspaceFileReadResult> {
+    return (await this.post("workspaceFileRead", {
+      path, purpose, comparisonBaseRevision: comparison?.baseRevision, oldPath: comparison?.oldPath,
+    })) as WorkspaceFileReadResult;
+  }
+
+  async workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<import("./types").WorkspaceRevisionFileReadResult> {
+    return (await this.post("workspaceRevisionFileRead", request)) as import("./types").WorkspaceRevisionFileReadResult;
   }
 
   async workspaceFileWrite(

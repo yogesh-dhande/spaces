@@ -27,6 +27,7 @@ import {
   WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
+  WorkspaceRevisionFileReadResult,
   WorkspaceFileReadPurpose,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
@@ -170,7 +171,7 @@ export class MockSpacesBridge implements SpacesBridge {
     await delay(undefined);
   }
 
-  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult> {
+  async workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose, _comparison?: { baseRevision: string; oldPath?: string }): Promise<WorkspaceFileReadResult> {
     // Only standalone Editor reads own the harness's live watcher. Inline diff reads fetch content
     // for a separate transient editor and must not move external-change monitoring off the open file.
     if (purpose === "editor") this.currentReadPath = path;
@@ -179,6 +180,19 @@ export class MockSpacesBridge implements SpacesBridge {
       throw new SpacesBridgeError("notFound", `No such file in the mock workspace: ${path}`);
     }
     return delay({ content: entry.content, sha256: entry.sha256, size: entry.content.length });
+  }
+
+  async workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<WorkspaceRevisionFileReadResult> {
+    if (!request.revision) throw new SpacesBridgeError("invalidArgument", "A revision is required.");
+    const entry = this.files.get(request.path);
+    if (!entry) throw new SpacesBridgeError("notFound", `No such file in the mock workspace: ${request.path}`);
+    return delay({
+      content: entry.content,
+      sha256: entry.sha256,
+      size: entry.content.length,
+      isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: null,
+    });
   }
 
   async workspaceFileWrite(

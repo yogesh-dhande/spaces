@@ -1,6 +1,7 @@
 import { CodeView, parseDiffFromFile, processFile, setLanguageOverride } from "@pierre/diffs";
-import type { CodeViewItem, CodeViewOptions, DiffLineAnnotation, FileContents } from "@pierre/diffs";
+import type { CodeViewItem, CodeViewOptions, DiffLineAnnotation, FileContents, FileDiffMetadata } from "@pierre/diffs";
 import { Editor } from "@pierre/diffs/edit";
+import { applyPatch, parsePatch, reversePatch } from "diff";
 import { DiffFileEntry, ReviewCommentSide } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
 import {
@@ -36,6 +37,16 @@ export interface DiffCommentHooks {
 
 type DiffViewPosition = { path: string; line: number; side: ReviewCommentSide };
 
+/** A complete Pierre diff hydrated once from the patch and its current editable new side. Keeping
+ * this as a value lets callers validate a replacement before discarding an unsaved editor without
+ * doing the expensive patch reversal a second time. */
+export interface PreparedDiffEdit {
+  path: string;
+  content: string;
+  fileDiff: FileDiffMetadata;
+  oldContent: string | null;
+}
+
 /**
  * Diff mode's content area: a single `@pierre/diffs` `CodeView` holding every changed file in
  * order, rather than a two-region layout (real diffs in one scrolling area, binary
@@ -47,13 +58,9 @@ type DiffViewPosition = { path: string; line: number; side: ReviewCommentSide };
  * `Virtualizer`), so this mounts into a `flex: 1; min-height: 0` element rather than an
  * auto-growing one inside a taller scrolling ancestor.
  *
- * Generic over `AnchoredComment` (Phase 4): `CodeView<AnchoredComment>`'s custom
- * `renderGutterUtility` renders the stable comment affordance on hover and opens a new draft on
- * click; `renderAnnotation` renders the comment card DOM for each
- * `CodeViewDiffItem.annotations` entry. The custom utility is used so the button has a stable
- * accessibility identifier for app automation; it must not be combined with Pierre's mutually
- * exclusive `onGutterUtilityClick` option. The item context is appended as the callback's last
- * argument by the compiled library's `defineItemSharedCallback` (see `CodeView.js`).
+ * Generic over `AnchoredComment`: `CodeView<AnchoredComment>` renders comment cards from each
+ * `CodeViewDiffItem.annotations` entry. Pierre owns the native gutter utility and its pointer
+ * suppression; post-render decoration supplies its stable automation identifier.
  */
 export class DiffView {
   private codeView: CodeView<AnchoredComment> | undefined;
@@ -116,6 +123,8 @@ export class DiffView {
         content: string;
         dirty: boolean;
         session: number;
+        fileDiff: FileDiffMetadata;
+        oldContent: string | null;
         conflict?: { kind: "changed"; diskContent: string } | { kind: "deleted" };
       }
     | undefined;
@@ -269,6 +278,7 @@ export class DiffView {
     if (index === undefined || !this.codeView) return;
     this.files[index] = file;
     this.filesByPath.set(file.path, file);
+    this.syncRecoveryEditFile();
     if (!this.isRenderedFile(file)) return;
     this.generation += 1;
     this.itemVersions.set(file.path, this.generation);
@@ -307,27 +317,48 @@ export class DiffView {
     }
   }
 
-  beginEdit(path: string, content: string, dirty = false): void {
+  beginEdit(path: string, content: string, dirty = false, oldContent?: string | null): boolean {
+    const prepared = this.prepareEdit(path, content, oldContent);
+    return prepared !== undefined && this.beginPreparedEdit(prepared, dirty);
+  }
+
+  /** Activates a complete diff prepared by `prepareEdit`. The preparation belongs to this exact
+   * path/content pair, so it is never reused after a disk read or selected file changes. */
+  beginPreparedEdit(prepared: PreparedDiffEdit, dirty = false): boolean {
+    const { path, content, fileDiff, oldContent } = prepared;
     if (!this.codeView) {
       this.codeView = new CodeView<AnchoredComment>(this.buildCodeViewOptions());
       this.codeView.setup(this.root);
     }
     if (this.editing?.path !== undefined && this.editing.path !== path) this.endEdit(this.editing.path);
-    this.editing = { path, content, dirty, session: ++this.editSessionGeneration };
+    this.editing = { path, content, dirty, fileDiff, oldContent, session: ++this.editSessionGeneration };
     this.syncRecoveryEditFile();
     this.emptyEl.style.display = "none";
     this.root.style.display = "";
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
-    const file = this.filesByPath.get(path);
-    if (!file) return;
-    const item = this.cacheItem(file);
-    // Entering edit switches just this record from a diff item to Pierre's full-file editor item.
-    // CodeView recreates that differing record only through setItems (updateItem requires equal
-    // item types), while all other records retain their current identity.
+    const editableFile = this.filesByPath.get(path);
+    if (!editableFile) return false;
+    const item = this.cacheItem(editableFile);
+    // Keep the existing FileDiff renderer: Pierre attaches its editor to that renderer and
+    // recomputes the same diff's hunks as the document changes.
     this.renderedPaths.add(path);
     this.codeView.setItems(this.cachedRenderedItems());
     this.completeEditorAttach(item);
+    return true;
+  }
+
+  /** Hydrates the complete old/new sides exactly once. Callers that need to validate before a
+   * destructive transition pass the returned value to `beginPreparedEdit` rather than asking the
+   * same patch to be parsed and reverse-applied again. */
+  prepareEdit(path: string, content: string, oldContent?: string | null): PreparedDiffEdit | undefined {
+    const hydrated = this.createEditableFileDiff(this.filesByPath.get(path), path, content, oldContent);
+    return hydrated === undefined ? undefined : { path, content, ...hydrated };
+  }
+
+  /** Pierre's stable old comparison side for the active inline edit. */
+  comparisonOldContent(path: string): string | null | undefined {
+    return this.editing?.path === path ? this.editing.oldContent : undefined;
   }
 
   /** Rebuilds the single editable item from a disk adoption or clean diff3 merge without creating
@@ -337,7 +368,9 @@ export class DiffView {
    * would leave the header and renderer out of sync with the root state. */
   replaceEditContent(path: string, content: string, dirty = true): void {
     if (this.editing?.path !== path || !this.codeView) return;
-    this.editing = { ...this.editing, content, dirty, conflict: undefined, session: ++this.editSessionGeneration };
+    const hydrated = this.createEditableFileDiff(this.filesByPath.get(path), path, content, this.editing.oldContent);
+    if (hydrated === undefined) return;
+    this.editing = { ...this.editing, content, dirty, ...hydrated, conflict: undefined, session: ++this.editSessionGeneration };
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     const file = this.filesByPath.get(path);
@@ -360,15 +393,17 @@ export class DiffView {
    * then CAS-writes against that same snapshot instead of a patch fragment or an older baseline. */
   setEditConflict(path: string, conflict: { kind: "changed"; diskContent: string } | { kind: "deleted" }): void {
     if (this.editing?.path !== path || !this.codeView) return;
+    this.clearEditorIdentifier();
     this.editing = { ...this.editing, conflict };
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
-    // Conflict changes the renderer from a File (editable) to FileDiff (read-only); `updateItem`
-    // cannot cross that boundary, so rebuild the item set as we do for streamed type changes.
+    // Conflict changes the FileDiff's complete sides and removes its editor. Rebuild the item set
+    // so Pierre replaces its renderer rather than retaining the editable attachment.
     const file = this.filesByPath.get(path);
     if (!file) return;
     this.cacheItem(file);
     this.codeView.setItems(this.cachedRenderedItems());
+    this.clearEditorIdentifier();
   }
 
   requestOpenAfterDiscard(path: string): void {
@@ -393,6 +428,7 @@ export class DiffView {
 
   endEdit(path: string): void {
     if (this.editing?.path !== path || !this.codeView) return;
+    this.clearEditorIdentifier();
     this.editing = undefined;
     const wasRecoveryEdit = this.recoveryEditFile?.path === path;
     this.recoveryEditFile = undefined;
@@ -400,7 +436,7 @@ export class DiffView {
     this.pendingEditPath = undefined;
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
-    // Leaving edit switches the active full-file item back to its patch-backed diff item.
+    // Leaving edit returns the active complete-side diff to its patch-backed review diff.
     if (wasRecoveryEdit) {
       this.itemsByPath.delete(path);
       this.itemTypes.delete(path);
@@ -415,6 +451,7 @@ export class DiffView {
       }
     }
     this.codeView.setItems(this.cachedRenderedItems());
+    this.clearEditorIdentifier();
   }
 
   /**
@@ -711,33 +748,6 @@ export class DiffView {
   private buildCodeViewOptions(): CodeViewOptions<AnchoredComment> {
     const renderAnnotation: NonNullable<CodeViewOptions<AnchoredComment>["renderAnnotation"]> = (annotation) =>
       this.hooks.renderCard(annotation.metadata);
-    const renderGutterUtility = (...args: unknown[]): HTMLElement | undefined => {
-      const getHoveredLine = args[0] as (() => { lineNumber: number; side?: "additions" | "deletions" } | undefined);
-      const context = args.at(-1) as { type?: string; item?: { id?: string } } | undefined;
-      if (context?.type !== "diff") return undefined;
-      const path = context?.item?.id;
-      if (!path) return undefined;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.setAttribute("data-utility-button", "");
-      // Pierre invokes this renderer while mounting the file, before any line is hovered. Keep one
-      // persistent action in the file's utility slot and resolve the current line only on click;
-      // the interaction manager updates its hovered-line getter as the pointer moves.
-      button.id = `code-pane-add-comment-${encodeURIComponent(path)}`;
-      button.setAttribute("aria-label", "Add comment");
-      button.textContent = "+";
-      button.addEventListener("click", (event) => {
-        // The custom utility lives inside the diff's interactive pre element. Stop the event at
-        // the button so clicking it cannot also be interpreted as a line click/edit request.
-        event.preventDefault();
-        event.stopPropagation();
-        const hovered = getHoveredLine();
-        if (!hovered || hovered.side === undefined) return;
-        const side = hovered.side === "deletions" ? "old" : "new";
-        this.requestNewComment(path, side, hovered.lineNumber);
-      });
-      return button;
-    };
     const onLineClick: NonNullable<CodeViewOptions<AnchoredComment>["onLineClick"]> = (event, context) => {
       // Pierre reports a diff click as one `diff-line` event object. CodeView appends the owning
       // item context as the second argument; this shape differs from the selected-range object
@@ -799,7 +809,8 @@ export class DiffView {
         );
         header.append(takeDisk, keepMine);
       } else {
-        header.append(cancel, save);
+        header.append(cancel);
+        if (this.editing.dirty) header.append(save);
         if (this.pendingEditPath === undefined) return header;
         const discard = document.createElement("button");
         discard.type = "button";
@@ -813,10 +824,15 @@ export class DiffView {
     return {
       theme: CODE_PANE_THEME_NAME,
       diffStyle: this.layout,
+      // CodeView enables its native gutter utility for all renderer types. File placeholders use
+      // the file renderer and inline-edit diffs have no stable patch anchors, so hide their no-op
+      // utility in Pierre's supported shadow-root stylesheet while retaining the native callback
+      // for ordinary read-only diffs.
+      unsafeCSS: "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
       enableGutterUtility: true,
       createEditor: (options) => new Editor(options),
       onItemEditChange: (item, file) => {
-        if (item.type !== "file" || this.editing?.path !== item.id || this.editing.conflict !== undefined) return;
+        if (item.type !== "diff" || this.editing?.path !== item.id || this.editing.conflict !== undefined) return;
         this.editing.content = file.contents;
         this.editing.dirty = true;
         this.clearEditError();
@@ -827,8 +843,12 @@ export class DiffView {
         if (currentFile) this.codeView?.updateItem(this.cacheItem(currentFile));
       },
       onLineClick,
+      onGutterUtilityClick: ((range: { start: number; side?: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => {
+        if (context.type !== "diff" || range.side === undefined) return;
+        if (this.editing?.path === context.item.id) return;
+        this.requestNewComment(context.item.id, range.side === "deletions" ? "old" : "new", range.start);
+      }) as NonNullable<CodeViewOptions<AnchoredComment>["onGutterUtilityClick"]>,
       renderAnnotation,
-      renderGutterUtility: renderGutterUtility as NonNullable<CodeViewOptions<AnchoredComment>["renderGutterUtility"]>,
       // Metadata augments Pierre's standard filename header. Supplying `renderCustomHeader` even
       // when it returns undefined replaces that header for every rendered file.
       renderHeaderMetadata: renderHeaderMetadata as NonNullable<CodeViewOptions<AnchoredComment>["renderHeaderMetadata"]>,
@@ -836,7 +856,10 @@ export class DiffView {
         const context = args.at(-1) as { item?: { id?: string } } | undefined;
         const path = context?.item?.id;
         if (path !== undefined) {
-          this.assignEditorIdentifier();
+          node.toggleAttribute("data-code-pane-editing", this.editing?.path === path && this.editing.conflict === undefined);
+          if (this.editing?.path === path && this.editing.conflict === undefined) this.assignEditorIdentifier(node);
+          else this.clearEditorIdentifier(node);
+          this.decorateNativeGutterUtility(node, path);
           this.decorateRenderedLines(node, path);
           this.retryPendingRestorePosition(path);
         }
@@ -890,16 +913,10 @@ export class DiffView {
       }
       return {
         id: file.path,
-        type: "file",
-        file: {
-          name: file.path,
-          contents: this.editing.content,
-          // This key stays stable while the user types, so Pierre keeps the live TextDocument;
-          // externally adopted/merged content increments `session` and deliberately rebuilds it.
-          cacheKey: `${file.path}:diff-edit:${this.editing.session}`,
-          lang: resolveAllowedLanguage(file.path),
-        },
+        type: "diff",
+        fileDiff: this.editing.fileDiff,
         version: this.itemVersion(file.path),
+        annotations: this.buildAnnotations(file.path),
         edit: true,
       };
     }
@@ -982,14 +999,23 @@ export class DiffView {
     requestAnimationFrame(() => this.assignEditorIdentifierAfterRender(path, framesRemaining - 1));
   }
 
-  private assignEditorIdentifier(): boolean {
+  private assignEditorIdentifier(root: HTMLElement = this.root): boolean {
     // Pierre's editor exposes its live surface as a multiline textbox. It sets the
     // contentEditable property rather than an HTML contenteditable attribute, so select the
     // semantic surface that is stable in both the browser and WKWebView DOMs.
-    const editorElement = this.renderedElements<HTMLElement>(`[role="textbox"][aria-multiline="true"]`)[0];
+    const editorElement = this.renderedElements<HTMLElement>(`[role="textbox"][aria-multiline="true"]`, root)[0];
     if (!editorElement) return false;
     editorElement.id = "code-pane-diff-edit-input";
     return true;
+  }
+
+  /** The identifier belongs to Spaces' active edit contract, not Pierre's renderer lifecycle.
+   * Pierre may retain a detached/reused contenteditable while replacing a FileDiff, so clear our
+   * identifier before a read-only transition even when that DOM node is not removed immediately. */
+  private clearEditorIdentifier(root: HTMLElement = this.root): void {
+    for (const editorElement of this.renderedElements<HTMLElement>("#code-pane-diff-edit-input", root)) {
+      editorElement.removeAttribute("id");
+    }
   }
 
   private decorateRenderedLines(node: HTMLElement, path: string): void {
@@ -1001,6 +1027,77 @@ export class DiffView {
       line.id = `code-pane-diff-${side}-line-${encodedPath}-${lineNumber}`;
       line.dataset.diffPath = path;
       line.dataset.diffSide = side;
+    }
+  }
+
+  private decorateNativeGutterUtility(node: HTMLElement, path: string): void {
+    if (this.decorateGutterUtility(node, path) > 0) return;
+    // FileDiff emits its post-render hook just before the interaction manager inserts the native
+    // SVG control. Observe only this file's shadow root so a later file can never take its id.
+    const root = node.shadowRoot;
+    if (!root) return;
+    const observer = new MutationObserver(() => {
+      if (this.decorateGutterUtility(node, path) > 0) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    // The utility's nested shadow tree can be populated after this root's mutation record; a
+    // single following task covers that post-mount ordering without touching another file.
+    setTimeout(() => {
+      this.decorateGutterUtility(node, path);
+      observer.disconnect();
+    }, 50);
+  }
+
+  private decorateGutterUtility(node: HTMLElement, path: string): number {
+    const buttons = this.renderedElements<HTMLElement>("[data-utility-button]", node);
+    for (const button of buttons) {
+      button.id = `code-pane-add-comment-${encodeURIComponent(path)}`;
+      button.setAttribute("aria-label", "Add comment");
+    }
+    return buttons.length;
+  }
+
+  /** Rebuild Pierre's complete diff from the current new side. Git streams patch hunks, not full
+   * files; reversing the displayed patch first gives `parseDiffFromFile` both complete sides so
+   * its editor can preserve and recompute hunks as the document changes. */
+  private createEditableFileDiff(
+    file: DiffFileEntry | undefined,
+    path: string,
+    newContent: string,
+    suppliedOldContent: string | null | undefined,
+  ): { fileDiff: FileDiffMetadata; oldContent: string | null } | undefined {
+    if (file?.isBinary) return undefined;
+    try {
+      const partial = file?.patch === undefined
+        ? undefined
+        : processFile(file.patch, { cacheKey: file.path, isGitDiff: true, throwOnError: true });
+      // A queued manifest row has no patch yet, but restored edits carry the complete persisted
+      // baseline explicitly. Accept that supplied old side; a fresh edit still requires a patch
+      // so an unappliable partial cannot silently become an empty diff.
+      if (file !== undefined && !partial && suppliedOldContent === undefined) return undefined;
+      const oldContent = suppliedOldContent !== undefined
+        ? suppliedOldContent
+        : partial?.type === "new"
+          ? null
+          : file?.patch === undefined
+            ? false
+            : applyPatch(newContent, reversePatch(parsePatch(file.patch)[0]!));
+      if (oldContent === false) return undefined;
+      const oldFile: FileContents | null = oldContent === null
+        ? null
+        : { name: partial?.prevName ?? file?.oldPath ?? path, contents: oldContent, cacheKey: `${path}:diff-edit:old`, lang: resolveAllowedLanguage(path) };
+      const newFile: FileContents = {
+        name: path,
+        contents: newContent,
+        cacheKey: `${path}:diff-edit:new:${this.editSessionGeneration + 1}`,
+        lang: resolveAllowedLanguage(path),
+      };
+      return {
+        oldContent,
+        fileDiff: setLanguageOverride(parseDiffFromFile(oldFile, newFile, undefined, true), resolveAllowedLanguage(path)),
+      };
+    } catch {
+      return undefined;
     }
   }
 
@@ -1103,7 +1200,8 @@ export class DiffView {
 
   /** Returns the manifest entries plus the one recovery-only editor, which deliberately stays out
    * of the sidebar/manifest scheduler. It is placed first so a refresh cannot strand unsaved text
-   * below a long streamed diff. */
+   * below a long streamed diff. A queued replacement patch also uses this item: its prior verified
+   * comparison can still render Save/Cancel after that transfer aborts. */
   private displayedFiles(): readonly DiffFileEntry[] {
     return this.recoveryEditFile === undefined ? this.files : [this.recoveryEditFile, ...this.files];
   }
@@ -1120,7 +1218,8 @@ export class DiffView {
 
   private syncRecoveryEditFile(): void {
     const editing = this.editing;
-    if (!editing || this.files.some((file) => file.path === editing.path)) {
+    const manifestFile = editing === undefined ? undefined : this.files.find((file) => file.path === editing.path);
+    if (!editing || (manifestFile !== undefined && this.isRenderedFile(manifestFile))) {
       this.recoveryEditFile = undefined;
       return;
     }

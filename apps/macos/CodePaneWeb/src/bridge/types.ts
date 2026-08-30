@@ -39,6 +39,8 @@ export interface DiffFileManifestEntry {
   /** Previous path, present only when `status` is `"renamed"`. */
   oldPath?: string;
   status: FileChangeStatus;
+  /** Immutable old-side tree for on-demand Git-filtered inline-edit hydration. */
+  comparisonBaseRevision?: string;
 }
 
 /** One completed file patch. `patch` is absent only for a binary file. There is deliberately no
@@ -56,6 +58,10 @@ export interface DiffFileEntry {
   patchState?: "queued" | "streaming" | "ready";
   oldSHA?: string;
   newSHA?: string;
+  /** Immutable post-change revision for a tracked revision-to-revision diff. Last Commit inline
+   * editing compares this exact revision with the live worktree before allowing a write. */
+  targetRevision?: string;
+  comparisonBaseRevision?: string;
 }
 
 /** The small first response of a progressive diff transfer. Its lease freezes the diff file
@@ -88,6 +94,18 @@ export interface WorkspaceFileReadResult {
   content: string;
   sha256: string;
   size: number;
+  comparisonOldContent?: string | null;
+}
+
+/** Last Commit safety and Git-filtered comparison input. `content`/`sha256` are the exact live
+ * worktree baseline that the native operation verified against the pinned revision; the target
+ * blob itself is existence/type checked but never transferred. */
+export interface WorkspaceRevisionFileReadResult {
+  content: string;
+  sha256: string;
+  size: number;
+  isWorktreeEquivalentToRevision: boolean;
+  comparisonOldContent: string | null;
 }
 
 /** Identifies whether a file read owns the native editor file-signature watcher. */
@@ -337,7 +355,12 @@ export interface SpacesBridge {
   workspaceDiffManifestRelease(scope: DiffScope, request: { manifestID: string }): Promise<void>;
   /** Reads a workspace file. The default editor purpose owns the native file-signature watcher;
    * inline diff reads explicitly use `inlineDiff` and do not retarget it. */
-  workspaceFileRead(path: string, purpose: WorkspaceFileReadPurpose): Promise<WorkspaceFileReadResult>;
+  workspaceFileRead(
+    path: string, purpose: WorkspaceFileReadPurpose, comparison?: { baseRevision: string; oldPath?: string },
+  ): Promise<WorkspaceFileReadResult>;
+  /** Reads a file from an immutable revision named by streamed diff metadata. This deliberately
+   * has no read purpose: it must never retarget the standalone Editor's worktree watcher. */
+  workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<WorkspaceRevisionFileReadResult>;
   workspaceFileWrite(path: string, content: string, options: WorkspaceFileWriteOptions): Promise<WorkspaceFileWriteResult>;
   /**
    * The full workspace file listing, backing Editor mode's Files tree and the ⌘P quick-open
@@ -450,6 +473,9 @@ export interface CodePaneEditorState {
  * and Keep mine must use create-if-missing. Editor mode has its own live reconciliation path, so
  * this distinction belongs only to the inline diff editor's durable state. */
 export interface CodePaneDiffEditorState extends CodePaneEditorState {
+  /** Immutable old side of the reviewed comparison. Unlike `baseContent`, this is never a CAS
+   * baseline; Pierre retains it while the editable new side changes and across hibernation. */
+  comparisonOldContent: string | null;
   conflictBaseSHA256: string | null;
 }
 

@@ -27,6 +27,7 @@ function makeBridge(result: WorkspaceFileReadResult): SpacesBridge {
     workspaceDiffFileChunkCancel: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceDiffManifestRelease: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileRead: vi.fn().mockResolvedValue(result),
+    workspaceRevisionFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceRefList: vi.fn().mockRejectedValue(new Error("not used")),

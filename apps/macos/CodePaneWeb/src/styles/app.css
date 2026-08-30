@@ -85,6 +85,13 @@
   gap: 10px;
 }
 
+.agent-command-dialog h2 {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+}
+
 .agent-command-dialog input {
   min-width: 0;
   height: 28px;

@@ -83,33 +83,42 @@ enum CodePaneBridge {
         let path: String
         let baseSHA256: String
         let baseContent: String
+        /// The comparison's old side is independent of the writable disk baseline. It remains
+        /// stable while an inline edit is restored or reconciled so the diff keeps its original
+        /// highlighting rather than comparing the file against its current contents.
+        let comparisonOldContent: String?
         let content: String
         let dirty: Bool
         let conflict: Bool
         let conflictBaseSHA256: String?
 
         init(
-            path: String, baseSHA256: String, baseContent: String, content: String, dirty: Bool, conflict: Bool = false,
+            path: String, baseSHA256: String, baseContent: String, comparisonOldContent: String?, content: String, dirty: Bool, conflict: Bool = false,
             conflictBaseSHA256: String? = nil
         ) {
             self.path = path
             self.baseSHA256 = baseSHA256
             self.baseContent = baseContent
+            self.comparisonOldContent = comparisonOldContent
             self.content = content
             self.dirty = dirty
             self.conflict = conflict
             self.conflictBaseSHA256 = conflictBaseSHA256
         }
 
-        private enum CodingKeys: String, CodingKey { case path, baseSHA256, baseContent, content, dirty, conflict, conflictBaseSHA256 }
+        private enum CodingKeys: String, CodingKey {
+            case path, baseSHA256, baseContent, comparisonOldContent, content, dirty, conflict, conflictBaseSHA256
+        }
 
-        /// This field is required-nullable on the web bridge. Decoding it with `decode`, rather
-        /// than `decodeIfPresent`, rejects stale partial snapshots instead of inventing a deletion.
+        /// This bridge accepts one persisted snapshot shape: these fields are required-nullable.
+        /// Decoding with `decode`, rather than `decodeIfPresent`, rejects a missing comparison
+        /// side or deletion target instead of inventing context that could make an unsafe save.
         init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             path = try container.decode(String.self, forKey: .path)
             baseSHA256 = try container.decode(String.self, forKey: .baseSHA256)
             baseContent = try container.decode(String.self, forKey: .baseContent)
+            comparisonOldContent = try container.decode(String?.self, forKey: .comparisonOldContent)
             content = try container.decode(String.self, forKey: .content)
             dirty = try container.decode(Bool.self, forKey: .dirty)
             conflict = try container.decode(Bool.self, forKey: .conflict)
@@ -121,6 +130,11 @@ enum CodePaneBridge {
             try container.encode(path, forKey: .path)
             try container.encode(baseSHA256, forKey: .baseSHA256)
             try container.encode(baseContent, forKey: .baseContent)
+            if let comparisonOldContent {
+                try container.encode(comparisonOldContent, forKey: .comparisonOldContent)
+            } else {
+                try container.encodeNil(forKey: .comparisonOldContent)
+            }
             try container.encode(content, forKey: .content)
             try container.encode(dirty, forKey: .dirty)
             try container.encode(conflict, forKey: .conflict)
@@ -424,7 +438,10 @@ enum CodePaneBridge {
         case workspaceDiffManifestRelease(scope: DiffScope, manifestID: String)
         /// `ownsFileSignature` is true only for the standalone Editor's read; inline diff reads must
         /// not retarget the one native file-signature watcher away from that Editor file.
-        case workspaceFileRead(path: String, ownsFileSignature: Bool)
+        case workspaceFileRead(path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?)
+        /// Reads a file from the immutable target revision attached to last-commit diff metadata. It must
+        /// not affect the standalone Editor's live working-tree file-signature subscription.
+        case workspaceRevisionFileRead(path: String, revision: String, oldPath: String?)
         /// `baseSHA256` is `nil` for the "create" convention (see `WorkspaceFileWriteOptions.baseSHA256`
         /// in `CodePaneWeb/src/bridge/types.ts`): the write must fail as a conflict unless the target
         /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
@@ -506,10 +523,19 @@ enum CodePaneBridge {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path and purpose."))
             }
             switch purpose {
-            case "editor": return .success(.workspaceFileRead(path: path, ownsFileSignature: true))
-            case "inlineDiff": return .success(.workspaceFileRead(path: path, ownsFileSignature: false))
+            case "editor": return .success(.workspaceFileRead(path: path, ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil))
+            case "inlineDiff":
+                let comparisonBaseRevision = request.params["comparisonBaseRevision"] as? String
+                let oldPath = request.params["oldPath"] as? String
+                return .success(.workspaceFileRead(
+                    path: path, ownsFileSignature: false, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath))
             default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead purpose must be editor or inlineDiff."))
             }
+        case "workspaceRevisionFileRead":
+            guard let path = request.params["path"] as? String, let revision = request.params["revision"] as? String else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceRevisionFileRead requires a path and revision."))
+            }
+            return .success(.workspaceRevisionFileRead(path: path, revision: revision, oldPath: request.params["oldPath"] as? String))
         case "workspaceFileWrite":
             // `options.baseSHA256` is optional: absent or JSON `null` (the wire's "create" convention
             // — see realBridge.ts's `workspaceFileWrite`) both fall out of `as? String` as `nil` here,
@@ -611,13 +637,98 @@ enum CodePaneBridge {
         let content: String
         let sha256: String
         let size: Int
+        let comparisonOldContent: String?
+
+        init(content: String, sha256: String, size: Int, comparisonOldContent: String? = nil) {
+            self.content = content
+            self.sha256 = sha256
+            self.size = size
+            self.comparisonOldContent = comparisonOldContent
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case content, sha256, size, comparisonOldContent
+        }
+
+        // `comparisonOldContent` is required-nullable on the web bridge. In particular, an added
+        // file has no old side; omitting the key would be indistinguishable from a malformed response.
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(content, forKey: .content)
+            try container.encode(sha256, forKey: .sha256)
+            try container.encode(size, forKey: .size)
+            if let comparisonOldContent {
+                try container.encode(comparisonOldContent, forKey: .comparisonOldContent)
+            } else {
+                try container.encodeNil(forKey: .comparisonOldContent)
+            }
+        }
     }
 
     static func fileReadPayload(_ result: SpacesDeviceWorkspaceFileReadResult) -> Result<FileReadPayload, BridgeError> {
         guard !result.isBinaryGuess, let data = Data(base64Encoded: result.base64Data), let content = String(data: data, encoding: .utf8) else {
             return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text."))
         }
-        return .success(FileReadPayload(content: content, sha256: result.sha256, size: result.size))
+        let comparisonOldContent: String?
+        if let encoded = result.comparisonOldBase64Data {
+            guard let comparisonData = Data(base64Encoded: encoded), let comparison = String(data: comparisonData, encoding: .utf8) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text."))
+            }
+            comparisonOldContent = comparison
+        } else {
+            comparisonOldContent = nil
+        }
+        return .success(FileReadPayload(
+            content: content, sha256: result.sha256, size: result.size,
+            comparisonOldContent: comparisonOldContent))
+    }
+
+    struct RevisionFileReadPayload: Encodable, Equatable {
+        let content: String
+        let sha256: String
+        let size: Int
+        let isWorktreeEquivalentToRevision: Bool
+        let comparisonOldContent: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case content, sha256, size, isWorktreeEquivalentToRevision, comparisonOldContent
+        }
+
+        // See `FileReadPayload`: this specialized Last Commit response has the same strict
+        // required-nullable old-side contract for an added file.
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(content, forKey: .content)
+            try container.encode(sha256, forKey: .sha256)
+            try container.encode(size, forKey: .size)
+            try container.encode(isWorktreeEquivalentToRevision, forKey: .isWorktreeEquivalentToRevision)
+            if let comparisonOldContent {
+                try container.encode(comparisonOldContent, forKey: .comparisonOldContent)
+            } else {
+                try container.encodeNil(forKey: .comparisonOldContent)
+            }
+        }
+    }
+
+    static func revisionFileReadPayload(_ result: SpacesDeviceWorkspaceRevisionFileReadResult) -> Result<RevisionFileReadPayload, BridgeError> {
+        guard !result.worktreeFile.isBinaryGuess,
+            let worktreeData = Data(base64Encoded: result.worktreeFile.base64Data),
+            let worktreeContent = String(data: worktreeData, encoding: .utf8)
+        else {
+            return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text."))
+        }
+        let comparisonOldContent: String?
+        if let encoded = result.comparisonOldBase64Data {
+            guard let data = Data(base64Encoded: encoded), let content = String(data: data, encoding: .utf8) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text."))
+            }
+            comparisonOldContent = content
+        } else {
+            comparisonOldContent = nil
+        }
+        return .success(.init(
+            content: worktreeContent, sha256: result.worktreeFile.sha256, size: result.worktreeFile.size,
+            isWorktreeEquivalentToRevision: result.isWorktreeEquivalentToRevision, comparisonOldContent: comparisonOldContent))
     }
 
     /// `workspaceFileWrite`'s wire shape is `{ok:true, sha256}`, `{conflict:true, currentSHA256}`, or

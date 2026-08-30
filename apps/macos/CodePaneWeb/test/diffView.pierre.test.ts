@@ -130,7 +130,7 @@ describe("DiffView with the real Pierre renderer", () => {
     container.remove();
   });
 
-  it("gives Pierre's real editable surface a stable identifier", async () => {
+  it("keeps Pierre's diff renderer and highlights while editing its complete right-side document", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const view = new DiffView(container, "split", hooks(() => {}));
@@ -142,7 +142,39 @@ describe("DiffView with the real Pierre renderer", () => {
     await vi.waitFor(() => {
       const editor = queryOpenShadowRoots(container, '[role="textbox"]')[0];
       expect(editor?.id).toBe("code-pane-diff-edit-input");
+      const rendered = container.querySelector("diffs-container")!.shadowRoot!;
+      expect(rendered.querySelector('[data-line-type="change-deletion"]')).not.toBeNull();
+      expect(rendered.querySelector('[data-line-type="change-addition"]')).not.toBeNull();
     });
+    container.remove();
+  });
+
+  it("returns to the read-only header when the inline edit ends", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new DiffView(container, "split", hooks(() => {}));
+
+    view.setFiles([file()], false);
+    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    view.beginEdit("src/example.txt", "const value = newValue;\n");
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-cancel")).toHaveLength(1));
+
+    view.endEdit("src/example.txt");
+    await vi.waitFor(() => {
+      expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0);
+      expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-cancel")).toHaveLength(0);
+      expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-save")).toHaveLength(0);
+    });
+
+    view.beginEdit("src/example.txt", "const value = newValue;\n");
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    view.setEditConflict("src/example.txt", { kind: "changed", diskContent: "const value = diskValue;\n" });
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0));
+    // Pierre completes the read-only renderer asynchronously; a delayed post-render must not
+    // restore the Spaces-owned identifier to a reused contenteditable.
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0);
+
     container.remove();
   });
 
@@ -153,18 +185,20 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}, onRequestNewComment));
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => {
-      const button = queryOpenShadowRoots(container, '[data-utility-button]')[0];
-      expect(button?.id).toBe("code-pane-add-comment-src%2Fexample.txt");
-    });
-
+    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const newLine = shadowRoot.querySelector<HTMLElement>('[data-line-type="change-addition"]')!;
     const pointerMove = new Event("pointermove", { bubbles: true, composed: true });
     Object.defineProperty(pointerMove, "pointerType", { value: "mouse" });
     newLine.dispatchEvent(pointerMove);
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, '[data-utility-button]')[0]?.id).toBe("code-pane-add-comment-src%2Fexample.txt"));
     const button = queryOpenShadowRoots(container, '[data-utility-button]')[0] as HTMLButtonElement;
-    button.click();
+    const pointerDown = new Event("pointerdown", { bubbles: true, composed: true });
+    Object.assign(pointerDown, { pointerId: 1, pointerType: "mouse", button: 0 });
+    button.dispatchEvent(pointerDown);
+    const pointerUp = new Event("pointerup", { bubbles: true, composed: true });
+    Object.assign(pointerUp, { pointerId: 1, pointerType: "mouse", button: 0 });
+    document.dispatchEvent(pointerUp);
 
     expect(onRequestNewComment).toHaveBeenCalledWith({
       filePath: "src/example.txt",
@@ -172,6 +206,22 @@ describe("DiffView with the real Pierre renderer", () => {
       lineNumber: 1,
       lineText: "const value = newValue;",
     });
+    container.remove();
+  });
+
+  it("hides the native comment utility while the file is being edited", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new DiffView(container, "split", hooks(() => {}));
+
+    view.setFiles([file()], false);
+    expect(view.beginEdit("src/example.txt", "const value = newValue;\n")).toBe(true);
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+
+    const editingRoots = queryOpenShadowRoots(container, "[data-code-pane-editing]");
+    expect(editingRoots).toHaveLength(1);
+    const unsafeStyle = queryOpenShadowRoots(container, "style[data-unsafe-css]")[0];
+    expect(unsafeStyle?.textContent).toContain(":host([data-code-pane-editing]) [data-utility-button]");
     container.remove();
   });
 
@@ -195,9 +245,34 @@ describe("DiffView with the real Pierre renderer", () => {
     Object.defineProperty(pointerMove, "pointerType", { value: "mouse" });
     lines[0]!.dispatchEvent(pointerMove);
     const button = queryOpenShadowRoots(container, '[data-utility-button]')[0] as HTMLButtonElement;
-    button.click();
+    const pointerDown = new Event("pointerdown", { bubbles: true, composed: true });
+    Object.assign(pointerDown, { pointerId: 1, pointerType: "mouse", button: 0 });
+    button.dispatchEvent(pointerDown);
+    const pointerUp = new Event("pointerup", { bubbles: true, composed: true });
+    Object.assign(pointerUp, { pointerId: 1, pointerType: "mouse", button: 0 });
+    document.dispatchEvent(pointerUp);
 
     expect(onRequestNewComment).toHaveBeenCalledWith(expect.objectContaining({ lineNumber: 2 }));
+    container.remove();
+  });
+
+  it("does not expose a native gutter utility for a binary placeholder", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new DiffView(container, "split", hooks(() => {}));
+
+    view.setFiles([{ ...file(), isBinary: true, patch: undefined }], false);
+    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+
+    const line = queryOpenShadowRoots(container, "[data-line]")[0];
+    const pointerMove = new Event("pointermove", { bubbles: true, composed: true });
+    Object.defineProperty(pointerMove, "pointerType", { value: "mouse" });
+    line?.dispatchEvent(pointerMove);
+    const utility = queryOpenShadowRoots(container, "[data-utility-button]");
+    expect(utility).toHaveLength(1);
+    expect(utility[0]?.closest("[data-file]")).not.toBeNull();
+    const unsafeStyle = queryOpenShadowRoots(container, "style[data-unsafe-css]")[0];
+    expect(unsafeStyle?.textContent).toContain("[data-file] [data-utility-button]");
     container.remove();
   });
 });

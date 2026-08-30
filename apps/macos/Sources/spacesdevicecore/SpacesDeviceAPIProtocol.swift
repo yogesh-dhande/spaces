@@ -953,10 +953,15 @@ public struct SpacesDeviceWorkspaceReference: Codable, Sendable, Equatable {
 public struct SpacesDeviceWorkspaceFileReadRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let relativePath: String
+    /// Immutable old-side tree requested only by inline diff editing; ordinary Editor reads omit it.
+    public let comparisonBaseRevision: String?
+    public let oldPath: String?
 
-    public init(workspaceID: String, relativePath: String) {
+    public init(workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
+        self.comparisonBaseRevision = comparisonBaseRevision
+        self.oldPath = oldPath
     }
 }
 
@@ -967,12 +972,55 @@ public struct SpacesDeviceWorkspaceFileReadResult: Codable, Sendable, Equatable 
     public let sha256: String
     public let size: Int
     public let isBinaryGuess: Bool
+    /// Git-filtered old comparison text only for an inline-diff baseline request.
+    public let comparisonOldBase64Data: String?
 
-    public init(base64Data: String, sha256: String, size: Int, isBinaryGuess: Bool) {
+    public init(
+        base64Data: String, sha256: String, size: Int, isBinaryGuess: Bool,
+        comparisonOldBase64Data: String? = nil
+    ) {
         self.base64Data = base64Data
         self.sha256 = sha256
         self.size = size
         self.isBinaryGuess = isBinaryGuess
+        self.comparisonOldBase64Data = comparisonOldBase64Data
+    }
+}
+
+/// Reads a regular file as it existed at one immutable Git object in a workspace repository. `revision`
+/// must be a full 40- or 64-hex object id; symbolic and abbreviated refs are intentionally rejected so a
+/// caller that received it in diff metadata always reads the same bytes. `relativePath` is workspace-relative.
+public struct SpacesDeviceWorkspaceRevisionFileReadRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let revision: String
+    public let relativePath: String
+    public let oldPath: String?
+
+    public init(workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil) {
+        self.workspaceID = workspaceID
+        self.revision = revision
+        self.relativePath = relativePath
+        self.oldPath = oldPath
+    }
+}
+
+/// Last Commit inline-edit verification. `worktreeFile` is the exact live baseline whose Git
+/// equivalence was checked by this operation, so the browser never has to race a separate file
+/// read against the immutable-revision guard. The target blob is checked only for existence and
+/// type; it is not transferred. Only the live baseline and Git-filtered comparison old side carry
+/// bounded payload bytes.
+public struct SpacesDeviceWorkspaceRevisionFileReadResult: Codable, Sendable, Equatable {
+    public let worktreeFile: SpacesDeviceWorkspaceFileReadResult
+    public let isWorktreeEquivalentToRevision: Bool
+    public let comparisonOldBase64Data: String?
+
+    public init(
+        worktreeFile: SpacesDeviceWorkspaceFileReadResult, isWorktreeEquivalentToRevision: Bool,
+        comparisonOldBase64Data: String?
+    ) {
+        self.worktreeFile = worktreeFile
+        self.isWorktreeEquivalentToRevision = isWorktreeEquivalentToRevision
+        self.comparisonOldBase64Data = comparisonOldBase64Data
     }
 }
 
@@ -1151,10 +1199,13 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
     public let isBinary: Bool
     public let oldSHA: String?
     public let newSHA: String?
+    /// The immutable target revision that owns `path`, when this file came from a tracked revision-to-revision diff.
+    /// A client can use it to read the post-change file without consulting the mutable working tree.
+    public let targetRevision: String?
 
     public init(
         path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, isBinary: Bool = false, oldSHA: String? = nil,
-        newSHA: String? = nil
+        newSHA: String? = nil, targetRevision: String? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
@@ -1162,6 +1213,7 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
         self.isBinary = isBinary
         self.oldSHA = oldSHA
         self.newSHA = newSHA
+        self.targetRevision = targetRevision
     }
 }
 
@@ -1171,11 +1223,14 @@ public struct SpacesDeviceWorkspaceDiffManifestFile: Codable, Sendable, Equatabl
     public let path: String
     public let oldPath: String?
     public let status: SpacesDeviceWorkspaceDiffFileStatus
+    /// Immutable old-side tree for on-demand Git-filtered inline-edit hydration.
+    public let comparisonBaseRevision: String?
 
-    public init(path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus) {
+    public init(path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, comparisonBaseRevision: String? = nil) {
         self.path = path
         self.oldPath = oldPath
         self.status = status
+        self.comparisonBaseRevision = comparisonBaseRevision
     }
 }
 
@@ -2277,6 +2332,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case endAutomationAgents(SpacesDeviceAutomationRunReference)
     /// Reads one file inside a workspace's checkout, capped at 10 MiB. Read-only.
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest)
+    /// Reads one file from an explicit immutable Git revision inside a workspace repository, capped at 10 MiB. Read-only.
+    case workspaceRevisionFileRead(SpacesDeviceWorkspaceRevisionFileReadRequest)
     /// Compare-and-swap write to one file inside a workspace's checkout; see
     /// `SpacesDeviceWorkspaceFileWriteRequest`.
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteRequest)
@@ -2374,6 +2431,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .cancelAutomationRun: "cancelAutomationRun"
         case .endAutomationAgents: "endAutomationAgents"
         case .workspaceFileRead: "workspaceFileRead"
+        case .workspaceRevisionFileRead: "workspaceRevisionFileRead"
         case .workspaceFileWrite: "workspaceFileWrite"
         case .workspaceFileList: "workspaceFileList"
         case .workspaceRefList: "workspaceRefList"
@@ -2497,7 +2555,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceFileList, .workspaceRefList, .workspaceDiffManifestChunk,
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList, .workspaceRefList, .workspaceDiffManifestChunk,
             .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
             true
         default: false
@@ -2567,6 +2625,7 @@ extension SpacesDeviceAPICommand: Codable {
         case cancelAutomationRun
         case endAutomationAgents
         case workspaceFileRead
+        case workspaceRevisionFileRead
         case workspaceFileWrite
         case workspaceFileList
         case workspaceRefList
@@ -2668,6 +2727,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .cancelAutomationRun: self = .cancelAutomationRun(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         case .endAutomationAgents: self = .endAutomationAgents(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadRequest.self, forKey: key))
+        case .workspaceRevisionFileRead:
+            self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadRequest.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteRequest.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListRequest.self, forKey: key))
         case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListRequest.self, forKey: key))
@@ -2757,6 +2818,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .cancelAutomationRun(let payload): try container.encode(payload, forKey: .cancelAutomationRun)
         case .endAutomationAgents(let payload): try container.encode(payload, forKey: .endAutomationAgents)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
+        case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
         case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
@@ -2852,6 +2914,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case automations(SpacesDeviceAutomationsResult)
     case automationRuns(SpacesDeviceAutomationRunsResult)
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
+    case workspaceRevisionFileRead(SpacesDeviceWorkspaceRevisionFileReadResult)
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteResult)
     case workspaceFileList(SpacesDeviceWorkspaceFileListResult)
     case workspaceRefList(SpacesDeviceWorkspaceRefListResult)
@@ -2883,6 +2946,7 @@ extension SpacesDeviceAPIResult: Codable {
         case automations
         case automationRuns
         case workspaceFileRead
+        case workspaceRevisionFileRead
         case workspaceFileWrite
         case workspaceFileList
         case workspaceRefList
@@ -2919,6 +2983,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .automations: self = .automations(try container.decode(SpacesDeviceAutomationsResult.self, forKey: key))
         case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
+        case .workspaceRevisionFileRead: self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadResult.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListResult.self, forKey: key))
         case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListResult.self, forKey: key))
@@ -2955,6 +3020,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .automations(let payload): try container.encode(payload, forKey: .automations)
         case .automationRuns(let payload): try container.encode(payload, forKey: .automationRuns)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
+        case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
         case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
         case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
@@ -3048,6 +3114,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var automationRuns: [TerminalServiceAutomationRunSummary]? { if case .automationRuns(let payload) = result { payload.rows } else { nil } }
 
     public var workspaceFileRead: SpacesDeviceWorkspaceFileReadResult? { if case .workspaceFileRead(let payload) = result { payload } else { nil } }
+
+    public var workspaceRevisionFileRead: SpacesDeviceWorkspaceRevisionFileReadResult? {
+        if case .workspaceRevisionFileRead(let payload) = result { payload } else { nil }
+    }
 
     public var workspaceFileWrite: SpacesDeviceWorkspaceFileWriteResult? {
         if case .workspaceFileWrite(let payload) = result { payload } else { nil }

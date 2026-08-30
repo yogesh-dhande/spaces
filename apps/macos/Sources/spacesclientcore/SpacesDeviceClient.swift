@@ -670,13 +670,31 @@ public enum SpacesDeviceClient {
     /// Reads one file inside a workspace's checkout on a paired device (capped at 10 MiB on the daemon
     /// side; see `SpacesDeviceAPIServer.workspaceFileMaxBytes`).
     public static func workspaceFileRead(
-        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceFileReadResult {
         let response = try request(
-            .init(command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: relativePath))), device: device, clientApp: clientApp,
+            .init(command: .workspaceFileRead(
+                .init(workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath))),
+            device: device, clientApp: clientApp,
             profile: profile)
         guard let result = response.workspaceFileRead else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return result
+    }
+
+    /// Verifies one immutable Last Commit target against its checkout and returns its first-parent
+    /// comparison side after Git's configured checkout filters.
+    public static func workspaceRevisionFileRead(
+        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceWorkspaceRevisionFileReadResult {
+        let response = try request(
+            .init(command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))),
+            device: device, clientApp: clientApp, profile: profile)
+        guard let result = response.workspaceRevisionFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return result
@@ -1343,7 +1361,8 @@ public enum SpacesDeviceClient {
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript, .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
+        case .terminalTranscript, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk,
+            .workspaceDiffManifestRelease,
             .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             largePayloadRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,

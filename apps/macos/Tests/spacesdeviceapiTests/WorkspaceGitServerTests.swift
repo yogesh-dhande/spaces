@@ -60,6 +60,446 @@
             }
         }
 
+        func testWorkspaceRevisionFileReadReturnsPinnedCommitBytesDespiteWorktreeEdits() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "committed bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "pin revision bytes"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "worktree bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertFalse(result.isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRecognizesACleanCheckoutAfterGitEOLTransformation() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "README.md text eol=crlf\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "line one\nline two\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "checkout eol transform"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
+                try runGit(["checkout", "--", "README.md"], cwd: repo.path)
+                let checkedOut = try Data(contentsOf: repo.appendingPathComponent("README.md"))
+                XCTAssertTrue(checkedOut.contains(0x0D))
+
+                let cleanResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(cleanResponse.ok, cleanResponse.message)
+                XCTAssertEqual(cleanResponse.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, true)
+
+                try "user changed\r\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                let changedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(changedResponse.ok, changedResponse.message)
+                XCTAssertEqual(changedResponse.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, false)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadUsesALiteralPathspecForBracketedPaths() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let directory = repo.appendingPathComponent("app", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let route = directory.appendingPathComponent("[slug].tsx")
+                try "export default 'base'\n".write(to: route, atomically: true, encoding: .utf8)
+                try runGit(["add", ":(literal)app/[slug].tsx"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bracket route"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "export default 'changed'\n".write(to: route, atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "app/[slug].tsx")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadIgnoresIndexVisibilityFlags() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                for flag in ["--assume-unchanged", "--skip-worktree"] {
+                    try runGit(["update-index", flag, "README.md"], cwd: repo.path)
+                    try "changed despite \(flag)\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    XCTAssertFalse(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision, flag)
+                    try runGit(["update-index", "--no-assume-unchanged", "README.md"], cwd: repo.path)
+                    try runGit(["update-index", "--no-skip-worktree", "README.md"], cwd: repo.path)
+                    try runGit(["checkout", "--ignore-skip-worktree-bits", "--", "README.md"], cwd: repo.path)
+                }
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsASymlinkAtTheTargetRevision() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let link = repo.appendingPathComponent("link.txt")
+                try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "README.md")
+                try runGit(["add", "link.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "symlink target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "link.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsAnIdenticalLeafSymlinkInTheWorktree() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "initial".write(to: repo.appendingPathComponent("same-content.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("README.md").path, withDestinationPath: "same-content.txt")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsAnIdenticalAncestorSymlinkInTheWorktree() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let trackedDirectory = repo.appendingPathComponent("tracked", isDirectory: true)
+                try FileManager.default.createDirectory(at: trackedDirectory, withIntermediateDirectories: true)
+                try "same nested content\n".write(to: trackedDirectory.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "tracked/file.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "tracked nested file"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let redirectedDirectory = repo.appendingPathComponent("redirected", isDirectory: true)
+                try FileManager.default.createDirectory(at: redirectedDirectory, withIntermediateDirectories: true)
+                try "same nested content\n".write(to: redirectedDirectory.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+                try FileManager.default.removeItem(at: trackedDirectory)
+                try FileManager.default.createSymbolicLink(atPath: trackedDirectory.path, withDestinationPath: "redirected")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "tracked/file.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRequiresTheTargetExecutableMode() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let firstRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let read = { (revision: String) throws -> SpacesDeviceWorkspaceRevisionFileReadResult in
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                    return try XCTUnwrap(response.workspaceRevisionFileRead)
+                }
+
+                XCTAssertTrue(try read(firstRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(firstRevision).isWorktreeEquivalentToRevision)
+                // Git tracks only the owner executable bit. Group/other execute bits on a regular
+                // worktree leaf do not change a 100644 target's checkout mode.
+                try FileManager.default.setAttributes([.posixPermissions: 0o645], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertTrue(try read(firstRevision).isWorktreeEquivalentToRevision)
+
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "make readme executable"], cwd: repo.path)
+                let executableRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                XCTAssertTrue(try read(executableRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(executableRevision).isWorktreeEquivalentToRevision)
+                try FileManager.default.setAttributes([.posixPermissions: 0o645], ofItemAtPath: repo.appendingPathComponent("README.md").path)
+                XCTAssertFalse(try read(executableRevision).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadProvidesGitSmudgedComparisonOldContent() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["config", "filter.spaces.clean", "sed s/SMUDGE/CANON/g"], cwd: repo.path)
+                try runGit(["config", "filter.spaces.smudge", "sed s/CANON/SMUDGE/g"], cwd: repo.path)
+                try "filtered.txt filter=spaces\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "old SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered base"], cwd: repo.path)
+                try "new SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try FileManager.default.removeItem(at: repo.appendingPathComponent("filtered.txt"))
+                try runGit(["checkout", "--", "filtered.txt"], cwd: repo.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "filtered.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.comparisonOldBase64Data))), encoding: .utf8), "old SMUDGE\n")
+            }
+        }
+
+        func testWorkspaceFileReadProvidesGitFilteredComparisonOldContentForUncommittedEditing() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["config", "filter.spaces.clean", "sed s/SMUDGE/CANON/g"], cwd: repo.path)
+                try runGit(["config", "filter.spaces.smudge", "sed s/CANON/SMUDGE/g"], cwd: repo.path)
+                try "filtered.txt filter=spaces\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+                try "old SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", ".gitattributes", "filtered.txt"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered comparison base"], cwd: repo.path)
+                let base = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "new SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "filtered.txt", comparisonBaseRevision: base)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let old = try XCTUnwrap(response.workspaceFileRead?.comparisonOldBase64Data)
+                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: old)), encoding: .utf8), "old SMUDGE\n")
+            }
+        }
+
+        func testWorkspaceFileReadTreatsAMissingComparisonPathAsNilWithoutParsingGitStderr() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-comparison-missing-localized-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("localized-missing-cat-file.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./missing-before.txt\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(.init(
+                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision, oldPath: "missing-before.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                // `ls-tree -z` returns structured absence, so the localized cat-file failure must
+                // never run. A stderr parser would call it and misclassify this as an internal error.
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNil(response.workspaceFileRead?.comparisonOldBase64Data)
+            }
+        }
+
+        func testWorkspaceFileReadPropagatesComparisonTreeLookupFailure() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-comparison-tree-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("fail-comparison-ls-tree.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"ls-tree\"*) echo 'beschädigter Baum' >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(.init(
+                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadUsesTheTargetPathAfterARename() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try runGit(["mv", "README.md", "Renamed.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "rename readme"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "Renamed.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(try XCTUnwrap(response.workspaceRevisionFileRead).isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadTreatsAnAddedFilesMissingParentAsNilWithoutParsingGitStderr() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-parent-missing-localized-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("localized-parent-cat-file.sh")
+            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./ADDED.md\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "added\n".write(to: repo.appendingPathComponent("ADDED.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "ADDED.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "added file"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "ADDED.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertNil(response.workspaceRevisionFileRead?.comparisonOldBase64Data)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadPreservesBinaryBytes() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let expected = Data([0, 0xFF, 0xC3, 0x28])
+                try expected.write(to: repo.appendingPathComponent("binary.dat"))
+                try runGit(["add", "binary.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add binary"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: revision, relativePath: "binary.dat")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadEnforcesTheTenMiBReadCap() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try Data(count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: repo.appendingPathComponent("huge.dat"))
+                try runGit(["add", "huge.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "oversized comparison side"], cwd: repo.path)
+                try "small target\n".write(to: repo.appendingPathComponent("huge.dat"), atomically: true, encoding: .utf8)
+                try runGit(["add", "huge.dat"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "small target"], cwd: repo.path)
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "huge.dat")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .payloadTooLarge)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadKeepsItsExactBaselineWhenCheckoutChurnsAfterRead() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-revision-file-read-race-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("mutate-on-filter.sh")
+            try "#!/bin/sh\ncase \" $* \" in *\" hash-object \"*) printf 'churned after baseline\\n' > \"$2/README.md\" ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
+                workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                // The result verifies the exact bounded bytes it returns as the editor's CAS
+                // baseline. Checkout churn after that read must not make it inspect a different
+                // worktree snapshot; a later write's SHA CAS protects this changed checkout.
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(
+                    String(data: try XCTUnwrap(Data(base64Encoded: result.worktreeFile.base64Data)), encoding: .utf8), "initial")
+                XCTAssertEqual(try String(contentsOf: repo.appendingPathComponent("README.md")), "churned after baseline\n")
+            }
+        }
+
+        func testWorkspaceRevisionFileReadMapsAConfirmedMissingPathToNotFound() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "missing.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadPropagatesTreeLookupExecutionFailureAsInternalError() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-revision-file-read-exec-failure-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scriptURL = root.appendingPathComponent("fail-ls-tree.sh")
+            try "#!/bin/sh\ncase \"$*\" in *ls-tree*) echo injected-tree-lookup-failure >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            let gitClient = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+
+            try withWorkspaceFixture(workspaceGitClient: gitClient) { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+            }
+        }
+
+        func testWorkspaceRevisionFileReadRejectsMutableOrInvalidRevisionAndEscapingPath() throws {
+            try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                for (revision, path) in [("HEAD", "README.md"), (String(repeating: "z", count: 40), "README.md"), (String(repeating: "a", count: 40), "../README.md")] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: path)),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertFalse(response.ok)
+                    XCTAssertEqual(response.errorCode, .invalidArgument)
+                }
+            }
+        }
+
         func testWorkspaceFileReadRejectsAPathThatEscapesTheWorkspace() throws {
             try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
@@ -1281,6 +1721,31 @@
                 XCTAssertEqual(result.files.map(\.path), ["README.md"])
                 let file = try XCTUnwrap(result.files.first)
                 XCTAssertEqual(file.status, .modified)
+            }
+        }
+
+        func testWorkspaceDiffLastCommitCompletedTrackedFileCarriesItsPinnedTargetRevision() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "committed content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+                try runGit(["add", "README.md"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "second commit"], cwd: repo.path)
+                let headSHA = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                let fileResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "README.md",
+                                byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(fileResponse.ok, fileResponse.message)
+                XCTAssertEqual(try XCTUnwrap(fileResponse.workspaceDiffFileChunk).file.targetRevision, headSHA)
             }
         }
 
@@ -2679,6 +3144,7 @@
         /// `withTemporaryProfile`/`makeServerAndClient`, extended with the workspace-git fixture that
         /// `SpacesDeviceWorkspaceGitTests.makeRepo` uses for the pure-logic suite.
         private func withWorkspaceFixture(
+            workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient(),
             _ body: (
                 _ workspaceID: String, _ repo: URL, _ server: SpacesDeviceAPIServer, _ requestClient: SpacesDeviceAPIRequestSessionClient,
                 _ clientApp: SpacesDeviceClientApp, _ authToken: String
@@ -2704,7 +3170,7 @@
                         id: workspaceID, projectID: projectID, dir: repo.path, dirname: nil, branch: "main", baseBranch: "main", isDefault: true,
                         isRunning: false, lastLaunchedAt: nil))
 
-                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient(workspaceGitClient: workspaceGitClient)
                 defer {
                     requestClient.cancel()
                     server.stop()
@@ -2784,10 +3250,13 @@
             }
         }
 
-        private func makeServerAndClient() throws -> (SpacesDeviceAPIServer, SpacesDeviceAPIRequestSessionClient, SpacesDeviceClientApp, String) {
+        private func makeServerAndClient(
+            workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
+        ) throws -> (SpacesDeviceAPIServer, SpacesDeviceAPIRequestSessionClient, SpacesDeviceClientApp, String) {
             let identity = try workspaceGitTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedWorkspaceGitPairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, workspaceGitClient: workspaceGitClient)
             try server.start()
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
                 resolver: SpacesDeviceEndpointResolver(

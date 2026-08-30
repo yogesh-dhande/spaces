@@ -497,6 +497,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let oldPath: String?
         let status: SpacesDeviceWorkspaceDiffFileStatus
         let source: Source
+
+        var comparisonBaseRevision: String? {
+            switch source {
+            case .tracked(let baseRef, _), .deletedButUntrackedInWorktree(let baseRef): return baseRef
+            case .untracked: return nil
+            }
+        }
     }
 
     /// A daemon-held manifest plan. Patch work is deferred until a client asks for a particular file, so a
@@ -683,7 +690,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let patchByteCount = wrotePatch ? fileByteCount(at: outputURL) : 0
         let metadata = wrotePatch ? patchMetadata(at: outputURL) : (isBinary: false, oldSHA: nil, newSHA: nil)
         let file = SpacesDeviceWorkspaceDiffFileMetadata(
-            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA
+            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA,
+            targetRevision: {
+                guard case .tracked(_, let targetRef?) = plan.source else { return nil }
+                return targetRef
+            }()
         )
         return FilePatchTransfer(scopeSignature: snapshot.scopeSignature, file: file, patchByteCount: patchByteCount)
     }

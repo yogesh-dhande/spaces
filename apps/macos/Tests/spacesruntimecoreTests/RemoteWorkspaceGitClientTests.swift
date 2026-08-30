@@ -93,6 +93,18 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 5, "bounded capture must terminate the child promptly rather than hang")
     }
 
+    func testRunGitAndCaptureDataPreservesRawBlobBytes() throws {
+        let fixture = try makeRemoteFixture()
+        let expected = Data([0, 0xFF, 0xC3, 0x28])
+        try expected.write(to: fixture.source.appendingPathComponent("binary.dat"))
+        try runGit(["add", "binary.dat"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "binary"], cwd: fixture.source.path)
+
+        let data = try RemoteWorkspaceGitClient().runGitAndCaptureData(["-C", fixture.source.path, "show", "HEAD:binary.dat"], maxOutputBytes: 1024)
+
+        XCTAssertEqual(data, expected)
+    }
+
     /// Regression coverage for the deadline-enforcement bug: `runGitAndCapture` used to call
     /// `PipeDrain.waitForData()` (which only ever returns at pipe EOF) before enforcing `timeout`, so a
     /// subprocess that stops producing output without exiting — nothing to do with a large-output cap — could

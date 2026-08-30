@@ -173,7 +173,12 @@ index 0000000..8a9b7c6
 ];
 
 /** `lastCommit` and named-ref scopes intentionally return a smaller subset, so switching scopes in the harness visibly changes the file list. */
-const LAST_COMMIT_FILES: DiffFileEntry[] = UNCOMMITTED_FILES.slice(0, 4);
+const LAST_COMMIT_FILES: DiffFileEntry[] = UNCOMMITTED_FILES.slice(0, 4).map((file) => ({
+  ...file,
+  // The harness treats this as an immutable revision identifier. The mock bridge's fixture data is
+  // shared with the worktree, so Last Commit editing remains exercisable in the browser harness.
+  targetRevision: "0123456789abcdef0123456789abcdef01234567",
+}));
 
 export function fixtureDiffFiles(scope: DiffScope, version: number): DiffFileEntry[] {
   if (scope.kind === "uncommitted") {

@@ -1180,7 +1180,99 @@ remote_device_ssh() {
   if [[ -n "${SPACES_E2E_REMOTE_SSH_USER:-}" ]]; then
     destination="$SPACES_E2E_REMOTE_SSH_USER@$destination"
   fi
-  ssh "${args[@]}" "$destination" "$@"
+  local remote_command="${1:?missing remote command}"
+  shift
+  # Tailscale SSH can report exit 0 even when the remote command failed, so every remote E2E action
+  # appends a one-shot completion marker on stderr and this wrapper refuses a response that does not echo it.
+  local marker="__spaces_remote_ssh_ok_${RANDOM}_$$_${RANDOM}__"
+  local stdout_file stderr_file status_file stdin_file=""
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stdout.XXXXXX")" || return 1
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stderr.XXXXXX")" || {
+    rm -f "$stdout_file"
+    return 1
+  }
+  status_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-status.XXXXXX")" || {
+    rm -f "$stdout_file" "$stderr_file"
+    return 1
+  }
+  # SSH consumes stdin on each attempt. Preserve heredoc/pipe input once so a marker-missing
+  # retry executes the same remote program instead of an empty `python3 -` that exits successfully.
+  # A terminal has no buffered program input and retains SSH's ordinary interactive stdin behavior.
+  if [[ ! -t 0 ]]; then
+    stdin_file="$(mktemp "${TMPDIR:-/tmp}/spaces-remote-ssh-stdin.XXXXXX")" || {
+      rm -f "$stdout_file" "$stderr_file" "$status_file"
+      return 1
+    }
+    if ! cat >"$stdin_file"; then
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      return 1
+    fi
+  fi
+  local attempt max_attempts ssh_status remote_status
+  max_attempts=3
+  for attempt in 1 2 3; do
+    : >"$stdout_file"
+    : >"$stderr_file"
+    : >"$status_file"
+    ssh_status=0
+    if [[ -n "$stdin_file" ]]; then
+      ssh "${args[@]}" "$destination" "{ $remote_command; }; spaces_rc=\$?; printf '%s %s\\n' '$marker' \"\$spaces_rc\" >&2" "$@" \
+        <"$stdin_file" >"$stdout_file" 2>"$stderr_file" \
+        || ssh_status=$?
+    else
+      ssh "${args[@]}" "$destination" "{ $remote_command; }; spaces_rc=\$?; printf '%s %s\\n' '$marker' \"\$spaces_rc\" >&2" "$@" \
+        >"$stdout_file" 2>"$stderr_file" \
+        || ssh_status=$?
+    fi
+    if (( ssh_status == 0 )) && strip_remote_device_ssh_success_marker "$stderr_file" "$marker" "$status_file"; then
+      remote_status="$(cat "$status_file")"
+      if [[ "$remote_status" == "0" ]]; then
+        break
+      fi
+      cat "$stdout_file" >&2
+      cat "$stderr_file" >&2
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      return "$remote_status"
+    fi
+    if (( attempt == max_attempts )); then
+      cat "$stderr_file" >&2
+      echo "Remote SSH command did not confirm completion after ${max_attempts} attempts: $remote_command" >&2
+      cat "$stdout_file" >&2
+      rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+      # A transport that returns 0 without our completion marker is not a successful command.
+      # Preserve a real SSH failure when present, otherwise make the exhausted marker failure
+      # observable to the caller instead of accidentally returning success.
+      if (( ssh_status != 0 )); then
+        return "$ssh_status"
+      fi
+      return 1
+    fi
+  done
+  cat "$stderr_file" >&2
+  rm -f "$stdout_file" "$stderr_file" "$status_file" "$stdin_file"
+}
+
+strip_remote_device_ssh_success_marker() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+
+marker_path = Path(sys.argv[1])
+marker_prefix = sys.argv[2].encode("utf-8") + b" "
+status_path = Path(sys.argv[3])
+data = marker_path.read_bytes()
+lines = data.splitlines(keepends=True)
+if not lines:
+    raise SystemExit(1)
+tail = lines[-1]
+if not tail.startswith(marker_prefix):
+    raise SystemExit(1)
+status = tail[len(marker_prefix):].strip()
+if not status.isdigit():
+    raise SystemExit(1)
+status_path.write_text(status.decode("utf-8"), encoding="utf-8")
+marker_path.write_bytes(b"".join(lines[:-1]))
+PY
 }
 
 remote_device_wait_service_port_state() {
@@ -6985,24 +7077,24 @@ APPLESCRIPT
 
 click_code_pane_mode() {
   case "$1" in
-    # The global Editor window's AX origin maps to the web pane just after its native identity strip;
-    # these are the centers of the fixed 30-point toolbar's two mode buttons.
-    Diff) click_code_pane_relative 16 76 ;;
-    Editor) click_code_pane_relative 52 76 ;;
+    # The code-pane toolbar exposes stable DOM identifiers. Press those instead of aiming at the
+    # compact global window's chrome: a mode switch is supposed to preserve the comparison scope,
+    # so this test must not turn a shifted coordinate into a misleading scope failure.
+    Diff) wait_and_click_ui_identifier "code-pane-mode-diff" "Code Pane Diff mode" ;;
+    Editor) wait_and_click_ui_identifier "code-pane-mode-editor" "Code Pane Editor mode" ;;
     *) fail "unknown code-pane mode: $1" ;;
   esac
 }
 
 choose_code_pane_scope() {
-  local scope="$1" menu_y
+  local scope="$1" scope_identifier
   case "$scope" in
-    Uncommitted) menu_y=95 ;;
-    "Last commit") menu_y=121 ;;
+    Uncommitted) scope_identifier="code-pane-scope-uncommitted" ;;
+    "Last commit") scope_identifier="code-pane-scope-last-commit" ;;
     *) fail "unknown code-pane scope: $scope" ;;
   esac
-  click_code_pane_relative 150 76
-  sleep 0.1
-  click_code_pane_relative 150 "$menu_y"
+  wait_and_click_ui_identifier "code-pane-scope-menu" "Code Pane scope menu"
+  wait_and_click_ui_identifier "$scope_identifier" "Code Pane $scope scope"
 }
 
 open_code_pane_file() {
@@ -7433,6 +7525,21 @@ wait_for_code_pane_stream_metric() {
     "$start_line"
 }
 
+# A scope click races an already-running workspace refresh.  Require both streaming bookends from
+# the selected comparison so the membership lane cannot mistake that older generation for success.
+wait_for_code_pane_scoped_stream_metric() {
+  local workspace_id="$1" scope="$2" trigger="$3" start_line="$4"
+  wait_for_app_log_pattern_from_line \
+    "spaces: perf metric=code_pane_diff_render workspace=${workspace_id} target=trigger=${trigger} success=1 elapsed_ms=.* scope=${scope}( |$)" \
+    "$start_line"
+}
+
+wait_for_code_pane_scoped_progressive_complete() {
+  local workspace_id="$1" scope="$2" start_line="$3"
+  wait_for_code_pane_scoped_stream_metric "$workspace_id" "$scope" manifest "$start_line" >/dev/null
+  wait_for_code_pane_scoped_stream_metric "$workspace_id" "$scope" complete "$start_line"
+}
+
 wait_for_code_pane_restored_state() {
   local workspace_id="$1" mode="$2" scope="$3" layout="$4" path="$5" dirty="$6" start_line="$7"
   wait_for_app_log_pattern_from_line \
@@ -7450,6 +7557,53 @@ assert_code_pane_restored_scroll_and_focus() {
 assert_code_pane_restored_scroll_line() {
   local line="$1" description="$2" expected_line="$3"
   [[ "$line" =~ "scroll_top=${expected_line}"(\ |$) ]] || fail "$description restored the wrong logical scroll line (expected $expected_line): $line"
+}
+
+code_pane_persisted_diff_scroll_line() {
+  local workspace_id="$1"
+  python3 - "$TMP_CLIENT_DB" "$workspace_id" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as connection:
+    row = connection.execute(
+        """
+        SELECT state_json
+        FROM code_pane_workspace_states
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+
+if row is None:
+    raise SystemExit(1)
+state = json.loads(row[0])
+line = state.get("diffScrollLine")
+if not isinstance(line, int) or isinstance(line, bool) or line < 0 or state.get("diffScrollSide") != "new":
+    raise SystemExit(1)
+print(line)
+PY
+}
+
+wait_for_code_pane_persisted_diff_scroll_line() {
+  local workspace_id="$1"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local line
+    line="$(code_pane_persisted_diff_scroll_line "$workspace_id" 2>/dev/null || true)"
+    # The fixture contains 240 lines; require a deep position so a missing/initial snapshot cannot
+    # accidentally become the baseline for the exact restore assertions below.
+    if [[ "$line" =~ ^[0-9]+$ ]] && (( line >= 100 )); then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for a deep persisted diff scroll line: $workspace_id"
 }
 
 assert_no_code_pane_stream_metric() {
@@ -7706,7 +7860,7 @@ expand_streaming_diff_tree() {
 
 exercise_code_pane_workspace_state_recovery() {
   local workspace_a_dir="$1" workspace_a_id="$2" workspace_b_dir="$3" workspace_b_id="$4" remote_workspace_dir="$5" remote_workspace_id="$6"
-  local start_line restored
+  local start_line restored workspace_a_scroll_line
   prepare_code_pane_streaming_diff "$workspace_a_dir" 0
   prepare_code_pane_streaming_diff "$workspace_b_dir" 0
 
@@ -7731,13 +7885,14 @@ exercise_code_pane_workspace_state_recovery() {
   wait_for_ui_identifier "code-pane-mode-editor" "workspace B Editor mode"
   wait_for_ui_identifier "code-pane-editor-input" "workspace B editor input"
   ui_replace_code_pane_editor_value "code-pane-editor-input" "workspace B unsaved editor state\n"
+  workspace_a_scroll_line="$(wait_for_code_pane_persisted_diff_scroll_line "$workspace_a_id")"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-restored.json"
   restored="$(wait_for_code_pane_restored_state \
     "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A recovery"
-  assert_code_pane_restored_scroll_line "$restored" "workspace A recovery" 203
+  assert_code_pane_restored_scroll_line "$restored" "workspace A recovery" "$workspace_a_scroll_line"
   wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A restored dirty buffer"
   assert_ui_identifier_attribute "code-pane-diff-directory-.spaces-e2e-stream" "AXExpanded" "true" "workspace A diff tree"
 
@@ -7756,7 +7911,7 @@ exercise_code_pane_workspace_state_recovery() {
   restored="$(wait_for_code_pane_restored_state \
     "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A before remote retarget"
-  assert_code_pane_restored_scroll_line "$restored" "workspace A before remote retarget" 203
+  assert_code_pane_restored_scroll_line "$restored" "workspace A before remote retarget" "$workspace_a_scroll_line"
 
   prepare_code_pane_streaming_diff "$remote_workspace_dir" 1
   open_streaming_workspace_for_state_recovery "$remote_workspace_id" "state-remote-initial"
@@ -7773,7 +7928,7 @@ exercise_code_pane_workspace_state_recovery() {
   restored="$(wait_for_code_pane_restored_state \
     "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A after remote retarget"
-  assert_code_pane_restored_scroll_line "$restored" "workspace A after remote retarget" 203
+  assert_code_pane_restored_scroll_line "$restored" "workspace A after remote retarget" "$workspace_a_scroll_line"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$remote_workspace_id" >"$TMP_ROOT/open-code-pane-state-remote-restored.json"
@@ -7792,7 +7947,7 @@ exercise_code_pane_workspace_state_recovery() {
   restored="$(wait_for_code_pane_restored_state \
     "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A app-restart recovery"
-  assert_code_pane_restored_scroll_line "$restored" "workspace A app-restart recovery" 203
+  assert_code_pane_restored_scroll_line "$restored" "workspace A app-restart recovery" "$workspace_a_scroll_line"
   wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty buffer after app restart"
 }
 
@@ -7852,13 +8007,17 @@ exercise_code_pane_file_membership_refresh() {
   local quick_open_row="code-pane-quick-open-$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$relative_path")"
   local start_line line
 
+  # Re-adding the large streaming fixture starts an Uncommitted refresh.  Drain that exact
+  # generation before selecting Last Commit. The daemon can publish its manifest while a remote
+  # mutation command is still returning, so the causal boundary has to precede both mutations.
+  start_line=$(( $(app_log_line_count) + 1 ))
   prepare_code_pane_streaming_diff "$workspace_dir" "$remote"
   remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
-
-  open_streaming_workspace_for_state_recovery "$workspace_id" "${host}-membership"
+  "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_id" >"$TMP_ROOT/open-code-pane-state-${host}-membership.json"
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "uncommitted" "$start_line" >/dev/null
   start_line=$(( $(app_log_line_count) + 1 ))
   choose_code_pane_scope "Last commit"
-  wait_for_code_pane_progressive_complete "$workspace_id" "$start_line" >/dev/null
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "lastCommit" "$start_line" >/dev/null
 
   # Open quick-open before the file exists so the first `workspaceFileList` fetch has already
   # completed, the workspace-level file-membership stream is armed, and the overlay must refresh in
@@ -7875,12 +8034,15 @@ exercise_code_pane_file_membership_refresh() {
   record_code_pane_metric "$line" "code_pane.editor_open_to_first_render.internal" "$host" "workspace-membership"
   assert_ui_identifier_attribute_contains "code-pane-editor-input" "AXValue" "$content" "$host discovered file content"
   click_code_pane_mode "Diff"
+  # The Quick Open path changes only the mode. Verify that the reviewed comparison itself survived
+  # before deliberately selecting Uncommitted for the next independent fixture section.
+  wait_for_ui_identifier_attribute_contains "code-pane-scope-menu" "AXTitle" "Last commit" "$host preserved Last Commit scope"
   # Opening the discovered file intentionally switches to Editor, and returning to Diff restores the
   # user's last scope. Reset it explicitly so the following workspace-state section starts from the
   # uncommitted fixture for both local and remote lanes.
   start_line=$(( $(app_log_line_count) + 1 ))
   choose_code_pane_scope "Uncommitted"
-  wait_for_code_pane_progressive_complete "$workspace_id" "$start_line" >/dev/null
+  wait_for_code_pane_scoped_progressive_complete "$workspace_id" "uncommitted" "$start_line" >/dev/null
   remove_code_pane_membership_fixture "$workspace_dir" "$relative_path" "$remote"
 }
 

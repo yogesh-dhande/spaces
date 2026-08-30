@@ -18,7 +18,7 @@ public enum SpacesWireProtocol {
 
     // A non-literal initializer keeps dependent targets from baking the value into default arguments;
     // an incremental rebuild must observe the contract exported by this module.
-    @inline(never) private static func currentVersion() -> Int { 37 }
+    @inline(never) private static func currentVersion() -> Int { 38 }
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

@@ -532,10 +532,17 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var subscribedFileFrameHandlers: [@Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void] = []
     private var subscribeFileArrivalWaiters: [CheckedContinuation<Void, Never>] = []
     private var subscribeFileFailuresRemaining = 0
+    private(set) var revisionFileReadCalls: [(workspaceID: String, revision: String, relativePath: String, oldPath: String?)] = []
+    private var revisionFileReadResult = SpacesDeviceWorkspaceRevisionFileReadResult(
+        worktreeFile: .init(
+            base64Data: Data("revision text".utf8).base64EncodedString(), sha256: "revision-sha", size: 13, isBinaryGuess: false),
+        isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: Data("revision text".utf8).base64EncodedString())
 
     private struct InjectedFileSubscribeFailure: Error {}
 
-    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+    func workspaceFileRead(
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+    ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
     {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceWorkspaceFileReadResult, any Error>) in
@@ -544,6 +551,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             pendingFileReadCalls.append((arrivalIndex, continuation))
             drainFileReadArrivalWaiters()
         }
+    }
+
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceRevisionFileReadResult
+    {
+        revisionFileReadCalls.append((workspaceID, revision, relativePath, oldPath))
+        return revisionFileReadResult
     }
 
     // MARK: - File list
@@ -1092,7 +1106,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
                 path: "Sources/App.swift", baseSHA256: "editor-base", baseContent: "let base = 1", content: "let edited = 2", dirty: true,
                 conflict: false),
             diffEditorState: .init(
-                path: "Sources/App.swift", baseSHA256: "diff-base", baseContent: "let base = 1", content: "let edited = 3", dirty: true,
+                path: "Sources/App.swift", baseSHA256: "diff-base", baseContent: "let base = 1", comparisonOldContent: nil, content: "let edited = 3", dirty: true,
                 conflict: true, conflictBaseSHA256: "disk-sha"),
             pendingReviewComments: [
                 .init(
@@ -2915,6 +2929,27 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(evaluator.evaluatedScripts.contains { $0.contains("req-1") && $0.contains("abc123") }, "the gateway's result must be replied back")
     }
 
+    @Test func workspaceRevisionFileReadUsesTheImmutableRevisionWithoutRetargetingLiveFileMonitoring() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        let revision = String(repeating: "a", count: 40)
+
+        content.dispatch(
+            CodePaneBridge.Request(id: "req-1", method: "workspaceRevisionFileRead", params: ["path": "Sources/App.swift", "revision": revision]))
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") && $0.contains("revision text") } }
+
+        let calls = await gateway.revisionFileReadCalls
+        #expect(calls.count == 1)
+        #expect(calls[0].workspaceID == "workspace-1")
+        #expect(calls[0].revision == revision)
+        #expect(calls[0].relativePath == "Sources/App.swift")
+        #expect(await gateway.fileSubscribeCallCount() == 0)
+    }
+
     // MARK: - Complete workspace-state recovery
 
     @Test func completeWorkspaceStateRoundTripsThroughTeardownAndAReplacementController() async throws {
@@ -3475,7 +3510,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let collected = CodePaneWorkspaceState(
             mode: .diff, editorState: nil,
             diffEditorState: .init(
-                path: "Sources/App.swift", baseSHA256: "old-sha", baseContent: "let old = 1", content: "let saved = 2", dirty: true, conflict: false),
+                path: "Sources/App.swift", baseSHA256: "old-sha", baseContent: "let old = 1", comparisonOldContent: "let comparison = 0",
+                content: "let saved = 2", dirty: true, conflict: false),
             pendingReviewComments: nil
         ).bridgePayload
         evaluator.completeOldestPending(with: try workspaceStateJSON(collected))
@@ -3489,6 +3525,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let recovered = try JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stored.utf8))
         #expect(recovered.diffEditorState?.baseSHA256 == "saved-sha")
         #expect(recovered.diffEditorState?.baseContent == "let saved = 2")
+        #expect(recovered.diffEditorState?.comparisonOldContent == "let comparison = 0")
         #expect(recovered.diffEditorState?.dirty == false)
     }
 
@@ -3513,7 +3550,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let collected = CodePaneWorkspaceState(
             mode: .diff, editorState: nil,
             diffEditorState: .init(
-                path: "Sources/App.swift", baseSHA256: "deleted-file-sha", baseContent: "let old = 1", content: "let typed after = 3", dirty: true,
+                path: "Sources/App.swift", baseSHA256: "deleted-file-sha", baseContent: "let old = 1", comparisonOldContent: nil, content: "let typed after = 3", dirty: true,
                 conflict: false), pendingReviewComments: nil
         ).bridgePayload
         evaluator.completeOldestPending(with: try workspaceStateJSON(collected))

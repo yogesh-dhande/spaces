@@ -87,6 +87,8 @@ describe("Toolbar — compare menu", () => {
       "Branch…",
       "Commit or ref…",
     ]);
+    expect(container.querySelector("#code-pane-scope-uncommitted")?.textContent).toBe("Uncommitted");
+    expect(container.querySelector("#code-pane-scope-last-commit")?.textContent).toBe("Last commit");
 
     compareBtn(container).click();
     expect(container.querySelector(".compare-menu")).toBeNull();

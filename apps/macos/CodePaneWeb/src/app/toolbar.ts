@@ -264,12 +264,12 @@ export function renderToolbar(
         const menu = document.createElement("div");
         menu.className = "compare-menu";
 
-        menu.appendChild(
-          menuItem("Uncommitted", kind === "uncommitted", () => {
-            closeCompareMenu();
-            callbacks.onScopeChange({ kind: "uncommitted" });
-          }),
-        );
+        const uncommitted = menuItem("Uncommitted", kind === "uncommitted", () => {
+          closeCompareMenu();
+          callbacks.onScopeChange({ kind: "uncommitted" });
+        });
+        uncommitted.id = "code-pane-scope-uncommitted";
+        menu.appendChild(uncommitted);
         const lastCommit = menuItem("Last commit", kind === "lastCommit", () => {
             closeCompareMenu();
             callbacks.onScopeChange({ kind: "lastCommit" });

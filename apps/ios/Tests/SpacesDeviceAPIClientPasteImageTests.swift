@@ -75,6 +75,27 @@
             XCTAssertEqual(request?.clientApp?.deviceName, "Sentinel iPhone")
         }
 
+        func testRevisionFileReadPassesOldPathAndReturnsTheSpecializedResult() async throws {
+            let recorder = SpacesDeviceAPIClientPasteImageRequestRecorder()
+            let expected = SpacesDeviceWorkspaceRevisionFileReadResult(
+                worktreeFile: .init(base64Data: "bGl2ZQ==", sha256: "live-sha", size: 4, isBinaryGuess: false),
+                isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: "b2xk")
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "read", result: .workspaceRevisionFileRead(expected))
+            }
+
+            let result = try await client.workspaceRevisionFileRead(
+                workspaceID: "workspace-1", revision: String(repeating: "a", count: 40), relativePath: "renamed.swift", oldPath: "old.swift")
+
+            guard case .workspaceRevisionFileRead(let payload)? = await recorder.snapshot().first?.command else {
+                XCTFail("Expected workspaceRevisionFileRead request.")
+                return
+            }
+            XCTAssertEqual(payload.oldPath, "old.swift")
+            XCTAssertEqual(result, expected)
+        }
+
         func testPasteImageThrowsWhenResponseNotOK() async {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: false, message: "denied") }

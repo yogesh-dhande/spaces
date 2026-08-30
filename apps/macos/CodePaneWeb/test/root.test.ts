@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTwoFilesPatch } from "diff";
 import { DiffView } from "../src/app/diffView";
 import { mountRoot } from "../src/app/root";
 import {
@@ -163,6 +164,9 @@ const hoisted = vi.hoisted(() => {
   // tests (Finding C) need a real open to actually complete, so they configure a per-test resolution
   // instead of relying on the default.
   const workspaceFileRead = vi.fn().mockRejectedValue(new Error("not used"));
+  // Last Commit inline editing verifies the live file against the immutable revision pinned in
+  // the streamed file metadata before it permits a write surface.
+  const workspaceRevisionFileRead = vi.fn().mockRejectedValue(new Error("not used"));
   const workspaceRefList = vi.fn().mockResolvedValue({
     branches: ["main"],
     branchesTruncated: false,
@@ -219,10 +223,19 @@ const hoisted = vi.hoisted(() => {
       });
     },
   );
-  const workspaceDiffFileChunk = vi.fn((_scope: unknown, request: { manifestID: string; relativePath: string }) => {
+  const workspaceDiffFileChunk = vi.fn((_scope: unknown, request: { manifestID: string; relativePath: string }): Promise<WorkspaceDiffFileChunkResult> => {
     const manifest = manifests.get(request.manifestID);
     const file = manifest?.files.find((entry) => entry.path === request.relativePath);
-    if (file && manifest) return Promise.resolve({ scopeSignature: manifest.scopeSignature, file });
+    if (file && manifest) {
+      return Promise.resolve({
+        scopeSignature: manifest.scopeSignature,
+        file,
+        // The production scheduler assembles patch bytes from this transport field; include the
+        // fixture's actual patch so inline hydration tests exercise reverse reconstruction rather
+        // than an empty patch accidentally rescued by a fallback.
+        patchBase64Data: file.patch === undefined ? undefined : btoa(file.patch),
+      });
+    }
     return Promise.reject(new Error(`missing manifest file ${request.relativePath}`));
   });
   const workspaceDiffManifestRelease = vi.fn((_scope: unknown, request: { manifestID: string }) => {
@@ -255,6 +268,7 @@ const hoisted = vi.hoisted(() => {
     workspaceDiffManifestRelease,
     workspaceFileList,
     workspaceFileRead,
+    workspaceRevisionFileRead,
     workspaceRefList,
     workspaceFileWrite,
     startWorkspaceCommand,
@@ -283,6 +297,7 @@ vi.mock("../src/bridge", () => ({
     workspaceDiffFileChunkCancel: vi.fn().mockResolvedValue(undefined),
     workspaceDiffManifestRelease: hoisted.workspaceDiffManifestRelease,
     workspaceFileRead: hoisted.workspaceFileRead,
+    workspaceRevisionFileRead: hoisted.workspaceRevisionFileRead,
     workspaceRefList: hoisted.workspaceRefList,
     workspaceFileWrite: hoisted.workspaceFileWrite,
     workspaceFileList: hoisted.workspaceFileList,
@@ -335,6 +350,17 @@ function switchToLastCommit(container: HTMLElement): void {
     (el) => el.textContent === "Last commit",
   );
   if (!item) throw new Error("no 'Last commit' compare menu item found");
+  item.click();
+}
+
+function switchToUncommitted(container: HTMLElement): void {
+  const compareBtn = container.querySelector(".compare-btn");
+  if (!compareBtn) throw new Error("no .compare-btn found");
+  (compareBtn as HTMLButtonElement).click();
+  const item = [...container.querySelectorAll<HTMLButtonElement>(".compare-menu .item")].find(
+    (el) => el.textContent === "Uncommitted",
+  );
+  if (!item) throw new Error("no 'Uncommitted' compare menu item found");
   item.click();
 }
 
@@ -1384,21 +1410,32 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     path: "editable.ts",
     status: "modified",
     isBinary: false,
-    patch: "diff --git a/editable.ts b/editable.ts\n--- a/editable.ts\n+++ b/editable.ts\n@@ -1 +1 @@\n-before\n+after\n",
+    // The inline editor hydrates a complete diff by reversing this patch against the disk read.
+    // Keep the synthetic pair coherent so failed hydration cannot be hidden by a fallback item.
+    patch: "diff --git a/editable.ts b/editable.ts\n--- a/editable.ts\n+++ b/editable.ts\n@@ -1 +1 @@\n-before\n+disk before\n",
   };
 
-  async function mountEditableDiff(): Promise<void> {
+  function editableFileForContent(content: string, oldContent = "before\n"): DiffFileEntry {
+    return {
+      ...editableFile,
+      patch: createTwoFilesPatch("a/editable.ts", "b/editable.ts", oldContent, content),
+    };
+  }
+
+  async function mountEditableDiff(file = editableFile): Promise<void> {
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
-    resolveDiff(0, [editableFile], "editable-sig");
+    resolveDiff(0, [file], "editable-sig");
     await mounted;
   }
 
-  function startEdit(path = editableFile.path): void {
+  async function startEdit(path = editableFile.path): Promise<void> {
     capturedCodeViewOptions.current!.onLineClick!(
       { type: "diff-line", lineNumber: 1, annotationSide: "additions" },
       { type: "diff", item: { id: path } },
     );
+    await Promise.resolve();
+    await Promise.resolve();
   }
 
   beforeEach(() => {
@@ -1406,6 +1443,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceDiffFileChunk.mockClear();
     hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceRevisionFileRead.mockReset();
     hoisted.workspaceFileWrite.mockReset();
     hoisted.notifyWorkspaceStateChanged.mockClear();
     capturedCodeViewOptions.current = undefined;
@@ -1416,9 +1454,776 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   afterEach(() => {
     INIT_PAYLOAD = defaultInitPayload;
     hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceRevisionFileRead.mockReset().mockRejectedValue(new Error("not used"));
     hoisted.workspaceFileWrite.mockReset().mockRejectedValue(new Error("not used"));
     vi.useRealTimers();
     window.requestAnimationFrame = nativeRequestAnimationFrame;
+  });
+
+  it("blocks Last Commit inline editing when the worktree no longer matches the pinned revision", async () => {
+    const lastCommitFile: DiffFileEntry = {
+      ...editableFile,
+      targetRevision: "a".repeat(40),
+    };
+    // The server's one response supplies both the exact live CAS baseline and the Git result.
+    // A false result must prevent an editor even though the returned content is otherwise usable.
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "same decoded text\n", sha256: "sha-worktree", size: 18,
+      isWorktreeEquivalentToRevision: false, comparisonOldContent: null,
+    });
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "uncommitted-sig");
+    await mounted;
+    hoisted.workspaceDiffManifestRelease.mockClear();
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-sig");
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current?.onLineClick).toBeDefined());
+    await startEdit();
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledWith({
+        path: "editable.ts",
+        revision: "a".repeat(40),
+      }),
+    );
+    expect(hoisted.workspaceFileRead).not.toHaveBeenCalledWith("editable.ts", "inlineDiff");
+    await vi.waitFor(() =>
+      expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+        "Workspace file changed since this commit. Switch to Uncommitted to edit it.",
+      ),
+    );
+    await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toBeNull();
+  });
+
+  it("uses the Git-filtered Last Commit comparison content instead of reverse-applying the raw patch", async () => {
+    const disk = "new SMUDGE\n";
+    const lastCommitFile = {
+      ...editableFileForContent(disk, "old CANON\n"),
+      targetRevision: "z".repeat(40),
+    };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: disk,
+      sha256: "sha-smudged",
+      size: disk.length,
+      isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: "old SMUDGE\n",
+    });
+
+    await mountEditableDiff(lastCommitFile);
+    await startEdit();
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState?.comparisonOldContent).toBe("old SMUDGE\n");
+    });
+  });
+
+  it("uses the server-filtered old side for an Uncommitted inline edit", async () => {
+    const disk = "new SMUDGE\n";
+    const file = {
+      ...editableFileForContent(disk, "old CANON\n"),
+      comparisonBaseRevision: "c".repeat(40),
+    };
+    hoisted.workspaceFileRead.mockResolvedValue({
+      content: disk, sha256: "sha-smudged", size: disk.length, comparisonOldContent: "old SMUDGE\n",
+    });
+
+    await mountEditableDiff(file);
+    await startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(
+      "editable.ts", "inlineDiff", { baseRevision: "c".repeat(40), oldPath: undefined },
+    ));
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+    expect(snapshot.diffEditorState?.comparisonOldContent).toBe("old SMUDGE\n");
+  });
+
+  it("preserves an added file's explicit null comparison side when switching to Last Commit", async () => {
+    const content = "added text\n";
+    const uncommittedAdded: DiffFileEntry = {
+      path: "editable.ts", status: "added", isBinary: false,
+      patch: createTwoFilesPatch("a/editable.ts", "b/editable.ts", "", content),
+      comparisonBaseRevision: "a".repeat(40),
+    };
+    const lastCommitAdded: DiffFileEntry = {
+      ...uncommittedAdded,
+      comparisonBaseRevision: undefined,
+      targetRevision: "b".repeat(40),
+    };
+    hoisted.workspaceFileRead.mockResolvedValueOnce({ content, sha256: "sha-uncommitted", size: content.length, comparisonOldContent: null });
+    hoisted.workspaceRevisionFileRead.mockResolvedValueOnce({
+      content, sha256: "sha-last-commit", size: content.length,
+      isWorktreeEquivalentToRevision: true, comparisonOldContent: null,
+    });
+
+    await mountEditableDiff(uncommittedAdded);
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my added edit\n" });
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitAdded], "last-commit-added-sig");
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState).toMatchObject({
+        content: "my added edit\n",
+        dirty: true,
+        comparisonOldContent: null,
+      });
+    });
+  });
+
+  it("treats a Last Commit worktree deletion as divergence while retaining ordinary scope deletion behavior", async () => {
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "d".repeat(40) };
+    hoisted.workspaceRevisionFileRead.mockRejectedValue(new SpacesBridgeError("notFound", "editable.ts was deleted"));
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "uncommitted-sig");
+    await mounted;
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-deleted-sig");
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current?.onLineClick).toBeDefined());
+    await startEdit();
+
+    await vi.waitFor(() =>
+      expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+        "Workspace file changed since this commit. Switch to Uncommitted to edit it.",
+      ),
+    );
+  });
+
+  it("re-arms a live editor before entering Last Commit and restores it only after the pinned revision matches disk", async () => {
+    hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    await mountEditableDiff();
+    await startEdit();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
+
+    let resolveRevision: ((result: { content: string; sha256: string; size: number; isWorktreeEquivalentToRevision: boolean; comparisonOldContent: string | null }) => void) | undefined;
+    hoisted.workspaceRevisionFileRead.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveRevision = resolve;
+      }),
+    );
+    const beginPreparedSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+    const endEditSpy = vi.spyOn(DiffView.prototype, "endEdit");
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "e".repeat(40) };
+
+    switchToLastCommit(container);
+    expect(endEditSpy).toHaveBeenCalledWith("editable.ts");
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-guarded-sig");
+    await vi.waitFor(() => expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledTimes(1));
+    expect(beginPreparedSpy).not.toHaveBeenCalled();
+    expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeUndefined();
+
+    resolveRevision!({ content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
+    await vi.waitFor(() => expect(beginPreparedSpy).toHaveBeenCalledTimes(1));
+    beginPreparedSpy.mockRestore();
+    endEditSpy.mockRestore();
+  });
+
+  it("re-arms an active Last Commit editor through the immutable guard after a signature refresh", async () => {
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "h".repeat(40) };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    let resolveRevision: ((result: { content: string; sha256: string; size: number; isWorktreeEquivalentToRevision: boolean; comparisonOldContent: string | null }) => void) | undefined;
+    hoisted.workspaceRevisionFileRead
+      .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-first", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRevision = resolve; }));
+    const beginPreparedSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+    const endEditSpy = vi.spyOn(DiffView.prototype, "endEdit");
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [lastCommitFile], "last-commit-first-sig");
+    await mounted;
+    await startEdit();
+    await vi.waitFor(() => expect(beginPreparedSpy).toHaveBeenCalledTimes(1));
+
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    expect(endEditSpy).toHaveBeenCalledWith("editable.ts");
+    resolveDiff(1, [lastCommitFile], "last-commit-refreshed-sig");
+    await vi.waitFor(() => expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledTimes(2));
+    // The manifest itself may paint, but an old commit editor never reattaches before the
+    // single immutable-revision response settles.
+    expect(beginPreparedSpy).toHaveBeenCalledTimes(1);
+
+    resolveRevision!({ content: "disk before\n", sha256: "sha-refreshed", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
+    await vi.waitFor(() => expect(beginPreparedSpy).toHaveBeenCalledTimes(2));
+    beginPreparedSpy.mockRestore();
+    endEditSpy.mockRestore();
+  });
+
+  it("restores a dirty Last Commit edit after a failed refresh and guards it again when the retry succeeds", async () => {
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "r".repeat(40) };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    let resolveRetryRevision: ((result: { content: string; sha256: string; size: number; isWorktreeEquivalentToRevision: boolean; comparisonOldContent: string | null }) => void) | undefined;
+    hoisted.workspaceRevisionFileRead
+      .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-original", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRetryRevision = resolve; }));
+    const beginPreparedSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+    const endEditSpy = vi.spyOn(DiffView.prototype, "endEdit");
+
+    try {
+      const mounted = mountRoot(container);
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+      resolveDiff(0, [lastCommitFile], "last-commit-original");
+      await mounted;
+      await startEdit();
+      capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my unsaved edit\n" });
+
+      useFakeTimersWithImmediatePaint();
+      fireDiffSignature();
+      await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+      expect(endEditSpy).toHaveBeenCalledWith("editable.ts");
+      rejectDiff(1, new SpacesBridgeError("unavailable", "daemon reconnecting"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const recoveredHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(recoveredHeader.textContent).toContain("Unsaved changes");
+      expect(recoveredHeader.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(recoveredHeader.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+        content: "my unsaved edit\n",
+        dirty: true,
+        baseSHA256: "sha-original",
+        comparisonOldContent: "before\n",
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3);
+      expect(endEditSpy).toHaveBeenCalledTimes(2);
+      resolveDiff(2, [lastCommitFile], "last-commit-retry");
+      await vi.waitFor(() => expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledTimes(2));
+      // The retry owns a fresh immutable check; restoring after the failed manifest does not make
+      // the saved editor eligible to render against the retry's patch without verification.
+      expect(beginPreparedSpy).toHaveBeenCalledTimes(2);
+
+      resolveRetryRevision!({ content: "disk before\n", sha256: "sha-retry", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
+      await vi.waitFor(() => expect(beginPreparedSpy).toHaveBeenCalledTimes(3));
+    } finally {
+      beginPreparedSpy.mockRestore();
+      endEditSpy.mockRestore();
+    }
+  });
+
+  it("turns an overlapping dirty Last Commit refresh into an explicit conflict against the verified new disk target", async () => {
+    const base = "value = base\n";
+    const disk = "value = remote\n";
+    const initialFile = { ...editableFileForContent(base, "value = previous\n"), targetRevision: "j".repeat(40) };
+    const refreshedFile = { ...editableFileForContent(disk, base), targetRevision: "k".repeat(40) };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: base, sha256: "sha-base", size: base.length })
+      .mockResolvedValueOnce({ content: disk, sha256: "sha-disk", size: disk.length });
+    hoisted.workspaceRevisionFileRead
+      .mockResolvedValueOnce({ content: base, sha256: "sha-base", size: base.length, isWorktreeEquivalentToRevision: true })
+      .mockResolvedValueOnce({ content: disk, sha256: "sha-disk", size: disk.length, isWorktreeEquivalentToRevision: true });
+    const conflictSpy = vi.spyOn(DiffView.prototype, "setEditConflict");
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [initialFile], "last-commit-overlap-initial");
+    await mounted;
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "value = mine\n" });
+
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [refreshedFile], "last-commit-overlap-refreshed");
+    await vi.waitFor(() => expect(conflictSpy).toHaveBeenCalledWith("editable.ts", { kind: "changed", diskContent: disk }));
+    const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+    expect(snapshot.diffEditorState).toMatchObject({
+      content: "value = mine\n",
+      dirty: true,
+      conflict: true,
+      baseSHA256: "sha-disk",
+      baseContent: disk,
+      conflictBaseSHA256: "sha-disk",
+    });
+    conflictSpy.mockRestore();
+  });
+
+  it("three-way merges non-overlapping dirty Last Commit refreshes onto the verified disk baseline", async () => {
+    const base = "mine base\nkeep\nremote base\n";
+    const disk = "mine base\nkeep\nremote user\n";
+    const mine = "mine user\nkeep\nremote base\n";
+    const initialFile = { ...editableFileForContent(base, "previous\nkeep\nremote base\n"), targetRevision: "l".repeat(40) };
+    const refreshedFile = { ...editableFileForContent(disk, base), targetRevision: "m".repeat(40) };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: base, sha256: "sha-base", size: base.length })
+      .mockResolvedValueOnce({ content: disk, sha256: "sha-disk", size: disk.length });
+    hoisted.workspaceRevisionFileRead
+      .mockResolvedValueOnce({ content: base, sha256: "sha-base", size: base.length, isWorktreeEquivalentToRevision: true })
+      .mockResolvedValueOnce({ content: disk, sha256: "sha-disk", size: disk.length, isWorktreeEquivalentToRevision: true });
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [initialFile], "last-commit-merge-initial");
+    await mounted;
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: mine });
+
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [refreshedFile], "last-commit-merge-refreshed");
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState).toMatchObject({
+        content: "mine user\nkeep\nremote user\n",
+        dirty: true,
+        conflict: false,
+        baseSHA256: "sha-disk",
+        baseContent: disk,
+      });
+    });
+  });
+
+  it("rebuilds a ref editor's comparison side from the completed Last Commit patch while keeping its dirty buffer", async () => {
+    const refFile = editableFileForContent("disk before\n", "ref comparison\n");
+    const lastCommitFile = editableFileForContent("disk before\n", "commit comparison\n");
+    lastCommitFile.targetRevision = "i".repeat(40);
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "ref", refName: "main" } },
+    };
+    hoisted.workspaceFileRead
+      .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-ref", size: 12 })
+      .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-commit", size: 12 });
+    hoisted.workspaceRevisionFileRead.mockResolvedValueOnce({
+      content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: "commit comparison\n",
+    });
+
+    await mountEditableDiff(refFile);
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-comparison-sig");
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState).toMatchObject({
+        content: "my dirty edit\n",
+        dirty: true,
+        baseSHA256: "sha-commit",
+        comparisonOldContent: "commit comparison\n",
+      });
+    });
+  });
+
+  it("rebuilds a dirty Last Commit editor from the completed Uncommitted patch before restoring it", async () => {
+    const lastCommitFile = editableFileForContent("disk before\n", "commit comparison\n");
+    lastCommitFile.targetRevision = "s".repeat(40);
+    const uncommittedFile = editableFileForContent("disk before\n", "working comparison\n");
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-disk", size: 12 });
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true,
+    });
+
+    await mountEditableDiff(lastCommitFile);
+    await startEdit();
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [uncommittedFile], "uncommitted-rebuilt-comparison");
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState).toMatchObject({
+        content: "my dirty edit\n",
+        dirty: true,
+        comparisonOldContent: "working comparison\n",
+      });
+    });
+  });
+
+  it("keeps Save and Cancel reachable when a completed scope change cannot read its baseline", async () => {
+    const lastCommitFile = editableFileForContent("disk before\n", "commit comparison\n");
+    lastCommitFile.targetRevision = "v".repeat(40);
+    const uncommittedFile = editableFileForContent("disk before\n", "working comparison\n");
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: "commit comparison\n",
+    });
+
+    await mountEditableDiff(lastCommitFile);
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    hoisted.workspaceFileRead.mockRejectedValueOnce(new SpacesBridgeError("internalError", "baseline unavailable"));
+
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [uncommittedFile], "uncommitted-baseline-failure");
+
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toContain("Save or Cancel"));
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "my dirty edit\n", dirty: true, comparisonOldContent: "commit comparison\n",
+    });
+  });
+
+  it("restores a hibernated dirty editor when the new scope manifest fails", async () => {
+    const lastCommitFile = editableFileForContent("disk before\n", "commit comparison\n");
+    lastCommitFile.targetRevision = "w".repeat(40);
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: "commit comparison\n",
+    });
+
+    await mountEditableDiff(lastCommitFile);
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    rejectDiff(1, new SpacesBridgeError("invalidArgument", "comparison unavailable"));
+
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toContain("Save or Cancel"));
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "my dirty edit\n", dirty: true, comparisonOldContent: "commit comparison\n",
+    });
+  });
+
+  it("keeps a dirty draft recoverable when entering Last Commit cannot load its manifest", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-disk", size: 12 });
+    await mountEditableDiff();
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    rejectDiff(1, new SpacesBridgeError("unavailable", "daemon reconnecting"));
+
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+      "Couldn't load Last Commit. Switch to Uncommitted to continue editing this draft.",
+    ));
+    expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeUndefined();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "my dirty edit\n", dirty: true,
+    });
+
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3));
+    resolveDiff(2, [editableFile], "uncommitted-recovery-after-last-failure");
+    await vi.waitFor(() => {
+      const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    });
+  });
+
+  it("restores a verified dirty Last Commit editor after its patch stream aborts", async () => {
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "x".repeat(40) };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-verified", size: 12,
+      isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n",
+    });
+    hoisted.workspaceDiffManifestRelease.mockClear();
+    const beginEditSpy = vi.spyOn(DiffView.prototype, "beginEdit");
+
+    await mountEditableDiff(lastCommitFile);
+    await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(1));
+    await startEdit();
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({ dirty: true });
+
+    useFakeTimersWithImmediatePaint();
+    hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-patch-abort");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe("Couldn't load diff. Try again.");
+    expect(beginEditSpy).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    });
+    beginEditSpy.mockRestore();
+  });
+
+  it("restores a dirty editor's Save and Cancel surface when a scope-transition patch stream aborts", async () => {
+    const lastCommitFile: DiffFileEntry = { ...editableFile, targetRevision: "y".repeat(40) };
+    const uncommittedFile = editableFileForContent("disk before\n", "uncommitted comparison\n");
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-verified", size: 12,
+      isWorktreeEquivalentToRevision: true, comparisonOldContent: "commit comparison\n",
+    });
+    hoisted.workspaceDiffManifestRelease.mockClear();
+
+    await mountEditableDiff(lastCommitFile);
+    await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(1));
+    await startEdit();
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+
+    useFakeTimersWithImmediatePaint();
+    hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [uncommittedFile], "uncommitted-patch-abort");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toContain("Save or Cancel"));
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "my dirty edit\n", dirty: true, comparisonOldContent: "commit comparison\n",
+    });
+  });
+
+  it("restores a dirty Last Commit draft as a recovery editor when the new scope omits its path", async () => {
+    const lastCommitFile = editableFileForContent("disk before\n", "commit comparison\n");
+    lastCommitFile.targetRevision = "u".repeat(40);
+    const saved: CodePaneDiffEditorState = {
+      path: "editable.ts",
+      baseSHA256: "sha-disk",
+      baseContent: "disk before\n",
+      comparisonOldContent: "commit comparison\n",
+      content: "my dirty edit\n",
+      dirty: true,
+      conflict: false,
+      conflictBaseSHA256: null,
+    };
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" }, diffEditorState: saved },
+    };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "disk before\n",
+      sha256: "sha-disk",
+      size: 12,
+      isWorktreeEquivalentToRevision: true,
+      comparisonOldContent: "commit comparison\n",
+    });
+    // Only the following Uncommitted recovery uses an ordinary live read; Last Commit itself
+    // must get its baseline from the guarded revision response above.
+    // The native payload encodes no requested comparison as JSON null. When the destination
+    // scope omits this path, that must still use the live disk baseline as its synthetic left side.
+    hoisted.workspaceFileRead.mockResolvedValue({
+      content: "disk before\n", sha256: "sha-disk", size: 12, comparisonOldContent: null,
+    });
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [lastCommitFile], "last-commit-draft");
+    await mounted;
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })?.textContent).toContain("Unsaved changes"));
+
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [], "uncommitted-clean");
+    await vi.waitFor(() => {
+      const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}") as { diffEditorState?: CodePaneDiffEditorState };
+      expect(snapshot.diffEditorState).toMatchObject({
+        content: "my dirty edit\n",
+        dirty: true,
+        comparisonOldContent: "disk before\n",
+      });
+    });
+    const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+  });
+
+  it("keeps a Last Commit review visible and directs an omitted dirty draft back to Uncommitted", async () => {
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-disk", size: 12 });
+    await mountEditableDiff();
+    await startEdit();
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [makeFile("other.ts")], "last-commit-omits-draft");
+
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+      "This draft is not part of Last Commit. Switch to Uncommitted to continue editing this draft.",
+    ));
+    expect(container.textContent).toContain("other.ts");
+    expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeUndefined();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      content: "my dirty edit\n", dirty: true,
+    });
+
+    switchToUncommitted(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3));
+    resolveDiff(2, [editableFile], "uncommitted-after-last-omission");
+    await vi.waitFor(() => {
+      const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
+      expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    });
+  });
+
+  it("rejects a stale Last Commit restore after its manifest generation is superseded", async () => {
+    const saved: CodePaneDiffEditorState = {
+      path: "editable.ts",
+      baseSHA256: "sha-saved",
+      baseContent: "disk before\n",
+      comparisonOldContent: "before\n",
+      content: "unsaved draft\n",
+      dirty: true,
+      conflict: false,
+      conflictBaseSHA256: null,
+    };
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" }, diffEditorState: saved } };
+    const pendingReads: Array<(result: { content: string; sha256: string; size: number; isWorktreeEquivalentToRevision: boolean; comparisonOldContent: string | null }) => void> = [];
+    hoisted.workspaceRevisionFileRead.mockImplementation(
+      () => new Promise((resolve) => pendingReads.push(resolve)),
+    );
+    const beginPreparedSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+    const first: DiffFileEntry = { ...editableFile, targetRevision: "f".repeat(40) };
+    const second: DiffFileEntry = { ...editableFile, targetRevision: "g".repeat(40) };
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [first], "last-commit-first-sig");
+    await mounted;
+    await vi.waitFor(() => expect(pendingReads).toHaveLength(1));
+    fireDiffSignature();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [second], "last-commit-second-sig");
+    await vi.waitFor(() => expect(pendingReads).toHaveLength(2));
+
+    pendingReads[0]!({ content: "disk before\n", sha256: "sha-old", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(beginPreparedSpy).not.toHaveBeenCalled();
+
+    pendingReads[1]!({ content: "disk before\n", sha256: "sha-new", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
+    await vi.waitFor(() => expect(beginPreparedSpy).toHaveBeenCalledTimes(1));
+    beginPreparedSpy.mockRestore();
+  });
+
+  it("runs the same immutable-revision guard before restoring a Last Commit inline editor", async () => {
+    const lastCommitFile: DiffFileEntry = {
+      ...editableFile,
+      targetRevision: "b".repeat(40),
+    };
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        scope: { kind: "lastCommit" },
+        diffEditorState: {
+          path: "editable.ts",
+          baseSHA256: "sha-saved",
+          baseContent: "disk before\n",
+          comparisonOldContent: "before\n",
+          content: "unsaved draft\n",
+          dirty: true,
+          conflict: false,
+          conflictBaseSHA256: null,
+        },
+      },
+    };
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "worktree churn\n", sha256: "sha-worktree", size: 15 });
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-commit", size: 12 });
+    const beginEditSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [lastCommitFile], "last-commit-restore-sig");
+    await mounted;
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledWith({
+        path: "editable.ts",
+        revision: "b".repeat(40),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+        "Workspace file changed since this commit. Switch to Uncommitted to edit it.",
+      ),
+    );
+    expect(beginEditSpy).not.toHaveBeenCalled();
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      path: "editable.ts",
+      content: "unsaved draft\n",
+      dirty: true,
+    });
+    beginEditSpy.mockRestore();
+  });
+
+  it("keeps a Last Commit draft dormant through a transient revision-read failure and retries its guard", async () => {
+    const lastCommitFile: DiffFileEntry = {
+      ...editableFile,
+      targetRevision: "c".repeat(40),
+    };
+    INIT_PAYLOAD = {
+      ...INIT_PAYLOAD,
+      workspaceState: {
+        ...INIT_PAYLOAD.workspaceState,
+        scope: { kind: "lastCommit" },
+        diffEditorState: {
+          path: "editable.ts",
+          baseSHA256: "sha-saved",
+          baseContent: "disk before\n",
+          comparisonOldContent: "before\n",
+          content: "unsaved draft\n",
+          dirty: true,
+          conflict: false,
+          conflictBaseSHA256: null,
+        },
+      },
+    };
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-commit", size: 12 });
+    hoisted.workspaceRevisionFileRead
+      .mockRejectedValueOnce(new Error("revision service reconnecting"))
+      .mockResolvedValue({ content: "disk before\n", sha256: "sha-commit", size: 12, isWorktreeEquivalentToRevision: true });
+    const beginEditSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [lastCommitFile], "last-commit-retry-sig");
+    await mounted;
+    await vi.waitFor(() =>
+      expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe(
+        "Couldn't verify this commit's file. Switch to Uncommitted to edit it.",
+      ),
+    );
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      path: "editable.ts",
+      content: "unsaved draft\n",
+      dirty: true,
+    });
+    expect(beginEditSpy).not.toHaveBeenCalled();
+
+    hoisted.diffSignatureCallbacks.at(-1)!();
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [lastCommitFile], "last-commit-retry-success-sig");
+    await vi.waitFor(() =>
+      expect(beginEditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "editable.ts", content: "unsaved draft\n", oldContent: "before\n" }),
+        true,
+      ),
+    );
+    expect(container.querySelector("#code-pane-diff-edit-error")?.textContent).toBe("");
+    beginEditSpy.mockRestore();
   });
 
   it("retains typing made after Save was clicked as dirty against the write's returned hash", async () => {
@@ -1430,16 +2235,16 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       }),
     );
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     await vi.waitFor(() => expect(capturedCodeViewOptions.current?.renderHeaderMetadata).toBeDefined());
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved text\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved text\n" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "saved text\n", { baseSHA256: "sha-before" }));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "typed after save\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "typed after save\n" });
     resolveWrite!({ ok: true, sha256: "sha-saved" });
 
     await vi.waitFor(() =>
@@ -1458,6 +2263,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("ignores a stale reconciliation read after a save advances the CAS baseline", async () => {
+    const testFile = editableFileForContent("before\n");
     let resolveReconcileRead: ((result: { content: string; sha256: string; size: number }) => void) | undefined;
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
@@ -1472,16 +2278,16 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
         resolveWrite = resolve;
       }),
     );
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
     // Start the signature refresh before Save. Its file read is deliberately held while the save
     // completes, so the eventual snapshot has the old CAS baseline.
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "stale-reconcile");
+    resolveDiff(1, [testFile], "stale-reconcile");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
 
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
@@ -1491,7 +2297,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       "saved\n",
       { baseSHA256: "sha-before" },
     ));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "typed after save\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "typed after save\n" });
     resolveWrite!({ ok: true, sha256: "sha-saved" });
     await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
       content: "typed after save\n",
@@ -1517,6 +2323,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("treats a disk refresh matching the saved buffer as clean before the CAS reply", async () => {
+    const testFile = editableFileForContent("before\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
       .mockResolvedValueOnce({ content: "saved\n", sha256: "sha-saved", size: 6 });
@@ -1526,11 +2333,11 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
         resolveWrite = resolve;
       }),
     );
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -1543,7 +2350,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     // therefore reconciles the exact saved buffer before saveDiffEdit can process the CAS result.
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "saved-signature");
+    resolveDiff(1, [testFile], "saved-signature");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => {
       const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
@@ -1564,6 +2371,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("ignores a late save failure after a matching disk refresh proved the write landed", async () => {
+    const testFile = editableFileForContent("before\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
       .mockResolvedValueOnce({ content: "saved\n", sha256: "sha-saved", size: 6 });
@@ -1573,11 +2381,11 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
         rejectWrite = reject;
       }),
     );
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -1588,7 +2396,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "saved-before-rejection");
+    resolveDiff(1, [testFile], "saved-before-rejection");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
       content: "saved\n",
@@ -1612,6 +2420,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("reconciles a disk snapshot against typing that lands while its read is in flight", async () => {
+    const testFile = editableFileForContent("line 1\nline 2\nline 3\n");
     let resolveReconcileRead: ((result: { content: string; sha256: string; size: number }) => void) | undefined;
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\n", sha256: "sha-before", size: 21 })
@@ -1620,19 +2429,19 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
           resolveReconcileRead = resolve;
         }),
       );
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "line 1 mine\nline 2\nline 3\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 mine\nline 2\nline 3\n" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "typing-during-reconcile");
+    resolveDiff(1, [testFile], "typing-during-reconcile");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
 
     // The disk read is still pending when the user edits the current buffer again. Reconciliation
     // must use this latest same-session content rather than discard the disk snapshot as stale.
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "line 1 mine\nline 2\nline 3\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 mine\nline 2\nline 3\n" });
     resolveReconcileRead!({ content: "line 1\nline 2\nline 3 from disk\n", sha256: "sha-disk", size: 34 });
 
     await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
@@ -1640,12 +2449,14 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       content: "line 1 mine\nline 2\nline 3 from disk\n",
       baseSHA256: "sha-disk",
       baseContent: "line 1\nline 2\nline 3 from disk\n",
+      comparisonOldContent: "before\n",
       dirty: true,
       conflict: false,
     }));
   });
 
   it("keeps reconciled content when an older in-flight save resolves afterward", async () => {
+    const testFile = editableFileForContent("line 1\nline 2\nline 3\nline 4\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\nline 4\n", sha256: "sha-before", size: 28 })
       .mockResolvedValueOnce({ content: "line 1\nline 2\nline 3\nline 4 from disk\n", sha256: "sha-disk", size: 38 });
@@ -1655,11 +2466,11 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
         resolveWrite = resolve;
       }),
     );
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "line 1 from mine\nline 2\nline 3\nline 4\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 from mine\nline 2\nline 3\nline 4\n" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -1672,7 +2483,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     // unresolved. Its generation bump must make the eventual old success retain this merge.
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "reconcile-in-flight-save");
+    resolveDiff(1, [testFile], "reconcile-in-flight-save");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })?.textContent).toContain("Unsaved changes"));
 
@@ -1691,6 +2502,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("clears an already-conflicted editor when its Keep mine write lands before the reply", async () => {
+    const testFile = editableFileForContent("before\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
       .mockResolvedValueOnce({ content: "disk version\n", sha256: "sha-disk", size: 13 })
@@ -1702,15 +2514,15 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       }),
     );
     const setConflictSpy = vi.spyOn(DiffView.prototype, "setEditConflict");
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "my version\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my version\n" });
 
     // First refresh establishes the read-only conflict comparison.
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "conflict-before-keep-mine");
+    resolveDiff(1, [testFile], "conflict-before-keep-mine");
     await vi.waitFor(() => expect(setConflictSpy).toHaveBeenCalledWith(
       "editable.ts",
       { kind: "changed", diskContent: "disk version\n" },
@@ -1733,7 +2545,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
       expect(header.textContent).toContain("Editing");
       expect(header.textContent).not.toContain("Workspace changed");
-      expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).not.toBeNull();
+      expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).toBeNull();
       expect(header.querySelector<HTMLButtonElement>("button")?.textContent).toBe("Cancel");
     });
 
@@ -1743,20 +2555,21 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("keeps dirty A when discarding it to open B fails", async () => {
-    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    const first = editableFileForContent("first disk\n");
+    const second: DiffFileEntry = { ...editableFileForContent("second disk\n"), path: "second.ts" };
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "first disk\n", sha256: "sha-first", size: 11 })
       .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
-    resolveDiff(0, [editableFile, second], "discard-failure-sig");
+    resolveDiff(0, [first, second], "discard-failure-sig");
     await mounted;
 
-    startEdit("editable.ts");
+    await startEdit("editable.ts");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "first edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "first edited\n" });
 
-    startEdit("second.ts");
+    await startEdit("second.ts");
     const pendingHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     [...pendingHeader.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Discard edits and open")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("second.ts", "inlineDiff"));
@@ -1770,7 +2583,8 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("ignores a delayed A save after discard-and-open replaces it with B", async () => {
-    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    const first = editableFileForContent("first disk\n");
+    const second: DiffFileEntry = { ...editableFileForContent("second disk\n"), path: "second.ts" };
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "first disk\n", sha256: "sha-first", size: 11 })
       .mockResolvedValueOnce({ content: "second disk\n", sha256: "sha-second", size: 12 });
@@ -1785,25 +2599,28 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
-    resolveDiff(0, [editableFile, second], "two-file-save-sig");
+    resolveDiff(0, [first, second], "two-file-save-sig");
     await mounted;
 
-    startEdit("editable.ts");
+    await startEdit("editable.ts");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "first edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "first edited\n" });
     const firstHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     firstHeader.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "first edited\n", { baseSHA256: "sha-first" }));
 
     // The explicit discard flow makes B the active editor while A's write is still unresolved.
-    startEdit("second.ts");
+    await startEdit("second.ts");
     const pendingFirstHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     const discard = [...pendingFirstHeader.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
       button.textContent?.includes("Discard edits and open"),
     );
     discard!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("second.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "second.ts", type: "file" }, { contents: "second edited\n" });
+    await vi.waitFor(() =>
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState?.path).toBe("second.ts"),
+    );
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "second.ts", type: "diff" }, { contents: "second edited\n" });
 
     resolveFirstWrite!({ ok: true, sha256: "sha-first-saved" });
     await vi.waitFor(() =>
@@ -1820,19 +2637,20 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("ends a clean A editor before opening B", async () => {
-    const second: DiffFileEntry = { ...editableFile, path: "second.ts" };
+    const first = editableFileForContent("editable.ts disk\n");
+    const second: DiffFileEntry = { ...editableFileForContent("second.ts disk\n"), path: "second.ts" };
     hoisted.workspaceFileRead.mockImplementation((path: string) =>
       Promise.resolve({ content: `${path} disk\n`, sha256: `sha-${path}`, size: path.length + 6 }),
     );
     const endEditSpy = vi.spyOn(DiffView.prototype, "endEdit");
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
-    resolveDiff(0, [editableFile, second], "two-editable-sig");
+    resolveDiff(0, [first, second], "two-editable-sig");
     await mounted;
-    startEdit("editable.ts");
+    await startEdit("editable.ts");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    startEdit("second.ts");
+    await startEdit("second.ts");
 
     expect(endEditSpy).toHaveBeenCalledWith("editable.ts");
     endEditSpy.mockRestore();
@@ -1843,7 +2661,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       .mockResolvedValueOnce({ content: "disk before\n", sha256: "sha-before", size: 12 })
       .mockResolvedValueOnce({ content: "disk changed\n", sha256: "sha-changed", size: 13 });
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     const replaceSpy = vi.spyOn(DiffView.prototype, "replaceEditContent");
 
@@ -1853,11 +2671,13 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await vi.waitFor(() => expect(replaceSpy).toHaveBeenCalledWith("editable.ts", "disk changed\n", false));
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
-    expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")?.disabled).toBe(true);
+    // A clean external adoption intentionally has no Save action; Save is only rendered once the
+    // editor buffer is dirty.
+    expect(header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).toBeNull();
     replaceSpy.mockRestore();
   });
 
-  it("reconciles a restored clean diff editor even when its path is absent from the manifest", async () => {
+  it("restores the review comparison side rather than the CAS baseline and retains it through disk reconciliation", async () => {
     INIT_PAYLOAD = {
       ...INIT_PAYLOAD,
       workspaceState: {
@@ -1866,6 +2686,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
           path: "editable.ts",
           baseSHA256: "sha-before",
           baseContent: "disk before\n",
+          comparisonOldContent: "review baseline\n",
           content: "disk before\n",
           dirty: false,
           conflict: false,
@@ -1874,6 +2695,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       },
     };
     hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "disk reset\n", sha256: "sha-reset", size: 11 });
+    const beginEditSpy = vi.spyOn(DiffView.prototype, "beginEdit");
     const replaceSpy = vi.spyOn(DiffView.prototype, "replaceEditContent");
 
     const mounted = mountRoot(container);
@@ -1881,6 +2703,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     resolveDiff(0, [], "clean-restored-omitted-sig");
     await mounted;
 
+    expect(beginEditSpy).toHaveBeenCalledWith("editable.ts", "disk before\n", false, "review baseline\n");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     expect(replaceSpy).toHaveBeenCalledWith("editable.ts", "disk reset\n", false);
     const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
@@ -1890,16 +2713,18 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       baseSHA256: "sha-reset",
       dirty: false,
       conflict: false,
+      comparisonOldContent: "review baseline\n",
     });
+    beginEditSpy.mockRestore();
     replaceSpy.mockRestore();
   });
 
   it("keeps a dirty inline edit reachable when a live manifest omits that path", async () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1916,9 +2741,9 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   it("surfaces a manifest transport failure above a dirty editor and retries without hiding Save/Cancel", async () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
 
     useFakeTimersWithImmediatePaint();
     fireDiffSignature();
@@ -1943,9 +2768,9 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   it("surfaces a patch-stream failure above a dirty editor and retries without hiding Save/Cancel", async () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
 
     useFakeTimersWithImmediatePaint();
     hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
@@ -1970,6 +2795,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("freezes an overlapping external write as a disk-versus-buffer comparison and keeps mine CAS-bound to that disk snapshot", async () => {
+    const testFile = editableFileForContent("before\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
       .mockResolvedValueOnce({ content: "disk version\n", sha256: "sha-disk", size: 13 });
@@ -1977,14 +2803,14 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     // rather than a later refresh triggered by a successful write.
     hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
     const setConflictSpy = vi.spyOn(DiffView.prototype, "setEditConflict");
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "my version\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my version\n" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "conflict-sig");
+    resolveDiff(1, [testFile], "conflict-sig");
 
     await vi.waitFor(() =>
       expect(setConflictSpy).toHaveBeenCalledWith("editable.ts", { kind: "changed", diskContent: "disk version\n" }),
@@ -1999,6 +2825,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
               snapshot.diffEditorState.baseSHA256 === "sha-disk" &&
               snapshot.diffEditorState.baseContent === "disk version\n" &&
               snapshot.diffEditorState.content === "my version\n" &&
+              snapshot.diffEditorState.comparisonOldContent === "before\n" &&
               snapshot.diffEditorState.conflictBaseSHA256 === "sha-disk",
           ),
       ).toBe(true),
@@ -2014,18 +2841,19 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   });
 
   it("uses create-if-missing CAS when Keep mine resolves a deleted-file conflict", async () => {
+    const testFile = editableFileForContent("before\n");
     hoisted.workspaceFileRead
       .mockResolvedValueOnce({ content: "before\n", sha256: "sha-before", size: 7 })
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "editable.ts was deleted"));
     hoisted.workspaceFileWrite.mockImplementationOnce(() => new Promise(() => {}));
-    await mountEditableDiff();
-    startEdit();
+    await mountEditableDiff(testFile);
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "restore mine\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "restore mine\n" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
-    resolveDiff(1, [editableFile], "deleted-edit-sig");
+    resolveDiff(1, [testFile], "deleted-edit-sig");
     const header = await vi.waitFor(() => {
       const rendered = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
       expect(rendered.textContent).toContain("Keep mine");
@@ -2052,6 +2880,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
           path: "editable.ts",
           baseSHA256: "sha-disk",
           baseContent: "disk version\n",
+          comparisonOldContent: "before\n",
           content: "my recovered version\n",
           dirty: true,
           conflict: true,
@@ -2083,6 +2912,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
           // file after state restoration.
           baseSHA256: "sha-before-conflict",
           baseContent: "before conflict\n",
+          comparisonOldContent: "before\n",
           content: "my recovered version\n",
           dirty: true,
           conflict: true,
@@ -2129,6 +2959,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
           path: "editable.ts",
           baseSHA256: "sha-before-delete",
           baseContent: "before delete\n",
+          comparisonOldContent: "before\n",
           content: "restore my recovered version\n",
           dirty: true,
           conflict: true,
@@ -2153,9 +2984,9 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
     hoisted.workspaceFileWrite.mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "file" }, { contents: "edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "edited\n" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     const save = header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!;
     save.click();
@@ -2172,7 +3003,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
   it("surfaces a non-deletion workspace read failure before opening an inline diff edit", async () => {
     hoisted.workspaceFileRead.mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon unavailable"));
     await mountEditableDiff();
-    startEdit();
+    await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
     expect(container.textContent).toContain("Couldn't open editable.ts for editing. Try again.");
@@ -3019,7 +3850,13 @@ describe("mountRoot's spaces:agents wiring", () => {
 
       const dialog = container.querySelector<HTMLElement>("#code-pane-start-agent-dialog")!;
       expect(dialog.hidden).toBe(false);
-      expect((container.querySelector<HTMLInputElement>("#code-pane-start-agent-command"))!.value).toBe(command);
+      expect(dialog.getAttribute("aria-labelledby")).toBe("code-pane-start-agent-title");
+      expect(container.querySelector<HTMLElement>("#code-pane-start-agent-title")?.textContent).toBe(
+        "Start an agent to receive review comments",
+      );
+      const commandInput = container.querySelector<HTMLInputElement>("#code-pane-start-agent-command")!;
+      expect(commandInput.value).toBe(command);
+      expect(commandInput.getAttribute("autocapitalize")).toBe("none");
       const status = container.querySelector<HTMLElement>("#code-pane-start-agent-status")!;
       expect(status.textContent).toContain("No agent detected");
       expect(status.textContent).toContain(failure);
@@ -3992,6 +4829,63 @@ describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before
     const readOrder = hoisted.workspaceFileRead.mock.invocationCallOrder[0]!;
     const listOrder = hoisted.workspaceFileList.mock.invocationCallOrder[0]!;
     expect(readOrder).toBeLessThan(listOrder);
+  });
+});
+
+describe("mountRoot's cross-mode Quick Open scope preservation", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.workspaceFileRead.mockClear();
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["committed.ts", "untracked.ts"], truncated: false });
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "untracked content", sha256: "untracked-sha", size: 17 });
+    container = document.createElement("div");
+  });
+
+  it("keeps Last Commit selected after Quick Open switches to Editor and the user returns to Diff", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("committed.ts")], "uncommitted-sig");
+    await mounted;
+
+    switchToLastCommit(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
+    resolveDiff(1, [makeFile("committed.ts")], "last-commit-sig");
+    await vi.waitFor(() => expect(container.querySelector(".compare-btn")?.textContent).toBe("Last commit"));
+    await vi.waitFor(() =>
+      expect(hoisted.notifyRenderMetric).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "diff", trigger: "manifest", scope: "lastCommit" }),
+      ),
+    );
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    input.value = "untracked.ts";
+    input.dispatchEvent(new Event("input"));
+    const row = await vi.waitFor(() => {
+      const el = container.querySelector('.quick-open .row[data-path="untracked.ts"]') as HTMLElement | null;
+      expect(el).not.toBeNull();
+      return el!;
+    });
+
+    row.click();
+    await vi.waitFor(() => expect(container.querySelector("#code-pane-mode-editor")?.classList.contains("on")).toBe(true));
+
+    clickButton(container, "Diff");
+
+    // Returning to Diff is only a mode change. In particular it must not turn the user's Last
+    // Commit comparison into Uncommitted just because the file opened from Quick Open is absent
+    // from that comparison.
+    expect(container.querySelector(".compare-btn")?.textContent).toBe("Last commit");
+    expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2);
+    const snapshots = hoisted.notifyWorkspaceStateChanged.mock.calls.map(([state]) =>
+      state as { mode: string; scope: { kind: string } },
+    );
+    expect(snapshots.at(-1)).toMatchObject({ mode: "diff", scope: { kind: "lastCommit" } });
   });
 });
 

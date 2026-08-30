@@ -45,8 +45,13 @@ protocol CodePaneDeviceGateway: Sendable {
     func cancelWorkspaceDiffManifest(workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String, device: SpacesPairedDeviceRecord)
         async throws
 
-    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+    func workspaceFileRead(
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+    ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
+
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceRevisionFileReadResult
 
     func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult
 
@@ -136,11 +141,23 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
-    func workspaceFileRead(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+    func workspaceFileRead(
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+    ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
     {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.workspaceFileRead(workspaceID: workspaceID, relativePath: relativePath, device: device)
+            try SpacesDeviceClient.workspaceFileRead(
+                workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, device: device)
+        }.value
+    }
+
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
+        -> SpacesDeviceWorkspaceRevisionFileReadResult
+    {
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceRevisionFileRead(
+                workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath, device: device)
         }.value
     }
 

@@ -229,9 +229,31 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(
                 command: .workspaceDiffFileChunk(
                     .init(workspaceID: "workspace-1", manifestID: "manifest-1", relativePath: "README.md", byteOffset: 0)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .workspaceRevisionFileRead(
+                    .init(workspaceID: "workspace-1", revision: String(repeating: "a", count: 40), relativePath: "README.md")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
+    func testWorkspaceRevisionFileReadRoundTripsThroughTheProtocol() throws {
+        let revision = String(repeating: "a", count: 40)
+        let request = SpacesDeviceAPIRequest(
+            command: .workspaceRevisionFileRead(
+                .init(workspaceID: "workspace-1", revision: revision, relativePath: "Sources/App.swift", oldPath: "Sources/OldApp.swift")),
+            authToken: "SECRET")
+        let response = SpacesDeviceAPIResponse(
+            ok: true, message: "Read workspace revision file.",
+            result: .workspaceRevisionFileRead(.init(
+                worktreeFile: .init(base64Data: "d29ya3RyZWU=", sha256: "worktree-sha", size: 8, isBinaryGuess: false),
+                isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: "aGVsbG8=")))
+
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+        let decodedResponse = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+        XCTAssertEqual(decodedResponse, response)
+        XCTAssertEqual(decodedResponse.workspaceRevisionFileRead?.worktreeFile.sha256, "worktree-sha")
+        XCTAssertEqual(decodedResponse.workspaceRevisionFileRead?.comparisonOldBase64Data, "aGVsbG8=")
     }
 
     func testDiffManifestChunkRequiresAnExplicitSemanticFileIndex() {

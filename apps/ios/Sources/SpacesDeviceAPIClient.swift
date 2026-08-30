@@ -285,6 +285,23 @@ struct SpacesDeviceAPIClient: Sendable {
         return result
     }
 
+    func workspaceRevisionFileRead(
+        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
+    {
+        let response = try await sendRequest(
+            .init(
+                command: .workspaceRevisionFileRead(
+                    .init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let result = response.workspaceRevisionFileRead else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a workspace revision file read result.")
+        }
+        return result
+    }
+
     /// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` should be the
     /// hash last read via `workspaceFileRead`, or `nil` to assert the file must not exist yet. A mismatch
     /// is not thrown: `didWrite` is `false` and the result carries the disk content to merge against. Wire

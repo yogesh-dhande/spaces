@@ -47,6 +47,18 @@ describe("RealSpacesBridge", () => {
     await expect(call).rejects.toMatchObject({ code: "notFound", message: "no such file" });
   });
 
+  it("sends an immutable revision read with its pinned path and revision", async () => {
+    const bridge = createRealBridge();
+    const call = bridge.workspaceRevisionFileRead({ path: "src/file.ts", revision: "a".repeat(40) });
+    const message = postMessage.mock.calls[0]![0] as { id: string; method: string; params: unknown };
+    expect(message).toMatchObject({
+      method: "workspaceRevisionFileRead",
+      params: { path: "src/file.ts", revision: "a".repeat(40) },
+    });
+    window.__spacesBridge!.resolve(message.id, { content: "const x = 1;\n", sha256: "sha", size: 13 });
+    await expect(call).resolves.toEqual({ content: "const x = 1;\n", sha256: "sha", size: 13 });
+  });
+
   it("normalizes an unrecognized error code to internalError rather than passing it through", async () => {
     const bridge = createRealBridge();
     const call = bridge.workspaceFileRead("x.ts", "editor");

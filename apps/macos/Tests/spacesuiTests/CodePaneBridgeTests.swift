@@ -170,13 +170,13 @@ import spacesterminalcore
 
     @Test func diffEditorConflictPreservesItsExactCASTargetAcrossTheStrictWireState() throws {
         let changed = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true, conflict: true,
             conflictBaseSHA256: "disk-sha")
         let deleted = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true, conflict: true,
             conflictBaseSHA256: nil)
         let clean = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: false, conflict: false,
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: false, conflict: false,
             conflictBaseSHA256: nil)
 
         let changedData = try JSONEncoder().encode(changed)
@@ -196,15 +196,41 @@ import spacesterminalcore
         #expect((try? JSONDecoder().decode(CodePaneBridge.DiffEditorState.self, from: missingTargetData)) == nil)
 
         let invalidNonConflict = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: false,
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true, conflict: false,
             conflictBaseSHA256: "disk-sha")
         let invalidEmptyTarget = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", content: "mine", dirty: true, conflict: true,
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true, conflict: true,
             conflictBaseSHA256: "")
         #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: invalidNonConflict)))
         #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: invalidEmptyTarget)))
         #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: changed)))
         #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: deleted)))
+    }
+
+    @Test func workspaceStateRoundTripPreservesTheDiffEditorsComparisonSide() throws {
+        let withComparison = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "disk", comparisonOldContent: "comparison", content: "mine", dirty: true,
+            conflict: false, conflictBaseSHA256: nil)
+        let withoutComparison = CodePaneBridge.DiffEditorState(
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "disk", comparisonOldContent: nil, content: "mine", dirty: false,
+            conflict: false, conflictBaseSHA256: nil)
+
+        let withComparisonData = try JSONEncoder().encode(workspaceState(diffEditorState: withComparison))
+        let withComparisonJSON = try #require(JSONSerialization.jsonObject(with: withComparisonData) as? [String: Any])
+        let withComparisonEditorJSON = try #require(withComparisonJSON["diffEditorState"] as? [String: Any])
+        #expect(withComparisonEditorJSON["comparisonOldContent"] as? String == "comparison")
+        #expect(try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: withComparisonData).diffEditorState == withComparison)
+
+        let withoutComparisonData = try JSONEncoder().encode(workspaceState(diffEditorState: withoutComparison))
+        let withoutComparisonJSON = try #require(JSONSerialization.jsonObject(with: withoutComparisonData) as? [String: Any])
+        let withoutComparisonEditorJSON = try #require(withoutComparisonJSON["diffEditorState"] as? [String: Any])
+        #expect(withoutComparisonEditorJSON["comparisonOldContent"] is NSNull)
+        #expect(try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: withoutComparisonData).diffEditorState == withoutComparison)
+
+        var missingComparison = withComparisonEditorJSON
+        missingComparison.removeValue(forKey: "comparisonOldContent")
+        let missingComparisonData = try JSONSerialization.data(withJSONObject: missingComparison)
+        #expect((try? JSONDecoder().decode(CodePaneBridge.DiffEditorState.self, from: missingComparisonData)) == nil)
     }
 
     @Test func workspaceStateChangedRejectsUnknownEnumStringsAndMissingRequiredCollections() throws {
@@ -468,11 +494,26 @@ import spacesterminalcore
     @Test func planForWorkspaceFileRead() {
         let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: ["path": "src/a.swift", "purpose": "editor"])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileRead(path: "src/a.swift", ownsFileSignature: true)))
+        #expect(CodePaneBridge.plan(for: request) == .success(
+            .workspaceFileRead(path: "src/a.swift", ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil)))
     }
 
     @Test func planForWorkspaceFileReadRequiresAPath() {
         let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: [:])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceRevisionFileRead() {
+        let revision = String(repeating: "a", count: 40)
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceRevisionFileRead", params: ["path": "src/a.swift", "revision": revision])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceRevisionFileRead(path: "src/a.swift", revision: revision, oldPath: nil)))
+    }
+
+    @Test func planForWorkspaceRevisionFileReadRequiresPathAndRevision() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceRevisionFileRead", params: ["path": "src/a.swift"])
 
         #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
     }
@@ -612,6 +653,19 @@ import spacesterminalcore
         #expect(CodePaneBridge.fileReadPayload(result) == .success(CodePaneBridge.FileReadPayload(content: "hello", sha256: "sha", size: 5)))
     }
 
+    @Test func uncommittedAddedFilePayloadExplicitlyEncodesANullComparisonSide() throws {
+        let result = SpacesDeviceWorkspaceFileReadResult(
+            base64Data: Data("added".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false,
+            comparisonOldBase64Data: nil)
+        guard case .success(let payload) = CodePaneBridge.fileReadPayload(result) else {
+            Issue.record("expected text payload")
+            return
+        }
+
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
+        #expect(json["comparisonOldContent"] is NSNull)
+    }
+
     @Test func fileReadPayloadRejectsBinaryGuesses() {
         let result = SpacesDeviceWorkspaceFileReadResult(
             base64Data: Data("hello".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: true)
@@ -624,6 +678,29 @@ import spacesterminalcore
         let result = SpacesDeviceWorkspaceFileReadResult(base64Data: invalidUTF8.base64EncodedString(), sha256: "sha", size: 3, isBinaryGuess: false)
 
         #expect(CodePaneBridge.fileReadPayload(result).isInvalidArgumentFailure)
+    }
+
+    @Test func revisionFileReadPayloadCarriesTheVerifiedLiveCASBaseline() {
+        let result = SpacesDeviceWorkspaceRevisionFileReadResult(
+            worktreeFile: .init(base64Data: Data("live text".utf8).base64EncodedString(), sha256: "live-sha", size: 9, isBinaryGuess: false),
+            isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: Data("old text".utf8).base64EncodedString())
+
+        #expect(CodePaneBridge.revisionFileReadPayload(result) == .success(.init(
+            content: "live text", sha256: "live-sha", size: 9,
+            isWorktreeEquivalentToRevision: true, comparisonOldContent: "old text")))
+    }
+
+    @Test func lastCommitAddedFilePayloadExplicitlyEncodesANullComparisonSide() throws {
+        let result = SpacesDeviceWorkspaceRevisionFileReadResult(
+            worktreeFile: .init(base64Data: Data("added".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false),
+            isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: nil)
+        guard case .success(let payload) = CodePaneBridge.revisionFileReadPayload(result) else {
+            Issue.record("expected text payload")
+            return
+        }
+
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
+        #expect(json["comparisonOldContent"] is NSNull)
     }
 
     /// A successful write's own hash rides along in the payload, so the client can

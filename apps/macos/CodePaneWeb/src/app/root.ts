@@ -12,9 +12,11 @@ import {
   SpacesBridgeError,
   WorkspaceDiffManifestChunkResult,
   WorkspaceFileReadResult,
+  WorkspaceRevisionFileReadResult,
+  type DiffScope,
 } from "../bridge/types";
 import { CommentsController, CommentsToolbarState } from "./commentsController";
-import { DiffView } from "./diffView";
+import { DiffView, type PreparedDiffEdit } from "./diffView";
 import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
 import { diff3MergeLines } from "./editorView";
@@ -43,6 +45,12 @@ const THEME_EVENT = "spaces:theme";
 const AGENTS_EVENT = "spaces:agents";
 const AGENT_START_STATUS_EVENT = "spaces:agentStartStatus";
 const SET_MODE_EVENT = "spaces:setMode";
+
+/** Keep performance milestones tied to the comparison that produced them.  The native E2E
+ * harness uses this to distinguish a selected scope from an older refresh still draining. */
+function renderMetricScope(scope: DiffScope): string {
+  return scope.kind === "ref" ? `ref:${scope.refName}` : scope.kind;
+}
 
 /**
  * Wires the bridge, toolbar, file list, and diff/editor views together.
@@ -96,6 +104,21 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let durableEditorScrollLine = initPayload.workspaceState.editorScrollLine ?? null;
   let durableEditorFocusedLine = initPayload.workspaceState.editorFocusedLine ?? null;
   let diffEditorState: CodePaneDiffEditorState | undefined = initPayload.workspaceState.diffEditorState ?? undefined;
+  // A hibernated Last Commit editor cannot be rendered until its streamed file metadata supplies
+  // the immutable revision required to prove the worktree still matches the reviewed commit.
+  let pendingLastCommitDiffEditorRestore = state.scope.kind === "lastCommit" && diffEditorState !== undefined;
+  // Only a transition from another comparison needs a fresh old side. A pane that was already in
+  // Last Commit persists its stable review baseline across hibernation, while ref/base → Last
+  // Commit must derive the different historical side from the newly completed commit patch.
+  let pendingLastCommitComparisonRebuild = false;
+  // A persisted Last Commit draft is deliberately not trusted on its own: only this page's
+  // immutable revision read proves that its saved CAS target still names the reviewed checkout.
+  // This lets a failed refresh restore an editor that was already verified in this page, while an
+  // entering/restored draft remains safely recoverable through Uncommitted instead.
+  let lastCommitDiffEditorVerified = false;
+  // Every comparison scope owns a distinct patch left side. A live inline editor waits for its
+  // replacement patch before it can be rendered again, preserving its dirty right-side buffer.
+  let pendingScopeTransitionDiffEditorRestore = false;
   /** Changes only when a distinct inline editor owns the surface; typing deliberately preserves it. */
   let diffEditSessionToken = diffEditorState === undefined ? 0 : 1;
   /** A stale save must not block the editor that replaced its session. */
@@ -235,6 +258,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     onRequestEdit: (path) => void beginDiffEdit(path),
     onDiffEditChange: (path, content) => {
       if (diffEditorState?.path !== path) return;
+      // This callback can only come from Pierre's already-open editor, whose Last Commit entry
+      // path passed `readDiffEditBaseline` before `activatePreparedDiffEdit` installed it. Keep
+      // that proof attached to the live session across a hibernated patch retry.
+      if (state.scope.kind === "lastCommit") lastCommitDiffEditorVerified = true;
       diffEditContentGeneration += 1;
       diffEditorState = { ...diffEditorState, content, dirty: true, conflict: false, conflictBaseSHA256: null };
       scheduleWorkspaceStatePush();
@@ -620,12 +647,16 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   startAgentDialog.id = "code-pane-start-agent-dialog";
   startAgentDialog.hidden = true;
   startAgentDialog.setAttribute("role", "dialog");
-  startAgentDialog.setAttribute("aria-label", "Start agent");
+  const startAgentTitle = document.createElement("h2");
+  startAgentTitle.id = "code-pane-start-agent-title";
+  startAgentTitle.textContent = "Start an agent to receive review comments";
+  startAgentDialog.setAttribute("aria-labelledby", startAgentTitle.id);
   const startAgentForm = document.createElement("form");
   const startAgentInput = document.createElement("input");
   startAgentInput.id = "code-pane-start-agent-command";
   startAgentInput.name = "command";
   startAgentInput.autocomplete = "off";
+  startAgentInput.setAttribute("autocapitalize", "none");
   startAgentInput.placeholder = "Command to run in this workspace";
   const startAgentStatus = document.createElement("div");
   startAgentStatus.className = "agent-command-status";
@@ -649,7 +680,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   startAgentSubmit.disabled = true;
   startAgentActions.append(startAgentCancel, startAgentSubmit);
   startAgentForm.append(startAgentInput, startAgentStatus, startAgentActions);
-  startAgentDialog.appendChild(startAgentForm);
+  startAgentDialog.append(startAgentTitle, startAgentForm);
   pane.appendChild(startAgentDialog);
 
   function setStartAgentStatus(text: string): void {
@@ -918,6 +949,174 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    */
   type DiffRenderTrigger = "initial" | "scope" | "workspaceChange";
 
+  /** Removes a mutable editor before a Last Commit manifest (or its signature refresh) can render.
+   * Its one safe restoration path is the immutable revision guard after that manifest's file patch
+   * completes. `rebuildComparison` distinguishes entering this scope from refreshing within it. */
+  function hibernateLastCommitDiffEditor(rebuildComparison: boolean): void {
+    if (diffEditorState === undefined || (!rebuildComparison && state.scope.kind !== "lastCommit")) return;
+    if (rebuildComparison) pendingLastCommitComparisonRebuild = true;
+    if (pendingLastCommitDiffEditorRestore) return;
+    pendingLastCommitDiffEditorRestore = true;
+    if (pendingScopeTransitionDiffEditorRestore) return;
+    diffEditRequestToken += 1;
+    diffEditSessionToken += 1;
+    diffView.endEdit(diffEditorState.path);
+  }
+
+  function hibernateDiffEditorForScopeTransition(): void {
+    if (diffEditorState === undefined || pendingScopeTransitionDiffEditorRestore) return;
+    pendingScopeTransitionDiffEditorRestore = true;
+    diffEditRequestToken += 1;
+    diffEditSessionToken += 1;
+    diffView.endEdit(diffEditorState.path);
+  }
+
+  /** A failed Last Commit manifest has not supplied a new immutable revision to validate, so the
+   * already-verified editor remains the only safe surface to restore. A successful manifest always
+   * takes the separate revision guard path below; entering Last Commit from another comparison has
+   * no prior Last Commit baseline and stays dormant until that path completes. */
+  function restoreLastCommitDiffEditorAfterFailedRefresh(): void {
+    const saved = diffEditorState;
+    if (
+      !pendingLastCommitDiffEditorRestore ||
+      pendingLastCommitComparisonRebuild ||
+      !lastCommitDiffEditorVerified ||
+      !saved ||
+      state.scope.kind !== "lastCommit"
+    ) return;
+    if (!diffView.beginEdit(saved.path, saved.content, saved.dirty, saved.comparisonOldContent)) return;
+    if (saved.conflict) {
+      diffView.setEditConflict(
+        saved.path,
+        saved.conflictBaseSHA256 === null ? { kind: "deleted" } : { kind: "changed", diskContent: saved.baseContent },
+      );
+    }
+    pendingLastCommitDiffEditorRestore = false;
+    diffEditSessionToken += 1;
+  }
+
+  /** A Last Commit edit is saveable only after this page has verified its immutable target. If a
+   * transition into that scope cannot finish, keep the draft durable and direct the user to the
+   * ordinary comparison where its existing CAS baseline is still safe to use. */
+  function showLastCommitDraftRecoveryGuidance(message: string): void {
+    diffView.showEditError(`${message} Switch to Uncommitted to continue editing this draft.`);
+  }
+
+  /** A failed diff load must never strand a hibernated dirty draft. A verified Last Commit editor
+   * can reattach to its existing immutable baseline; entering Last Commit cannot, so it remains a
+   * visible, review-only recovery state until the user returns to Uncommitted or a retry verifies
+   * the newly streamed target. */
+  function recoverDirtyDiffEditorAfterFailedRefresh(message: string, error?: unknown): void {
+    const saved = diffEditorState;
+    if (!saved?.dirty) return;
+    if (state.scope.kind === "lastCommit") {
+      if (!pendingLastCommitComparisonRebuild && lastCommitDiffEditorVerified) {
+        restoreLastCommitDiffEditorAfterFailedRefresh();
+        diffView.showEditError(message);
+      } else if (pendingLastCommitDiffEditorRestore) {
+        showLastCommitDraftRecoveryGuidance("Couldn't load Last Commit.");
+      }
+      return;
+    }
+    const wasHibernatedForScopeTransition = pendingScopeTransitionDiffEditorRestore;
+    restoreScopeTransitionDiffEditorAfterFailedRefresh(saved.path, error);
+    // The scope recovery already explains that Save/Cancel remains available. Retain that more
+    // actionable wording; an ordinary same-scope refresh still needs the generic transport error.
+    if (!wasHibernatedForScopeTransition) diffView.showEditError(message);
+  }
+
+  /** A failed comparison refresh has not supplied a replacement left side. Keep the already
+   * rendered editor usable rather than marooning its dirty buffer behind a failed scope request.
+   * A missing live file is an explicit recreate-or-discard conflict; every other failure preserves
+   * the saved CAS target and is retried only by a later deliberate refresh/scope change. */
+  function restoreScopeTransitionDiffEditorAfterFailedRefresh(path: string, error?: unknown): void {
+    const saved = diffEditorState;
+    if (
+      !pendingScopeTransitionDiffEditorRestore || !saved || saved.path !== path ||
+      state.scope.kind === "lastCommit"
+    ) return;
+    const restored = error instanceof SpacesBridgeError && error.code === "notFound"
+      ? { ...saved, conflict: true, conflictBaseSHA256: null }
+      : saved;
+    if (!diffView.beginEdit(restored.path, restored.content, restored.dirty, restored.comparisonOldContent)) return;
+    if (restored.conflict) {
+      diffView.setEditConflict(
+        restored.path,
+        restored.conflictBaseSHA256 === null ? { kind: "deleted" } : { kind: "changed", diskContent: restored.baseContent },
+      );
+    }
+    diffEditorState = restored;
+    pendingScopeTransitionDiffEditorRestore = false;
+    diffEditSessionToken += 1;
+    diffView.showEditError(`Couldn't update ${path}'s comparison. Save or Cancel this edit, then try again.`);
+    pushWorkspaceState();
+  }
+
+  /** Restores a hibernated editor only after the new scope has supplied the completed patch that
+   * defines its comparison side. The worktree CAS baseline remains the one the user was editing;
+   * changing a review scope must not rewrite a dirty buffer or silently adopt a different disk
+   * target. Last Commit has its stricter immutable-revision guard below. */
+  async function restoreScopeTransitionDiffEditor(path: string, restoreToken: number): Promise<void> {
+    const saved = diffEditorState;
+    if (
+      !pendingScopeTransitionDiffEditorRestore ||
+      !saved ||
+      saved.path !== path ||
+      state.scope.kind === "lastCommit" ||
+      restoreToken !== diffRequestToken
+    ) return;
+    try {
+      const result = await readDiffEditBaseline(path, performance.now());
+      if (
+        result.kind !== "ready" ||
+        !pendingScopeTransitionDiffEditorRestore ||
+        diffEditorState !== saved ||
+        saved.path !== path ||
+        restoreToken !== diffRequestToken
+      ) return;
+      const completedFile = files.find((file) => file.path === path && file.patchState === "ready");
+      // No manifest entry means `readDiffEditBaseline` made an ordinary live read, whose wire
+      // payload explicitly encodes its unrequested comparison as null. This recovery editor has
+      // no comparison patch, so its new scope's disk baseline is the only valid synthetic left side.
+      const comparisonOldContent = completedFile === undefined
+        ? result.disk.content
+        : result.comparisonOldContent !== undefined
+          ? result.comparisonOldContent
+          : diffView.prepareEdit(path, result.disk.content)?.oldContent;
+      if (comparisonOldContent === undefined) {
+        diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
+        return;
+      }
+      const restoredContent = saved.dirty ? saved.content : result.disk.content;
+      const prepared = diffView.prepareEdit(path, restoredContent, comparisonOldContent);
+      if (prepared === undefined || !diffView.beginPreparedEdit(prepared, saved.dirty)) {
+        diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
+        return;
+      }
+      if (saved.conflict) {
+        diffView.setEditConflict(
+          path,
+          saved.conflictBaseSHA256 === null ? { kind: "deleted" } : { kind: "changed", diskContent: saved.baseContent },
+        );
+      }
+      diffEditorState = saved.dirty
+        ? { ...saved, comparisonOldContent: prepared.oldContent }
+        : {
+            ...saved,
+            baseSHA256: result.disk.sha256,
+            baseContent: result.disk.content,
+            content: result.disk.content,
+            comparisonOldContent: prepared.oldContent,
+          };
+      pendingScopeTransitionDiffEditorRestore = false;
+      diffEditSessionToken += 1;
+      pushWorkspaceState();
+    } catch (error) {
+      if (restoreToken !== diffRequestToken || diffEditorState !== saved) return;
+      restoreScopeTransitionDiffEditorAfterFailedRefresh(path, error);
+    }
+  }
+
   /** Reads every bounded metadata page before handing the sidebar a manifest. A manifest lease pins
    * the enumeration, so every page must repeat its id and signature; accepting a mixed sequence
    * would make a later patch request address a different plan than the rendered sidebar. */
@@ -959,6 +1158,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     const renderStartedAt = performance.now();
     const token = ++diffRequestToken;
     const scope = state.scope;
+    hibernateLastCommitDiffEditor(false);
     clearTimeout(diffRetryTimer);
     let manifest: WorkspaceDiffManifestChunkResult;
     let fetchElapsedMs: number;
@@ -967,6 +1167,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       fetchElapsedMs = Math.round(Math.max(performance.now() - renderStartedAt, 0));
     } catch (err) {
       if (token !== diffRequestToken) return; // superseded: a newer refresh already won, so this failure is moot
+      recoverDirtyDiffEditorAfterFailedRefresh("Couldn't load diff. Try again.", err);
       // A typed `SpacesBridgeError` means the daemon decoded the request and rejected it for a
       // durable reason (e.g. a bad/deleted ref for a "vs chosen ref" scope, or the workspace itself
       // is gone) — the exact same request will fail the exact same way on every retry, so retrying
@@ -1022,7 +1223,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         comments.setFiles([]);
         return;
       }
-      if (diffEditorState?.dirty) diffView.showEditError("Couldn't load diff. Try again.");
+      recoverDirtyDiffEditorAfterFailedRefresh("Couldn't load diff. Try again.");
       scheduleDiffRetry(preserveScroll, token, trigger);
       return;
     }
@@ -1049,8 +1250,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       );
     }
     initialDiffScrollRestored = true;
-    if (diffEditorState !== undefined) {
-      diffView.beginEdit(diffEditorState.path, diffEditorState.content, diffEditorState.dirty);
+    if (diffEditorState !== undefined && !pendingLastCommitDiffEditorRestore && !pendingScopeTransitionDiffEditorRestore) {
+      diffView.beginEdit(diffEditorState.path, diffEditorState.content, diffEditorState.dirty, diffEditorState.comparisonOldContent);
       if (diffEditorState.conflict) {
         // The durable conflict target is the same disk side the user last compared. `null` means
         // that side was absent, so the restored action must recreate the file instead of CASing
@@ -1087,6 +1288,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         fetchElapsedMs,
         fileCount: files.length,
         contentBytes: 0,
+        scope: renderMetricScope(scope),
       });
     }
     try {
@@ -1105,7 +1307,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         diffView.updateFile(queued);
         renderChangesList();
       }
-      if (diffEditorState?.dirty) diffView.showEditError("Couldn't load diff. Try again.");
+      recoverDirtyDiffEditorAfterFailedRefresh("Couldn't load diff. Try again.");
       scheduleDiffRetry(preserveScroll, token, trigger);
     }
   }
@@ -1207,6 +1409,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         const patch = finalFile.isBinary ? undefined : patchChunks.join("");
         decodeElapsedMs += Math.max(performance.now() - joinStartedAt, 0);
         const completed: DiffFileEntry = {
+          ...files[next.index],
           ...finalFile,
           patch,
           patchState: "ready",
@@ -1221,10 +1424,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         if (diffSelectedPath === completed.path) diffView.revealStreamedFile(completed.path);
         updateChangesListRow(completed);
         comments.updateFile(completed);
+        if (pendingLastCommitDiffEditorRestore && diffEditorState?.path === completed.path) {
+          void restoreLastCommitDiffEditor(completed.path, token, completed.targetRevision);
+        } else if (pendingScopeTransitionDiffEditorRestore && diffEditorState?.path === completed.path) {
+          void restoreScopeTransitionDiffEditor(completed.path, token);
+        }
         // Restored clean editors reconcile immediately after `beginEdit`, even when the manifest
         // omits the path. Keep this streaming hook for already-dirty/conflicted editors whose
         // external-change handling still needs the completed patch generation.
-        if (diffEditorState?.path === completed.path && (diffEditorState.dirty || diffEditorState.conflict)) {
+        if (!pendingLastCommitDiffEditorRestore && !pendingScopeTransitionDiffEditorRestore && diffEditorState?.path === completed.path && (diffEditorState.dirty || diffEditorState.conflict)) {
           void reconcileDiffEditWithDisk(completed.path);
         }
         afterBrowserPaint(() => {
@@ -1235,6 +1443,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             elapsedMs: Math.round(Math.max(performance.now() - renderStartedAt, 0)),
             fileCount: files.length,
             contentBytes: completed.patch?.length ?? 0,
+            scope: renderMetricScope(scope),
             path: completed.path,
             fileIndex: next.index,
             selectedPriority: selectedPriority || undefined,
@@ -1252,6 +1461,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         // because a priority-completed item may have moved from its append position.
         if (diffSelectedPath !== null && diffSelectedPath !== undefined) diffView.revealStreamedFile(diffSelectedPath);
       }
+      // A scope may legitimately omit the edited path (for example, a clean worktree after a
+      // Last Commit draft). Its recovery editor has no patch left side, so compare the preserved
+      // dirty buffer against the newly-read disk baseline rather than leaving Save/Cancel dormant.
+      if (pendingScopeTransitionDiffEditorRestore && diffEditorState !== undefined && !files.some((file) => file.path === diffEditorState!.path)) {
+        void restoreScopeTransitionDiffEditor(diffEditorState.path, token);
+      }
+      // A dirty draft entering Last Commit has no safe left side when this immutable manifest
+      // omits its path. Keep the completed review visible and leave the durable draft available
+      // through Uncommitted; rendering it here would make an unverified historical edit saveable.
+      if (pendingLastCommitDiffEditorRestore && diffEditorState?.dirty && !files.some((file) => file.path === diffEditorState!.path)) {
+        showLastCommitDraftRecoveryGuidance("This draft is not part of Last Commit.");
+      }
       afterBrowserPaint(() => {
         if (token !== diffRequestToken) return;
         // Let the final FileDiff post-render first apply a pending restored line. Clearing the
@@ -1264,6 +1485,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           elapsedMs: Math.round(Math.max(performance.now() - renderStartedAt, 0)),
           fileCount: files.length,
           contentBytes: aggregateContentUnits(files.map((file) => file.patch)),
+          scope: renderMetricScope(scope),
         });
       });
     } finally {
@@ -1288,22 +1510,202 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     return bytes;
   }
 
+  type DiffEditRead =
+    | { kind: "ready"; disk: WorkspaceFileReadResult; comparisonOldContent?: string | null; fetchElapsedMs: number }
+    | { kind: "worktreeDiverged" }
+    | { kind: "revisionUnavailable" };
+
+  /** The Last Commit patch is fixed at a manifest-pinned revision while the worktree is mutable.
+   * Git verifies checkout equivalence through its configured EOL/filter rules, preventing a CAS
+   * write from applying a historical review onto an agent's newer worktree change. */
+  async function readDiffEditBaseline(path: string, startedAt: number, pinnedRevision?: string): Promise<DiffEditRead> {
+    if (state.scope.kind !== "lastCommit") {
+      const file = files.find((candidate) => candidate.path === path);
+      const comparison = file?.comparisonBaseRevision === undefined
+        ? undefined
+        : { baseRevision: file.comparisonBaseRevision, oldPath: file.oldPath };
+      const disk = comparison === undefined
+        ? await bridge.workspaceFileRead(path, "inlineDiff")
+        : await bridge.workspaceFileRead(path, "inlineDiff", comparison);
+      return {
+        kind: "ready", disk, comparisonOldContent: disk.comparisonOldContent,
+        fetchElapsedMs: Math.round(Math.max(performance.now() - startedAt, 0)),
+      };
+    }
+    const targetFile = files.find((file) => file.path === path);
+    const targetRevision = pinnedRevision ?? targetFile?.targetRevision;
+    if (targetRevision === undefined) return { kind: "revisionUnavailable" };
+    let revision: WorkspaceRevisionFileReadResult;
+    try {
+      revision = await bridge.workspaceRevisionFileRead({ path, revision: targetRevision, oldPath: targetFile?.oldPath });
+    } catch (error) {
+      // A Last Commit comparison names a file that existed at the immutable revision. If it has
+      // disappeared from the mutable worktree, it is the same safety condition as a content hash
+      // mismatch: opening its editor would turn a historical review into a write against a changed
+      // workspace. Keep ordinary Uncommitted deletion handling below untouched.
+      if (error instanceof SpacesBridgeError && error.code === "notFound") return { kind: "worktreeDiverged" };
+      throw error;
+    }
+    if (revision.isWorktreeEquivalentToRevision !== true) return { kind: "worktreeDiverged" };
+    const disk: WorkspaceFileReadResult = { content: revision.content, sha256: revision.sha256, size: revision.size };
+    return {
+      kind: "ready", disk, comparisonOldContent: revision.comparisonOldContent,
+      fetchElapsedMs: Math.round(Math.max(performance.now() - startedAt, 0)),
+    };
+  }
+
+  function showLastCommitEditGuardError(result: Exclude<DiffEditRead, { kind: "ready" }>): void {
+    if (result.kind === "worktreeDiverged") {
+      diffView.showEditError("Workspace file changed since this commit. Switch to Uncommitted to edit it.");
+    } else {
+      diffView.showEditError("Couldn't verify this commit's file. Switch to Uncommitted to edit it.");
+    }
+  }
+
+  /** A saved Last Commit inline editor waits for its file patch so this exact same immutable
+   * comparison check gates restoration. Persisted edits are never rendered against mutable churn. */
+  async function restoreLastCommitDiffEditor(path: string, restoreToken: number, targetRevision: string | undefined): Promise<void> {
+    const saved = diffEditorState;
+    if (
+      !pendingLastCommitDiffEditorRestore ||
+      !saved ||
+      saved.path !== path ||
+      state.scope.kind !== "lastCommit" ||
+      targetRevision === undefined ||
+      restoreToken !== diffRequestToken
+    ) return;
+    const startedAt = performance.now();
+    diffView.clearEditError();
+    try {
+      const result = await readDiffEditBaseline(path, startedAt, targetRevision);
+      // A Last Commit manifest pins its target SHA. Both its refresh generation and that SHA must
+      // still own this hibernated editor when the independent file reads settle; an A→B→A scope
+      // round-trip or a new HEAD must never revive an editor verified against an old comparison.
+      if (
+        state.scope.kind !== "lastCommit" ||
+        diffEditorState !== saved ||
+        restoreToken !== diffRequestToken ||
+        files.find((file) => file.path === path)?.targetRevision !== targetRevision
+      ) return;
+      if (result.kind !== "ready") {
+        showLastCommitEditGuardError(result);
+        return;
+      }
+      const comparisonOldContent = pendingLastCommitComparisonRebuild
+        ? result.comparisonOldContent
+        : saved.comparisonOldContent;
+      if (comparisonOldContent === undefined) {
+        diffView.showEditError(`Couldn't verify ${path}'s comparison side. Try again.`);
+        return;
+      }
+      let restored: CodePaneDiffEditorState;
+      if (saved.conflict) {
+        // A conflict is an explicit user decision, not a stale rendering detail. A newer verified
+        // Last Commit target replaces its disk/CAS side, but never silently unlocks or drops mine.
+        restored = {
+          ...saved,
+          baseSHA256: result.disk.sha256,
+          baseContent: result.disk.content,
+          comparisonOldContent,
+          conflict: true,
+          conflictBaseSHA256: result.disk.sha256,
+        };
+      } else if (saved.dirty && (saved.baseSHA256 !== result.disk.sha256 || saved.baseContent !== result.disk.content)) {
+        // A Last Commit refresh can advance HEAD while this pane is hibernated. Treat that exactly
+        // like the live editor's external-change reconciliation: merge non-overlapping edits onto
+        // the verified disk baseline, otherwise freeze the exact replacement target for an
+        // explicit Keep mine/Take disk decision.
+        const merged = diff3MergeLines(saved.content, saved.baseContent, result.disk.content);
+        if ("merged" in merged) {
+          restored = {
+            path,
+            baseSHA256: result.disk.sha256,
+            baseContent: result.disk.content,
+            comparisonOldContent,
+            content: merged.merged,
+            dirty: true,
+            conflict: false,
+            conflictBaseSHA256: null,
+          };
+        } else {
+          restored = {
+            ...saved,
+            baseSHA256: result.disk.sha256,
+            baseContent: result.disk.content,
+            comparisonOldContent,
+            conflict: true,
+            conflictBaseSHA256: result.disk.sha256,
+          };
+        }
+      } else {
+        restored = {
+          ...saved,
+          baseSHA256: result.disk.sha256,
+          baseContent: result.disk.content,
+          content: saved.dirty ? saved.content : result.disk.content,
+          comparisonOldContent,
+          conflict: false,
+          conflictBaseSHA256: null,
+        };
+      }
+      const prepared = diffView.prepareEdit(path, restored.content, restored.comparisonOldContent);
+      if (prepared === undefined || !diffView.beginPreparedEdit(prepared, restored.dirty)) {
+        diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
+        return;
+      }
+      if (restored.conflict) diffView.setEditConflict(path, { kind: "changed", diskContent: result.disk.content });
+      diffEditorState = restored;
+      pendingLastCommitDiffEditorRestore = false;
+      pendingLastCommitComparisonRebuild = false;
+      pendingScopeTransitionDiffEditorRestore = false;
+      lastCommitDiffEditorVerified = true;
+      diffEditSessionToken += 1;
+      pushWorkspaceState();
+    } catch {
+      if (
+        state.scope.kind !== "lastCommit" ||
+        diffEditorState !== saved ||
+        restoreToken !== diffRequestToken ||
+        files.find((file) => file.path === path)?.targetRevision !== targetRevision
+      ) return;
+      showLastCommitEditGuardError({ kind: "revisionUnavailable" });
+    }
+  }
+
   /** Starts the one editable new/right-side file. The read is the CAS baseline, not the patch body:
    * a patch can be stale while an agent is actively changing the worktree, whereas every write must
    * compare against the actual workspace file the user is about to update. */
-  function activateDiffEdit(path: string, disk: WorkspaceFileReadResult, startedAt: number, fetchElapsedMs: number): void {
+  function activateDiffEdit(
+    path: string, disk: WorkspaceFileReadResult, startedAt: number, fetchElapsedMs: number, comparisonOldContent?: string | null,
+  ): boolean {
+    const prepared = diffView.prepareEdit(path, disk.content, comparisonOldContent);
+    return prepared !== undefined && activatePreparedDiffEdit(prepared, disk, startedAt, fetchElapsedMs);
+  }
+
+  /** The dirty-editor replacement path prepares B before it discards A. Reuse that exact
+   * successful hydration when B takes over so a large patch is parsed and reverse-applied once. */
+  function activatePreparedDiffEdit(
+    prepared: PreparedDiffEdit,
+    disk: WorkspaceFileReadResult,
+    startedAt: number,
+    fetchElapsedMs: number,
+  ): boolean {
+    const path = prepared.path;
+    if (!diffView.beginPreparedEdit(prepared)) return false;
+    const comparisonOldContent = prepared.oldContent;
     diffEditSessionToken += 1;
     diffEditorState = {
       path,
       baseSHA256: disk.sha256,
       baseContent: disk.content,
+      comparisonOldContent,
       content: disk.content,
       dirty: false,
       conflict: false,
       conflictBaseSHA256: null,
     };
+    if (state.scope.kind === "lastCommit") lastCommitDiffEditorVerified = true;
     diffEditContentGeneration += 1;
-    diffView.beginEdit(path, disk.content);
     pushWorkspaceState();
     afterBrowserPaint(() => {
       if (diffEditorState?.path !== path) return;
@@ -1317,6 +1719,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         path,
       });
     });
+    return true;
   }
 
   async function beginDiffEdit(path: string): Promise<void> {
@@ -1338,12 +1741,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     const startedAt = performance.now();
     diffView.clearEditError();
     try {
-      const disk = await bridge.workspaceFileRead(path, "inlineDiff");
-      const fetchElapsedMs = Math.round(Math.max(performance.now() - startedAt, 0));
+      const result = await readDiffEditBaseline(path, startedAt);
       // File reads are asynchronous. A newer line click or a fresh diff generation owns the one
       // edit surface, even when this older read happens to resolve after it.
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
-      activateDiffEdit(path, disk, startedAt, fetchElapsedMs);
+      if (result.kind !== "ready") {
+        showLastCommitEditGuardError(result);
+      } else if (!activateDiffEdit(path, result.disk, startedAt, result.fetchElapsedMs, result.comparisonOldContent)) {
+        diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
+      }
     } catch (error) {
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       // A deleted target is expected under agent churn: the rendered comparison remains reviewable
@@ -1364,15 +1770,27 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     const startedAt = performance.now();
     diffView.clearEditError();
     try {
-      const disk = await bridge.workspaceFileRead(nextPath, "inlineDiff");
-      const fetchElapsedMs = Math.round(Math.max(performance.now() - startedAt, 0));
+      const result = await readDiffEditBaseline(nextPath, startedAt);
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       if (diffEditorState?.path !== currentPath) return;
+      if (result.kind !== "ready") {
+        diffView.clearPendingOpen(currentPath);
+        showLastCommitEditGuardError(result);
+        return;
+      }
+      const prepared = diffView.prepareEdit(nextPath, result.disk.content, result.comparisonOldContent);
+      if (prepared === undefined) {
+        diffView.clearPendingOpen(currentPath);
+        diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
+        return;
+      }
       diffView.endEdit(currentPath);
       diffEditorState = undefined;
       diffEditSessionToken += 1;
       pushWorkspaceState();
-      activateDiffEdit(nextPath, disk, startedAt, fetchElapsedMs);
+      if (!activatePreparedDiffEdit(prepared, result.disk, startedAt, result.fetchElapsedMs)) {
+        diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
+      }
     } catch {
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       if (diffEditorState?.path !== currentPath) return;
@@ -1538,6 +1956,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             path,
             baseSHA256: disk.sha256,
             baseContent: disk.content,
+            comparisonOldContent: edit.comparisonOldContent,
             content: disk.content,
             dirty: false,
             conflict: false,
@@ -1551,6 +1970,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
               path,
               baseSHA256: disk.sha256,
               baseContent: disk.content,
+              comparisonOldContent: edit.comparisonOldContent,
               content: merged.merged,
               dirty: true,
               conflict: false,
@@ -1701,11 +2121,22 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     // This must happen before `renderBody` detaches the old mode's virtualized DOM. The captured
     // lines become the inactive view's durable values until the next time it is visible.
     captureViewPositions();
+    const enteringLastCommit = action.type === "setScope" && state.scope.kind !== "lastCommit" && action.scope.kind === "lastCommit";
+    if (action.type === "setScope" && diffEditorState !== undefined) hibernateDiffEditorForScopeTransition();
+    if (enteringLastCommit) hibernateLastCommitDiffEditor(true);
     if (action.type === "setScope") {
       configuredBaseSelectionToken += 1;
       configuredBaseRefName = configuredBaseScopeRefName;
     }
     state = codePaneReducer(state, action);
+    // Last Commit's immutable guard is only meaningful while that scope remains selected. The
+    // separate scope-transition guard continues through every comparison until its new patch is
+    // complete and has rebuilt the editor's left side.
+    if (action.type === "setScope" && state.scope.kind !== "lastCommit") {
+      pendingLastCommitDiffEditorRestore = false;
+      pendingLastCommitComparisonRebuild = false;
+      lastCommitDiffEditorVerified = false;
+    }
     toolbar.update(buildToolbarState());
 
     if (action.type === "setLayout") {
@@ -1775,7 +2206,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // regardless of which mode ends up on screen.
   await editorView.restoreState(initPayload.workspaceState.editorState ?? undefined);
   editorView.restorePosition(initPayload.workspaceState.editorScrollLine, initPayload.workspaceState.editorFocusedLine);
-  const restoredScope = state.scope.kind === "ref" ? `ref:${state.scope.refName}` : state.scope.kind;
+  const restoredScope = renderMetricScope(state.scope);
   const restoredEditorState = editorView.snapshot();
   afterBrowserPaint(() => {
     // A restored diff may still be queued behind the initial manifest when this milestone fires.

@@ -11,6 +11,8 @@ type FakeCodeViewItem = {
   version: number | undefined;
   annotations: unknown;
   file?: { contents: string; cacheKey?: string };
+  fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+  edit?: boolean;
 };
 
 type FakeCodeViewInput = {
@@ -19,6 +21,8 @@ type FakeCodeViewInput = {
   version: number | undefined;
   annotations?: unknown;
   file?: { contents: string; cacheKey?: string };
+  fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+  edit?: boolean;
 };
 
 // `@pierre/diffs`' real `CodeView.syncItemRecord` (`dist/components/CodeView.js`) short-circuits
@@ -42,6 +46,7 @@ const control = vi.hoisted(() => ({
   lastInstance: undefined as { setSelectedLines(selection: unknown): void } | undefined,
   setItemsCalls: [] as Array<ReadonlyArray<FakeCodeViewInput>>,
   addItemCalls: [] as FakeCodeViewInput[],
+  processFileCalls: 0,
 }));
 
 vi.mock("@pierre/diffs", async (importOriginal) => {
@@ -52,10 +57,19 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     version: number | undefined;
     annotations?: unknown;
     file?: { contents: string; cacheKey?: string };
+    fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+    edit?: boolean;
   }): boolean {
     const existing = items.get(next.id);
     if (existing && existing.version === next.version) return false;
-    items.set(next.id, { type: next.type, version: next.version, annotations: next.annotations, file: next.file });
+    items.set(next.id, {
+      type: next.type,
+      version: next.version,
+      annotations: next.annotations,
+      file: next.file,
+      fileDiff: next.fileDiff,
+      edit: next.edit,
+    });
     return true;
   }
   class FakeCodeView {
@@ -105,6 +119,8 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
       version: number | undefined;
       annotations?: unknown;
       file?: { contents: string; cacheKey?: string };
+      fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+      edit?: boolean;
     }): boolean {
       const existing = this.items.get(input.id);
       if (!existing) return false;
@@ -114,14 +130,22 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
       return syncItem(this.items, input);
     }
   }
-  return { ...actual, CodeView: FakeCodeView };
+  return {
+    ...actual,
+    CodeView: FakeCodeView,
+    processFile: (...args: Parameters<typeof actual.processFile>) => {
+      control.processFileCalls += 1;
+      return actual.processFile(...args);
+    },
+  };
 });
 
 const PATCH = `diff --git a/src/foo.ts b/src/foo.ts
 index 1111111..2222222 100644
 --- a/src/foo.ts
 +++ b/src/foo.ts
-@@ -10,5 +10,6 @@ function compute() {
+@@ -1,5 +1,6 @@
+ function compute() {
  const a = 1;
 -const b = oldHelper();
 +const b = newHelper();
@@ -129,6 +153,25 @@ index 1111111..2222222 100644
  const d = 4;
  return a + b;
 `;
+
+const EDIT_CONTENT = `function compute() {
+const a = 1;
+const b = newHelper();
+const c = 3;
+const d = 4;
+return a + b;
+`;
+
+const EDIT_OLD_CONTENT = `function compute() {
+const a = 1;
+const b = oldHelper();
+const d = 4;
+return a + b;
+`;
+
+function diffLines(content: string): string[] {
+  return content.split("\n").slice(0, -1).map((line) => `${line}\n`);
+}
 
 function file(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
   return { path: "src/foo.ts", status: "modified", patch: PATCH, isBinary: false, ...overrides };
@@ -167,6 +210,7 @@ beforeEach(() => {
   control.lastInstance = undefined;
   control.setItemsCalls = [];
   control.addItemCalls = [];
+  control.processFileCalls = 0;
 });
 
 describe("DiffView.setComments", () => {
@@ -371,6 +415,22 @@ describe("DiffView progressive patch replacement", () => {
 });
 
 describe("DiffView inline edit", () => {
+  it("hydrates a replacement diff once before activating it", () => {
+    const path = "src/foo.ts";
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([file({ path })], false);
+    control.processFileCalls = 0;
+
+    const prepared = diffView.prepareEdit(path, EDIT_CONTENT);
+
+    expect(prepared).toEqual(expect.objectContaining({ path, content: EDIT_CONTENT, oldContent: EDIT_OLD_CONTENT }));
+    expect(control.processFileCalls).toBe(1);
+    expect(diffView.beginPreparedEdit(prepared!)).toBe(true);
+    // Parsing/reversing a large patch is the observable expensive work. Activating the prepared
+    // complete sides must not repeat it after a dirty editor is discarded for this file.
+    expect(control.processFileCalls).toBe(1);
+  });
+
   it("assigns the stable editor identifier inside Pierre's shadow-root container", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -383,7 +443,7 @@ describe("DiffView inline edit", () => {
       return 1;
     });
 
-    diffView.beginEdit(path, "editable\n");
+    expect(diffView.beginEdit(path, EDIT_CONTENT)).toBe(true);
     const rendered = document.createElement("div");
     const shadowRoot = rendered.attachShadow({ mode: "open" });
     const editable = document.createElement("div");
@@ -405,7 +465,7 @@ describe("DiffView inline edit", () => {
     diffView.setFiles([unchanged], false);
     const unchangedItem = control.setItemsCalls.at(-1)?.[0];
 
-    diffView.beginEdit("src/omitted.ts", "unsaved recovery\n", true);
+    diffView.beginEdit("src/omitted.ts", "unsaved recovery\n", true, "");
     expect(control.setItemsCalls.at(-1)?.[1]).toBe(unchangedItem);
 
     diffView.endEdit("src/omitted.ts");
@@ -417,11 +477,12 @@ describe("DiffView inline edit", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([], true);
 
-    diffView.beginEdit("src/omitted.ts", "unsaved recovery\n", true);
+    diffView.beginEdit("src/omitted.ts", "unsaved recovery\n", true, "");
 
     expect(control.items.get("src/omitted.ts")).toMatchObject({
-      type: "file",
-      file: { contents: "unsaved recovery\n" },
+      type: "diff",
+      fileDiff: { additionLines: ["unsaved recovery\n"] },
+      edit: true,
     });
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/omitted.ts",
@@ -436,7 +497,7 @@ describe("DiffView inline edit", () => {
     document.body.appendChild(host);
     const diffView = new DiffView(host, "unified", makeHooks());
     diffView.setFiles([file()], false);
-    diffView.beginEdit("src/foo.ts", "unsaved recovery\n", true);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
     diffView.setError("Unable to load this workspace's diff.");
 
@@ -446,8 +507,9 @@ describe("DiffView inline edit", () => {
     expect(error.style.display).toBe("flex");
     expect(root.style.display).not.toBe("none");
     expect(control.items.get("src/foo.ts")).toMatchObject({
-      type: "file",
-      file: { contents: "unsaved recovery\n" },
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
     });
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
@@ -464,7 +526,7 @@ describe("DiffView inline edit", () => {
     document.body.appendChild(host);
     const diffView = new DiffView(host, "unified", makeHooks());
     diffView.setFiles([file(), file({ path: "src/stale.ts" })], false);
-    diffView.beginEdit("src/foo.ts", "unsaved recovery\n", true);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
     diffView.setLoading();
 
@@ -474,8 +536,9 @@ describe("DiffView inline edit", () => {
     expect(loading.style.display).toBe("flex");
     expect(root.style.display).not.toBe("none");
     expect(control.items.get("src/foo.ts")).toMatchObject({
-      type: "file",
-      file: { contents: "unsaved recovery\n" },
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
     });
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
@@ -489,11 +552,19 @@ describe("DiffView inline edit", () => {
     // later durable failure promotes it back to the same recovery surface.
     diffView.setFiles([file()], false);
     expect(loading.style.display).toBe("none");
-    expect(control.items.get("src/foo.ts")).toMatchObject({ file: { contents: "unsaved recovery\n" } });
+    expect(control.items.get("src/foo.ts")).toMatchObject({
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
+    });
     diffView.setError("Unable to load this workspace's diff.");
     expect(loading.textContent).toBe("Unable to load this workspace's diff.");
     expect(root.style.display).not.toBe("none");
-    expect(control.items.get("src/foo.ts")).toMatchObject({ file: { contents: "unsaved recovery\n" } });
+    expect(control.items.get("src/foo.ts")).toMatchObject({
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
+    });
     host.remove();
   });
 
@@ -504,7 +575,7 @@ describe("DiffView inline edit", () => {
       onDiscardAndOpenDiffEdit,
     });
     diffView.setFiles([file()], false);
-    diffView.beginEdit("src/foo.ts", "unsaved\n", true);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
     diffView.requestOpenAfterDiscard("src/bar.ts");
 
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
@@ -521,38 +592,48 @@ describe("DiffView inline edit", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
 
-    diffView.beginEdit("src/foo.ts", "const diskOnly = true;\n");
+    expect(diffView.beginEdit("src/foo.ts", EDIT_CONTENT)).toBe(true);
 
     expect(control.items.get("src/foo.ts")).toMatchObject({
-      type: "file",
-      file: { contents: "const diskOnly = true;\n" },
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
     });
   });
 
   it("ends the prior clean edit before opening a different file, leaving one editable item", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file(), file({ path: "src/bar.ts" })], false);
-    diffView.beginEdit("src/foo.ts", "foo disk\n");
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT);
 
-    diffView.beginEdit("src/bar.ts", "bar disk\n");
+    diffView.beginEdit("src/bar.ts", EDIT_CONTENT);
 
     expect(control.items.get("src/foo.ts")?.type).toBe("diff");
-    expect(control.items.get("src/bar.ts")).toMatchObject({ type: "file", file: { contents: "bar disk\n" } });
+    expect(control.items.get("src/bar.ts")).toMatchObject({
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_CONTENT) },
+      edit: true,
+    });
   });
 
   it("keeps a clean external adoption clean while replacing the editor document", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
-    diffView.beginEdit("src/foo.ts", "before\n");
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT);
 
-    diffView.replaceEditContent("src/foo.ts", "adopted from disk\n", false);
+    diffView.replaceEditContent("src/foo.ts", EDIT_OLD_CONTENT, false);
 
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
-    expect(control.items.get("src/foo.ts")).toMatchObject({ file: { contents: "adopted from disk\n" } });
+    expect(control.items.get("src/foo.ts")).toMatchObject({
+      type: "diff",
+      fileDiff: { additionLines: diffLines(EDIT_OLD_CONTENT) },
+      edit: true,
+    });
     expect(header?.textContent).toContain("Editing");
-    expect(header?.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")?.disabled).toBe(true);
+    expect(header?.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).toBeNull();
+    expect([...header!.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toEqual(["Cancel"]);
   });
 
   it("replaces a dirty inline editor with a read-only disk-versus-buffer comparison until an explicit conflict action", () => {
@@ -561,14 +642,20 @@ describe("DiffView inline edit", () => {
     const hooks = { ...makeHooks(), onDiffEditChange, onResolveDiffEdit };
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
-    diffView.beginEdit("src/foo.ts", "const value = mine;\n", true);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
     diffView.setEditConflict("src/foo.ts", { kind: "changed", diskContent: "const value = disk;\n" });
 
-    // A `diff` item is Pierre's non-editable comparison surface, while the regular inline edit is
-    // a `file` item. The old disk version is supplied as the old side and the frozen buffer as the
-    // new side, so the user can decide without accidentally changing either version.
-    expect(control.items.get("src/foo.ts")?.type).toBe("diff");
+    // Both normal editing and conflict comparison use Pierre's FileDiff renderer. Conflict mode
+    // omits `edit`, and compares the exact disk snapshot with the frozen buffer read-only.
+    expect(control.items.get("src/foo.ts")).toMatchObject({
+      type: "diff",
+      fileDiff: {
+        deletionLines: diffLines("const value = disk;\n"),
+        additionLines: diffLines(EDIT_CONTENT),
+      },
+    });
+    expect(control.items.get("src/foo.ts")?.edit).toBeUndefined();
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
@@ -594,7 +681,7 @@ describe("DiffView inline edit", () => {
     const onResolveDiffEdit = vi.fn();
     const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onResolveDiffEdit });
     diffView.setFiles([file()], false);
-    diffView.beginEdit("src/foo.ts", "const value = mine;\n", true);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
     diffView.setEditConflict("src/foo.ts", { kind: "deleted" });
 
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
@@ -629,7 +716,7 @@ describe("DiffView inline edit", () => {
     expect(renderHeaderMetadata?.({ name: "queued.ts" })).toBeUndefined();
     expect(renderHeaderMetadata?.({ name: "binary.bin" })).toBeUndefined();
 
-    diffView.beginEdit("src/foo.ts", "editor contents\n");
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT);
     expect(renderHeaderMetadata?.({ name: "src/foo.ts" })?.textContent).toContain("Editing");
   });
 });
@@ -1033,29 +1120,27 @@ describe("DiffView line clicks", () => {
       | ((event: { type: "diff-line"; lineNumber: number; annotationSide: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => void)
       | undefined;
     expect(onLineClick).toBeDefined();
-    onLineClick!({ type: "diff-line", lineNumber: 11, annotationSide: "deletions" }, { type: "diff", item: { id: "src/foo.ts" } });
+    onLineClick!({ type: "diff-line", lineNumber: 3, annotationSide: "deletions" }, { type: "diff", item: { id: "src/foo.ts" } });
 
     expect(onRequestEdit).not.toHaveBeenCalled();
-    expect(diffView.focusedPosition()).toEqual({ path: "src/foo.ts", line: 11, side: "old" });
+    expect(diffView.focusedPosition()).toEqual({ path: "src/foo.ts", line: 3, side: "old" });
   });
 });
 
 describe("DiffView gutter-utility click", () => {
-  function renderUtility(): HTMLButtonElement {
-    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
-      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
-        item: { type: string; item: { id: string } }) => HTMLElement | undefined)
+  function invokeUtility(
+    contextType = "diff",
+    side: "additions" | "deletions" | undefined = "additions",
+    path = "src/foo.ts",
+  ): void {
+    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
+      | ((range: { start: number; side?: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => void)
       | undefined;
-    expect(renderGutterUtility).toBeDefined();
-    const button = renderGutterUtility!(
-      () => ({ lineNumber: 11, side: "additions" }),
-      { type: "diff", item: { id: "src/foo.ts" } },
-    );
-    expect(button).toBeInstanceOf(HTMLButtonElement);
-    return button as HTMLButtonElement;
+    expect(onGutterUtilityClick).toBeDefined();
+    onGutterUtilityClick!({ start: 3, side }, { type: contextType, item: { id: path } });
   }
 
-  it("renders a stable comment utility and requests a new comment when clicked", () => {
+  it("routes a native utility click and requests a new comment", () => {
     const onRequestNewComment = vi.fn();
     const onRequestEdit = vi.fn();
     const hooks = makeHooks();
@@ -1064,53 +1149,56 @@ describe("DiffView gutter-utility click", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
 
-    const button = renderUtility();
-    expect(button.id).toBe("code-pane-add-comment-src%2Ffoo.ts");
-    const onLineClick = control.lastOptions?.onLineClick as ((event: unknown, context: unknown) => void) | undefined;
-    expect(onLineClick).toBeDefined();
-    const bubbledClick = vi.fn(() =>
-      onLineClick!({ type: "diff-line", annotationSide: "additions", lineNumber: 11 }, { type: "diff", item: { id: "src/foo.ts" } }),
-    );
-    const parent = document.createElement("div");
-    parent.addEventListener("click", bubbledClick);
-    parent.appendChild(button);
-    button.click();
+    invokeUtility();
 
     expect(onRequestNewComment).toHaveBeenCalledTimes(1);
     expect(onRequestNewComment).toHaveBeenCalledWith({
       filePath: "src/foo.ts",
       side: "new",
-      lineNumber: 11,
+      lineNumber: 3,
       lineText: "const b = newHelper();",
     });
     expect(onRequestEdit).not.toHaveBeenCalled();
-    expect(bubbledClick).not.toHaveBeenCalled();
   });
 
-  it("renders the utility before hover and resolves the hovered line when clicked", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
-    diffView.setFiles([file()], false);
+  it("suppresses comments for the actively edited file while preserving comments on another read-only diff", () => {
+    const onRequestNewComment = vi.fn();
+    const hooks = makeHooks();
+    hooks.onRequestNewComment = onRequestNewComment;
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file(), file({ path: "src/other.ts" })], false);
+    expect(diffView.beginEdit("src/foo.ts", EDIT_CONTENT)).toBe(true);
 
-    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
-      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
-          item: { type: string; item: { id: string } }) => HTMLElement | undefined)
-      | undefined;
-    expect(renderGutterUtility!(() => undefined, { type: "diff", item: { id: "src/foo.ts" } })?.id).toBe(
-      "code-pane-add-comment-src%2Ffoo.ts",
-    );
+    invokeUtility("diff", "additions", "src/foo.ts");
+    invokeUtility("diff", "additions", "src/other.ts");
+
+    expect(onRequestNewComment).toHaveBeenCalledTimes(1);
+    expect(onRequestNewComment).toHaveBeenCalledWith({
+      filePath: "src/other.ts",
+      side: "new",
+      lineNumber: 3,
+      lineText: "const b = newHelper();",
+    });
   });
 
-  it("does not render a comment utility for non-diff items", () => {
+  it("ignores a native utility range without a side", () => {
+    const onRequestNewComment = vi.fn();
+    const hooks = makeHooks();
+    hooks.onRequestNewComment = onRequestNewComment;
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    diffView.setFiles([file()], false);
+    const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
+      | ((range: { start: number; side?: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => void)
+      | undefined;
+    onGutterUtilityClick!({ start: 3 }, { type: "diff", item: { id: "src/foo.ts" } });
+    expect(onRequestNewComment).not.toHaveBeenCalled();
+  });
+
+  it("does not request comments for non-diff items", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
-    const renderGutterUtility = control.lastOptions?.renderGutterUtility as
-      | ((getHoveredLine: () => { lineNumber: number; side?: "additions" | "deletions" } | undefined,
-        item: { type: string; item: { id: string } }) => HTMLElement | undefined)
-      | undefined;
-    expect(renderGutterUtility).toBeDefined();
-
-    expect(renderGutterUtility!(() => undefined, { type: "file", item: { id: "src/foo.ts" } })).toBeUndefined();
-    expect(renderGutterUtility!(() => undefined, { type: "placeholder", item: { id: "src/foo.ts" } })).toBeUndefined();
+    invokeUtility("file");
+    invokeUtility("placeholder");
   });
 
   // Regression: the clicked line must not remain selected after requesting a new comment. The
@@ -1121,7 +1209,7 @@ describe("DiffView gutter-utility click", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
 
-    renderUtility().click();
+    invokeUtility();
     await Promise.resolve(); // flush the queued microtask clear
 
     expect(control.setSelectedLinesCalls).toEqual([null]);
@@ -1134,7 +1222,7 @@ describe("DiffView gutter-utility click", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", hooks);
     diffView.setFiles([file()], false);
 
-    renderUtility().click();
+    invokeUtility();
     await Promise.resolve(); // flush the queued microtask clear
 
     expect(onRequestNewComment).toHaveBeenCalledTimes(1);
@@ -1145,7 +1233,7 @@ describe("DiffView gutter-utility click", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
 
-    expect(control.lastOptions?.onGutterUtilityClick).toBeUndefined();
-    expect(control.lastOptions?.renderGutterUtility).toBeDefined();
+    expect(control.lastOptions?.onGutterUtilityClick).toBeDefined();
+    expect(control.lastOptions?.renderGutterUtility).toBeUndefined();
   });
 });

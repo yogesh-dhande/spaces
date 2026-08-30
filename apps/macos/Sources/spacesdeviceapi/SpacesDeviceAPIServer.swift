@@ -176,7 +176,8 @@ extension SpacesDeviceAPICommand {
     /// them needs a worker-queue divert of its own.
     fileprivate var runsOnWorkspaceGitQueue: Bool {
         switch self {
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk,
+        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
+            .workspaceDiffFileChunk,
             .workspaceFileList, .workspaceRefList:
             true
         default: false
@@ -1271,6 +1272,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func workspaceGitQueueWorkspaceID(for request: SpacesDeviceAPIRequest) -> String {
         switch request.command {
         case .workspaceFileRead(let payload): return payload.workspaceID
+        case .workspaceRevisionFileRead(let payload): return payload.workspaceID
         case .workspaceFileWrite(let payload): return payload.workspaceID
         case .workspaceDiffManifestChunk(let payload): return payload.workspaceID
         case .workspaceDiffManifestRelease(let payload): return payload.workspaceID
@@ -1282,7 +1284,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
     /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
     /// polling, both of which run off the serial state queue.
-    private let workspaceGitClient = RemoteWorkspaceGitClient()
+    private let workspaceGitClient: RemoteWorkspaceGitClient
     /// Manifests retain a compact plan; child transfers retain generated patch files. One short TTL is
     /// refreshed on every range so a healthy remote download survives while abandoned generations do not
     /// retain plan memory or private files indefinitely.
@@ -1396,6 +1398,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
+        self.workspaceGitClient = RemoteWorkspaceGitClient()
         liveTerminalSessionStateProvider = nil
         liveInMemoryTerminalSessionsProvider = nil
         overviewLoaderForTesting = nil
@@ -1423,7 +1426,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
-        agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) }
+        agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) },
+        workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
     ) {
         self.host = host
         self.port = port
@@ -1441,6 +1445,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
+        self.workspaceGitClient = workspaceGitClient
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
         #endif
@@ -2846,7 +2851,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert workspace file-read/write/diff/file-list/ref-list commands to
         // `workspaceGitQueue` before they reach here (see `runsOnWorkspaceGitQueue`), so this case only
         // keeps the switch exhaustive.
-        case .workspaceFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk,
+        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
+            .workspaceDiffFileChunk,
             .workspaceFileList, .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
@@ -2984,6 +2990,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
         switch request.command {
         case .workspaceFileRead(let payload): return try handleWorkspaceFileReadRequest(payload, context: context)
+        case .workspaceRevisionFileRead(let payload): return try handleWorkspaceRevisionFileReadRequest(payload, context: context)
         case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
         case .workspaceDiffManifestChunk(let payload): return try handleWorkspaceDiffManifestChunkRequest(payload, context: context)
         case .workspaceDiffManifestRelease(let payload): return handleWorkspaceDiffManifestReleaseRequest(payload)
@@ -4262,17 +4269,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return workspace.dir
     }
 
-    private func handleWorkspaceFileReadRequest(_ request: SpacesDeviceWorkspaceFileReadRequest, context: RequestContext) throws
-        -> SpacesDeviceAPIResponse
-    {
-        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+    /// Reads a bounded regular checkout file. The revision-read endpoint shares this exact path so
+    /// its returned CAS baseline has the same containment, type, and cap guarantees as a normal file read.
+    private func workspaceFileReadResponse(
+        relativePath: String, workspaceDir: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil
+    ) -> SpacesDeviceAPIResponse {
         let resolvedPath: String
         do {
-            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: relativePath, workspaceDir: workspaceDir)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
 
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath), let size = attributes[.size] as? Int else {
-            return SpacesDeviceAPIResponse(ok: false, message: "File '\(request.relativePath)' was not found.", errorCode: .notFound)
+            return SpacesDeviceAPIResponse(ok: false, message: "File '\(relativePath)' was not found.", errorCode: .notFound)
         }
         // `attributesOfItem` (the stat above) never blocks, even against a FIFO or socket, but opening one of
         // those for read does — a FIFO in particular blocks until a writer appears, with no timeout, wedging
@@ -4293,19 +4301,246 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // could not be opened/read (e.g. permissions), never that it is missing. Reporting `.notFound`
             // would be a silent conflation an automated retry could misinterpret as "safe to create".
             return SpacesDeviceAPIResponse(
-                ok: false, message: "File '\(request.relativePath)' exists but could not be read.", errorCode: .internalError)
+                ok: false, message: "File '\(relativePath)' exists but could not be read.", errorCode: .internalError)
         }
         guard data.count <= Self.workspaceFileMaxBytes else {
             // The stat-based check above is the cheap fast path; this is the guard that cannot be raced — the
             // file grew between the stat and this read.
             return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
         }
+        let comparisonOldData: Data?
+        if let comparisonBaseRevision {
+            guard Self.isFullGitRevision(comparisonBaseRevision), oldPath.map(Self.isSafeGitRelativePath) ?? true else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Comparison revision and path must be immutable and workspace-relative.", errorCode: .invalidArgument)
+            }
+            do {
+                try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+                let comparisonPath = oldPath ?? relativePath
+                switch try gitTreePath(at: comparisonBaseRevision, relativePath: comparisonPath, workspaceDir: workspaceDir) {
+                case .missing:
+                    comparisonOldData = nil
+                case .nonRegular:
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
+                case .regularBlob:
+                    comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
+                        ["-C", workspaceDir, "cat-file", "--filters", "\(comparisonBaseRevision):./\(comparisonPath)"], timeout: 10,
+                        maxOutputBytes: Self.workspaceFileMaxBytes)
+                }
+            } catch SpacesRuntimeError.outputExceededCap {
+                return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
+            } catch {
+                return SpacesDeviceAPIResponse(ok: false, message: "Could not read the comparison file.", errorCode: .internalError)
+            }
+        } else {
+            comparisonOldData = nil
+        }
         return SpacesDeviceAPIResponse(
             ok: true, message: "Read workspace file.",
             result: .workspaceFileRead(
                 .init(
                     base64Data: data.base64EncodedString(), sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(data), size: data.count,
-                    isBinaryGuess: SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(data))))
+                    isBinaryGuess: SpacesDeviceWorkspaceBinaryGuess.isLikelyBinary(data),
+                    comparisonOldBase64Data: comparisonBaseRevision == nil ? nil : comparisonOldData?.base64EncodedString())))
+    }
+
+    private func handleWorkspaceFileReadRequest(_ request: SpacesDeviceWorkspaceFileReadRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        return workspaceFileReadResponse(
+            relativePath: request.relativePath, workspaceDir: workspaceDir,
+            comparisonBaseRevision: request.comparisonBaseRevision, oldPath: request.oldPath)
+    }
+
+    /// Reads one blob from an immutable commit, never from the working tree. The path is validated as a
+    /// lexical workspace-relative Git path rather than resolved on disk: a last-commit file may have been
+    /// renamed or deleted since that commit, so filesystem/symlink resolution would reject a valid object.
+    private func handleWorkspaceRevisionFileReadRequest(_ request: SpacesDeviceWorkspaceRevisionFileReadRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard Self.isFullGitRevision(request.revision), Self.isSafeGitRelativePath(request.relativePath),
+            request.oldPath.map(Self.isSafeGitRelativePath) ?? true
+        else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Revision must be a full object id and path must be workspace-relative.", errorCode: .invalidArgument)
+        }
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+
+        // A full-hex revision cannot be parsed as an option. The path is one object-expression argument
+        // following the revision and `:./`, never a separate pathspec or command-line option.
+        let resolved = try workspaceGitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^{commit}"], timeout: 2, allowedExitCodes: [0, 1])
+        guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Revision was not found in this workspace.", errorCode: .invalidArgument)
+        }
+        let targetHash: String
+        let targetIsExecutable: Bool
+        switch try gitTreePath(at: request.revision, relativePath: request.relativePath, workspaceDir: workspaceDir) {
+        case .missing:
+            return SpacesDeviceAPIResponse(ok: false, message: "File was not found at this revision.", errorCode: .notFound)
+        case .nonRegular:
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "File at this revision is not a regular file.", errorCode: .invalidArgument)
+        case .regularBlob(let objectID, let mode):
+            targetHash = objectID
+            targetIsExecutable = mode == "100755"
+        }
+        // Last Commit can edit only the tracked path itself. The ordinary workspace reader follows
+        // contained links by design, but accepting one here would let a reviewed regular file save
+        // through a different leaf or directory. Resolving the workspace root itself remains valid.
+        guard !lastCommitWorktreePathTraversesSymbolicLink(relativePath: request.relativePath, workspaceDir: workspaceDir) else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Last Commit editing requires a direct workspace file path.", errorCode: .invalidArgument)
+        }
+        // Read the editable worktree bytes before the equivalence check below. If checkout churns
+        // between this read and `git diff`, the check reports false and the browser rejects this
+        // baseline; if it churns after the check, the returned SHA remains the CAS write token.
+        // The revision target is intentionally only existence/type checked above: it is never
+        // transferred or size-capped, unlike this live baseline and the comparison side below.
+        let worktreeRead = workspaceFileReadResponse(relativePath: request.relativePath, workspaceDir: workspaceDir)
+        guard worktreeRead.ok, let worktreeFile = worktreeRead.workspaceFileRead else { return worktreeRead }
+        // Hash the bytes just read through Git's clean-filter path, rather than `git diff`'s
+        // index-aware working-tree scan: assume-unchanged/skip-worktree must not hide a real live
+        // divergence. The temporary input is exactly the response's CAS baseline, so the equality
+        // check cannot verify different bytes from those the editor would later save. Git tracks the
+        // executable bit too, so exact equivalence needs both the filtered blob and direct leaf mode.
+        let worktreeIsExecutable = lastCommitDirectWorktreeExecutable(
+            relativePath: request.relativePath, workspaceDir: workspaceDir)
+        let filteredWorktreeHash: String?
+        if worktreeIsExecutable == targetIsExecutable {
+            let baselineData = Data(base64Encoded: worktreeFile.base64Data)!
+            filteredWorktreeHash = try gitFilteredHash(
+                data: baselineData, relativePath: request.relativePath, workspaceDir: workspaceDir)
+        } else {
+            filteredWorktreeHash = nil
+        }
+        let parent = try workspaceGitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^"], timeout: 2, allowedExitCodes: [0, 1])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let comparisonOldData: Data?
+        if parent.isEmpty {
+            comparisonOldData = nil
+        } else {
+            let oldPath = request.oldPath ?? request.relativePath
+            do {
+                switch try gitTreePath(at: parent, relativePath: oldPath, workspaceDir: workspaceDir) {
+                case .missing:
+                    comparisonOldData = nil
+                case .nonRegular:
+                    return SpacesDeviceAPIResponse(
+                        ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
+                case .regularBlob:
+                    comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
+                        ["-C", workspaceDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10,
+                        maxOutputBytes: Self.workspaceFileMaxBytes)
+                }
+            } catch SpacesRuntimeError.outputExceededCap {
+                return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
+            }
+        }
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Read workspace revision file.",
+            result: .workspaceRevisionFileRead(
+                .init(
+                    worktreeFile: worktreeFile,
+                    isWorktreeEquivalentToRevision: filteredWorktreeHash == targetHash,
+                    comparisonOldBase64Data: comparisonOldData?.base64EncodedString())))
+    }
+
+    /// Runs Git's configured clean filters over already-bounded checkout bytes. `hash-object --path`
+    /// chooses attributes as if the data belonged at `relativePath`, while the private temporary file
+    /// prevents a second read of a concurrently changing worktree path from weakening the CAS guard.
+    private func gitFilteredHash(data: Data, relativePath: String, workspaceDir: String) throws -> String {
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-git-filter-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: input.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not prepare Git filter input."])
+        }
+        defer { try? FileManager.default.removeItem(at: input) }
+        return try workspaceGitClient.runGitAndCapture(
+            ["-C", workspaceDir, "hash-object", "--path=\(relativePath)", input.path], timeout: 10)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum GitTreePath {
+        case missing
+        case regularBlob(objectID: String, mode: String)
+        case nonRegular
+    }
+
+    /// `ls-tree -z` is the structured authority for a revision path. It keeps normal absence
+    /// separate from execution failures and locale-dependent diagnostics before a filtered blob
+    /// read, while `:(literal)` preserves filenames such as `app/[slug].tsx` in a subtree workspace.
+    private func gitTreePath(at revision: String, relativePath: String, workspaceDir: String) throws -> GitTreePath {
+        let output = try workspaceGitClient.runGitAndCapture(
+            ["-C", workspaceDir, "ls-tree", "-z", revision, "--", ":(literal)\(relativePath)"], timeout: 10)
+        let entries = output.split(separator: "\0", omittingEmptySubsequences: true)
+        guard entries.count <= 1 else {
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
+                NSLocalizedDescriptionKey: "Git tree lookup returned multiple entries for one literal path.",
+            ])
+        }
+        guard let entry = entries.first else { return .missing }
+        guard let tab = entry.firstIndex(of: "\t") else {
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
+                NSLocalizedDescriptionKey: "Git tree lookup returned malformed output.",
+            ])
+        }
+        let fields = entry[..<tab].split(separator: " ", omittingEmptySubsequences: true)
+        guard fields.count == 3 else {
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
+                NSLocalizedDescriptionKey: "Git tree lookup returned malformed metadata.",
+            ])
+        }
+        guard fields[1] == "blob" else { return .nonRegular }
+        switch fields[0] {
+        case "100644", "100755": return .regularBlob(objectID: String(fields[2]), mode: String(fields[0]))
+        default: return .nonRegular
+        }
+    }
+
+    /// Walks from the resolved workspace root, deliberately excluding a symlink that names the
+    /// workspace itself but rejecting every user-controlled component below it. This Last Commit-only
+    /// guard keeps its returned CAS path identical to the regular path Git's tree entry describes.
+    private func lastCommitWorktreePathTraversesSymbolicLink(relativePath: String, workspaceDir: String) -> Bool {
+        let root = URL(fileURLWithPath: workspaceDir, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        var candidate = root
+        for component in relativePath.split(separator: "/", omittingEmptySubsequences: true) {
+            candidate.appendPathComponent(String(component), isDirectory: false)
+            var status = stat()
+            // Let the shared worktree reader give missing/permission paths their established typed
+            // result. A successful lstat here is enough to reject only an observed redirect.
+            guard lstat(candidate.path, &status) == 0 else { return false }
+            if (status.st_mode & S_IFMT) == S_IFLNK { return true }
+        }
+        return false
+    }
+
+    /// Returns the executable bit only for a direct regular leaf. A churned/missing/non-regular
+    /// path cannot prove exact Last Commit equivalence and therefore returns nil.
+    private func lastCommitDirectWorktreeExecutable(relativePath: String, workspaceDir: String) -> Bool? {
+        let root = URL(fileURLWithPath: workspaceDir, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let path = relativePath.split(separator: "/", omittingEmptySubsequences: true).reduce(root) {
+            $0.appendingPathComponent(String($1), isDirectory: false)
+        }
+        var status = stat()
+        guard lstat(path.path, &status) == 0, (status.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return (status.st_mode & S_IXUSR) != 0
+    }
+
+    private static func isFullGitRevision(_ revision: String) -> Bool {
+        guard revision.utf8.count == 40 || revision.utf8.count == 64 else { return false }
+        return revision.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102) }
+    }
+
+
+    private static func isSafeGitRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.utf8.contains(0) else { return false }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { component in
+            !component.isEmpty && component != "." && component != ".."
+        }
     }
 
     /// Lists every path in a workspace's checkout for the Editor pane's file tree/quick-open; see
@@ -4545,7 +4780,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         var nextIndex = fileIndex
         while nextIndex < snapshot.plans.count {
             let plan = snapshot.plans[nextIndex]
-            let file = SpacesDeviceWorkspaceDiffManifestFile(path: plan.path, oldPath: plan.oldPath, status: plan.status)
+            let file = SpacesDeviceWorkspaceDiffManifestFile(
+                path: plan.path, oldPath: plan.oldPath, status: plan.status, comparisonBaseRevision: plan.comparisonBaseRevision)
             let encodedFileByteCount = try metadataEncoder.encode(file).count
             let delimiterByteCount = chunk.isEmpty ? 0 : 1
             guard encodedByteCount + delimiterByteCount + encodedFileByteCount <= Self.workspaceDiffManifestChunkByteCap else { break }

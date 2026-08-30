@@ -244,6 +244,17 @@ public final class RemoteWorkspaceGitClient: Sendable {
         _ arguments: [String], timeout: TimeInterval? = nil, allowedExitCodes: Set<Int32> = [0], maxOutputBytes: Int? = nil,
         environmentOverrides callEnvironmentOverrides: [String: String] = [:]
     ) throws -> String {
+        String(decoding: try runGitAndCaptureData(
+            arguments, timeout: timeout, allowedExitCodes: allowedExitCodes, maxOutputBytes: maxOutputBytes,
+            environmentOverrides: callEnvironmentOverrides), as: UTF8.self)
+    }
+
+    /// Runs Git with the same bounded stdout capture and error semantics as `runGitAndCapture`, preserving
+    /// stdout as raw bytes. Callers that read blob content must use this rather than a lossy text conversion.
+    public func runGitAndCaptureData(
+        _ arguments: [String], timeout: TimeInterval? = nil, allowedExitCodes: Set<Int32> = [0], maxOutputBytes: Int? = nil,
+        environmentOverrides callEnvironmentOverrides: [String: String] = [:]
+    ) throws -> Data {
         let process = makeGitProcess(arguments, environmentOverrides: callEnvironmentOverrides)
         let out = Pipe()
         let err = Pipe()
@@ -332,14 +343,7 @@ public final class RemoteWorkspaceGitClient: Sendable {
                 let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
                 throw SpacesRuntimeError.gitCommandFailed(message: message)
             }
-            // Lossy on purpose: git emits a patch's raw on-disk bytes verbatim, and a file that is not valid
-            // UTF-8 (a Latin-1 text file, say) is still git's idea of "text" — its own binary sniff is on the
-            // content, not the encoding. The strict `String(data:encoding:.utf8)` initializer returns nil for
-            // any such byte sequence, and `?? ""` was silently turning that into an empty patch — the diff
-            // then reports the file as an ordinary, unchanged-looking non-binary entry with nothing to show,
-            // hiding a real change instead of surfacing it. `String(decoding:as:)` never fails: invalid bytes
-            // become U+FFFD, so the rest of the patch (headers, hunk markers, unaffected lines) still renders.
-            return String(decoding: outputData, as: UTF8.self)
+            return outputData
         }
     }
 
