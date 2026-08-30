@@ -438,7 +438,8 @@ enum CodePaneBridge {
         case workspaceDiffManifestRelease(scope: DiffScope, manifestID: String)
         /// `ownsFileSignature` is true only for the standalone Editor's read; inline diff reads must
         /// not retarget the one native file-signature watcher away from that Editor file.
-        case workspaceFileRead(path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?)
+        case workspaceFileRead(
+            path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool)
         /// Reads a file from the immutable target revision attached to last-commit diff metadata. It must
         /// not affect the standalone Editor's live working-tree file-signature subscription.
         case workspaceRevisionFileRead(path: String, revision: String, oldPath: String?)
@@ -447,7 +448,7 @@ enum CodePaneBridge {
         /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
         /// missing (see `FileWritePayload`'s `fileMissing` case) instead of being unable to ever write
         /// past that state.
-        case workspaceFileWrite(path: String, content: String, baseSHA256: String?)
+        case workspaceFileWrite(path: String, content: String, baseSHA256: String?, requiresDirectPath: Bool)
         /// Lists every path in the workspace's checkout, for the Editor pane's file tree and
         /// quick-open. No params.
         case workspaceFileList
@@ -523,12 +524,14 @@ enum CodePaneBridge {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead requires a path and purpose."))
             }
             switch purpose {
-            case "editor": return .success(.workspaceFileRead(path: path, ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil))
+            case "editor":
+                return .success(
+                    .workspaceFileRead(path: path, ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil, requiresDirectPath: false))
             case "inlineDiff":
                 let comparisonBaseRevision = request.params["comparisonBaseRevision"] as? String
                 let oldPath = request.params["oldPath"] as? String
                 return .success(.workspaceFileRead(
-                    path: path, ownsFileSignature: false, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath))
+                    path: path, ownsFileSignature: false, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, requiresDirectPath: true))
             default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead purpose must be editor or inlineDiff."))
             }
         case "workspaceRevisionFileRead":
@@ -544,7 +547,17 @@ enum CodePaneBridge {
                 let options = request.params["options"] as? [String: Any]
             else { return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite requires a path, content, and options.")) }
             let baseSHA256 = options["baseSHA256"] as? String
-            return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256))
+            guard let purpose = options["purpose"] as? String else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite options require a purpose."))
+            }
+            let requiresDirectPath: Bool
+            switch purpose {
+            case "editor": requiresDirectPath = false
+            case "inlineDiff": requiresDirectPath = true
+            default:
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite purpose must be editor or inlineDiff."))
+            }
+            return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath))
         case "workspaceFileList": return .success(.workspaceFileList)
         case "workspaceRefList": return .success(.workspaceRefList)
         case "reviewCommentList": return .success(.reviewCommentList)

@@ -60,7 +60,9 @@ production build.
   The revision target is existence/type checked but never transferred. Last Commit inline editing
   uses this one response as its CAS baseline and guard, so it never races a separate live read;
   it never moves the standalone editor watcher.
-- `workspaceFileWrite(path, content, {baseSHA256})` — compare-and-swap write; returns
+- `workspaceFileWrite(path, content, {baseSHA256, purpose})` — compare-and-swap write. `inlineDiff`
+  rejects symbolic-link components so the patch's path cannot save into its link target; `editor`
+  retains contained-link workspace editing. It returns
   `{ok:true, sha256}` (the hash of exactly what was just written, adopted directly as the next
   save's CAS baseline) or `{conflict:true, currentSHA256}` (`currentSHA256` omitted and
   `fileMissing:true` set instead when the file was deleted out from under the write). Never

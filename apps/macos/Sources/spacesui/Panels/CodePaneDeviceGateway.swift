@@ -46,7 +46,8 @@ protocol CodePaneDeviceGateway: Sendable {
         async throws
 
     func workspaceFileRead(
-        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool,
+        device: SpacesPairedDeviceRecord
     ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
 
@@ -57,7 +58,10 @@ protocol CodePaneDeviceGateway: Sendable {
 
     func workspaceRefList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceRefListResult
 
-    func workspaceFileWrite(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord)
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath: Bool,
+        device: SpacesPairedDeviceRecord
+    )
         async throws -> SpacesDeviceWorkspaceFileWriteResult
 
     func subscribeWorkspaceDiffSignature(
@@ -142,13 +146,15 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     func workspaceFileRead(
-        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool,
+        device: SpacesPairedDeviceRecord
     ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileRead(
-                workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, device: device)
+                workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                requiresDirectPath: requiresDirectPath, device: device)
         }.value
     }
 
@@ -169,12 +175,16 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.workspaceRefList(workspaceID: workspaceID, device: device) }.value
     }
 
-    func workspaceFileWrite(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord)
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath: Bool,
+        device: SpacesPairedDeviceRecord
+    )
         async throws -> SpacesDeviceWorkspaceFileWriteResult
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileWrite(
-                workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256, device: device)
+                workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
+                requiresDirectPath: requiresDirectPath, device: device)
         }.value
     }
 

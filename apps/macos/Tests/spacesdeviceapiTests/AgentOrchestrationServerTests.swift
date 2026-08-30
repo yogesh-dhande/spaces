@@ -28,9 +28,10 @@
                     server.stop()
                 }
 
+                let command = "  my-agent --review  "
                 let response = try client.send(
                     SpacesDeviceAPIRequest(
-                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: "my-agent --review")), authToken: token,
+                        command: .startWorkspaceCommandSession(.init(workspaceID: "workspace-1", command: command)), authToken: token,
                         clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
@@ -39,7 +40,7 @@
                 let launch = try XCTUnwrap(configurations.first)
                 XCTAssertEqual(launch.workspaceID, "workspace-1")
                 XCTAssertEqual(launch.kind, .shell)
-                XCTAssertTrue(launch.command?.contains("my-agent --review") == true)
+                XCTAssertTrue(launch.command?.contains(command) == true, "the login shell must receive the user's verbatim command")
                 XCTAssertTrue(launch.command?.contains(" -l -i -c ") == true)
                 XCTAssertEqual(response.sessionID, launch.sessionID)
                 let launchedSession = try XCTUnwrap(response.launchedTerminalSession)

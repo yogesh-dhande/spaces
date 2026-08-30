@@ -541,7 +541,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private struct InjectedFileSubscribeFailure: Error {}
 
     func workspaceFileRead(
-        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, device: SpacesPairedDeviceRecord
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath _: Bool,
+        device: SpacesPairedDeviceRecord
     ) async throws
         -> SpacesDeviceWorkspaceFileReadResult
     {
@@ -809,7 +810,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func setFileWriteResult(_ result: Result<SpacesDeviceWorkspaceFileWriteResult, any Error>) { fileWriteResult = result }
 
-    func workspaceFileWrite(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, device: SpacesPairedDeviceRecord)
+    func workspaceFileWrite(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath _: Bool,
+        device: SpacesPairedDeviceRecord
+    )
         async throws -> SpacesDeviceWorkspaceFileWriteResult
     {
         fileWriteCalls.append((workspaceID, relativePath, base64Data, expectedSHA256))
@@ -3166,7 +3170,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             content.dispatch(
                 .init(
                     id: "save-before-close", method: "workspaceFileWrite",
-                    params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": [:]]))
+                    params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": ["purpose": "editor"]]))
             await gateway.waitForFileWriteCallCount(1)
             content.close()
             retainedByWrite = content
@@ -3327,7 +3331,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         firstA.dispatch(
             .init(
                 id: "save-before-retarget", method: "workspaceFileWrite",
-                params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": ["baseSHA256": "diff-base"]]))
+                params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": ["baseSHA256": "diff-base", "purpose": "inlineDiff"]]))
         firstA.dispatch(
             .init(
                 id: "comment-before-retarget", method: "reviewCommentUpsert",
@@ -3383,7 +3387,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.dispatch(
             .init(
                 id: "save-before-termination", method: "workspaceFileWrite",
-                params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": ["baseSHA256": "diff-base"]]))
+                params: ["path": "Sources/App.swift", "content": "let saved = 4", "options": ["baseSHA256": "diff-base", "purpose": "inlineDiff"]]))
         content.dispatch(
             .init(
                 id: "comment-before-termination", method: "reviewCommentUpsert",
@@ -3503,7 +3507,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.dispatch(
             .init(
                 id: "save-inline-diff", method: "workspaceFileWrite",
-                params: ["path": "Sources/App.swift", "content": "let saved = 2", "options": ["baseSHA256": "old-sha"]]))
+                params: ["path": "Sources/App.swift", "content": "let saved = 2", "options": ["baseSHA256": "old-sha", "purpose": "inlineDiff"]]))
         await gateway.waitForFileWriteCallCount(1)
 
         content.deactivate()
@@ -3544,7 +3548,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.dispatch(
             .init(
                 id: "recreate-inline-diff", method: "workspaceFileWrite",
-                params: ["path": "Sources/App.swift", "content": "let recreated = 2", "options": [:]]))
+                params: ["path": "Sources/App.swift", "content": "let recreated = 2", "options": ["purpose": "inlineDiff"]]))
         await gateway.waitForFileWriteCallCount(1)
         content.deactivate()
         let collected = CodePaneWorkspaceState(

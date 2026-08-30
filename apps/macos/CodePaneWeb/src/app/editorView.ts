@@ -1010,7 +1010,7 @@ export class EditorView {
     const baseSHA256 = this.diskMissing ? undefined : this.baseSHA256;
     let result: WorkspaceFileWriteResult;
     try {
-      result = await this.bridge.workspaceFileWrite(path, content, { baseSHA256 });
+      result = await this.bridge.workspaceFileWrite(path, content, { baseSHA256, purpose: "editor" });
     } catch (err) {
       if (generation !== this.openGeneration) return; // a later loadFile() already won
       // Fix 2 (round-5): a `handleExternalChange` reconcile for this same file completed while this
@@ -1301,6 +1301,7 @@ export class EditorView {
       try {
         result = await this.bridge.workspaceFileWrite(this.currentPath, submitted, {
           baseSHA256: this.baseSHA256,
+          purpose: "editor",
         });
       } catch (err) {
         if (generation !== this.openGeneration) return; // a later loadFile() already won; this failure is moot

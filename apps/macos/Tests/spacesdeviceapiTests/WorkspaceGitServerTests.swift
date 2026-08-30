@@ -1168,6 +1168,43 @@
             }
         }
 
+        func testInlineDiffFileReadAndWriteRejectAnInWorkspaceSymlinkWithoutTouchingItsTarget() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let target = repo.appendingPathComponent("target.md")
+                let original = Data("original target".utf8)
+                try original.write(to: target)
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-link.md").path, withDestinationPath: "target.md")
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-directory").path, withDestinationPath: ".")
+
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "inline-link.md", requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(readResponse.ok)
+                XCTAssertEqual(readResponse.errorCode, .invalidArgument)
+
+                let ancestorReadResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "inline-directory/target.md", requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(ancestorReadResponse.ok)
+                XCTAssertEqual(ancestorReadResponse.errorCode, .invalidArgument)
+
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            .init(
+                                workspaceID: workspaceID, relativePath: "inline-link.md", base64Data: Data("edited target".utf8).base64EncodedString(),
+                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), requiresDirectPath: true)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(writeResponse.ok)
+                XCTAssertEqual(writeResponse.errorCode, .invalidArgument)
+                XCTAssertEqual(try Data(contentsOf: target), original, "an inline diff save must not follow the symlink into its target")
+            }
+        }
+
         func testWorkspaceFileWriteOnAnUnknownWorkspaceReturnsNotFound() throws {
             try withWorkspaceFixture { _, _, server, requestClient, clientApp, authToken in
                 let response = try requestClient.send(

@@ -258,7 +258,7 @@ describe("EditorView — save() catches a rejected write (round-8 Fix 2)", () =>
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
     await vi.waitFor(() =>
-      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a" }),
+      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a", purpose: "editor" }),
     );
 
     // B is opened (and wins) while A's write is still in flight. A is still `dirty` (the save
@@ -316,7 +316,7 @@ describe("EditorView — CAS baseline from the write result (round-4 Fix 1)", ()
 
     const { saveBtn } = await openAndSave(bridge);
     expect(bridge.workspaceFileRead).toHaveBeenCalledTimes(1);
-    expect(workspaceFileWrite).toHaveBeenNthCalledWith(1, "src/app/root.ts", "export {}\n", { baseSHA256: "sha-1" });
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(1, "src/app/root.ts", "export {}\n", { baseSHA256: "sha-1", purpose: "editor" });
 
     // A second save (the user editing again after the first one landed) must use the WRITE's own
     // hash as its baseSHA256, proving the CAS baseline came from the write result and not a re-read.
@@ -324,7 +324,7 @@ describe("EditorView — CAS baseline from the write result (round-4 Fix 1)", ()
     saveBtn.click();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
 
-    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "src/app/root.ts", "export {}\n", { baseSHA256: "write-sha-1" });
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "src/app/root.ts", "export {}\n", { baseSHA256: "write-sha-1", purpose: "editor" });
     expect(bridge.workspaceFileRead).toHaveBeenCalledTimes(1);
   });
 });
@@ -436,7 +436,7 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     saveBtn.disabled = false;
     saveBtn.click();
     // The write is submitted with "edited" and is now in flight (held open by resolveWrite).
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited", { baseSHA256: "sha-1", purpose: "editor" }));
 
     // A keystroke lands before the write settles.
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "edited, then more" });
@@ -912,7 +912,7 @@ describe("EditorView — save() completion is generation-guarded against a later
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
     await vi.waitFor(() =>
-      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a" }),
+      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a", purpose: "editor" }),
     );
 
     return { view, saveBtn, resolveWrite, writePromise };
@@ -999,7 +999,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
     await vi.waitFor(() =>
-      expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 edited\nline2\n", { baseSHA256: "sha-1" }),
+      expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 edited\nline2\n", { baseSHA256: "sha-1", purpose: "editor" }),
     );
 
     // A live signature event for this same file races the in-flight save and runs the reconcile to
@@ -1051,7 +1051,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
     const conflictBanner = await vi.waitFor(() => {
@@ -1087,7 +1087,7 @@ describe("EditorView — save() completion is guarded against a concurrent exter
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
     const conflictBanner = await vi.waitFor(() => {
@@ -2088,7 +2088,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     // The write's own CAS commit lands on disk and the 2s signature poll pushes it before the
     // save's own network response comes back.
@@ -2189,7 +2189,7 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "v1\n", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "v1\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     // Further typing during the flight: the write already submitted "v1\n", but the buffer moves on
     // to "v2\n" before the write's response comes back.
@@ -2262,7 +2262,7 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
 
     const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
     saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "world\n", { baseSHA256: "sha-1" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "world\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "world2\n" });
 
@@ -2338,7 +2338,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       return el;
     });
     (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
 
     await vi.waitFor(() => expect(conflictBanner.style.display).toBe("none"));
     expect(view.collectStateForFlush()).toBe(
@@ -2447,7 +2447,7 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
       return el;
     });
     (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
 
     // A further external write lands while Keep mine's own write is in flight. `handleExternalChange`
     // runs unchanged while already in conflict (see its doc comment): this reconcile re-enters
@@ -2520,7 +2520,7 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     const takeDiskBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk")!;
 
     keepMineBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
 
     expect(keepMineBtn.disabled).toBe(true);
     expect(takeDiskBtn.disabled).toBe(true);
@@ -2582,7 +2582,7 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     });
     const keepMineBtn = conflictBanner.querySelector("button") as HTMLButtonElement; // "Keep mine" is the first button
     keepMineBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2" }));
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
     expect(keepMineBtn.disabled).toBe(true);
 
     rejectWrite(new SpacesBridgeError("unavailable", "daemon not reachable"));
@@ -3129,7 +3129,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
     // one -- proving the re-entry above actually refreshed against the newest disk state.
     (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
     await vi.waitFor(() =>
-      expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 mine\nline2\nline3\n", { baseSHA256: "sha-3" }),
+      expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 mine\nline2\nline3\n", { baseSHA256: "sha-3", purpose: "editor" }),
     );
   });
 

@@ -7606,6 +7606,43 @@ wait_for_code_pane_persisted_diff_scroll_line() {
   fail "timed out waiting for a deep persisted diff scroll line: $workspace_id"
 }
 
+wait_for_code_pane_persisted_editor_dirty() {
+  local workspace_id="$1" expected_path="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if python3 - "$TMP_CLIENT_DB" "$workspace_id" "$expected_path" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, workspace_id, expected_path = sys.argv[1:]
+with sqlite3.connect(db_path) as connection:
+    row = connection.execute(
+        """
+        SELECT state_json
+        FROM code_pane_workspace_states
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+
+if row is None:
+    raise SystemExit(1)
+state = json.loads(row[0])
+editor = state.get("editorState")
+if not isinstance(editor, dict) or editor.get("path") != expected_path or editor.get("dirty") is not True:
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for a persisted dirty Editor state: $workspace_id $expected_path"
+}
+
 assert_no_code_pane_stream_metric() {
   local workspace_id="$1" trigger="$2" start_line="$3" seconds="${4:-1}"
   local deadline=$((SECONDS + seconds))
@@ -7885,6 +7922,7 @@ exercise_code_pane_workspace_state_recovery() {
   wait_for_ui_identifier "code-pane-mode-editor" "workspace B Editor mode"
   wait_for_ui_identifier "code-pane-editor-input" "workspace B editor input"
   ui_replace_code_pane_editor_value "code-pane-editor-input" "workspace B unsaved editor state\n"
+  wait_for_code_pane_persisted_editor_dirty "$workspace_b_id" ".spaces-e2e-stream/stream-state.txt"
   workspace_a_scroll_line="$(wait_for_code_pane_persisted_diff_scroll_line "$workspace_a_id")"
 
   start_line=$(( $(app_log_line_count) + 1 ))
@@ -7922,6 +7960,7 @@ exercise_code_pane_workspace_state_recovery() {
   open_code_pane_file ".spaces-e2e-stream/stream-state.txt"
   wait_for_ui_identifier "code-pane-editor-input" "remote workspace editor input"
   ui_replace_code_pane_editor_value "code-pane-editor-input" "remote workspace unsaved editor state\n"
+  wait_for_code_pane_persisted_editor_dirty "$remote_workspace_id" ".spaces-e2e-stream/stream-state.txt"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-after-remote.json"

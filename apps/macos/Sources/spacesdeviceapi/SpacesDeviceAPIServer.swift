@@ -4272,11 +4272,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Reads a bounded regular checkout file. The revision-read endpoint shares this exact path so
     /// its returned CAS baseline has the same containment, type, and cap guarantees as a normal file read.
     private func workspaceFileReadResponse(
-        relativePath: String, workspaceDir: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil
+        relativePath: String, workspaceDir: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
+        requiresDirectPath: Bool = false
     ) -> SpacesDeviceAPIResponse {
         let resolvedPath: String
         do {
-            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: relativePath, workspaceDir: workspaceDir)
+            resolvedPath = try (
+                requiresDirectPath
+                    ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: relativePath, workspaceDir: workspaceDir)
+                    : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: relativePath, workspaceDir: workspaceDir))
+        } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
 
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath), let size = attributes[.size] as? Int else {
@@ -4351,7 +4358,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         return workspaceFileReadResponse(
             relativePath: request.relativePath, workspaceDir: workspaceDir,
-            comparisonBaseRevision: request.comparisonBaseRevision, oldPath: request.oldPath)
+            comparisonBaseRevision: request.comparisonBaseRevision, oldPath: request.oldPath, requiresDirectPath: request.requiresDirectPath)
     }
 
     /// Reads one blob from an immutable commit, never from the working tree. The path is validated as a
@@ -4588,7 +4595,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         let resolvedPath: String
         do {
-            resolvedPath = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+            resolvedPath = try (
+                request.requiresDirectPath
+                    ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+                    : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir))
+        } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
         guard let newData = Data(base64Encoded: request.base64Data) else {
             return SpacesDeviceAPIResponse(ok: false, message: "File content is not valid base64.", errorCode: .invalidArgument)
@@ -5369,10 +5382,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleStartWorkspaceCommandSessionRequest(_ request: SpacesDeviceStartWorkspaceCommandSessionRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        guard let command = normalizedString(request.command) else {
+        guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
         }
-        let session = try context.orchestrator().createWorkspaceTerminalSession(workspaceID: request.workspaceID, title: nil, command: command)
+        let session = try context.orchestrator().createWorkspaceTerminalSession(workspaceID: request.workspaceID, title: nil, command: request.command)
         return try refreshedMutationResponse(
             context: context, message: "Started workspace command session.", workspaceID: request.workspaceID, sessionID: session.id,
             launchedTerminalSession: try launchedTerminalSessionSummary(session, workspaceID: request.workspaceID))

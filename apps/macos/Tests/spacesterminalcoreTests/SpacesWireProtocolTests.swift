@@ -4,7 +4,7 @@ import XCTest
 @testable import spacesterminalcore
 
 final class SpacesWireProtocolTests: XCTestCase {
-    func testMergedContractUsesNextWireVersion() { XCTAssertEqual(SpacesWireProtocol.version, 38) }
+    func testMergedContractUsesNextWireVersion() { XCTAssertEqual(SpacesWireProtocol.version, 39) }
 
     func testEvaluateCompatibleWhenVersionsMatch() {
         let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 5, localVersion: 5)

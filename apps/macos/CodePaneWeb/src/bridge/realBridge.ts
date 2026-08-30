@@ -204,6 +204,9 @@ class RealSpacesBridge implements SpacesBridge {
     content: string,
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
+    if (options.purpose !== "editor" && options.purpose !== "inlineDiff") {
+      throw new SpacesBridgeError("invalidArgument", "workspaceFileWrite requires an editor or inlineDiff purpose.");
+    }
     // `baseSHA256: undefined` (the "create" convention) is normalized to `null` here for the same
     // reason workspace-state JSON normalizes nullable values: postMessage's structured-clone
     // step drops `undefined`-valued properties entirely, which would make "create" indistinguishable
@@ -211,7 +214,7 @@ class RealSpacesBridge implements SpacesBridge {
     return (await this.post("workspaceFileWrite", {
       path,
       content,
-      options: { baseSHA256: options.baseSHA256 ?? null },
+      options: { baseSHA256: options.baseSHA256 ?? null, purpose: options.purpose },
     })) as WorkspaceFileWriteResult;
   }
 

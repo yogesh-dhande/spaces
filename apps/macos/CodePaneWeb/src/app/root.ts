@@ -826,8 +826,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   });
   startAgentForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    const command = startAgentInput.value.trim();
-    if (command.length === 0 || startAgentRequestInFlight) return;
+    const command = startAgentInput.value;
+    if (command.trim().length === 0 || startAgentRequestInFlight) return;
     startAgentRequestInFlight = true;
     startAgentRequestCommand = command;
     setStartAgentStatus("Starting agent…");
@@ -1756,7 +1756,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       // and a subsequent refresh owns its metadata. Any other failed read leaves the user with no
       // edit surface, so make that retryable failure explicit rather than silently ignoring it.
       if (!(error instanceof SpacesBridgeError && error.code === "notFound")) {
-        diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
+        diffView.showEditError(error instanceof SpacesBridgeError ? error.message : `Couldn't open ${path} for editing. Try again.`);
       }
     }
   }
@@ -1791,11 +1791,15 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       if (!activatePreparedDiffEdit(prepared, result.disk, startedAt, result.fetchElapsedMs)) {
         diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
       }
-    } catch {
+    } catch (error) {
       if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       if (diffEditorState?.path !== currentPath) return;
       diffView.clearPendingOpen(currentPath);
-      diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
+      diffView.showEditError(
+        error instanceof SpacesBridgeError && error.code !== "notFound"
+          ? error.message
+          : `Couldn't open ${nextPath} for editing. Try again.`,
+      );
     }
   }
 
@@ -1822,7 +1826,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     diffEditSaveInFlightSession = editSession;
     const ownsEdit = () => diffEditSessionToken === editSession && diffEditorState?.path === path;
     try {
-      const outcome = await bridge.workspaceFileWrite(path, edit.content, { baseSHA256 });
+      const outcome = await bridge.workspaceFileWrite(path, edit.content, { baseSHA256, purpose: "inlineDiff" });
       // A cancel/discard-and-open can install another editor while this CAS write is in flight.
       // Its reply belongs only to the original session and may not clear, conflict, refresh, or
       // otherwise mutate the replacement editor.
@@ -1885,7 +1889,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       } else {
         // The edit state and its CAS baseline stay intact, so the same explicit Save action can
         // retry after a transient daemon/transport/permission failure.
-        diffView.showEditError(`Couldn't save ${path}. Try again.`);
+        diffView.showEditError(error instanceof SpacesBridgeError ? error.message : `Couldn't save ${path}. Try again.`);
       }
     } finally {
       if (diffEditSaveInFlightSession === editSession) diffEditSaveInFlightSession = undefined;

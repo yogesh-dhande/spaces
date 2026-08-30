@@ -956,12 +956,19 @@ public struct SpacesDeviceWorkspaceFileReadRequest: Codable, Sendable, Equatable
     /// Immutable old-side tree requested only by inline diff editing; ordinary Editor reads omit it.
     public let comparisonBaseRevision: String?
     public let oldPath: String?
+    /// Inline diff editing uses a lexical path and rejects every symbolic-link component, so the
+    /// separately rendered patch cannot be read from one file and saved through another.
+    public let requiresDirectPath: Bool
 
-    public init(workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil) {
+    public init(
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
+        requiresDirectPath: Bool = false
+    ) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
         self.comparisonBaseRevision = comparisonBaseRevision
         self.oldPath = oldPath
+        self.requiresDirectPath = requiresDirectPath
     }
 }
 
@@ -1122,12 +1129,18 @@ public struct SpacesDeviceWorkspaceFileWriteRequest: Codable, Sendable, Equatabl
     public let relativePath: String
     public let base64Data: String
     public let expectedSHA256: String?
+    /// See `SpacesDeviceWorkspaceFileReadRequest.requiresDirectPath`.
+    public let requiresDirectPath: Bool
 
-    public init(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil) {
+    public init(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
+        requiresDirectPath: Bool = false
+    ) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
         self.base64Data = base64Data
         self.expectedSHA256 = expectedSHA256
+        self.requiresDirectPath = requiresDirectPath
     }
 }
 

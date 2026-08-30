@@ -1156,14 +1156,17 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 generation: generation, hosting: hosting)
         case .workspaceDiffManifestRelease(let scope, let manifestID):
             performWorkspaceDiffManifestRelease(scope: scope, manifestID: manifestID, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileRead(let path, let ownsFileSignature, let comparisonBaseRevision, let oldPath):
+        case .workspaceFileRead(let path, let ownsFileSignature, let comparisonBaseRevision, let oldPath, let requiresDirectPath):
             performFileRead(
                 path: path, ownsFileSignature: ownsFileSignature, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                requiresDirectPath: requiresDirectPath,
                 id: id, generation: generation, hosting: hosting)
         case .workspaceRevisionFileRead(let path, let revision, let oldPath):
             performWorkspaceRevisionFileRead(path: path, revision: revision, oldPath: oldPath, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileWrite(let path, let content, let baseSHA256):
-            performFileWrite(path: path, content: content, baseSHA256: baseSHA256, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileWrite(let path, let content, let baseSHA256, let requiresDirectPath):
+            performFileWrite(
+                path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath, id: id, generation: generation,
+                hosting: hosting)
         case .reviewCommentList: performReviewCommentList(id: id, generation: generation, hosting: hosting)
         case .reviewCommentUpsert(let commentID, let filePath, let side, let lineNumber, let lineText, let body):
             performReviewCommentUpsert(
@@ -1330,7 +1333,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     private func performFileRead(
-        path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, id: String, generation: Int,
+        path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool, id: String, generation: Int,
         hosting: any CodePaneHosting
     ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
@@ -1383,7 +1386,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         Task { [weak self] in
             do {
                 let result = try await deviceGateway.workspaceFileRead(
-                    workspaceID: workspaceID, relativePath: path, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, device: device)
+                    workspaceID: workspaceID, relativePath: path, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                    requiresDirectPath: requiresDirectPath, device: device)
                 guard let self else { return }
                 switch CodePaneBridge.fileReadPayload(result) {
                 case .success(let payload):
@@ -1573,7 +1577,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         resubscribeFileSignature(path: restorePath, device: device)
     }
 
-    private func performFileWrite(path: String, content: String, baseSHA256: String?, id: String, generation: Int, hosting: any CodePaneHosting) {
+    private func performFileWrite(
+        path: String, content: String, baseSHA256: String?, requiresDirectPath: Bool, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
                 id: id, generation: generation,
@@ -1590,7 +1596,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         Task { [weak self] in
             do {
                 let result = try await deviceGateway.workspaceFileWrite(
-                    workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256, device: device)
+                    workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256,
+                    requiresDirectPath: requiresDirectPath, device: device)
                 switch CodePaneBridge.fileWritePayload(result) {
                 case .success(let payload):
                     // Only an actually-committed write (never a CAS conflict, which wrote

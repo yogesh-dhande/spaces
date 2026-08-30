@@ -671,12 +671,15 @@ public enum SpacesDeviceClient {
     /// side; see `SpacesDeviceAPIServer.workspaceFileMaxBytes`).
     public static func workspaceFileRead(
         workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
+        requiresDirectPath: Bool = false,
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceFileReadResult {
         let response = try request(
             .init(command: .workspaceFileRead(
-                .init(workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath))),
+                .init(
+                    workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                    requiresDirectPath: requiresDirectPath))),
             device: device, clientApp: clientApp,
             profile: profile)
         guard let result = response.workspaceFileRead else {
@@ -705,13 +708,16 @@ public enum SpacesDeviceClient {
     /// A mismatch is not thrown as an error: `didWrite` is `false` and the result carries the disk content
     /// the caller can merge against.
     public static func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, device: SpacesPairedDeviceRecord,
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false,
+        device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceFileWriteResult {
         let response = try request(
             .init(
                 command: .workspaceFileWrite(
-                    .init(workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256))),
+                    .init(
+                        workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
+                        requiresDirectPath: requiresDirectPath))),
             device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceFileWrite else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)

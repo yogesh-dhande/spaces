@@ -1629,12 +1629,12 @@ public final class WorkspaceOrchestrator {
             if let explicitTitle, !explicitTitle.isEmpty {
                 try validateAvailableWorkspaceFocusName(workspaceID: workspace.id, name: explicitTitle, excludingWindowIDs: [])
             }
-            let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasNonblankCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
             // virtue of the terminal); with one, the command runs through that same interactive login shell
             // so it resolves exactly the tools the bare session would.
             let shellCommand =
-                (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
+                hasNonblankCommand ? interactiveLoginShellCommand(command!) : interactiveShellCommand(cwd: workspace.dir)
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: explicitTitle, shellCommand: shellCommand, kind: .shell,
                 defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
@@ -1660,7 +1660,7 @@ public final class WorkspaceOrchestrator {
                 CodingAgent.matching(command: command)?.displayName
                 ?? (CodingAgent.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
             return try launchWorkspaceCommandSession(
-                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
+                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .agent,
                 defaultTitle: defaultTitle, automationRunID: automationRunID)
         }
     }

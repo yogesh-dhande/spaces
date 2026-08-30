@@ -495,7 +495,7 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: ["path": "src/a.swift", "purpose": "editor"])
 
         #expect(CodePaneBridge.plan(for: request) == .success(
-            .workspaceFileRead(path: "src/a.swift", ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil)))
+            .workspaceFileRead(path: "src/a.swift", ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileReadRequiresAPath() {
@@ -520,9 +520,12 @@ import spacesterminalcore
 
     @Test func planForWorkspaceFileWrite() {
         let request = CodePaneBridge.Request(
-            id: "1", method: "workspaceFileWrite", params: ["path": "src/a.swift", "content": "hi", "options": ["baseSHA256": "abc123"]])
+            id: "1", method: "workspaceFileWrite",
+            params: ["path": "src/a.swift", "content": "hi", "options": ["baseSHA256": "abc123", "purpose": "inlineDiff"]])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "src/a.swift", content: "hi", baseSHA256: "abc123")))
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(.workspaceFileWrite(path: "src/a.swift", content: "hi", baseSHA256: "abc123", requiresDirectPath: true)))
     }
 
     // `[String: Any]` isn't `Sendable`, so these are separate tests rather than one parameterized
@@ -546,14 +549,15 @@ import spacesterminalcore
     /// wire's "create" convention (see `Plan.workspaceFileWrite`'s doc comment) — "Keep mine" uses this
     /// to recreate a file the daemon reports as missing, so this must succeed with `nil`, not reject.
     @Test func planForWorkspaceFileWriteTreatsAMissingBaseSHA256AsCreate() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": [:]])
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil)))
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["purpose": "editor"]])
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileWriteTreatsAJSONNullBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(
-            id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["baseSHA256": NSNull()]])
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil)))
+            id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["baseSHA256": NSNull(), "purpose": "editor"]])
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileList() {

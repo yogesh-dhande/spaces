@@ -17,7 +17,29 @@ import spacesruntimecore
 /// Path containment for the workspace file-read/write Device API commands: a client-supplied
 /// `relativePath` must resolve to somewhere inside the workspace's checkout, even through symlinks.
 enum SpacesDeviceWorkspacePathResolver {
-    enum PathError: Error { case escapesWorkspace }
+    enum PathError: Error { case escapesWorkspace, containsSymbolicLink }
+
+    /// Returns the lexical workspace path only when every existing component is a non-symlink.
+    /// Inline diff editing renders a patch for this exact path, so following a contained symlink would
+    /// let Save update a different file than the patch's identity. Ordinary Editor access continues to
+    /// use `resolveContainedPath`, where contained symlinks are intentional.
+    static func resolveDirectPath(relativePath: String, workspaceDir: String, fileManager: FileManager = .default) throws -> String {
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else { throw PathError.escapesWorkspace }
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: true)
+        guard !components.isEmpty, !components.contains(where: { $0 == ".." || $0 == "." }) else { throw PathError.escapesWorkspace }
+
+        let workspaceRoot = URL(fileURLWithPath: workspaceDir, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        var candidate = workspaceRoot
+        for component in components {
+            candidate.appendPathComponent(String(component), isDirectory: false)
+            if let attributes = try? fileManager.attributesOfItem(atPath: candidate.path),
+                attributes[.type] as? FileAttributeType == .typeSymbolicLink
+            {
+                throw PathError.containsSymbolicLink
+            }
+        }
+        return candidate.path
+    }
 
     /// Resolves `relativePath` against `workspaceDir` and asserts the result stays inside it.
     ///

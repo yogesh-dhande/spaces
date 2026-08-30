@@ -121,6 +121,10 @@ export interface WorkspaceFileWriteOptions {
    * — there is no prior hash to compare against, only "did anyone else recreate it first".
    */
   baseSHA256: string | undefined;
+  /** Required on the host wire: inline diff saves reject symbolic links while ordinary Editor saves
+   * retain the workspace's contained-symlink behavior. Optional here keeps lightweight test bridges
+   * focused on their asserted behavior; `realBridge` rejects a missing value instead of inferring one. */
+  purpose?: WorkspaceFileReadPurpose;
 }
 
 export interface WorkspaceFileWriteOk {
