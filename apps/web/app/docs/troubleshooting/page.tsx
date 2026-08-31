@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
+import { Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Troubleshooting",
@@ -13,17 +14,15 @@ export default function TroubleshootingDocsPage() {
       description="Diagnosis paths for common dependency, workspace lifecycle, process, and window-routing failures."
       pagePath="/docs/troubleshooting"
     >
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
+      <Section title="Quick Triage">
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Check that Chrome is installed.</li>
           <li>2. Confirm the workspace is still listed in the sidebar and not hidden.</li>
           <li>3. If launch complains about existing runtime, run <code>spaces workspace restart</code> from the workspace directory.</li>
         </ol>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Launch / Stop / Restart Issues</h2>
+      <Section title="Launch / Stop / Restart Issues">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>spaces workspace restart</code> from the workspace directory to reset state.</li>
           <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
@@ -36,14 +35,13 @@ export default function TroubleshootingDocsPage() {
 spaces workspace start
 spaces workspace restart`}</code>
         </pre>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Keyboard Shortcut Issues</h2>
+      <Section title="Keyboard Shortcut Issues">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Global toggle (<code>cmd+alt+=</code>) or another global shortcut does nothing</strong> &mdash; another app may own the combo. Rebind it in Settings.</li>
         </ul>
-      </article>
+      </Section>
     </DocsShell>
   );
 }

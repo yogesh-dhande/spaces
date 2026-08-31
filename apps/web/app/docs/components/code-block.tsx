@@ -15,3 +15,15 @@ export function Cmd({ children }: { children: ReactNode }) {
     </code>
   );
 }
+
+// Distinct from Cmd: an older, plainer inline-code treatment (no accent color, no
+// monospace, a different background token) used across a handful of pages for
+// literal paths/values rather than runnable commands. Kept as its own component
+// rather than folded into Cmd so the rendered markup stays exactly as it was.
+export function InlineCode({ children }: { children: ReactNode }) {
+  return (
+    <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">
+      {children}
+    </code>
+  );
+}

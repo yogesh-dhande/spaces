@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
-import { card, prose, code } from "../../components/guide-styles";
+import { code } from "../../components/guide-styles";
+import { Prose, Section } from "../../components/section";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django Monorepo (No Docker)",
@@ -16,25 +17,23 @@ export default function NextjsDjangoMonorepoHostGuidePage() {
       description="Use this when frontend and backend live in one repo and both run directly on your machine."
       pagePath="/docs/guides"
     >
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
-        <p className={prose}>
+      <Section title="Use Case">
+        <Prose>
           One repo with <code>/frontend</code> and <code>/backend</code>.
           You want each workspace to spin up both services with isolated ports and predictable URLs per service.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
+      <Section title="Project Settings Explained">
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
           <code>{`frontend
 api`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Separate services keep frontend/backend stable per workspace and prevent collisions across branches.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
         <pre className={code}>
@@ -42,14 +41,14 @@ api`}</code>
 cd ../backend && pip install -r requirements.txt
 cp .env.example .env`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Bootstraps both app layers. The setup script runs in a shell, so chained <code>cd &amp;&amp; ...</code> steps are fine here. Copying <code>.env</code> gives per-workspace config freedom. Symlink centralizes updates but can cause cross-workspace side effects. Swap <code>.env.example</code> for whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
-        <p className={prose}>
+        <Prose>
           Add two processes. Process commands run as shell input, so <code>cd</code> plus env assignment runs naturally.
-        </p>
+        </Prose>
         <pre className={code}>
           <code>{`# frontend process
 cd frontend && API_URL=$SPACES_API_URL PORT=$SPACES_FRONTEND_PORT npm run dev`}</code>
@@ -58,14 +57,14 @@ cd frontend && API_URL=$SPACES_API_URL PORT=$SPACES_FRONTEND_PORT npm run dev`}<
           <code>{`# backend process
 cd backend && python manage.py runserver 0.0.0.0:$SPACES_API_PORT`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Frontend points to the workspace backend service. Both processes stay in one workspace context with shared per-service env vars.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
-        <p className={prose}>
+        <Prose>
           Add two browser sessions — each URL is its own entry — so the frontend preview and Django admin are each one focus away.
-        </p>
+        </Prose>
         <pre className={code}>
           <code>{`# frontend browser session
 $SPACES_FRONTEND_URL`}</code>
@@ -75,7 +74,7 @@ $SPACES_FRONTEND_URL`}</code>
 $SPACES_API_URL/admin`}</code>
         </pre>
 
-      </article>
+      </Section>
 
       <Link
         href="/docs/guides"

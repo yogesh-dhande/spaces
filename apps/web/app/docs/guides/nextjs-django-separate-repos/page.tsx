@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
-import { card, prose, code } from "../../components/guide-styles";
+import { code } from "../../components/guide-styles";
+import { Prose, Section } from "../../components/section";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django (Separate Repos)",
@@ -16,18 +17,16 @@ export default function NextjsDjangoSeparateReposGuidePage() {
       description="Use this when frontend and backend live in different projects but you want one active workspace context for both."
       pagePath="/docs/guides"
     >
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
-        <p className={prose}>
+      <Section title="Use Case">
+        <Prose>
           Frontend and backend are separate repos. You want one workspace to run both processes and keep browser sessions aligned.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Project Settings</h2>
-        <p className={prose}>
+      <Section title="Project Settings">
+        <Prose>
           The frontend workspace must own both frontend and backend services and run both processes if it is the central context for both services.
-        </p>
+        </Prose>
         <h3 className="mt-4 text-sm font-semibold text-foreground">Frontend Project Template</h3>
 <pre className={code}>
           <code>{`Services: frontend, backend
@@ -35,10 +34,10 @@ Frontend Server: API_URL=$SPACES_BACKEND_URL PORT=$SPACES_FRONTEND_PORT npm run 
 Backend Server: cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$SPACES_BACKEND_PORT
 Browser Session: $SPACES_FRONTEND_URL`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           The backend server is started from the frontend workspace so both processes can receive the same <code>SPACES_&lt;SERVICE&gt;_PORT</code> and <code>SPACES_&lt;SERVICE&gt;_URL</code> env vars Spaces injects for each service. The backend row can change directories directly because process commands run as shell input.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
       <Link
         href="/docs/guides"
