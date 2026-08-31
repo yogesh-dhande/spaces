@@ -90,7 +90,7 @@
         /// reduce chains from); this host only applies what it hands back.
         private lazy var statePipeline = TerminalRemoteStateReductionPipeline(
             shouldUseFrame: { frame, payload in
-                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
+                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reasonKind)
             }, apply: { [weak self] output in self?.applyReducedState(output) })
         /// Whether a payload carrying a full frame is in the pipeline and has not been applied yet.
         ///
@@ -339,7 +339,7 @@
         public func hasRenderableSurface() -> Bool { terminalView.hasRenderedContent }
 
         public func requestSurfaceRefresh() {
-            requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange)
+            requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange.rawValue)
             // Same rule as applyReducedState: a refresh must not clobber a scrolled ended viewport, but
             // it must repaint the replay when the surface was released and recreated underneath it.
             if !isEndedScrollbackReplayActive {
@@ -494,7 +494,7 @@
                 return
             }
             if terminalServiceRequestSender != nil {
-                requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.initial)
+                requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.initial.rawValue)
                 return
             }
             // No device-backed state route was injected (e.g. unit tests). A
@@ -908,7 +908,7 @@
 
         private func currentRenderFrameForRenderUpdate() -> GhosttyRenderFrame? {
             guard let frame = latestState?.decodedRenderUpdate?.fullFrame,
-                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reasonKind)
             else {
                 guard !terminalView.hasRenderedSurfaceContent else { return nil }
                 return nil
@@ -918,7 +918,7 @@
 
         private func latestSnapshotIfCompatible() -> GhosttyTerminalSnapshot? {
             guard let snapshot = latestState?.renderSnapshot,
-                Self.shouldUseRenderFrameSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+                Self.shouldUseRenderFrameSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reasonKind)
             else { return nil }
             return snapshot
         }
@@ -1479,9 +1479,9 @@
         }
 
         nonisolated static func shouldUseRenderFrameSnapshot(
-            _ snapshot: GhosttyTerminalSnapshot, runtimeState: TerminalSessionRuntimeState?, reason: String?
+            _ snapshot: GhosttyTerminalSnapshot, runtimeState: TerminalSessionRuntimeState?, reason: TerminalRemoteSessionStateReason?
         ) -> Bool {
-            guard reason == TerminalRemoteSessionStateReason.resize else { return true }
+            guard reason == .resize else { return true }
             return Self.snapshot(snapshot, matches: runtimeState)
         }
 

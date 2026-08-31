@@ -268,7 +268,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
                 // carried through the queue (its position relative to the state around it is preserved)
                 // but never reduced, which would risk an out-of-order payload regressing the cached
                 // title, runtime state, or ownership.
-                if incomingPayload.reason == TerminalRemoteSessionStateReason.clipboardWrite {
+                if incomingPayload.reasonKind == .clipboardWrite {
                     output = TerminalRemoteStateReductionOutput(
                         incomingPayload: incomingPayload, reduction: nil, reduceMS: 0, isOutOfBand: queued.isOutOfBand)
                 } else {

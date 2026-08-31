@@ -23,14 +23,15 @@ private final class RenderUpdateEncodingResultRecorder: @unchecked Sendable {
 final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testMergedPayloadCarriesOutputPositionWithoutRawBytes() throws {
         let initial = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
-            renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        )
 
         let outputUpdate = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "output", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
-            screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: 2,
-            outputEndByteOffset: 42)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: 2, outputEndByteOffset: 42)
 
         let merged = initial.merged(with: outputUpdate)
         XCTAssertEqual(merged.renderText, "alpha")
@@ -42,9 +43,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(decodedOutputUpdate.outputEndByteOffset, 42)
 
         let metadataUpdate = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-05-20T00:00:02Z", sessionStateRevision: 2, sessionStateFlags: 1,
-            screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "alpha",
-            workingDirectory: "/tmp/alpha", outputByteCount: nil)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-05-20T00:00:02Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil)
 
         let metadataMerged = merged.merged(with: metadataUpdate)
         XCTAssertNil(metadataMerged.outputEndByteOffset)
@@ -53,15 +54,15 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
     func testMergedPayloadClearsScreenStateWhenOwnerChangesWithoutFreshSnapshot() throws {
         let initial = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"), title: "alpha",
-            workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil,
+            attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
             renderUpdate: try renderUpdateData(text: "stale suggestion", sessionRevision: 1, ownerEpoch: 9))
 
         let ownerUpdate = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
-            screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "ios-viewer"), title: "alpha",
-            workingDirectory: "/tmp/alpha", outputByteCount: nil)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-05-20T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil,
+            attachmentSnapshot: attachmentSnapshot(ownerID: "ios-viewer"), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil)
 
         let merged = initial.merged(with: ownerUpdate)
         XCTAssertNil(merged.renderSnapshot)
@@ -71,17 +72,18 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerDoesNotApplyPreservedFrameForMetadataOnlyUpdate() throws {
         var reducer = TerminalRemoteStateReducer()
         let initial = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
-            renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        )
 
         let initialReduction = reducer.reduce(incomingPayload: initial, previousPayload: nil)
         XCTAssertEqual(initialReduction.frameToApply?.snapshot, initial.renderSnapshot)
 
         let inputAck = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: 5)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input.rawValue, emittedAt: "2026-05-20T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: 5)
 
         let inputReduction = reducer.reduce(incomingPayload: inputAck, previousPayload: initialReduction.storedPayload)
 
@@ -93,9 +95,10 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerYieldsFullFrameWithoutDrop() throws {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        )
 
         let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil)
 
@@ -115,15 +118,15 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
         var reducer = TerminalRemoteStateReducer()
         let full = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(firstFrame)))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(firstFrame)))
         _ = reducer.reduce(incomingPayload: full, previousPayload: nil)
 
         let deltaPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
         let reduction = reducer.reduce(incomingPayload: deltaPayload, previousPayload: full)
 
         XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "bravo"))
@@ -135,9 +138,10 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerDropsFrameRejectedByShouldUseFrame() throws {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        )
 
         let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, shouldUseFrame: { _, _ in false })
 
@@ -155,9 +159,10 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerRequestsResyncWhenTheResizeGridVetoDropsTheFrame() throws {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        )
 
         let reduction = reducer.reduce(
             incomingPayload: payload, previousPayload: nil, shouldUseFrame: { _, _ in false }, requestResyncOnApplyFailure: true)
@@ -276,7 +281,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(seededReduction.frameToApply?.snapshot, snapshot(text: "alpha"))
 
         let resize = try payload(
-            text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", reason: TerminalRemoteSessionStateReason.resize)
+            text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z",
+            reason: TerminalRemoteSessionStateReason.resize.rawValue)
         let vetoed = reducer.reduce(
             incomingPayload: resize, previousPayload: seededReduction.storedPayload, shouldUseFrame: { _, _ in false },
             requestResyncOnApplyFailure: true)
@@ -299,9 +305,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))))
         XCTAssertEqual(delta.kind, .delta)
         let deltaPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 3,
-            sessionStateFlags: 1, screenStateRevision: 3, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-09T00:00:04Z",
+            sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 3, runtimeState: nil, attachmentSnapshot: nil, title: "t",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
         let deltaReduction = reducer.reduce(
             incomingPayload: deltaPayload, previousPayload: reduction.storedPayload, requestResyncOnApplyFailure: true)
         XCTAssertEqual(deltaReduction.frameToApply?.snapshot, snapshot(text: "charl"))
@@ -344,9 +350,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             target: GhosttyRenderFrame(sessionRevision: 9, ownerEpoch: 4, snapshot: snapshot(text: "delta")),
             baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 8, ownerEpoch: 4, snapshot: snapshot(text: "charl"))))
         let orphanPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 9,
-            sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-09T00:00:04Z",
+            sessionStateRevision: 9, sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
         let broken = reducer.reduce(incomingPayload: orphanPayload, previousPayload: seededReduction.storedPayload, requestResyncOnApplyFailure: true)
         XCTAssertEqual(broken.dropReason, "base_revision_mismatch")
         XCTAssertTrue(broken.didRequestResync)
@@ -373,9 +379,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             target: GhosttyRenderFrame(sessionRevision: 9, ownerEpoch: 4, snapshot: snapshot(text: "delta")),
             baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 8, ownerEpoch: 4, snapshot: snapshot(text: "charl"))))
         let orphanPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 9,
-            sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-09T00:00:04Z",
+            sessionStateRevision: 9, sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
         let broken = reducer.reduce(incomingPayload: orphanPayload, previousPayload: seededReduction.storedPayload, requestResyncOnApplyFailure: true)
         XCTAssertTrue(broken.didRequestResync)
 
@@ -402,8 +408,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-08-09T00:00:01Z",
             exitedAt: "2026-08-09T00:00:01Z")
         let deadRunResponse = try payload(
-            text: "final", sessionRevision: 1, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z", reason: TerminalRemoteSessionStateReason.terminated,
-            runtimeState: deadRunState)
+            text: "final", sessionRevision: 1, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z",
+            reason: TerminalRemoteSessionStateReason.terminated.rawValue, runtimeState: deadRunState)
         let reduction = reducer.reduce(
             incomingPayload: deadRunResponse, previousPayload: liveReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
 
@@ -442,9 +448,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             exitedAt: "2026-08-09T00:00:01Z")
         let finalFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "final"))
         let response = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-08-09T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exited, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(finalFrame)))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-08-09T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exited, attachmentSnapshot: nil, title: "t",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(finalFrame)))
 
         let reduction = reducer.reduce(
             incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
@@ -455,7 +461,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
     private func payload(
         text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t",
-        reason: String = TerminalRemoteSessionStateReason.initial, runtimeState: TerminalSessionRuntimeState? = nil
+        reason: String = TerminalRemoteSessionStateReason.initial.rawValue, runtimeState: TerminalSessionRuntimeState? = nil
     ) throws -> GhosttyRemoteSessionStatePayload {
         let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
         return GhosttyRemoteSessionStatePayload(
@@ -466,7 +472,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
     private func metadataPayload(emittedAt: String, title: String) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
             workingDirectory: "/tmp/alpha", outputByteCount: nil)
     }
@@ -474,9 +480,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerReportsDecodeFailureForCorruptRenderUpdate() {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: Data([0x00, 0x01, 0x02, 0x03]))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: Data([0x00, 0x01, 0x02, 0x03]))
 
         let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, requestResyncOnApplyFailure: true)
 
@@ -489,9 +495,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testDecodedRenderUpdateReturnsEqualValueAcrossRepeatedAccess() throws {
         let data = try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: data)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: data)
 
         XCTAssertEqual(payload.decodedRenderUpdate, payload.decodedRenderUpdate)
         XCTAssertEqual(payload.decodedRenderUpdate?.fullFrame?.snapshot, snapshot(text: "alpha"))
@@ -509,9 +515,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducedPayloadYieldsTheSameBytesItReportsAsState() throws {
         let data = try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: data)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: data)
 
         var reducer = TerminalRemoteStateReducer()
         let stored = reducer.reduce(incomingPayload: payload, previousPayload: nil).storedPayload
@@ -535,13 +541,13 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testMaterializedProducerPayloadDefersEncodingAndKeepsExactWireBytes() throws {
         let update = GhosttyRenderUpdate.full(.init(sessionRevision: 7, ownerEpoch: 9, snapshot: snapshot(text: "alpha")))
         let metadata = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-05-20T00:00:00Z",
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
             sessionStateRevision: 7, sessionStateFlags: 1, screenStateRevision: 7, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
             workingDirectory: "/tmp/alpha", outputByteCount: nil)
         let encodingResults = RenderUpdateEncodingResultRecorder()
         let materialized = metadata.replacingRenderUpdate(materialized: update, encodingObserver: encodingResults.record)
         let eager = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-05-20T00:00:00Z",
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
             sessionStateRevision: 7, sessionStateFlags: 1, screenStateRevision: 7, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
             workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
 
@@ -570,17 +576,17 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     /// update: the merge carries the body, so the bytes a subscriber would be handed do not change.
     func testMergedPayloadCarriesTheMaterializedRenderUpdateUnchanged() throws {
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"),
-            title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil,
+            attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
             renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
         var reducer = TerminalRemoteStateReducer()
         let stored = reducer.reduce(incomingPayload: payload, previousPayload: nil).storedPayload
 
         let metadataOnly = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: 5)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input.rawValue, emittedAt: "2026-05-20T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: 5)
         let merged = stored.merged(with: metadataOnly)
         XCTAssertEqual(merged.renderUpdate, stored.renderUpdate)
         XCTAssertEqual(merged.decodedRenderUpdate, stored.decodedRenderUpdate)
@@ -588,7 +594,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
         // An owner change with no fresh screen state drops it, materialized or not.
         let ownerChange = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: "2026-05-20T00:00:02Z",
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-05-20T00:00:02Z",
             sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil,
             attachmentSnapshot: attachmentSnapshot(ownerID: "ios-viewer"), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil)
         let afterOwnerChange = stored.merged(with: ownerChange)
@@ -603,9 +609,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let delta = GhosttyRenderUpdateFactory.makeUpdate(target: secondFrame, baseline: GhosttyRenderUpdateBaseline(frame: firstFrame))
         XCTAssertEqual(delta.kind, .delta)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
         var reducer = TerminalRemoteStateReducer()
 
         let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, requestResyncOnApplyFailure: true)
@@ -633,8 +639,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let snapshot = snapshot(text: "frame")
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 34, snapshot: snapshot)
         let attributes = GhosttyRenderFrameMetrics.attributes(
-            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5, outputByteCount: 6, screenStateRevision: 7,
-            dropped: false, renderMode: "ghostty-mirror")
+            reason: TerminalRemoteSessionStateReason.output.rawValue, frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5,
+            outputByteCount: 6, screenStateRevision: 7, dropped: false, renderMode: "ghostty-mirror")
 
         XCTAssertEqual(attributes["reason"], "output")
         XCTAssertEqual(attributes["render_frame"], "1")
@@ -658,7 +664,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     }
 
     func testRenderFrameMetricAttributesMarkMissingRenderUpdateAsNone() {
-        let attributes = GhosttyRenderFrameMetrics.attributes(reason: "input", frame: nil, frameByteCount: nil, screenStateRevision: 7)
+        let attributes = GhosttyRenderFrameMetrics.attributes(
+            reason: TerminalRemoteSessionStateReason.input.rawValue, frame: nil, frameByteCount: nil, screenStateRevision: 7)
 
         XCTAssertEqual(attributes["render_frame"], "0")
         XCTAssertEqual(attributes["frame_kind"], "none")
@@ -674,8 +681,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     /// payload announced a copy".
     func testMergedPayloadDropsTheClipboardWrite() {
         let clipboardPayload = payload(
-            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
-        let laterOutput = payload(reason: TerminalRemoteSessionStateReason.output)
+            reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+        let laterOutput = payload(reason: TerminalRemoteSessionStateReason.output.rawValue)
 
         XCTAssertNil(clipboardPayload.merged(with: laterOutput).clipboardWrite)
         XCTAssertNil(laterOutput.merged(with: clipboardPayload).clipboardWrite)
@@ -685,7 +692,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     /// write is not part of.
     func testReplacingRenderUpdateDropsTheClipboardWrite() {
         let clipboardPayload = payload(
-            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+            reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
         XCTAssertNil(clipboardPayload.replacingRenderUpdate(nil).clipboardWrite)
     }
 
@@ -694,9 +701,10 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testReducerAppliesTheClipboardWriteOnceAndStoresNone() {
         var reducer = TerminalRemoteStateReducer()
         let clipboardPayload = payload(
-            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+            reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
 
-        let reduction = reducer.reduce(incomingPayload: clipboardPayload, previousPayload: payload(reason: "initial"))
+        let reduction = reducer.reduce(
+            incomingPayload: clipboardPayload, previousPayload: payload(reason: TerminalRemoteSessionStateReason.initial.rawValue))
 
         XCTAssertEqual(reduction.payload.clipboardWrite?.text, "copied")
         XCTAssertNil(reduction.storedPayload.clipboardWrite)
@@ -707,11 +715,11 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     /// that reconnects afterwards would otherwise be handed a stale copy to paste.
     func testClipboardWriteSurvivesTheWireButNotAMerge() throws {
         let clipboardPayload = payload(
-            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+            reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
         let decoded = try GhosttyRemoteSessionStateCodec.decodeLine(try GhosttyRemoteSessionStateCodec.encodeLine(clipboardPayload))
         XCTAssertEqual(decoded.clipboardWrite, TerminalClipboardWritePayload(targetClientID: "mac-window", text: "copied"))
 
-        let terminated = payload(reason: TerminalRemoteSessionStateReason.terminated)
+        let terminated = payload(reason: TerminalRemoteSessionStateReason.terminated.rawValue)
         XCTAssertNil(decoded.merged(with: terminated).clipboardWrite)
     }
 

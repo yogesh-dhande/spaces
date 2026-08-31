@@ -1204,7 +1204,7 @@
             // window is per-line task scheduling, the result self-corrects, and closing it means an
             // ordered drain across the whole stream transport for a race no state payload can hit
             // (those carry timestamps and tolerate reordering by design).
-            if payload.reason == TerminalRemoteSessionStateReason.clipboardWrite {
+            if payload.reasonKind == .clipboardWrite {
                 for listener in listeners { listener.onUpdate(payload) }
                 return
             }

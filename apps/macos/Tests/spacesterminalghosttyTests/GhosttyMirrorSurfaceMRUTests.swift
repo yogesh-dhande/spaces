@@ -501,8 +501,8 @@ import spacesterminalcore
         -> GhosttyRemoteSessionStatePayload
     {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: "initial", emittedAt: "2026-07-24T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-07-24T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-24T00:00:00Z",
                 title: "live", workingDirectory: "/tmp/live", columns: columns, rows: rows),

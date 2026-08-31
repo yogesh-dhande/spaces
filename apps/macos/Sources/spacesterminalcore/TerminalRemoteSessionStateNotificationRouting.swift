@@ -36,37 +36,41 @@ import Foundation
 /// scope here, since ownership handoffs are rare enough that doubling their refresh is not the
 /// streaming-cadence cost this table exists to control.
 public enum TerminalRemoteSessionStateNotificationRouting {
+    /// Keeps the `String` entry point: callers hold the wire reason off a payload, not the parsed
+    /// enum. An unrecognized reason parses to `nil` and posts nothing, matching what the old
+    /// `default:` branch did — the payload has already been applied to the mirror and to the
+    /// client's cached session state, so posting nothing keeps an unrecognized reason off the
+    /// refresh path instead of letting it inherit the most expensive one; a state change that needs
+    /// a refresh also arrives under a known reason.
+    ///
+    /// Falling back to a runtime-state refresh here would buy forward compatibility with a daemon
+    /// that introduces a reason this client has never seen, at the cost of restoring the silent
+    /// inheritance of the most expensive path this table exists to prevent. That trade is
+    /// deliberately declined: a reason is added to this table in the same change that introduces it,
+    /// so an unknown reason means a client and daemon built from different sources — a mismatch this
+    /// product does not carry compatibility code for.
     public static func notifications(forReason reason: String) -> [Notification.Name] {
-        switch reason {
-        case TerminalRemoteSessionStateReason.attachmentState: return [.spacesTerminalAttachmentStateDidChange, .spacesTerminalRuntimeStateDidChange]
-        case TerminalRemoteSessionStateReason.sessionMetadata: return [.spacesTerminalSessionMetadataDidChange]
-        case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.terminated:
-            return [.spacesTerminalRuntimeStateDidChange]
-        case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
-            TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-            TerminalRemoteSessionStateReason.selection, TerminalRemoteSessionStateReason.resize:
-            return [.spacesTerminalOutputDidChange]
-        case TerminalRemoteSessionStateReason.clipboardWrite:
+        guard let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason) else { return [] }
+        // `isOutputShaped` is the single source for which reasons are screen-content-shaped; deferring
+        // to it here (rather than repeating its case list) is what keeps this switch and that one from
+        // disagreeing about any given reason.
+        if reasonKind.isOutputShaped { return [.spacesTerminalOutputDidChange] }
+        switch reasonKind {
+        case .attachmentState: return [.spacesTerminalAttachmentStateDidChange, .spacesTerminalRuntimeStateDidChange]
+        case .sessionMetadata: return [.spacesTerminalSessionMetadataDidChange]
+        case .initial, .runtimeState, .terminated: return [.spacesTerminalRuntimeStateDidChange]
+        case .clipboardWrite:
             // Deliberately no notification. A clipboard write changes nothing a pane presents — the
             // receiving client acts on it where it applies the payload, by writing its own
-            // pasteboard — so neither refresh family has anything to do. The row exists because the
-            // `default:` below silently drops unknown reasons, which would make a later reader
-            // think this reason was simply forgotten.
+            // pasteboard — so neither refresh family has anything to do. The row exists because
+            // dropping it would make a later reader think this reason was simply forgotten.
             return []
-        default:
-            // A reason this build does not know. The payload has already been applied to the
-            // mirror and to the client's cached session state, so posting nothing keeps an
-            // unrecognized reason off the refresh path instead of letting it inherit the most
-            // expensive one; a state change that needs a refresh also arrives under a known reason.
-            //
-            // Falling back to a runtime-state refresh here would buy forward compatibility with a
-            // daemon that introduces a reason this client has never seen, at the cost of restoring
-            // the silent inheritance of the most expensive path that this exhaustive table exists
-            // to prevent. That trade is deliberately declined: a reason is added to this table in
-            // the same change that introduces it, so an unknown reason means a client and daemon
-            // built from different sources — a mismatch this product does not carry compatibility
-            // code for.
-            return []
+        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize:
+            // Unreachable: the `isOutputShaped` guard above already returned for every one of these
+            // cases. Listed anyway because the switch must stay exhaustive over the full enum, which
+            // is what forces `isOutputShaped` to be updated (and this switch to be revisited) the
+            // moment a case is added or reclassified.
+            preconditionFailure("isOutputShaped already returned for this reason")
         }
     }
 
@@ -77,17 +81,20 @@ public enum TerminalRemoteSessionStateNotificationRouting {
     /// matters here: the reduce loop calls this once per payload on a session under steady output,
     /// several times a second for as long as the session streams.
     ///
-    /// This must stay consistent with `notifications(forReason:) == [.spacesTerminalOutputDidChange]`
-    /// for every reason — enforced by `TerminalRemoteSessionStateNotificationRoutingTests`, which checks
-    /// this predicate against that comparison for every declared reason plus an unknown one, so the two
-    /// cannot drift apart as reasons are added.
-    public static func isOutputShaped(reason: String) -> Bool {
-        switch reason {
-        case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
-            TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-            TerminalRemoteSessionStateReason.selection, TerminalRemoteSessionStateReason.resize:
-            return true
-        default: return false
+    /// Shares `isOutputShaped` with `notifications(forReason:)` above, so the two cannot drift apart
+    /// as reasons are added: both switch exhaustively over `TerminalRemoteSessionStateReason`, so the
+    /// compiler demands both are revisited when a case is added or reclassified.
+    public static func isOutputShaped(reason: String) -> Bool { TerminalRemoteSessionStateReason(rawValue: reason)?.isOutputShaped ?? false }
+}
+
+extension TerminalRemoteSessionStateReason {
+    /// Whether this reason describes screen content that could change what a mirroring pane
+    /// presents. The single source both `TerminalRemoteSessionStateNotificationRouting.notifications(forReason:)`
+    /// and `.isOutputShaped(reason:)` read, so the two entry points cannot disagree about a reason.
+    fileprivate var isOutputShaped: Bool {
+        switch self {
+        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize: return true
+        case .initial, .attachmentState, .sessionMetadata, .runtimeState, .terminated, .clipboardWrite: return false
         }
     }
 }

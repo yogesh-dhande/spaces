@@ -92,7 +92,7 @@ final class DeviceTerminalSessionStateModelListenerReplayTests: XCTestCase {
 
     private func payload(sessionID: String, emittedAt: String, update: GhosttyRenderUpdate) throws -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live",
             workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
     }

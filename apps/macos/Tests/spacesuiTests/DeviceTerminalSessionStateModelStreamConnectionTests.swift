@@ -583,14 +583,16 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             sessionID, { _ in deliveries.increment() }, { _ in })
         XCTAssertNotNil(handle)
 
-        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:01Z"))
+        model.applyControlResponseState(
+            statePayload(sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-28T00:00:01Z"))
         XCTAssertEqual(deliveries.count, 1, "the listener must be attached while its handle is held")
 
         handle = nil
         // The detach hops to the main actor, and a main-actor task enqueued after it runs after it.
         await Task { @MainActor in }.value
 
-        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:02Z"))
+        model.applyControlResponseState(
+            statePayload(sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-28T00:00:02Z"))
         XCTAssertEqual(deliveries.count, 1, "a released handle must take its listener out of the fan-out")
     }
 
@@ -1288,7 +1290,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.startStateStream(onUpdate: { received.append($0) }, onDisconnect: { _ in })
 
         // The catch-up response lands first and installs the newer emission time.
-        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:09Z"))
+        model.applyControlResponseState(
+            statePayload(sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-28T00:00:09Z"))
         // The stream event carrying the copy was emitted earlier and arrives after it.
         model.applyStreamEvent(
             clipboardPayload(sessionID: sessionID, emittedAt: "2026-07-28T00:00:01Z", targetClientID: "owner", text: "copied text"),
@@ -1328,12 +1331,16 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
 
         model.applyControlResponseState(
-            statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:01Z", title: "before"))
+            statePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-28T00:00:01Z",
+                title: "before"))
         model.applyStreamEvent(
             clipboardPayload(sessionID: sessionID, emittedAt: "2026-07-28T00:00:09Z", targetClientID: "owner", text: "copied", title: "clipboard"),
             generation: generation)
         model.applyControlResponseState(
-            statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:05Z", title: "after"))
+            statePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-28T00:00:05Z",
+                title: "after"))
 
         XCTAssertEqual(model.latestRemoteStatePayload?.title, "after")
         XCTAssertNil(model.latestRemoteStatePayload?.clipboardWrite)
@@ -1349,7 +1356,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         -> GhosttyRemoteSessionStatePayload
     {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp",
             outputByteCount: nil, clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
     }
@@ -1419,8 +1426,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// update, which is everything these tests need the catch-up `.state` and the stream to carry.
     private func runningStatePayload(sessionID: String) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-24T00:00:02Z", sessionStateRevision: nil, sessionStateFlags: nil,
-            screenStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-24T00:00:02Z",
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
                 state: .running, updatedAt: "2026-07-24T00:00:01Z", title: "t", workingDirectory: "/tmp"), attachmentSnapshot: nil, title: "t",
@@ -1431,8 +1438,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// unwanted, so no drop against it is an outage.
     private func endedStatePayload(sessionID: String) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-24T00:00:01Z", sessionStateRevision: nil, sessionStateFlags: nil,
-            screenStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-24T00:00:01Z",
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited, updatedAt: "2026-07-24T00:00:01Z",
                 exitedAt: "2026-07-24T00:00:01Z"), attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp", outputByteCount: nil)

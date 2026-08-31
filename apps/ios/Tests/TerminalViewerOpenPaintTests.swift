@@ -25,7 +25,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
 
             XCTAssertTrue(model.isOwner, "this client owns the session")
             XCTAssertNil(model.ownerRenderEpoch, "the session's pre-resize grid must not paint")
@@ -55,7 +55,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "no viewport has been reported yet, so nothing can match")
             XCTAssertNil(model.ownerRenderEpoch)
 
@@ -92,7 +92,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 50, rows: 40, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
 
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "that frame is at the grid the surface already moved past")
             XCTAssertNil(model.ownerRenderEpoch, "and it must not paint either")
@@ -100,7 +100,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 45, rows: 35, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
 
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the latest grid's frame ends the hold")
             await waitUntil("the latest-grid frame to paint") { model.ownerRenderEpoch != nil }
@@ -131,7 +131,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: otherOwner,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
             XCTAssertFalse(model.isOwner, "this lifecycle never takes ownership")
 
             // The detail is covered and reopened: `stop()` bumps the lifecycle without clearing
@@ -152,7 +152,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:35Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
 
             XCTAssertTrue(model.isOwner)
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the new lifecycle's own matching frame releases the hold")
@@ -182,7 +182,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: otherOwner,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
             XCTAssertFalse(model.isOwner, "this lifecycle never takes ownership")
 
             // The detail is covered and reopened: `stop()` bumps the lifecycle without clearing
@@ -209,7 +209,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:37Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
 
             XCTAssertTrue(model.isOwner)
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the new lifecycle's own matching frame releases the hold")
@@ -228,7 +228,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", state: .exited,
-                    reason: TerminalRemoteSessionStateReason.runtimeState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.runtimeState.rawValue), isOutOfBand: false)
 
             XCTAssertEqual(model.renderMode, "ended")
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "an ended session never resizes, so nothing is left to wait for")
@@ -284,7 +284,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
             XCTAssertTrue(model.isOwner, "the attach payload makes this client the owner and schedules the sync")
 
             // No viewport is ever reported in this window, so the sync's viewport wait (400ms) plus its
@@ -325,7 +325,7 @@
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
-                    reason: TerminalRemoteSessionStateReason.attachmentState), isOutOfBand: false)
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
             XCTAssertTrue(model.isOwner)
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting)
 
@@ -487,7 +487,7 @@
         /// ownership the reduction chain already carries rides forward untouched.
         private nonisolated static func framedState(
             columns: Int, rows: Int, revision: UInt64, emittedAt: String, state: TerminalSessionState = .running, owner: TerminalClient? = nil,
-            reason: String = TerminalRemoteSessionStateReason.stateChange
+            reason: String = TerminalRemoteSessionStateReason.stateChange.rawValue
         ) throws -> GhosttyRemoteSessionStatePayload {
             let frame = GhosttyRenderFrame(sessionRevision: revision, ownerEpoch: 1, snapshot: gridSnapshot(columns: columns, rows: rows))
             return GhosttyRemoteSessionStatePayload(
@@ -507,8 +507,8 @@
             let ownerClient = TerminalClient(
                 id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
             return GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt, sessionStateRevision: nil,
-                sessionStateFlags: nil, screenStateRevision: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 100, childPID: 200, state: state, updatedAt: emittedAt),
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(
                     clients: [ownerClient],

@@ -382,7 +382,7 @@
 
         func testSubscribeRoutesThroughBackendStreamAndDeliversPayload() async throws {
             let payload = GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-04T14:23:30Z",
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-04T14:23:30Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
             let subscribeRequestBox = StubSubscribeRequestBox()

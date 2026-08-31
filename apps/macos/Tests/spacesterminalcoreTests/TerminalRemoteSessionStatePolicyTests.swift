@@ -3,48 +3,99 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
+    /// Migrated from the retired `TerminalRemoteSessionStateNotificationRoutingTests`: which
+    /// notifications each reason maps to is product behavior the `TerminalRemoteSessionStateReason`
+    /// enum's exhaustive switches do not pin down on their own (a switch being exhaustive only proves
+    /// every case is handled, not that it is mapped correctly), so this stays a behavioral assertion.
+    /// The consistency check between `notifications(forReason:)` and `isOutputShaped(reason:)` that
+    /// file also carried is not migrated: `isOutputShaped(reason:)` now reads the same
+    /// `TerminalRemoteSessionStateReason.isOutputShaped` primitive `notifications(forReason:)` defers
+    /// to for its screen-content branch, so the two cannot disagree by construction, not merely by
+    /// the exhaustiveness of separately-maintained switches.
+    func testNotificationRoutingMapsEachReasonToItsNotifications() {
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.initial.rawValue),
+            [.spacesTerminalRuntimeStateDidChange])
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.runtimeState.rawValue),
+            [.spacesTerminalRuntimeStateDidChange])
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.terminated.rawValue),
+            [.spacesTerminalRuntimeStateDidChange])
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.attachmentState.rawValue),
+            [.spacesTerminalAttachmentStateDidChange, .spacesTerminalRuntimeStateDidChange])
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue),
+            [.spacesTerminalSessionMetadataDidChange])
+        let screenContentReasons: [TerminalRemoteSessionStateReason] = [
+            .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize,
+        ]
+        for reason in screenContentReasons {
+            XCTAssertEqual(
+                TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason.rawValue), [.spacesTerminalOutputDidChange],
+                "reason \(reason) must route to the output notification")
+        }
+        XCTAssertEqual(
+            TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue), [])
+        XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: "not_a_reason"), [])
+        XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: ""), [])
+    }
+
     func testScreenStatePolicyMatchesOwnerBootstrapModel() {
-        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial))
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial, ownerKind: .localWindow))
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial, ownerKind: .remoteViewer))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.attachmentState, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .localWindow))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.attachmentState, ownerKind: .remoteViewer))
+                reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .remoteViewer))
+        XCTAssertTrue(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .localWindow))
+        XCTAssertTrue(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .remoteViewer))
         XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.input, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .remoteViewer))
         XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.input, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .localWindow))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.inputOutput, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .localWindow))
         XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.inputOutput, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .remoteViewer))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.output, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .localWindow))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.output, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .remoteViewer))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .localWindow))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .remoteViewer))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .remoteViewer))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .localWindow))
-        XCTAssertTrue(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.clearScreen))
-        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.runtimeState))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .localWindow))
+        XCTAssertTrue(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.clearScreen.rawValue))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.runtimeState.rawValue))
         // A clipboard write rides its own broadcast after the output turn that already carried the
         // frame; re-exporting one here would put a second frame on the delta chain for nothing.
         XCTAssertFalse(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.clipboardWrite, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .localWindow))
         XCTAssertFalse(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.clipboardWrite, ownerKind: .remoteViewer))
+                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .remoteViewer))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: "unknown", ownerKind: .localWindow))
     }
 
@@ -85,16 +136,16 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: "session", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .running, updatedAt: "2026-05-27T00:00:00Z")
         let payloadWithoutSnapshot = GhosttyRemoteSessionStatePayload(
-            sessionID: "session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: "2026-05-27T00:00:00Z",
+            sessionID: "session", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-05-27T00:00:00Z",
             sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "shell", workingDirectory: "/tmp", outputByteCount: nil)
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithoutSnapshot))
 
         let snapshot = snapshot(columns: 40, rows: 34)
         let payloadWithSnapshot = GhosttyRemoteSessionStatePayload(
-            sessionID: "session", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-27T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "shell", workingDirectory: "/tmp", outputByteCount: nil,
+            sessionID: "session", reason: TerminalRemoteSessionStateReason.resize.rawValue, emittedAt: "2026-05-27T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "shell", workingDirectory: "/tmp", outputByteCount: nil,
             renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(.init(sessionRevision: 1, ownerEpoch: 2, snapshot: snapshot))))
         XCTAssertTrue(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithSnapshot, viewportColumns: 40, viewportRows: 34))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithSnapshot, viewportColumns: 122, viewportRows: 34))
@@ -107,12 +158,10 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
         let selection = GhosttyTerminalSelectionRange(
             startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
         let blankSnapshotWithSelection = blankSnapshot(columns: 10, rows: 4, selection: selection)
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithSelection, snapshotText: nil))
+        XCTAssertTrue(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithSelection, snapshotText: nil))
 
         let blankSnapshotWithoutSelection = blankSnapshot(columns: 10, rows: 4)
-        XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithoutSelection, snapshotText: nil))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithoutSelection, snapshotText: nil))
     }
 
     private func snapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
@@ -130,7 +179,8 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
         GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
             defaultBackgroundRGB: 0x000000,
-            cells: Array(repeating: GhosttyTerminalSnapshot.Cell(codepoint: 0, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0), count: columns * rows),
-            selection: selection)
+            cells: Array(
+                repeating: GhosttyTerminalSnapshot.Cell(codepoint: 0, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0),
+                count: columns * rows), selection: selection)
     }
 }

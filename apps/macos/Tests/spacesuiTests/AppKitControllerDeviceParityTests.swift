@@ -1514,9 +1514,9 @@ import workspacecore
 
     private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp",
-            outputByteCount: nil)
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-06-22T12:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot,
+            title: "alpha", workingDirectory: "/tmp", outputByteCount: nil)
     }
 
     private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {

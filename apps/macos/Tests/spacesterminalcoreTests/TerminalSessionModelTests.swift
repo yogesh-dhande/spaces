@@ -440,9 +440,10 @@ final class TerminalSessionModelTests: XCTestCase {
             title: "final-target", workingDirectory: root.path, columns: 80, rows: 24)
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,
-            sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-target", workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-05-08T00:00:05Z",
+            sessionStateRevision: 12, sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target", workingDirectory: root.path, outputByteCount: nil,
+            renderUpdate: Data([1, 2, 3]))
 
         try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
 
@@ -475,9 +476,9 @@ final class TerminalSessionModelTests: XCTestCase {
                     detachedAt: "2026-05-08T00:00:01Z")
             })
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,
-            sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: history, title: "final-target",
-            workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-05-08T00:00:05Z",
+            sessionStateRevision: 12, sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: history,
+            title: "final-target", workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
 
         try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
 
@@ -518,8 +519,8 @@ final class TerminalSessionModelTests: XCTestCase {
 
     private func payload(sessionID: String, renderUpdate: Data?) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 1,
-            sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: sessionID,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-05-08T00:00:05Z",
+            sessionStateRevision: 1, sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: sessionID,
             workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: renderUpdate)
     }
 

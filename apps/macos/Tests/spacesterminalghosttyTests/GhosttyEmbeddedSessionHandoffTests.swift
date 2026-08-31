@@ -503,7 +503,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         // a render frame to be produced).
         try await waitAsync { Self.snapshotText(of: resumedCore)?.contains(marker) == true }
         try await TerminalEngineActor.run {
-            let payload = try XCTUnwrap(resumedCore.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let payload = try XCTUnwrap(resumedCore.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             let resumedRevision = try XCTUnwrap(payload.screenStateRevision)
             XCTAssertGreaterThan(resumedRevision, record.screenStateRevision, "the resumed revision must be strictly greater than the recorded one")
             let update = try XCTUnwrap(payload.decodedRenderUpdate)

@@ -1,29 +1,5 @@
 import Foundation
 
-/// Every `reason` a session core stamps on a broadcast remote-state payload. Subscribers
-/// route on these, so a core must never broadcast a reason that is not declared here.
-public enum TerminalRemoteSessionStateReason {
-    public static let initial = "initial"
-    public static let attachmentState = "attachment_state"
-    public static let sessionMetadata = "session_metadata"
-    public static let input = "input"
-    public static let inputOutput = "input_output"
-    public static let output = "output"
-    public static let stateChange = "state_change"
-    public static let scroll = "scroll"
-    public static let clearScreen = "clear_screen"
-    /// The shared selection changed (set or cleared), by any viewer or by the daemon auto-clearing
-    /// a garbage-pinned selection. Selection is host-anchored, not owner-gated, so this reason
-    /// carries no owner-specific gating of its own.
-    public static let selection = "selection"
-    public static let runtimeState = "runtime_state"
-    public static let resize = "resize"
-    public static let terminated = "terminated"
-    /// A program copied to the clipboard (OSC 52). Carries `clipboardWrite` and nothing else the
-    /// client acts on; see `TerminalClipboardWritePayload`.
-    public static let clipboardWrite = "clipboard_write"
-}
-
 public enum TerminalRemoteSessionStatePolicy {
     public static func activeOwnerClientID(in snapshot: TerminalSessionAttachmentSnapshot?) -> String? {
         snapshot?.attachments.first { $0.mode == .owner && $0.detachedAt == nil }?.clientID
@@ -38,24 +14,29 @@ public enum TerminalRemoteSessionStatePolicy {
         activeOwnerClient(in: snapshot)?.kind
     }
 
+    // Keeps a raw `String` entry point (rather than the enum) because a debug/test hook deliberately
+    // drives this with an unrecognized reason to prove the pipeline defaults safely (see
+    // `TerminalRemoteSessionStatePolicyTests`). An unrecognized reason parses to `nil` and falls through
+    // to the same `false` a raw-string default branch used to return.
     public static func shouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
-        switch reason {
-        case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.attachmentState:
-            return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case TerminalRemoteSessionStateReason.resize: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case TerminalRemoteSessionStateReason.output: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case TerminalRemoteSessionStateReason.stateChange: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case TerminalRemoteSessionStateReason.scroll: return true
-        case TerminalRemoteSessionStateReason.clearScreen: return true
-        case TerminalRemoteSessionStateReason.selection: return true
-        case TerminalRemoteSessionStateReason.terminated: return true
-        case TerminalRemoteSessionStateReason.input: return false
-        case TerminalRemoteSessionStateReason.inputOutput: return ownerKind == .localWindow
+        guard let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason) else { return false }
+        switch reasonKind {
+        case .initial, .attachmentState: return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case .resize: return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case .output: return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case .stateChange: return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case .scroll: return true
+        case .clearScreen: return true
+        case .selection: return true
+        case .terminated: return true
+        case .input: return false
+        case .inputOutput: return ownerKind == .localWindow
         // A clipboard write announces no screen change: the output turn that carried the OSC 52
         // already broadcast the frame. Exporting one here would put a second frame on the delta
         // chain for a payload the mirror does not render.
-        case TerminalRemoteSessionStateReason.clipboardWrite: return false
-        default: return false
+        case .clipboardWrite: return false
+        case .sessionMetadata: return false
+        case .runtimeState: return false
         }
     }
 
@@ -350,7 +331,8 @@ public struct TerminalRemoteStateReducer: Sendable {
             // unknowable). The wire codec enforces the same thing structurally — a full frame encodes no
             // rect fields, so the blob this payload yields round-trips to exactly this poisoned value.
             // Only `frameToApply`, consumed once by the live apply that produced it, keeps the rects.
-            let storedFrame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+            let storedFrame = GhosttyRenderFrame(
+                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
             return (payload.replacingRenderUpdate(materialized: .full(storedFrame)), decodedUpdate, frame, nil)
         } catch {
             renderUpdateBaseline = nil

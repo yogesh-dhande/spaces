@@ -2622,7 +2622,7 @@ enum SpacesDaemonErrorClassification {
         let response = liveCore.handleControlRequest(controlRequest)
         let sessionState =
             response.ok && includeSessionState
-            ? TerminalEngineActor.runSynchronously({ liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange) }) : nil
+            ? TerminalEngineActor.runSynchronously({ liveCore.currentRemoteStatePayload(reason: .stateChange) }) : nil
         return TerminalServiceResponse(
             ok: response.ok, message: response.message, errorCode: response.errorCode, sessionState: sessionState, controlResponse: response)
     }
@@ -2806,7 +2806,7 @@ enum SpacesDaemonErrorClassification {
     /// so it is isolated to the terminal engine actor.
     @TerminalEngineActor private func liveCoreRemoteStatePayload(sessionID: String) -> GhosttyRemoteSessionStatePayload? {
         guard let liveCore = sessionCores[sessionID] else { return nil }
-        return liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange)
+        return liveCore.currentRemoteStatePayload(reason: .stateChange)
     }
 
     /// The live core's answer to a Device API `.state` read: the same payload a fresh subscriber's initial
@@ -2886,7 +2886,7 @@ enum SpacesDaemonErrorClassification {
             .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
             title: runtimeState.title ?? launchConfiguration?.title ?? sessionID,
             workingDirectory: runtimeState.workingDirectory ?? launchConfiguration?.workingDirectory ?? paths.rootDirectory, outputByteCount: nil)
