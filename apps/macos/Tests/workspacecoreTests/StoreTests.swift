@@ -1,4 +1,5 @@
 import XCTest
+import spacestestsupport
 
 @testable import spacesdatabase
 @testable import spacesterminalcore

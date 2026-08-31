@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import spacesdevicecore
+import spacestestsupport
 
 @testable import spacesui
 

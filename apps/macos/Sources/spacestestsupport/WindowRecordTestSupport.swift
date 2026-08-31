@@ -1,9 +1,8 @@
 import Foundation
-
-@testable import workspacecore
+import workspacecore
 
 extension WindowRecord {
-    init(
+    public init(
         id: String, workspaceID: String, app: String, title: String?, targetURL: String? = nil, terminalTrackingID: String? = nil, role: String,
         orderIndex: Int, lastSeenAt: String
     ) {
@@ -12,5 +11,5 @@ extension WindowRecord {
             role: role, orderIndex: orderIndex, lastSeenAt: lastSeenAt)
     }
 
-    var title: String? { name }
+    public var title: String? { name }
 }
