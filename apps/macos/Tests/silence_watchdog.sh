@@ -42,4 +42,30 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 kill -0 "$child_pid" 2>/dev/null && fail "silent command left child process $child_pid running"
 
+# Pins the #583 false-kill: a stalled downstream consumer must not be able to
+# starve the liveness signal. The producer writes a 512KB burst (overfilling the
+# ~64KB fifo/pipe buffers upstream of a consumer that doesn't read for 8s), then
+# ticks for several more seconds. A healthy producer must survive even though its
+# stdout is backed up the whole time.
+backpressure_out="$TMP_ROOT/backpressure.out"
+backpressure_err="$TMP_ROOT/backpressure.err"
+backpressure_status_path="$TMP_ROOT/backpressure.status"
+set +e
+{
+    run_with_silence_watchdog 2 /bin/bash -c \
+        'head -c 524288 /dev/zero | tr "\0" "x"; echo; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "backpressure-tick-$i"; sleep 0.4; done; echo "backpressure-done"' \
+        2>"$backpressure_err"
+    echo "$?" >"$backpressure_status_path"
+} | { sleep 8; cat >"$backpressure_out"; }
+set -e
+backpressure_status="$(cat "$backpressure_status_path")"
+[[ "$backpressure_status" -eq 0 ]] || fail "healthy producer behind a stalled consumer was killed (status $backpressure_status)"
+grep -q "backpressure-done" "$backpressure_out" || fail "output lost under consumer backpressure"
+
+# A background child that inherits stdout and writes shortly after the work
+# process exits still gets its output forwarded (the forwarder drains until the
+# log stays quiet after exit, rather than stopping at the parent's exit).
+straggler_output="$(run_with_silence_watchdog 5 /bin/bash -c '(sleep 1; echo "straggler-output") & exit 0')"
+[[ "$straggler_output" == *"straggler-output"* ]] || fail "output written by a surviving child after work exit was lost"
+
 echo "silence watchdog tests passed"
