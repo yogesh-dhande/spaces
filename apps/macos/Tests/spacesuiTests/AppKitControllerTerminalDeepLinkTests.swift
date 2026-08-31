@@ -87,10 +87,10 @@ import workspacecore
         // misses — the input that drives the "session not found on device" loud alert.
         let match = await AppKitController.resolveSessionSummaryMatchOffMain(
             sessionID: "session-missing", device: device, clientApp: clientApp,
-            resolveOverview: { device, _ in
+            resolveOverview: { context in
                 SpacesDeviceOverviewResolution(
                     overview: SpacesDeviceOverview(
-                        device: device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary(id: "other", workspaceID: "ws")])),
+                        device: context.device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary(id: "other", workspaceID: "ws")])),
                     daemonStatus: nil, compatibility: nil)
             })
 

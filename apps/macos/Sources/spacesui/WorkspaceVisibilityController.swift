@@ -167,15 +167,15 @@ import workspacecore
                 host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                 return completion(false)
             }
+            let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
             // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,
             // not a possibly-stale cached snapshot (remote overviews refresh on a
             // throttled cadence), so a running workspace is never hidden without being
             // stopped, nor a stopped one prompted about needlessly.
             var isRunning = workspace.isRunning
             if isHidden {
-                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
+                    do { return .success(try SpacesDeviceClient.overview(context: DeviceRequestContext(device: device, clientApp: clientApp))) } catch { return .failure(error) }
                 }.value
                 switch overviewResult {
                 case .success(let overview): isRunning = overview.overview.workspaces.first(where: { $0.id == workspaceID })?.isRunning ?? false
@@ -193,8 +193,7 @@ import workspacecore
                 alert.addButton(withTitle: "Cancel")
                 guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
                 let stopResult = await AppKitController.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    try SpacesDeviceClient.stopWorkspace(workspaceID: workspaceID, context: DeviceRequestContext(device: device, clientApp: clientApp))
                 }
                 if case .failure(let error) = stopResult {
                     host.showError(error)
@@ -204,8 +203,7 @@ import workspacecore
             let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateWorkspaceMetadata(
-                    workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
             switch result {
             case .success(let response):
@@ -241,7 +239,7 @@ import workspacecore
                 // Decide the prompt and the stops from fresh daemon state rather than a possibly-stale
                 // cached snapshot, for the same reason as `setWorkspaceHidden`.
                 let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
+                    do { return .success(try SpacesDeviceClient.overview(context: DeviceRequestContext(device: device, clientApp: clientApp))) } catch { return .failure(error) }
                 }.value
                 let running: [SpacesDeviceWorkspaceSummary]
                 switch overviewResult {
@@ -263,7 +261,7 @@ import workspacecore
                     guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
                     for workspace in running {
                         let stopResult = await AppKitController.deviceMutation(device: device) { device in
-                            try SpacesDeviceClient.stopWorkspace(workspaceID: workspace.id, device: device, clientApp: clientApp)
+                            try SpacesDeviceClient.stopWorkspace(workspaceID: workspace.id, context: DeviceRequestContext(device: device, clientApp: clientApp))
                         }
                         // A workspace that would not stop is left running and visible: hiding the project
                         // now would strand it out of view still running.
@@ -284,7 +282,8 @@ import workspacecore
             // workspace stays one unhide away. The single-workspace hide has the same shape.
             let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.updateProjectMetadata(projectID: projectID, isHidden: isHidden, device: device, clientApp: clientApp)
+                try SpacesDeviceClient.updateProjectMetadata(
+                    projectID: projectID, isHidden: isHidden, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
             switch result {
             case .success(let response):

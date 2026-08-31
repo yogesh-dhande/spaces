@@ -796,7 +796,7 @@ private struct DeviceSyncState {
                     // remote costs one round-trip, and only an incompatible/too-old daemon falls back
                     // to the standalone handshake — which stays decodable when the overview would not,
                     // so the device is presented as blocked (no overview) rather than offline.
-                    let resolution = try SpacesDeviceClient.resolveOverview(device: record, clientApp: clientApp)
+                    let resolution = try SpacesDeviceClient.resolveOverview(context: DeviceRequestContext(device: record, clientApp: clientApp))
                     return .success(
                         RemoteDeviceLoad(
                             overview: resolution.overview, daemonStatus: resolution.daemonStatus, compatibility: resolution.compatibility))
@@ -1152,7 +1152,7 @@ private struct DeviceSyncState {
                 do {
                     return .success(
                         try SpacesDeviceClient.subscribeOverview(
-                            device: record, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect))
+                            context: DeviceRequestContext(device: record, clientApp: clientApp), onOverview: onOverview, onDisconnect: onDisconnect))
                 } catch { return .failure(error) }
             }.value
             let client: SpacesDeviceAPIOverviewStreamClient?

@@ -54,8 +54,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                 probe.bootstrapCount += 1
                 return Self.localBootstrapResponse(port: probe.bootstrapCount == 1 ? 11_111 : 22_222)
             }
-            let requestProvider: SpacesDeviceClient.DeviceRequestProvider = { _, device, _, _ in
-                probe.requestedPorts.append(device.port)
+            let requestProvider: SpacesDeviceClient.DeviceRequestProvider = { _, context in
+                probe.requestedPorts.append(context.device.port)
                 guard probe.requestedPorts.count > 1 else { throw POSIXError(.ECONNREFUSED) }
                 return Self.emptyOverviewResponse()
             }

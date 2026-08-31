@@ -249,7 +249,7 @@ import systembridge
             // persisted before the last restart can no longer be trusted to carry (a dev profile binds
             // an ephemeral Device API port; installed builds keep the fixed default).
             let local = try SpacesDeviceClient.bootstrapLocalDevice(clientApp: SpacesDeviceClient.macOSClientApp(), profile: profile)
-            return try SpacesDeviceClient.agentHooksStatus(device: local, profile: profile)
+            return try SpacesDeviceClient.agentHooksStatus(context: DeviceRequestContext(device: local, profile: profile))
         } catch {
             // The step is skipped for this launch and left undismissed, so it is offered again once
             // the daemon answers. Logged because a probe that always failed would otherwise present as

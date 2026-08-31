@@ -143,7 +143,7 @@ extension AppKitController: CodingAgentsHost {}
         renderRows(message: nil, isLoading: true)
         let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
         Task.detached(priority: .userInitiated) { [weak self] in
-            let result = Result { try SpacesDeviceClient.agentHooksStatus(device: device, profile: profile) }
+            let result = Result { try SpacesDeviceClient.agentHooksStatus(context: DeviceRequestContext(device: device, profile: profile)) }
             await self?.applyStatusFetch(result, token: token)
         }
     }
@@ -285,7 +285,7 @@ extension AppKitController: CodingAgentsHost {}
         renderRows(message: nil, isLoading: false)
         let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
         Task.detached(priority: .userInitiated) { [weak self] in
-            let result = Result { try SpacesDeviceClient.installAgentHooks([kind], device: device, profile: profile) }
+            let result = Result { try SpacesDeviceClient.installAgentHooks([kind], context: DeviceRequestContext(device: device, profile: profile)) }
             await self?.applyInstall(result, token: token, deviceID: targetDeviceID, kind: kind)
         }
     }

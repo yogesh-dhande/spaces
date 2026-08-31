@@ -712,10 +712,11 @@ import workspacecore
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in
                 do {
                     let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                    let context = DeviceRequestContext(device: device, clientApp: clientApp)
                     if let editingID {
-                        _ = try SpacesDeviceClient.updateAutomation(id: editingID, fields: fields, device: device, clientApp: clientApp)
+                        _ = try SpacesDeviceClient.updateAutomation(id: editingID, fields: fields, context: context)
                     } else {
-                        _ = try SpacesDeviceClient.createAutomation(fields, device: device, clientApp: clientApp)
+                        _ = try SpacesDeviceClient.createAutomation(fields, context: context)
                     }
                     return nil
                 } catch { return error }

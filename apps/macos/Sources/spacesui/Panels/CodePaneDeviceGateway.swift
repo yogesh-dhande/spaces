@@ -110,7 +110,8 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> SpacesDeviceWorkspaceDiffManifestChunkResult {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceDiffManifestChunk(
-                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex, device: device)
+                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex,
+                context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -121,7 +122,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceDiffFileChunk(
                 workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                byteOffset: byteOffset, transferID: transferID, device: device)
+                byteOffset: byteOffset, transferID: transferID, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -132,7 +133,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.cancelWorkspaceDiffFileChunk(
                 workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                byteOffset: byteOffset, transferID: transferID, device: device)
+                byteOffset: byteOffset, transferID: transferID, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -141,7 +142,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.cancelWorkspaceDiffManifest(
-                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, device: device)
+                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -154,7 +155,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileRead(
                 workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
-                requiresDirectPath: requiresDirectPath, device: device)
+                requiresDirectPath: requiresDirectPath, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -163,16 +164,20 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceRevisionFileRead(
-                workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath, device: device)
+                workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath, context: DeviceRequestContext(device: device))
         }.value
     }
 
     func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult {
-        try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.workspaceFileList(workspaceID: workspaceID, device: device) }.value
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceFileList(workspaceID: workspaceID, context: DeviceRequestContext(device: device))
+        }.value
     }
 
     func workspaceRefList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceRefListResult {
-        try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.workspaceRefList(workspaceID: workspaceID, device: device) }.value
+        try await Task.detached(priority: .userInitiated) {
+            try SpacesDeviceClient.workspaceRefList(workspaceID: workspaceID, context: DeviceRequestContext(device: device))
+        }.value
     }
 
     func workspaceFileWrite(
@@ -184,7 +189,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileWrite(
                 workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
-                requiresDirectPath: requiresDirectPath, device: device)
+                requiresDirectPath: requiresDirectPath, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -194,7 +199,8 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> any CodePaneDiffSignatureStreamHandle {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceDiffSignature(
-                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, context: DeviceRequestContext(device: device), onFrame: onFrame,
+                onDisconnect: onDisconnect)
         }.value
     }
 
@@ -204,7 +210,8 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> any CodePaneFileSignatureStreamHandle {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceFileSignature(
-                workspaceID: workspaceID, relativePath: relativePath, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                workspaceID: workspaceID, relativePath: relativePath, context: DeviceRequestContext(device: device), onFrame: onFrame,
+                onDisconnect: onDisconnect)
         }.value
     }
 
@@ -214,13 +221,13 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> any CodePaneFileListSignatureStreamHandle {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.subscribeWorkspaceFileListSignature(
-                workspaceID: workspaceID, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
+                workspaceID: workspaceID, context: DeviceRequestContext(device: device), onFrame: onFrame, onDisconnect: onDisconnect)
         }.value
     }
 
     func workspaceReviewCommentList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> [SpacesDeviceReviewComment] {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.workspaceReviewCommentList(workspaceID: workspaceID, device: device)
+            try SpacesDeviceClient.workspaceReviewCommentList(workspaceID: workspaceID, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -231,13 +238,13 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceReviewCommentUpsert(
                 workspaceID: workspaceID, id: id, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body,
-                device: device)
+                context: DeviceRequestContext(device: device))
         }.value
     }
 
     func workspaceReviewCommentDelete(workspaceID: String, id: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.workspaceReviewCommentDelete(workspaceID: workspaceID, id: id, device: device)
+            try SpacesDeviceClient.workspaceReviewCommentDelete(workspaceID: workspaceID, id: id, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -246,13 +253,13 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     ) async throws -> SpacesDeviceAPIResponse {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceReviewCommentsSend(
-                workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments, device: device)
+                workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments, context: DeviceRequestContext(device: device))
         }.value
     }
 
     func startWorkspaceCommand(workspaceID: String, command: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.startWorkspaceCommandSession(workspaceID: workspaceID, command: command, device: device)
+            try SpacesDeviceClient.startWorkspaceCommandSession(workspaceID: workspaceID, command: command, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -260,7 +267,7 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         -> CodePaneAgentStartSnapshot
     {
         let task = Task.detached(priority: .utility) { () throws -> CodePaneAgentStartSnapshot in
-            let overview = try SpacesDeviceClient.overview(device: device).overview
+            let overview = try SpacesDeviceClient.overview(context: DeviceRequestContext(device: device)).overview
             let terminal = overview.sessions.first(where: { $0.id == sessionID })
             let workspace = overview.workspaces.first(where: { $0.id == workspaceID })
             let agentRow = workspace?.codingAgentRows.first(where: { row in

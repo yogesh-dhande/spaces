@@ -270,7 +270,8 @@ extension AppKitController {
             guard let processKey = item.processKey else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.runWorkspaceProcess(
-                    workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID, device: device, clientApp: clientApp)
+                    workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID,
+                    context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .agent, .browser, .window: return
         }
@@ -282,17 +283,19 @@ extension AppKitController {
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.stopWorkspaceProcess(
                     workspaceID: workspaceID, processID: item.processID, processKey: item.processKey, processTemplateID: item.processTemplateID,
-                    device: device, clientApp: clientApp)
+                    context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .agent:
             guard let sessionID = item.sessionID else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.stopWorkspaceTerminal(workspaceID: workspaceID, sessionID: sessionID, device: device, clientApp: clientApp)
+                try SpacesDeviceClient.stopWorkspaceTerminal(
+                    workspaceID: workspaceID, sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .window:
             guard let sessionID = item.sessionID else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.stopWorkspaceTerminal(workspaceID: workspaceID, sessionID: sessionID, device: device, clientApp: clientApp)
+                try SpacesDeviceClient.stopWorkspaceTerminal(
+                    workspaceID: workspaceID, sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .browser, .missingConfiguredProcess: return
         }
@@ -304,7 +307,7 @@ extension AppKitController {
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.restartWorkspaceProcess(
                     workspaceID: workspaceID, processID: item.processID, processKey: item.processKey, processTemplateID: item.processTemplateID,
-                    device: device, clientApp: clientApp)
+                    context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .agent, .browser, .window, .missingConfiguredProcess: return
         }
@@ -353,12 +356,12 @@ extension AppKitController {
         case .terminalSession(let sessionID):
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.renameTerminalSession(
-                    workspaceID: workspaceID, sessionID: sessionID, title: title, device: device, clientApp: clientApp)
+                    workspaceID: workspaceID, sessionID: sessionID, title: title, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .agentSession(let agentID):
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.renameAgentSession(
-                    workspaceID: workspaceID, agentID: agentID, title: title, device: device, clientApp: clientApp)
+                    workspaceID: workspaceID, agentID: agentID, title: title, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
         case .configuredProcess:
             do {

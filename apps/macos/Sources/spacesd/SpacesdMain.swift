@@ -2545,7 +2545,9 @@ enum SpacesDaemonErrorClassification {
             let validatedRow = try RemoteAgentSubscriptionValidation.validate(
                 deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
                 resolveDevice: { try SpacesClientDatabase.defaultDatabase().pairedDevice(id: $0) }, deviceName: { $0.name },
-                fetchRows: { try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, device: $0, clientApp: clientApp) })
+                fetchRows: {
+                    try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, context: DeviceRequestContext(device: $0, clientApp: clientApp))
+                })
             try orchestrator.store.insertAgentRemoteSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID,
                 createdAt: nowISO8601())

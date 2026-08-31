@@ -110,7 +110,7 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let args = try decodeMCPArguments(ProjectListArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
-                    let projects = try SpacesDeviceClient.projects(device: device, clientApp: cliDeviceClientApp())
+                    let projects = try SpacesDeviceClient.projects(context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(
                         TerminalServiceProfileCommandResponse(message: "Listed projects.", projects: projects.map(Self.profileProjectSummary)))
                 }
@@ -124,7 +124,7 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let args = try decodeMCPArguments(WorkspaceListArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
-                    var workspaces = try SpacesDeviceClient.workspaces(device: device, clientApp: cliDeviceClientApp())
+                    var workspaces = try SpacesDeviceClient.workspaces(context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     if let project = args.project { workspaces = workspaces.filter { $0.projectID == project } }
                     return .profile(
                         TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord)))
@@ -146,7 +146,8 @@ final class SpacesMCPStdioServer {
                 if let device = try server.resolvedDevice(args.device) {
                     let response = try SpacesDeviceClient.createWorkspace(
                         projectID: args.project, branch: args.branch, baseBranch: args.baseBranch,
-                        allowExistingBranchReuse: args.existingBranch ?? false, device: device, clientApp: cliDeviceClientApp())
+                        allowExistingBranchReuse: args.existingBranch ?? false,
+                        context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
                 return .profile(
@@ -165,7 +166,7 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(WorkspaceStartArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
                     let response = try SpacesDeviceClient.launchWorkspace(
-                        workspaceID: args.workspace, device: device, clientApp: cliDeviceClientApp())
+                        workspaceID: args.workspace, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
                 return .profile(
@@ -181,7 +182,7 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(WorkspaceRestartArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
                     let response = try SpacesDeviceClient.restartWorkspace(
-                        workspaceID: args.workspace, device: device, clientApp: cliDeviceClientApp())
+                        workspaceID: args.workspace, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
                 return .profile(
@@ -194,7 +195,8 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let args = try decodeMCPArguments(TerminalListArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
-                    let sessions = try SpacesDeviceClient.terminalSessions(device: device, clientApp: cliDeviceClientApp())
+                    let sessions = try SpacesDeviceClient.terminalSessions(
+                        context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     let rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
                     return .profile(
                         TerminalServiceProfileCommandResponse(
@@ -214,7 +216,7 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(TerminalTailArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
                     let output = try SpacesDeviceClient.tailTerminalOutput(
-                        sessionID: args.session, lines: args.lines, device: device, clientApp: cliDeviceClientApp())
+                        sessionID: args.session, lines: args.lines, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output))
                 }
                 return .profile(
@@ -249,7 +251,8 @@ final class SpacesMCPStdioServer {
                         bytes = value
                     }
                     let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline, device: device, clientApp: cliDeviceClientApp())
+                        sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline,
+                        context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
                 return .profile(
@@ -268,7 +271,7 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(AgentListArguments.self, from: arguments)
                 if let device = try server.resolvedDevice(args.device) {
                     let rows = try SpacesDeviceClient.listAgentSessions(
-                        workspaceID: args.workspace, device: device, clientApp: cliDeviceClientApp())
+                        workspaceID: args.workspace, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .agentSessions(
                         MCPAgentSessionsToolResponse(
                             message: "Listed agent sessions.", agentSessions: rows.map { AgentSessionRowJSON($0, deviceID: device.id) }))
@@ -289,7 +292,8 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(AgentStatusArguments.self, from: arguments)
                 let sessionID = try server.resolvedAgentSessionID(args.session)
                 if let device = try server.resolvedDevice(args.device) {
-                    let rows = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
+                    let rows = try SpacesDeviceClient.listAgentSessions(
+                        sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     guard let row = rows.first else {
                         throw MCPError.invalidArguments("No agent session for terminal \(sessionID) on \(device.name).")
                     }
@@ -315,7 +319,7 @@ final class SpacesMCPStdioServer {
                 let sessionID = try server.resolvedAgentSessionID(args.session)
                 if let device = try server.resolvedDevice(args.device) {
                     let rows = try SpacesDeviceClient.annotateAgentSession(
-                        sessionID: sessionID, note: args.note, device: device, clientApp: cliDeviceClientApp())
+                        sessionID: sessionID, note: args.note, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .agentSessions(
                         MCPAgentSessionsToolResponse(
                             message: rows.first?.note == nil ? "Cleared agent note." : "Annotated agent session.",
@@ -383,7 +387,7 @@ final class SpacesMCPStdioServer {
                     // local `.agentKill`: a hook-signaled child's subscribers are told it exited before its
                     // row is deleted, and a not-yet-signaled `.agent`-kind session is terminated.
                     let response = try SpacesDeviceClient.killAgentSession(
-                        sessionID: args.session, device: device, clientApp: cliDeviceClientApp())
+                        sessionID: args.session, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
                 return .profile(try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: args.session))))
