@@ -231,27 +231,23 @@ extension TerminalSessionPaneViewController {
         }
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
         let isGhosttyEndedFinalRender = visibleRenderer == .ghosttyEndedFinalRender
-        let isFullBleedOwnerPreparation = isDeferringInitialOwnerPresentation && preferredAttachmentMode == .owner
-        if isFullBleedOwnerPreparation { outputView.string = "" }
         let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
         titleLabel.isHidden = isGhosttyOwner
         summaryLabel.isHidden = shouldCollapseOwnerChrome
         rendererLabel.isHidden = isGhosttyOwner
         stateLabel.isHidden = shouldCollapseOwnerChrome
-        let isFullBleed = isGhosttyOwner || isGhosttyEndedFinalRender || isFullBleedOwnerPreparation
+        let isFullBleed = isGhosttyOwner || isGhosttyEndedFinalRender
         outputScrollView.borderType = isFullBleed || (backend == .ghosttyEmbedded && visibleRenderer != .textView) ? .noBorder : .bezelBorder
-        outputScrollView.drawsBackground = !isFullBleedOwnerPreparation
-        outputView.drawsBackground = !isFullBleedOwnerPreparation
+        outputScrollView.drawsBackground = true
+        outputView.drawsBackground = true
         bodyStackView.spacing = isFullBleed ? 0 : 12
         bodyLeadingConstraint?.constant = isFullBleed ? 0 : 16
         bodyTrailingConstraint?.constant = isFullBleed ? 0 : -16
         bodyTopToContentConstraint?.constant = isFullBleed ? 0 : 12
         bodyBottomToContentConstraint?.constant = isFullBleed ? 0 : -16
         outputView.textContainerInset =
-            isFullBleedOwnerPreparation
-            ? .zero : backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
-        outputView.textContainer?.lineFragmentPadding =
-            isFullBleedOwnerPreparation ? 0 : backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
+            backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
+        outputView.textContainer?.lineFragmentPadding = backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 

@@ -24,7 +24,6 @@ extension TerminalSessionPaneViewController {
         }
         refreshNow()
         if focus { focusEmbeddedTerminalInput() }
-        debugAssertAttachStateEquivalence()
     }
 
     /// Moves keyboard focus into the terminal content.

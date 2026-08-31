@@ -119,16 +119,11 @@ extension TerminalSessionPaneViewController {
     public var clientID: String { client.id }
     var debugTakeoverPending: Bool { isTakeoverAttemptPending }
     func debugSetTakeoverAttemptStartedAt(_ date: Date?) {
-        takeoverAttemptStartedAt = date
-        // Keeps the shadow in step like every other write site (the id comes from the shadow itself,
-        // since `takeoverAttemptID` is private to the controller's file and the shadow provably
-        // matches it everywhere this seam is legal to use).
         switch takeoverAttemptState {
         case .none: break
         case .queued(let id), .inFlight(let id, _):
             takeoverAttemptState = date.map { .inFlight(id: id, startedAt: $0) } ?? .queued(id: id)
         }
-        debugAssertAttachStateEquivalence()
     }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
