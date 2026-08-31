@@ -1,11 +1,75 @@
 #!/bin/sh
 
+# Both tree walkers read "$1" directly instead of naming a variable: POSIX sh
+# variables are global, so a recursive call would overwrite the parent level's
+# copy and the post-recursion signal would hit the last descendant again
+# instead of the parent. Positional parameters are the one per-call scope.
 kill_silence_watchdog_process_tree() {
-    watchdog_pid="$1"
-    for watchdog_child in $(pgrep -P "$watchdog_pid" 2>/dev/null); do
+    for watchdog_child in $(pgrep -P "$1" 2>/dev/null); do
         kill_silence_watchdog_process_tree "$watchdog_child"
     done
-    kill -KILL "$watchdog_pid" 2>/dev/null || true
+    kill -KILL "$1" 2>/dev/null || true
+}
+
+# Freezes a tree with SIGSTOP, parent before children, so a frozen parent
+# cannot spawn replacements while its descendants are still being walked.
+# A stopped process still accepts task inspection (`sample`) and SIGKILL.
+stop_silence_watchdog_process_tree() {
+    kill -STOP "$1" 2>/dev/null || true
+    for watchdog_child in $(pgrep -P "$1" 2>/dev/null); do
+        stop_silence_watchdog_process_tree "$watchdog_child"
+    done
+}
+
+# The SIGKILL that follows a silence timeout destroys the only evidence of
+# where the run wedged, and CI hangs of this shape (#583) have never reproduced
+# locally — so before killing, capture a process listing and per-process thread
+# stacks (`sample`) of the hung tree into the caller's log. Everything here is
+# best-effort: a process that exits mid-capture or refuses task inspection
+# leaves a note instead of a report and never blocks the kill.
+capture_silence_watchdog_hang_evidence() {
+    watchdog_hang_root="$1"
+    watchdog_hang_dir="$2"
+
+    watchdog_hang_pids=""
+    watchdog_hang_queue="$watchdog_hang_root"
+    while [ -n "$watchdog_hang_queue" ]; do
+        watchdog_hang_next=""
+        for watchdog_hang_pid in $watchdog_hang_queue; do
+            watchdog_hang_pids="$watchdog_hang_pids $watchdog_hang_pid"
+            watchdog_hang_next="$watchdog_hang_next $(pgrep -P "$watchdog_hang_pid" 2>/dev/null || true)"
+        done
+        # Unquoted expansion through echo collapses the accumulated whitespace;
+        # an all-space string becomes empty and ends the walk.
+        # shellcheck disable=SC2086,SC2116
+        watchdog_hang_queue="$(echo $watchdog_hang_next)"
+    done
+
+    echo "=== silence-watchdog: process tree at kill time ==="
+    # Darwin ps takes a single comma-separated pid list after -p.
+    # shellcheck disable=SC2086
+    ps -o pid,ppid,state,%cpu,etime,command -p "$(echo $watchdog_hang_pids | tr ' ' ',')" 2>/dev/null || true
+
+    # `sample` runs 2 seconds per process; the cap bounds the pre-kill delay and
+    # the log volume if a runaway tree ever forks wide.
+    watchdog_hang_sampled=0
+    for watchdog_hang_pid in $watchdog_hang_pids; do
+        if [ "$watchdog_hang_sampled" -ge 12 ]; then
+            echo "=== silence-watchdog: sampling stopped after $watchdog_hang_sampled processes ==="
+            break
+        fi
+        watchdog_hang_sampled=$((watchdog_hang_sampled + 1))
+        echo "=== silence-watchdog: thread stacks for pid $watchdog_hang_pid ==="
+        watchdog_hang_sample_file="$watchdog_hang_dir/sample-$watchdog_hang_pid.txt"
+        sample "$watchdog_hang_pid" 2 -file "$watchdog_hang_sample_file" \
+            >/dev/null 2>"$watchdog_hang_sample_file.err" || true
+        if [ -s "$watchdog_hang_sample_file" ]; then
+            cat "$watchdog_hang_sample_file"
+        else
+            echo "(sample produced no report for pid $watchdog_hang_pid)"
+            cat "$watchdog_hang_sample_file.err" 2>/dev/null || true
+        fi
+    done
 }
 
 run_with_silence_watchdog() (
@@ -98,8 +162,20 @@ run_with_silence_watchdog() (
             esac
             if [ "$(($(date +%s) - watchdog_last_output_epoch))" -ge "$watchdog_seconds" ]; then
                 echo "Test process produced no output for ${watchdog_seconds}s; killing it as hung." >&3
-                # Record the timeout before killing so a fast-exiting parent cannot hide it.
+                # Record the timeout before the multi-second evidence capture and
+                # the kill: a process that exits mid-capture (or a fast-exiting
+                # parent) has still exceeded the silence deadline and must not
+                # turn the diagnosed timeout into its own exit status.
                 : >"$watchdog_timeout_path"
+                # Freeze the tree before the multi-second capture: a root that
+                # exited mid-capture would reparent surviving children out of
+                # the later tree walk's reach and leak them past the kill.
+                stop_silence_watchdog_process_tree "$watchdog_work_pid"
+                # Evidence goes through the log file, not fd 3: the log is the
+                # backpressure-isolated channel (the forwarder drains it on its
+                # own schedule), while a stalled fd-3 consumer could block the
+                # monitor here before it ever kills the hung tree.
+                capture_silence_watchdog_hang_evidence "$watchdog_work_pid" "$watchdog_output_dir" >>"$watchdog_log" 2>&1 || true
                 kill_silence_watchdog_process_tree "$watchdog_work_pid"
                 exit 0
             fi

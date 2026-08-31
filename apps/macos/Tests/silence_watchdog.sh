@@ -29,18 +29,32 @@ set -e
 [[ "$failure_status" -eq 23 ]] || fail "command exit status was not preserved: $failure_status"
 
 child_pid_path="$TMP_ROOT/child.pid"
+root_pid_path="$TMP_ROOT/root.pid"
 set +e
-run_with_silence_watchdog 1 /bin/bash -c 'sleep 30 & echo $! >"$1"; wait' _ "$child_pid_path" >"$TMP_ROOT/stall.out" 2>&1
+run_with_silence_watchdog 1 /bin/bash -c 'echo $$ >"$2"; sleep 30 & echo $! >"$1"; wait' _ "$child_pid_path" "$root_pid_path" >"$TMP_ROOT/stall.out" 2>&1
 stall_status=$?
 set -e
 [[ "$stall_status" -eq 124 ]] || fail "silent command returned $stall_status instead of timeout status 124"
 grep -q "produced no output for 1s" "$TMP_ROOT/stall.out" || fail "stall diagnostic was not emitted"
+# The kill destroys the evidence, so the diagnostic must carry the tree listing
+# and a per-process stack section (the stacks themselves are best-effort).
+grep -q "process tree at kill time" "$TMP_ROOT/stall.out" || fail "hang process-tree capture was not emitted"
+grep -q "thread stacks for pid" "$TMP_ROOT/stall.out" || fail "hang stack capture was not emitted"
 child_pid="$(cat "$child_pid_path")"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$child_pid" 2>/dev/null || break
     sleep 0.1
 done
 kill -0 "$child_pid" 2>/dev/null && fail "silent command left child process $child_pid running"
+# The root is frozen with SIGSTOP for evidence capture before the kill, so it
+# can never exit on its own once its children die: only the tree kill reaching
+# the root itself (not just its descendants) ends it.
+root_pid="$(cat "$root_pid_path")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$root_pid" 2>/dev/null || break
+    sleep 0.1
+done
+kill -0 "$root_pid" 2>/dev/null && fail "silent command left root process $root_pid running"
 
 # Pins the #583 false-kill: a stalled downstream consumer must not be able to
 # starve the liveness signal. The producer writes a 512KB burst (overfilling the
