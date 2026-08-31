@@ -296,7 +296,7 @@ private struct E2ERunner {
         let ghosttySetup = macOSDirectory.appendingPathComponent("scripts/setup_ghosttykit.sh").path
         try runProcess(executable: ghosttySetup, arguments: [], environment: [:])
         let buildScript = rootDirectory.appendingPathComponent("scripts/swiftpm.sh").path
-        try runProcess(executable: buildScript, arguments: ["build"], environment: ["SPACES_E2E_BOOTSTRAP_BUILD": "1"])
+        try runProcess(executable: buildScript, arguments: ["build"], environment: [:])
     }
 
     /// Runs a scenario whose descriptor kind is `.script`; the terminal-latency and mobile
@@ -490,7 +490,7 @@ private struct E2ERunner {
 
     private var sharedEnvironment: [String: String] {
         [
-            "SPACES_E2E_RUN_ROOT": runRoot.path, "SPACES_E2E_CLI": spacese2ePath, "SPACES_E2E": spacese2ePath, "SPACES_E2E_SKIP_MACOS_BUILD": "1",
+            "SPACES_E2E_CLI": spacese2ePath, "SPACES_E2E": spacese2ePath, "SPACES_E2E_SKIP_MACOS_BUILD": "1",
             "SPACES_E2E_SKIP_GHOSTTYKIT_SETUP": "1",
         ]
     }

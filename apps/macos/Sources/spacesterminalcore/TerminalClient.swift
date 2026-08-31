@@ -2,7 +2,6 @@ import Foundation
 
 public enum TerminalClientKind: String, Codable, Sendable, CaseIterable {
     case localWindow
-    case cliObserver
     case remoteViewer
 
     /// Whether a client of this kind is judged live by its attachment lease.

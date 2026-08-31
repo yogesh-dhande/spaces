@@ -59,7 +59,6 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let scrollbarOffset: UInt32
 
     public static let mouseShiftCaptureUnset: UInt8 = 0
-    public static let mouseShiftCaptureDisabled: UInt8 = 1
     public static let mouseShiftCaptureEnabled: UInt8 = 2
 
     public init(

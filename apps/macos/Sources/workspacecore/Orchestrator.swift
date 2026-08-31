@@ -332,11 +332,6 @@ public final class WorkspaceOrchestrator {
         let orderIndex: Int
     }
 
-    enum ManagedTerminalFocusResult {
-        case sessionRequest
-        case unavailable
-    }
-
     enum WorkspaceNavigationTarget {
         case agent(AgentWindowRecord)
         case browser(WindowRecord)

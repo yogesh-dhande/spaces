@@ -2720,8 +2720,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// this class's queue entry points follow.
     public func stop() { performOnQueue { self.stopOnQueue() } }
 
-    func listPairedDevices() throws -> [SpacesDevicePairedClient] { try syncOnQueue { try self.pairingStore.listDevices() } }
-
     func revokePairing(installationID: String) throws -> [SpacesDevicePairedClient] {
         try syncOnQueue {
             try self.pairingStore.revoke(installationID: installationID)

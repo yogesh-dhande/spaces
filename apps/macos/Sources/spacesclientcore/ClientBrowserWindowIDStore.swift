@@ -23,11 +23,6 @@ public struct ClientBrowserWindowIDStore: Sendable {
         }
     }
 
-    public func clearWindowID(workspaceID: String, targetURL: String) throws {
-        try SpacesClientDatabase.withDefaultDatabase {
-            try $0.clearBrowserSessionWindowID(deviceID: deviceID, workspaceID: workspaceID, targetURL: targetURL)
-        }
-    }
     /// All tracked browser-session tab locations for a workspace, used to close them when the
     /// workspace stops.
     public func windowIDs(workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {

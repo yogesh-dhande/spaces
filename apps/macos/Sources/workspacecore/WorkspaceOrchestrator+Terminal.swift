@@ -338,23 +338,6 @@ extension WorkspaceOrchestrator {
 
     func isManagedTerminalApp(_ appName: String?) -> Bool { terminalHost(for: appName) != nil }
 
-    /// Requests focus for a Spaces-managed terminal by session id. Focus is delegated to the
-    /// client over IPC (the daemon has no window server), so this only routes the request and
-    /// reports whether a session identity was available.
-    func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, requestID: String? = nil)
-        -> ManagedTerminalFocusResult
-    {
-        guard terminalHost(for: terminalApp) == .spaces else { return .unavailable }
-        guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
-        let startedAt = currentDate()
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        builtInTerminalWindowFocuser(sessionID, requestID)
-        logTerminalPerfMetric(
-            "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
-            elapsedMS: elapsedMS(since: startedAt), success: true)
-        return .sessionRequest
-    }
-
     func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
     func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
