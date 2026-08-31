@@ -154,35 +154,8 @@
         }
 
         // MARK: - Fixtures
-
-        private func makeOverview(
-            workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false,
-            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
-        ) -> SpacesDeviceOverviewPayload {
-            let project = SpacesDeviceProjectSummary(
-                id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
-            let resolvedWorkspaces = workspaces ?? [makeWorkspace(id: "workspace-feature", branch: "feature", codingAgentRows: codingAgentRows)]
-            return SpacesDeviceOverviewPayload(
-                projects: [project], workspaces: resolvedWorkspaces, sessions: [],
-                daemonStatus: TerminalServiceDaemonStatus(
-                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
-                    protocolVersion: SpacesWireProtocol.version))
-        }
-
-        private func makeWorkspace(id: String, branch: String?, isHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [])
-            -> SpacesDeviceWorkspaceSummary
-        {
-            SpacesDeviceWorkspaceSummary(
-                id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
-                isHidden: isHidden, isDefault: false, sessionCount: 0, codingAgentRows: codingAgentRows)
-        }
-
-        private func makeAgentRow(id: String, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState)
-            -> SpacesDeviceWorkspaceCodingAgentRow
-        {
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: id, workspaceID: "workspace-feature", name: "claude", command: "claude", agentID: "runtime-\(id)", sessionID: "session-\(id)",
-                runState: runState, activityState: activityState, canStop: true)
-        }
+        //
+        // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`,
+        // shared with `SpacesMobileAlertsTests`.
     }
 #endif
