@@ -47,6 +47,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     private enum PendingGhosttyHostAttachment {
         case owner(requestID: String?, reason: String, requestWindowFocus: Bool)
+        // Unreachable today: the only window this type is populated in is the first host resolution's
+        // reentrancy guard (see `resolvedGhosttySessionHost`), and `ghosttyRendererHost` is always nil
+        // there, so `ensureGhosttyFinalRenderSurfaceAttached` — the only producer of this case — can
+        // never observe `hasGhosttyFinalRenderStateAvailable()` (which reads `ghosttyRendererHost`) as
+        // true inside that window. Kept because the enum ships unchanged to
+        // `TerminalGhosttyHostResolution.DeferredAttachment`, this axis's shadow.
         case finalRender(reason: String)
     }
 
@@ -81,6 +87,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
     var backend: TerminalSessionBackendKind
     var preferredAttachmentMode: TerminalAttachmentMode
     private var ownerAttachmentRequested: Bool
+    /// Shadow of `ownerAttachmentRequested` / `preferredAttachmentMode`. See `ghosttyHostResolution`
+    /// above; initialized properly in `init` below since its starting value depends on the
+    /// constructor's `preferredAttachmentMode` parameter.
+    var ownershipIntent: TerminalOwnershipIntent = .contentWithViewer(presentedMode: .viewer)
     let titleLabel = NSTextField(labelWithString: "")
     let summaryLabel = NSTextField(labelWithString: "")
     let stateLabel = NSTextField(labelWithString: "")
@@ -159,12 +169,19 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
     private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
+    /// Shadow of `clientGhosttySessionHost` / `isResolvingGhosttySessionHost` /
+    /// `pendingGhosttyHostAttachment`, kept in step at every write site below and cross-checked against
+    /// them by `debugAssertAttachStateEquivalence()`. Not yet read for any decision — see that type's
+    /// doc comment.
+    var ghosttyHostResolution: TerminalGhosttyHostResolution = .unresolved
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     var takeoverAttemptStartedAt: Date?
     private var takeoverAttemptID: UUID?
     /// Whether a takeover control this pane issued is still queued or in flight. Every completion path
     /// is keyed by `takeoverAttemptID`, so the id is also what says an attempt is outstanding.
     var isTakeoverAttemptPending: Bool { takeoverAttemptID != nil }
+    /// Shadow of `takeoverAttemptID` / `takeoverAttemptStartedAt`. See `ghosttyHostResolution` above.
+    var takeoverAttemptState: TerminalTakeoverAttemptState = .none
     var lastRenderedOutput = ""
     var isClientAttached = false
     var lastRequestedAttachmentMode: TerminalAttachmentMode?
@@ -174,6 +191,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// same mode behind the first. The id distinguishes a superseded attach's late completion from
     /// the current one's.
     private var pendingAttach: (id: UUID, mode: TerminalAttachmentMode)?
+    /// Shadow of `isClientAttached` / `lastRequestedAttachmentMode` / `pendingAttach`. See
+    /// `ghosttyHostResolution` above.
+    var clientAttachmentLifecycle: TerminalClientAttachmentLifecycle = .detached
     /// The message a failed attach put in the input status, so a later successful attach can retire it
     /// (see `clearAttachErrorStatusIfShowing`). Nil whenever no attach failure is on display.
     private var attachErrorStatusMessage: String?
@@ -259,6 +279,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.stateProvider = stateProvider
         self.preferredAttachmentMode = preferredAttachmentMode
         ownerAttachmentRequested = preferredAttachmentMode == .owner
+        ownershipIntent =
+            ownerAttachmentRequested
+            ? .seekingOwner(presentedMode: preferredAttachmentMode) : .contentWithViewer(presentedMode: preferredAttachmentMode)
         let resolvedLaunchConfiguration = stateProvider.currentLaunchConfiguration
         launchConfiguration = resolvedLaunchConfiguration
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
@@ -314,6 +337,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         buildUI()
         if performInitialRefresh { refreshNow() }
         mainThreadReleaseBag = [view]
+        debugAssertAttachStateEquivalence()
     }
 
     deinit { MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 }) }
@@ -331,6 +355,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         guard backend == .ghosttyEmbedded else { return }
         ownerAttachmentRequested = true
         preferredAttachmentMode = .owner
+        ownershipIntent = .seekingOwner(presentedMode: .owner)
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
         let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
@@ -343,19 +368,28 @@ private final class NotificationObserverBag: @unchecked Sendable {
         }
         guard canAttachToGhosttyRuntime(lastObservedRuntimeState) else {
             refreshNow(allowGhosttyOwnerAttach: false)
+            debugAssertAttachStateEquivalence()
             return
         }
         if currentOwnerClient?.id == client.id, activeAttachment(snapshot: attachmentSnapshot)?.mode == .owner {
             isClientAttached = true
             lastRequestedAttachmentMode = .owner
+            // The snapshot can already show this client as the confirmed owner while its own attach
+            // send's completion is still in flight (the daemon answered; the main-actor hop has not
+            // run). The outstanding request stays represented, exactly as `refreshNow`'s
+            // confirmed-attachment sync does — jumping to `.attached` here would disagree with
+            // `pendingAttach` until that completion lands.
+            clientAttachmentLifecycle = pendingAttach.map { .attaching(requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
             lastObservedAttachmentMode = .owner
             ensureGhosttyHostAttached(reason: "request_owner_mode")
             refreshNow()
+            debugAssertAttachStateEquivalence()
             return
         }
         attachLocalClientIfNeeded(mode: .owner, force: true)
         ensureGhosttyHostAttached(reason: "request_owner_mode")
         refreshNow()
+        debugAssertAttachStateEquivalence()
     }
 
     public func takeOverOwnership(now: Date = Date()) {
@@ -382,6 +416,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         takeoverButton.isEnabled = false
         takeoverAttemptStartedAt = nil
         takeoverAttemptID = attemptID
+        takeoverAttemptState = .queued(id: attemptID)
         // The takeover rides the pane's client-control queue for the same reason attach and detach do:
         // the daemon has to see it behind the attach this pane already issued. Sent on its own it could
         // overtake that attach, and the daemon would either refuse a takeover naming a client it has not
@@ -409,6 +444,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     }
                     self.ownerAttachmentRequested = true
                     self.preferredAttachmentMode = .owner
+                    self.ownershipIntent = .seekingOwner(presentedMode: .owner)
                     let attachStartedAt = Date()
                     self.ensureGhosttyHostAttached(reason: "takeover")
                     let attachElapsedMS = TerminalPerformance.elapsedMS(since: attachStartedAt)
@@ -433,6 +469,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
         }
         refreshNow(allowGhosttyOwnerAttach: false)
+        debugAssertAttachStateEquivalence()
     }
 
     /// Stamps the moment a queued takeover starts sending, which is what the retry timeout measures.
@@ -441,6 +478,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private func beginTakeoverAttempt(id: UUID) {
         guard takeoverAttemptID == id else { return }
         takeoverAttemptStartedAt = Date()
+        takeoverAttemptState = .inFlight(id: id, startedAt: takeoverAttemptStartedAt!)
+        debugAssertAttachStateEquivalence()
     }
 
     private func finishFailedTakeoverAttempt(id: UUID, message: String) {
@@ -449,18 +488,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
         if activeOwnerClient(snapshot: attachmentSnapshot)?.id != client.id {
             ownerAttachmentRequested = false
-            preferredAttachmentMode = activeAttachment(snapshot: attachmentSnapshot)?.mode ?? .viewer
+            let resolvedMode = activeAttachment(snapshot: attachmentSnapshot)?.mode ?? .viewer
+            preferredAttachmentMode = resolvedMode
+            ownershipIntent = .contentWithViewer(presentedMode: resolvedMode)
         }
         refreshNow(allowGhosttyOwnerAttach: false)
         updateInputStatus(message: message, isError: true)
+        debugAssertAttachStateEquivalence()
     }
 
     private func clearTakeoverAttempt(id: UUID) {
         guard takeoverAttemptID == id else { return }
         takeoverAttemptStartedAt = nil
         takeoverAttemptID = nil
+        takeoverAttemptState = .none
         let isCurrentOwner = lastObservedOwnerClientID == client.id
         takeoverButton.isEnabled = !isCurrentOwner && isInteractiveRuntimeState(lastObservedRuntimeState)
+        debugAssertAttachStateEquivalence()
     }
 
     func ensureGhosttyHostAttached(requestID: String? = nil, reason: String, requestWindowFocus: Bool = true) {
@@ -472,12 +516,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
             terminalContainer.layoutSubtreeIfNeeded()
             guard let host = resolvedGhosttySessionHost(for: launchConfiguration) else {
                 pendingGhosttyHostAttachment = .owner(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus)
+                ghosttyHostResolution = .resolving(deferred: .owner(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus))
+                debugAssertAttachStateEquivalence()
                 return
             }
             switchGhosttySessionHostIfNeeded(host)
             let attachmentMode = confirmedHostAttachmentMode
             try host.attach(client: client, mode: attachmentMode, into: terminalContainer)
-            if defersInitialOwnerClientAttach { isClientAttached = true }
+            // The deferred write means "this pane is the owner without having sent a client attach"
+            // (a harness without a working attach action, whose optimistic attach rolled back), so it
+            // records the full attachment — mode included, `.owner` per this function's entry guard —
+            // not just the bare flag: `isClientAttached == true` with no requested mode is a
+            // combination the attach lifecycle deliberately has no case for.
+            if defersInitialOwnerClientAttach {
+                isClientAttached = true
+                lastRequestedAttachmentMode = .owner
+                clientAttachmentLifecycle = pendingAttach.map { .attaching(requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
+            }
             // The pane's own record of its attachment stays the requested mode even while the host is
             // held at viewer: it is what the attachment-transition rules in `refreshNow` compare a
             // snapshot against, and recording a momentary viewer here would hide a real demotion.
@@ -489,7 +544,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
             logFocusMetric(
                 "terminal_window_attach_owner_surface", startedAt: startedAt, requestID: requestID,
                 detail: "reason=\(reason) mode=\(attachmentMode.rawValue)")
-        } catch { updateInputStatus(message: String(describing: error), isError: true) }
+            debugAssertAttachStateEquivalence()
+        } catch {
+            updateInputStatus(message: String(describing: error), isError: true)
+            debugAssertAttachStateEquivalence()
+        }
     }
 
     private func ensureGhosttyFinalRenderSurfaceAttached(reason: String) {
@@ -502,6 +561,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
             terminalContainer.layoutSubtreeIfNeeded()
             guard let host = resolvedGhosttySessionHost(for: launchConfiguration) else {
                 pendingGhosttyHostAttachment = .finalRender(reason: reason)
+                ghosttyHostResolution = .resolving(deferred: .finalRender(reason: reason))
+                debugAssertAttachStateEquivalence()
                 return
             }
             switchGhosttySessionHostIfNeeded(host)
@@ -510,7 +571,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
             logFocusMetric(
                 "terminal_window_attach_final_surface", startedAt: startedAt, requestID: nil,
                 detail: "reason=\(reason) mode=\(TerminalAttachmentMode.viewer.rawValue)")
-        } catch { updateOutputPlainText("Final terminal render unavailable.") }
+            debugAssertAttachStateEquivalence()
+        } catch {
+            updateOutputPlainText("Final terminal render unavailable.")
+            debugAssertAttachStateEquivalence()
+        }
     }
 
     private func releaseGhosttySurfaceIfNeeded() {
@@ -557,7 +622,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
         // A refresh is where the pane resolves what it presents, so it is also where the surface
         // availability that resolution was made from is recorded. Recording on exit captures a
         // surface this refresh attached or released.
-        defer { surfaceAvailabilityAtLastPresentation = hasRenderableGhosttySurface }
+        defer {
+            surfaceAvailabilityAtLastPresentation = hasRenderableGhosttySurface
+            // A single deferred call covers every exit from this function — the early return below and
+            // the catch block included — rather than needing one at each exit point.
+            debugAssertAttachStateEquivalence()
+        }
         do {
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
@@ -586,6 +656,13 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 if let activeAttachment {
                     isClientAttached = true
                     lastRequestedAttachmentMode = activeAttachment.mode
+                    // A confirmed attachment can coexist with a still-outstanding attach requesting a
+                    // different mode (this snapshot cannot reflect an attach the daemon has not answered
+                    // yet), so the shadow stays `.attaching` — carrying the outstanding request forward
+                    // untouched — rather than jumping straight to `.attached`.
+                    clientAttachmentLifecycle =
+                        pendingAttach.map { .attaching(requestedMode: $0.mode, priorMode: activeAttachment.mode) }
+                        ?? .attached(mode: activeAttachment.mode)
                 } else {
                     let wasObservedAsAttachedOwner =
                         isClientAttached || lastObservedAttachmentMode == .owner || lastObservedOwnerClientID == client.id
@@ -596,6 +673,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     if pendingAttach == nil {
                         isClientAttached = false
                         lastRequestedAttachmentMode = nil
+                        clientAttachmentLifecycle = .detached
                     }
                     lastObservedAttachmentMode = nil
                     if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
@@ -608,6 +686,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                         // the request across an observed viewer attachment for the same reason.
                         if pendingAttach == nil { ownerAttachmentRequested = false }
                         preferredAttachmentMode = .viewer
+                        ownershipIntent = ownerAttachmentRequested ? .seekingOwner(presentedMode: .viewer) : .contentWithViewer(presentedMode: .viewer)
                     }
                 }
                 let canAttachAsOwner = canAttachToRuntime && (currentOwnerClient == nil || currentOwnerClient?.id == client.id)
@@ -658,6 +737,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     } else if !canKeepOwnerRequest && !isTakeoverAttemptPending {
                         preferredAttachmentMode = activeAttachment.mode
                     }
+                    // Recomputed rather than written per-branch above: cheaper to derive from the two
+                    // flags this block may have just changed than to duplicate the branch's own
+                    // conditions, and a no-op recompute (the `shouldPreserveOwnerRequest &&
+                    // (canKeepOwnerRequest || isTakeoverAttemptPending)` case, which writes neither flag)
+                    // is harmless.
+                    ownershipIntent =
+                        ownerAttachmentRequested
+                        ? .seekingOwner(presentedMode: preferredAttachmentMode) : .contentWithViewer(presentedMode: preferredAttachmentMode)
                     if lastObservedAttachmentMode != activeAttachment.mode {
                         beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
@@ -747,13 +834,20 @@ private final class NotificationObserverBag: @unchecked Sendable {
             if let currentOwnerClient, currentOwnerClient.id != client.id {
                 ownerAttachmentRequested = false
                 preferredAttachmentMode = .viewer
+                ownershipIntent = .contentWithViewer(presentedMode: .viewer)
                 attachmentMode = .viewer
             }
         }
-        guard force || !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
+        guard force || !isClientAttached || lastRequestedAttachmentMode != attachmentMode else {
+            debugAssertAttachStateEquivalence()
+            return
+        }
         // An attach already queued for this mode covers the request; only an explicit reclaim
         // (`force`) re-sends behind it.
-        guard force || pendingAttach?.mode != attachmentMode else { return }
+        guard force || pendingAttach?.mode != attachmentMode else {
+            debugAssertAttachStateEquivalence()
+            return
+        }
         let requestedMode = attachmentMode
         // Optimistic: the intent is recorded before the send so the pane presents as attached right
         // away and no later refresh re-issues the same attach. `finishAttach` rolls it back when the
@@ -762,6 +856,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
         lastRequestedAttachmentMode = requestedMode
         let attachID = UUID()
         pendingAttach = (id: attachID, mode: requestedMode)
+        // `priorMode` starts out equal to `requestedMode`, mirroring the optimistic
+        // `lastRequestedAttachmentMode` write just above exactly (see the case's doc comment); only a
+        // later `refreshNow` sync against an authoritative snapshot can move it away from that value
+        // while this same attach stays outstanding.
+        clientAttachmentLifecycle = .attaching(requestedMode: requestedMode, priorMode: requestedMode)
+        debugAssertAttachStateEquivalence()
         let attachingClient = client
         clientControlQueue.enqueue(priority: .userInitiated) { [weak self, attachClientAction] in
             // Ordering the sends is not enough on its own: a queued attach the pane has already replaced
@@ -806,7 +906,15 @@ private final class NotificationObserverBag: @unchecked Sendable {
         guard pendingAttach?.id == id else { return }
         pendingAttach = nil
         guard let error else {
+            // Confirms whatever `lastRequestedAttachmentMode` currently holds, not this attach's own
+            // `mode`: a `refreshNow` racing this same completion (see `.attaching`'s `priorMode` doc
+            // comment) can already have overwritten that flag from an authoritative snapshot before this
+            // callback runs, and this method does not stomp it back to `mode` on success — only a
+            // failure resets it. Mirroring `mode` here instead would drift from that pre-existing flag
+            // behavior the moment such a race lands.
+            clientAttachmentLifecycle = lastRequestedAttachmentMode.map { .attached(mode: $0) } ?? .detached
             clearAttachErrorStatusIfShowing()
+            debugAssertAttachStateEquivalence()
             ensureGhosttyHostAttached(reason: "client_attach_confirmed", requestWindowFocus: false)
             return
         }
@@ -814,9 +922,20 @@ private final class NotificationObserverBag: @unchecked Sendable {
             isClientAttached = false
             lastRequestedAttachmentMode = nil
         }
+        // Recomputed outside the rollback branch above: the failed attach is no longer outstanding
+        // either way, and the optimistic flags may not have been its own to roll back — a terminating
+        // close can already have cleared them (leaving nothing requested), or a `refreshNow` can have
+        // overwritten them from an authoritative snapshot (leaving a different confirmed attachment
+        // standing). The shadow follows whatever the flags now say.
+        if isClientAttached, let lastRequestedAttachmentMode {
+            clientAttachmentLifecycle = .attached(mode: lastRequestedAttachmentMode)
+        } else {
+            clientAttachmentLifecycle = .detached
+        }
         let message = String(describing: error)
         attachErrorStatusMessage = message
         updateInputStatus(message: message, isError: true)
+        debugAssertAttachStateEquivalence()
     }
 
     /// Retires the message a failed attach left in the input status once a later attach succeeds.
@@ -827,6 +946,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
         guard let attachErrorStatusMessage, inputStatusLabel.stringValue == attachErrorStatusMessage else { return }
         self.attachErrorStatusMessage = nil
         updateInputStatus(message: "", isError: false)
+    }
+
+    /// Flag teardown for a terminating close (`closeEmbedded(sessionIsTerminating: true)`): the
+    /// session is ending daemon-side, so there is no detach to send — the flags are just dropped.
+    /// Pre-existing gap, not introduced by the shadow: this path does not clear `pendingAttach`, so
+    /// an attach still in flight when the session terminates stays outstanding until `finishAttach`'s
+    /// completion lands and clears it (inert meanwhile — `ensureGhosttyHostAttached`'s
+    /// backend/runtime-state guards keep a stale intent from acting). The shadow mirrors that dangle
+    /// exactly (`.attaching` with `priorMode: nil`, matching the flags cleared here) rather than
+    /// forcing `.detached`, keeping the equivalence assert a proof of faithful mirroring on this
+    /// path too. Lives here rather than in +Embedded because that mirror reads the file-private
+    /// `pendingAttach`.
+    func clearClientAttachFlagsForTerminatingClose() {
+        isClientAttached = false
+        lastRequestedAttachmentMode = nil
+        clientAttachmentLifecycle = pendingAttach.map { .attaching(requestedMode: $0.mode, priorMode: nil) } ?? .detached
+        debugAssertAttachStateEquivalence()
     }
 
     /// Sends the detach off the main actor, ordered behind whatever attach this pane already issued.
@@ -845,6 +981,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
         // The detach supersedes any attach still in flight, so a re-show of this pane must be free to
         // issue a fresh attach behind it rather than be deduplicated against the superseded one.
         pendingAttach = nil
+        clientAttachmentLifecycle = .detached
+        debugAssertAttachStateEquivalence()
         clientControlQueue.enqueue(priority: .utility) { [detachClientAction] in
             try? detachClientAction(clientID)
             if let onDetached { await MainActor.run { onDetached() } }
@@ -950,23 +1088,33 @@ private final class NotificationObserverBag: @unchecked Sendable {
         if let clientGhosttySessionHost { return clientGhosttySessionHost }
         guard !isResolvingGhosttySessionHost else { return nil }
         isResolvingGhosttySessionHost = true
+        ghosttyHostResolution = .resolving(deferred: nil)
         defer {
             isResolvingGhosttySessionHost = false
             retryPendingGhosttyHostAttachmentIfNeeded()
         }
         let created = sessionHostProvider(launchConfiguration, paths)
         clientGhosttySessionHost = created
+        // No suspension point runs between this assignment and the `defer` above clearing
+        // `isResolvingGhosttySessionHost`: both this axis's flags change together from any other code's
+        // perspective, so the shadow can move straight to `.resolved` here rather than needing an
+        // intermediate case.
+        ghosttyHostResolution = .resolved
+        debugAssertAttachStateEquivalence()
         return created
     }
 
     private func retryPendingGhosttyHostAttachmentIfNeeded() {
         guard let pendingGhosttyHostAttachment, clientGhosttySessionHost != nil else { return }
         self.pendingGhosttyHostAttachment = nil
+        // `ghosttyHostResolution` is already `.resolved` (set above, before this runs) and that case
+        // carries no deferred payload, so clearing the flag here needs no further shadow write.
         switch pendingGhosttyHostAttachment {
         case .owner(let requestID, let reason, let requestWindowFocus):
             ensureGhosttyHostAttached(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus)
         case .finalRender(let reason): ensureGhosttyFinalRenderSurfaceAttached(reason: reason)
         }
+        debugAssertAttachStateEquivalence()
     }
 
     private func switchGhosttySessionHostIfNeeded(_ host: any TerminalGhosttySessionHosting) {
@@ -1112,4 +1260,73 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 }
             })
     }
+
+    #if DEBUG
+    /// Cross-checks every shadow attach-state enum against the flags it mirrors. Called at the end of
+    /// every method that writes any of the covered flags (see call sites above), so a mismatch is
+    /// caught at the write that caused it rather than surfacing later as a confusing symptom.
+    ///
+    /// The flags stay the source of truth for every decision in this stage (see
+    /// `TerminalSessionPaneAttachState.swift`); this only proves the shadow tracks them faithfully, so
+    /// a later stage can move decisions onto the enums with confidence nothing was missed. A failure
+    /// here means either a write site was missed, or a reachable flag combination does not fit the
+    /// enum shape this stage committed to — both are design bugs to fix, not to silence.
+    func debugAssertAttachStateEquivalence() {
+        let expectedLifecycle: TerminalClientAttachmentLifecycle
+        if let pendingAttach {
+            expectedLifecycle = .attaching(requestedMode: pendingAttach.mode, priorMode: lastRequestedAttachmentMode)
+        } else if isClientAttached, let lastRequestedAttachmentMode {
+            expectedLifecycle = .attached(mode: lastRequestedAttachmentMode)
+        } else {
+            expectedLifecycle = .detached
+        }
+        assert(
+            clientAttachmentLifecycle == expectedLifecycle,
+            "clientAttachmentLifecycle \(clientAttachmentLifecycle) != expected \(expectedLifecycle) "
+                + "(isClientAttached=\(isClientAttached) lastRequestedAttachmentMode=\(String(describing: lastRequestedAttachmentMode)) "
+                + "pendingAttach=\(String(describing: pendingAttach)))")
+
+        let expectedIntent: TerminalOwnershipIntent =
+            ownerAttachmentRequested ? .seekingOwner(presentedMode: preferredAttachmentMode) : .contentWithViewer(presentedMode: preferredAttachmentMode)
+        assert(
+            ownershipIntent == expectedIntent,
+            "ownershipIntent \(ownershipIntent) != expected \(expectedIntent) "
+                + "(ownerAttachmentRequested=\(ownerAttachmentRequested) preferredAttachmentMode=\(preferredAttachmentMode))")
+
+        let expectedHostResolution: TerminalGhosttyHostResolution
+        if clientGhosttySessionHost != nil {
+            expectedHostResolution = .resolved
+        } else if isResolvingGhosttySessionHost {
+            let expectedDeferred: TerminalGhosttyHostResolution.DeferredAttachment?
+            switch pendingGhosttyHostAttachment {
+            case .none: expectedDeferred = nil
+            case .owner(let requestID, let reason, let requestWindowFocus):
+                expectedDeferred = .owner(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus)
+            case .finalRender(let reason): expectedDeferred = .finalRender(reason: reason)
+            }
+            expectedHostResolution = .resolving(deferred: expectedDeferred)
+        } else {
+            expectedHostResolution = .unresolved
+        }
+        assert(
+            ghosttyHostResolution == expectedHostResolution,
+            "ghosttyHostResolution \(ghosttyHostResolution) != expected \(expectedHostResolution) "
+                + "(clientGhosttySessionHost=\(clientGhosttySessionHost != nil) isResolvingGhosttySessionHost=\(isResolvingGhosttySessionHost) "
+                + "pendingGhosttyHostAttachment=\(String(describing: pendingGhosttyHostAttachment)))")
+
+        let expectedTakeoverState: TerminalTakeoverAttemptState
+        if let takeoverAttemptID {
+            expectedTakeoverState =
+                takeoverAttemptStartedAt.map { .inFlight(id: takeoverAttemptID, startedAt: $0) } ?? .queued(id: takeoverAttemptID)
+        } else {
+            expectedTakeoverState = .none
+        }
+        assert(
+            takeoverAttemptState == expectedTakeoverState,
+            "takeoverAttemptState \(takeoverAttemptState) != expected \(expectedTakeoverState) "
+                + "(takeoverAttemptID=\(String(describing: takeoverAttemptID)) takeoverAttemptStartedAt=\(String(describing: takeoverAttemptStartedAt)))")
+    }
+    #else
+    @inline(__always) func debugAssertAttachStateEquivalence() {}
+    #endif
 }
