@@ -519,6 +519,23 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertNotNil(sendProperties["bytes"])
         XCTAssertNotNil(sendProperties["submit"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
+
+        // Pins every remaining tool's `required` set against the Codable argument structs in
+        // SpacesMCPServerArguments.swift: each struct's non-optional fields must exactly match what its
+        // descriptor advertises, so a struct that silently drops or adds a required field is caught here
+        // rather than only surfacing as a client-visible schema/decoding mismatch.
+        let expectedRequired: [String: [String]] = [
+            "spaces_project_list": [], "spaces_workspace_list": [], "spaces_workspace_start": ["workspace"],
+            "spaces_workspace_restart": ["workspace"], "spaces_terminal_list": [], "spaces_agent_list": [],
+            "spaces_agent_status": [], "spaces_agent_annotate": ["note"], "spaces_agent_spawn": ["command"],
+            "spaces_agent_kill": ["session"], "spaces_agent_subscribe": ["session"], "spaces_agent_unsubscribe": ["session"],
+            "spaces_device_list": [],
+        ]
+        for (name, required) in expectedRequired {
+            let tool = try XCTUnwrap(tools.first { ($0["name"] as? String) == name }, "missing tool \(name)")
+            let toolSchema = try XCTUnwrap(tool["inputSchema"] as? [String: Any])
+            XCTAssertEqual(toolSchema["required"] as? [String], required, "unexpected required set for \(name)")
+        }
     }
 
     func testMCPStdioFramingIsNewlineDelimited() throws {
@@ -560,19 +577,21 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
     }
 
+    private func terminalInputPayload(from arguments: [String: Any]) throws -> TerminalProfileInput {
+        try decodeMCPArguments(TerminalInputArguments.self, from: arguments).resolvedInput()
+    }
+
     func testMCPTerminalInputMapsTextAndBytesToTypedInput() throws {
-        let server = SpacesMCPStdioServer()
-        XCTAssertEqual(try server.terminalInputPayload(from: ["text": ""]), .text(""))
-        XCTAssertEqual(try server.terminalInputPayload(from: ["text": "hello"]), .text("hello"))
-        XCTAssertEqual(try server.terminalInputPayload(from: ["bytes": [0, 10, 255]]), .bytes(Data([0, 10, 255])))
+        XCTAssertEqual(try terminalInputPayload(from: ["text": ""]), .text(""))
+        XCTAssertEqual(try terminalInputPayload(from: ["text": "hello"]), .text("hello"))
+        XCTAssertEqual(try terminalInputPayload(from: ["bytes": [0, 10, 255]]), .bytes(Data([0, 10, 255])))
     }
 
     func testMCPTerminalInputRejectsMissingAndBothArguments() {
-        let server = SpacesMCPStdioServer()
-        XCTAssertThrowsError(try server.terminalInputPayload(from: [:])) { error in
+        XCTAssertThrowsError(try terminalInputPayload(from: [:])) { error in
             XCTAssertEqual(error.localizedDescription, "text or bytes is required.")
         }
-        XCTAssertThrowsError(try server.terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
+        XCTAssertThrowsError(try terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
             XCTAssertEqual(error.localizedDescription, "Provide text or bytes, not both.")
         }
     }
