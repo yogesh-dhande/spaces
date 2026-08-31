@@ -94,7 +94,6 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     private let onProvenHost: @Sendable (String) -> Void
     private let connectSeam: ConnectSeam
     private let plainTCPProbeSeam: PlainTCPProbeSeam
-    private let attemptQueue = DispatchQueue(label: "spaces.device.endpoint.resolver", attributes: .concurrent)
     /// Tracks every in-flight candidate attempt so tests can wait for losers to finish unwinding.
     private let attemptGroup = DispatchGroup()
     private let lock = NSLock()
@@ -276,13 +275,21 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// Runs the staggered race and returns its winner. Waits until a candidate wins or every attempt
     /// has finished: each attempt is bounded by its own connect timeout and the stagger schedule is
     /// bounded, so this cannot outlast `candidateStaggerDelay * (candidates.count - 1)` plus one
-    /// per-candidate timeout.
+    /// per-candidate timeout — even when the Swift cooperative pool and the kernel workqueue behind
+    /// GCD's non-overcommit queues are both fully occupied. Each attempt runs on its own dedicated
+    /// `Thread` (via `SpacesBlockingIOThread`) rather than a `DispatchQueue.asyncAfter`, specifically
+    /// because a concurrent-but-non-overcommit queue is never guaranteed a thread once the kernel
+    /// workqueue is saturated: that starvation is what let a synchronous test running on the last free
+    /// cooperative-pool thread deadlock a 3-core CI runner outright (issue #611), since `awaitOutcome()`
+    /// below had nothing left to wake it. A real `Thread` is guaranteed to start regardless.
     private func race(candidates: [String], timeout: TimeInterval) throws -> Resolved {
         let state = RaceState(pending: candidates.count)
         for (index, host) in candidates.enumerated() {
             attemptGroup.enter()
-            attemptQueue.asyncAfter(deadline: .now() + Self.candidateStaggerDelay * Double(index)) { [self] in
+            let staggerDelay = Self.candidateStaggerDelay * Double(index)
+            SpacesBlockingIOThread.spawn(name: "spaces.device.endpoint.resolver.attempt") { [self] in
                 defer { attemptGroup.leave() }
+                if staggerDelay > 0 { Thread.sleep(forTimeInterval: staggerDelay) }
                 // A candidate whose turn comes after the race is already decided is never dialed, which
                 // is what keeps the common on-network case to exactly one connection per connect.
                 guard !state.isDecided() else {
