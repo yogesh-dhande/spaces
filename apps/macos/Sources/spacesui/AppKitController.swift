@@ -3255,6 +3255,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         -> [AlertsGroup]
     {
         let iso8601Formatter = staticISO8601Formatter
+        // First-wins matches the `first(where:)` scan this replaces.
+        let sessionsByID = Dictionary(overview.sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let sessionsByWorkspace = Dictionary(grouping: overview.sessions, by: \.workspaceID)
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces {
             var items: [AlertsAttentionEntry] = []
@@ -3279,7 +3282,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
                         icon: "cpu.fill", iconTint: iconTint, label: agent.name,
-                        detail: terminalPaletteSecondaryLabel(liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessions: overview.sessions),
+                        detail: terminalPaletteSecondaryLabel(liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessionsByID: sessionsByID),
                         shortcut: "", processStatus: nil, agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue),
                         countsTowardBadge: true, eventDate: eventDate,
                         // Mirror `agentWindows(from:)` so the `.agentWindow` resolution finds the row by
@@ -3294,7 +3297,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // suppressing the focused session's bell is a consumption, not a filter (see
             // `AlertsController.consumeFocusedSessionBellAlerts`), and consumption needs the entry to
             // exist so its identity can be recorded and kept alive by the dismissal pruning rule.
-            for session in overview.sessions where session.workspaceID == workspace.id {
+            for session in sessionsByWorkspace[workspace.id] ?? [] {
                 guard let bellAt = session.bellAt else { continue }
                 // Not `iso8601Formatter`: a Linux daemon stamps runtime state with fractional seconds,
                 // which the framework's default format rejects, and the age is the only recency this row
@@ -3306,7 +3309,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // The row reads exactly as the session's sidebar row does — name, then what the
                         // program is doing — because its presence under Alerts is what says the bell rang.
                         label: session.title,
-                        detail: terminalPaletteSecondaryLabel(liveTitle: session.liveTitle, sessionID: session.id, sessions: overview.sessions),
+                        detail: terminalPaletteSecondaryLabel(liveTitle: session.liveTitle, sessionID: session.id, sessionsByID: sessionsByID),
                         shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
                         focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
             }
@@ -8145,12 +8148,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The command palette describes a named terminal with program-provided title state first, then
     /// the generic foreground command the daemon already included in its overview. It deliberately
     /// performs no process inspection and has no launch-command or shell fallback.
-    nonisolated static func terminalPaletteSecondaryLabel(liveTitle: String?, sessionID: String?, sessions: [SpacesDeviceTerminalSessionSummary])
+    nonisolated static func terminalPaletteSecondaryLabel(
+        liveTitle: String?, sessionID: String?, sessionsByID: [String: SpacesDeviceTerminalSessionSummary]
+    )
         -> String?
     {
         if let liveTitle = liveTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !liveTitle.isEmpty { return liveTitle }
         guard let sessionID,
-            let command = sessions.first(where: { $0.id == sessionID })?.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let command = sessionsByID[sessionID]?.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
             !command.isEmpty
         else { return nil }
         return command
@@ -12823,12 +12828,14 @@ extension AppKitController {
     ) -> [CommandPaletteItem] {
         let mapped = deviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
+        let sessionsByID = Dictionary(overview.sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let workspacesByID = Dictionary(overview.workspaces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         // The palette lists what the sidebar lists, so it walks through the same visibility rules rather
         // than the raw overview: hidden workspaces and hidden projects leave both surfaces together.
         for project in SidebarVisibility.deviceProjects(mapped.projects, deviceID: deviceID, workspacesByProject: mapped.workspacesByProject) {
             for workspace in mapped.workspacesByProject[project.id] ?? [] where SidebarVisibility.isVisibleWorkspace(workspace, inProject: project) {
-                guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == workspace.id }) else { continue }
+                guard let deviceWorkspace = workspacesByID[workspace.id] else { continue }
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
                 let windows = deviceTerminalWindows(from: detail.terminalRows)
                 let processes = runningProcesses(from: detail.processRows)
@@ -12880,7 +12887,7 @@ extension AppKitController {
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
                                 kind: target.kind, label: rowText.label,
                                 detail: terminalPaletteSecondaryLabel(
-                                    liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessions: overview.sessions), status: .none,
+                                    liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessionsByID: sessionsByID), status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
                                 // Recency is keyed off the row's name: which row was last focused must not
                                 // turn on what its program happens to be printing.
@@ -12902,7 +12909,7 @@ extension AppKitController {
                         else { continue }
                         let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
                         let detail = terminalPaletteSecondaryLabel(
-                            liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessions: overview.sessions)
+                            liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessionsByID: sessionsByID)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
