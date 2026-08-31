@@ -152,17 +152,16 @@ struct SpacesDeviceAPIClient: Sendable {
         return options
     }
 
-    func createWorkspace(
-        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, allowExistingBranchReuse: Bool,
-        commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws -> SpacesDeviceAPIResponse {
+    func createWorkspace(_ config: CreateWorkspaceConfig, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
         try await mutation(
             .init(
                 command: .createWorkspace(
                     .init(
-                        projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
-                        allowExistingBranchReuse: allowExistingBranchReuse)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
-            commandChannel: commandChannel)
+                        projectID: config.projectID, branch: config.branch, baseBranch: config.baseBranch, directoryName: config.directoryName,
+                        allowExistingBranchReuse: config.allowExistingBranchReuse)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
     /// Starts every configured process and coding agent in the workspace. Browser sessions and ad hoc
@@ -469,24 +468,24 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     func sendText(
-        sessionID: String, clientID: String, text: String, ownerEpoch: UInt64?, appendNewline: Bool = false, asPaste: Bool = false,
-        timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
+        context: TerminalCommandContext, text: String, appendNewline: Bool = false, asPaste: Bool = false, timeout: Duration = .seconds(3),
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
                 .init(
-                    action: .send, sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline,
-                    asPaste: asPaste)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+                    action: .send, sessionID: context.sessionID, clientID: context.clientID, text: text, ownerEpoch: context.ownerEpoch,
+                    appendNewline: appendNewline, asPaste: asPaste)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
-    func sendKey(
-        sessionID: String, clientID: String, key: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3),
-        commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws {
+    func sendKey(context: TerminalCommandContext, key: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws
+    {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .key, sessionID: sessionID, clientID: clientID, key: key, ownerEpoch: ownerEpoch)),
+            command: .terminalControl(
+                .init(action: .key, sessionID: context.sessionID, clientID: context.clientID, key: key, ownerEpoch: context.ownerEpoch)),
             authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
@@ -496,24 +495,24 @@ struct SpacesDeviceAPIClient: Sendable {
     /// longer to transmit than ordinary text/key input, so this uses a 30 s default timeout instead
     /// of the 6 s timeout used elsewhere for interactive input.
     func pasteImage(
-        sessionID: String, clientID: String, ownerEpoch: UInt64?, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
+        context: TerminalCommandContext, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalPasteImage(
                 SpacesDeviceTerminalPasteImageRequest(
-                    sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: fileExtension, imageData: imageData)),
-            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+                    sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch, fileExtension: fileExtension,
+                    imageData: imageData)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
-    func clearScreen(
-        sessionID: String, clientID: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3),
-        commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws {
+    func clearScreen(context: TerminalCommandContext, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws
+    {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .clearScreen, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch)),
+            command: .terminalControl(
+                .init(action: .clearScreen, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch)),
             authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
@@ -550,28 +549,29 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     func resize(
-        sessionID: String, clientID: String, columns: Int, rows: Int, ownerEpoch: UInt64?, resizeSerial: UInt64?, timeout: Duration = .seconds(3),
+        context: TerminalCommandContext, columns: Int, rows: Int, resizeSerial: UInt64?, timeout: Duration = .seconds(3),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
                 .init(
-                    action: .resize, sessionID: sessionID, clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch,
-                    resizeSerial: resizeSerial)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+                    action: .resize, sessionID: context.sessionID, clientID: context.clientID, columns: columns, rows: rows,
+                    ownerEpoch: context.ownerEpoch, resizeSerial: resizeSerial)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func scroll(
-        sessionID: String, clientID: String, horizontal: Double, vertical: Double, ownerEpoch: UInt64?, scrollMods: Int32? = nil,
+        context: TerminalCommandContext, horizontal: Double, vertical: Double, scrollMods: Int32? = nil,
         pointerPosition: TerminalScrollPointerPosition? = nil, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
                 .init(
-                    action: .scroll, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal,
-                    scrollVertical: vertical, scrollMods: scrollMods, scrollPointerX: pointerPosition?.x, scrollPointerY: pointerPosition?.y,
-                    scrollPointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+                    action: .scroll, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch,
+                    scrollHorizontal: horizontal, scrollVertical: vertical, scrollMods: scrollMods, scrollPointerX: pointerPosition?.x,
+                    scrollPointerY: pointerPosition?.y, scrollPointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
@@ -579,14 +579,14 @@ struct SpacesDeviceAPIClient: Sendable {
     /// Sends one mouse button press or release, forwarded to the session's terminal when a mouse-aware
     /// application there is tracking the mouse. The pointer is normalized the same way `scroll`'s is.
     func mouseButton(
-        sessionID: String, clientID: String, button: UInt8, pressed: Bool, ownerEpoch: UInt64?, pointerPosition: TerminalScrollPointerPosition? = nil,
+        context: TerminalCommandContext, button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition? = nil,
         timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
                 .init(
-                    action: .mouseButton, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, mouseButton: button,
-                    mousePressed: pressed, mousePointerX: pointerPosition?.x, mousePointerY: pointerPosition?.y,
+                    action: .mouseButton, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch,
+                    mouseButton: button, mousePressed: pressed, mousePointerX: pointerPosition?.x, mousePointerY: pointerPosition?.y,
                     mousePointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }

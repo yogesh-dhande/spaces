@@ -2043,8 +2043,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let identity = overviewIdentity
         do {
             let response = try await bridgeClient.createWorkspace(
-                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
-                allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
+                CreateWorkspaceConfig(
+                    projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
+                    allowExistingBranchReuse: allowExistingBranchReuse), commandChannel: commandChannel)
             await applyMutationResponse(response, identity: identity)
             guard identity == overviewIdentity else { return }
             isShowingWorkspaceCreateSheet = false
