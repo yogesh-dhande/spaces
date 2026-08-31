@@ -7,15 +7,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Error: required env file was not found at $ENV_FILE." >&2
-  exit 1
-fi
-
-set -a
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +a
+source "$REPO_ROOT/scripts/spaces-e2e-env.sh"
+spaces_e2e_require_env "$REPO_ROOT"
 
 IOS_PROJECT="$REPO_ROOT/apps/ios/SpacesMobile.xcodeproj"
 SCHEME="${SPACES_IOS_SCHEME:-SpacesMobile}"
@@ -210,19 +203,42 @@ PY
   rm -f "$devices_json" "$status_path"
 }
 
+# Prints the first matching explanation for a failure log against an ordered table of
+# pattern/message pairs, or a default message when nothing matches. `$1` is the log path, `$2`
+# the default message, and each further pair of args is a grep -E pattern followed by the
+# (possibly multi-line) message to print when that pattern matches. This is the one grep-cascade
+# body shared by the explain_*_failure functions below; each of them owns only its header,
+# footer, and its own table of patterns, not another copy of the if/elif chain.
+explain_failure_from_table() {
+  local log_path="$1"
+  local default_message="$2"
+  shift 2
+  local pattern message
+  while [[ $# -gt 0 ]]; do
+    pattern="$1"
+    message="$2"
+    shift 2
+    if grep -Eiq "$pattern" "$log_path"; then
+      printf '%s\n' "$message" >&2
+      return 0
+    fi
+  done
+  printf '%s\n' "$default_message" >&2
+  return 0
+}
+
 explain_build_failure() {
   local log_path="$1"
   echo "" >&2
   echo "Build failed." >&2
-  if grep -Eiq "requires a development team|No signing certificate|No profiles for|Provisioning profile|Signing for .* requires|No Accounts|doesn't include the currently selected device" "$log_path"; then
-    echo "This looks like an Xcode signing or provisioning issue." >&2
-    echo "Set SPACES_IOS_DEVELOPMENT_TEAM in $ENV_FILE, or open apps/ios/SpacesMobile.xcodeproj and enable automatic signing for the SpacesMobile target." >&2
-  elif grep -Eiq "Unable to find a destination|not eligible|not available|device.*not.*found|destination specifier" "$log_path"; then
-    echo "Xcode could not use the configured device as a build destination." >&2
-    echo "Confirm the device is unlocked, trusted, connected, and listed by xcrun xctrace list devices." >&2
-  else
-    echo "Review the xcodebuild log above for the compiler or package error." >&2
-  fi
+  explain_failure_from_table "$log_path" \
+    "Review the xcodebuild log above for the compiler or package error." \
+    "requires a development team|No signing certificate|No profiles for|Provisioning profile|Signing for .* requires|No Accounts|doesn't include the currently selected device" \
+    "This looks like an Xcode signing or provisioning issue.
+Set SPACES_IOS_DEVELOPMENT_TEAM in $ENV_FILE, or open apps/ios/SpacesMobile.xcodeproj and enable automatic signing for the SpacesMobile target." \
+    "Unable to find a destination|not eligible|not available|device.*not.*found|destination specifier" \
+    "Xcode could not use the configured device as a build destination.
+Confirm the device is unlocked, trusted, connected, and listed by xcrun xctrace list devices."
   echo "Full log: $log_path" >&2
 }
 
@@ -230,26 +246,29 @@ explain_install_failure() {
   local log_path="$1"
   echo "" >&2
   echo "Install failed." >&2
-  if grep -Eiq "locked|could not be unlocked|passcode" "$log_path"; then
-    echo "The device appears to be locked. Unlock it and rerun the script." >&2
-  elif grep -Eiq "Developer Mode|developer mode" "$log_path"; then
-    echo "Developer Mode is not available or not enabled on the device." >&2
-    echo "Enable Developer Mode on the device and reconnect it." >&2
-  elif grep -Eiq "not paired|pairing|Trust This Computer|not trusted" "$log_path"; then
-    echo "The device is not trusted or paired with this Mac." >&2
-    echo "Unlock the device, reconnect it, and accept the Trust This Computer prompt." >&2
-  elif grep -Eiq "No such device|not found|was not found|Unable to locate|device.*unavailable" "$log_path"; then
-    echo "The configured device was disconnected or is no longer visible to Xcode." >&2
-    echo "Check the cable/Wi-Fi connection and update SPACES_IOS_DEVICE_UDID in $ENV_FILE if the device changed." >&2
-  else
-    echo "Review the devicectl install log above for the device-side error." >&2
-  fi
+  explain_failure_from_table "$log_path" \
+    "Review the devicectl install log above for the device-side error." \
+    "locked|could not be unlocked|passcode" \
+    "The device appears to be locked. Unlock it and rerun the script." \
+    "Developer Mode|developer mode" \
+    "Developer Mode is not available or not enabled on the device.
+Enable Developer Mode on the device and reconnect it." \
+    "not paired|pairing|Trust This Computer|not trusted" \
+    "The device is not trusted or paired with this Mac.
+Unlock the device, reconnect it, and accept the Trust This Computer prompt." \
+    "No such device|not found|was not found|Unable to locate|device.*unavailable" \
+    "The configured device was disconnected or is no longer visible to Xcode.
+Check the cable/Wi-Fi connection and update SPACES_IOS_DEVICE_UDID in $ENV_FILE if the device changed."
   echo "Full log: $log_path" >&2
 }
 
 explain_launch_failure() {
   local log_path="$1"
   echo "" >&2
+
+  # The locked case is not part of the cascade below: it means the launch's only obstacle is a
+  # locked screen, so it reports success-shaped guidance (no "launch failed" header, no "Full
+  # log" footer) and returns 0 rather than the 1 every other outcome returns.
   if grep -Eiq "Locked|could not be unlocked|device was not.*unlocked|passcode" "$log_path"; then
     echo "Installed $BUNDLE_ID, but the device is locked so iOS refused to launch it." >&2
     echo "Unlock the device and tap SpacesMobile, or rerun this script after unlocking." >&2
@@ -257,11 +276,10 @@ explain_launch_failure() {
   fi
 
   echo "Installed $BUNDLE_ID, but launch failed." >&2
-  if grep -Eiq "not found|No such application|Application.*not.*found" "$log_path"; then
-    echo "The bundle identifier was not found on the device. Confirm SPACES_IOS_BUNDLE_ID is $BUNDLE_ID or leave it unset." >&2
-  else
-    echo "Review the devicectl launch log above for the device-side error." >&2
-  fi
+  explain_failure_from_table "$log_path" \
+    "Review the devicectl launch log above for the device-side error." \
+    "not found|No such application|Application.*not.*found" \
+    "The bundle identifier was not found on the device. Confirm SPACES_IOS_BUNDLE_ID is $BUNDLE_ID or leave it unset."
   echo "Full log: $log_path" >&2
   return 1
 }

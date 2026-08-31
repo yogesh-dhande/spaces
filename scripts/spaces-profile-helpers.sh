@@ -31,6 +31,33 @@ spaces_profile_clear_inherited_binding() {
   unset SPACES_DB_PATH SPACES_RUNTIME_DIR
 }
 
+# Reads one value out of a JSON object piped in on stdin, `payload` in scope for the Python
+# expression in `$1` (e.g. `payload.get("field")` or a nested lookup). A falsy value (missing,
+# empty, zero, None) is treated as absent: with `$2` given, that raises it as the failure message
+# (matching a script under `set -e`); without it, the function just prints nothing and exits 0,
+# for a caller that only wants a value when one exists (`spaces_profile_app_owner_pid`).
+#
+# This is the one shared body behind every field/expression readout below; each caller supplies
+# the JSON source and the expression, not another copy of the load/lookup/print boilerplate.
+_spaces_profile_json_field() {
+  local expr="$1"
+  local missing_message="${2:-}"
+  python3 -c '
+import json, sys
+
+data = sys.stdin.read()
+payload = json.loads(data) if data.strip() else {}
+expr = sys.argv[1]
+missing_message = sys.argv[2] if len(sys.argv) > 2 else ""
+value = eval(expr, {"payload": payload})
+if not value:
+    if missing_message:
+        raise SystemExit(missing_message)
+    raise SystemExit(0)
+print(value)
+' "$expr" "$missing_message"
+}
+
 # Prints one field of the resolved profile — `profileRoot`, `databasePath`, `runtimeDirectory`,
 # `ipcObject`, `source` — for a script that needs a concrete path (sqlite inspection, log and socket
 # locations). This is where scripts read paths from: a path is a fact to look up from the binary that
@@ -40,28 +67,14 @@ spaces_profile_field() {
   local field="$2"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-show --json | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-value = payload.get(sys.argv[1])
-if not value:
-    raise SystemExit(f"profile-show --json has no {sys.argv[1]}")
-print(value)
-' "$field"
+  "$e2e_cli" profile-show --json | _spaces_profile_json_field "payload.get(\"$field\")" "profile-show --json has no $field"
 }
 
 spaces_profile_app_owner_pid() {
   local cli="$1"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-app-owner --json | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-owner = payload.get("owner") or {}
-pid = owner.get("pid")
-if pid:
-    print(pid)
-'
+  "$e2e_cli" profile-app-owner --json | _spaces_profile_json_field '(payload.get("owner") or {}).get("pid")'
 }
 
 spaces_profile_stop_running_app() {
@@ -87,11 +100,7 @@ spaces_profile_terminal_service_socket_path() {
   local cli="$1"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-socket-paths | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-print(payload["serviceSocketPath"])
-'
+  "$e2e_cli" profile-socket-paths | _spaces_profile_json_field 'payload["serviceSocketPath"]'
 }
 
 spaces_profile_terminal_session_control_socket_path() {
@@ -99,14 +108,7 @@ spaces_profile_terminal_session_control_socket_path() {
   local session_id="$2"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-socket-paths --session-id "$session_id" | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-path = payload.get("sessionControlSocketPath")
-if not path:
-    raise SystemExit("missing sessionControlSocketPath")
-print(path)
-'
+  "$e2e_cli" profile-socket-paths --session-id "$session_id" | _spaces_profile_json_field 'payload.get("sessionControlSocketPath")' "missing sessionControlSocketPath"
 }
 
 spaces_profile_terminal_session_subscription_socket_path() {
@@ -114,14 +116,7 @@ spaces_profile_terminal_session_subscription_socket_path() {
   local session_id="$2"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-socket-paths --session-id "$session_id" | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-path = payload.get("sessionSubscriptionSocketPath")
-if not path:
-    raise SystemExit("missing sessionSubscriptionSocketPath")
-print(path)
-'
+  "$e2e_cli" profile-socket-paths --session-id "$session_id" | _spaces_profile_json_field 'payload.get("sessionSubscriptionSocketPath")' "missing sessionSubscriptionSocketPath"
 }
 
 spaces_profile_mac_client_installation_id() {
@@ -138,35 +133,41 @@ spaces_profile_socket_owner_pids() {
   fi
 }
 
-spaces_profile_stop_terminal_service() {
+# Resolves the terminal service's socket path and prints it only if the file actually exists,
+# so both stop functions below start from the same "is there anything to stop" check instead of
+# each re-walking `profile-socket-paths`' newline-separated candidates. Returns 1 (nothing to
+# print) when resolution fails or no candidate exists on disk, matching the `return 0` early-out
+# every caller used to write out by hand.
+_spaces_profile_terminal_service_existing_socket_path() {
   local cli="$1"
-  local timeout="${2:-20}"
   local socket_paths
-  if ! socket_paths="$(spaces_profile_terminal_service_socket_path "$cli")"; then
-    return 0
-  fi
-  local socket_path=""
+  socket_paths="$(spaces_profile_terminal_service_socket_path "$cli")" || return 1
   local candidate_socket_path
   while IFS= read -r candidate_socket_path; do
     if [[ -e "$candidate_socket_path" ]]; then
-      socket_path="$candidate_socket_path"
-      break
+      printf '%s\n' "$candidate_socket_path"
+      return 0
     fi
   done <<<"$socket_paths"
-  [[ -n "$socket_path" ]] || return 0
+  return 1
+}
 
-  local candidate_pids
-  candidate_pids="$(spaces_profile_socket_owner_pids "$socket_path")"
-
-  local shutdown_pid
-  shutdown_pid="$(
-    python3 - "$socket_path" <<'PY' || true
+# Sends `{"command": {<cmd>: {}}}` to the terminal service's control socket and prints the raw
+# JSON response verbatim (nothing if the daemon never answers). This is the one socket-IO body
+# behind both `shutdown` and `shutdownIfIdle`; a daemon that is not listening, or that trips over
+# on the connect/send/recv, is a normal outcome here (a stale socket, a daemon mid-exit), not a
+# script failure, so an `OSError` is swallowed rather than propagated.
+_spaces_profile_service_command() {
+  local socket_path="$1"
+  local cmd="$2"
+  python3 - "$socket_path" "$cmd" <<'PY' || true
 import json
 import socket
 import sys
 
 socket_path = sys.argv[1]
-payload = json.dumps({"command": {"shutdown": {}}}).encode("utf-8")
+cmd = sys.argv[2]
+payload = json.dumps({"command": {cmd: {}}}).encode("utf-8")
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(1)
@@ -179,10 +180,8 @@ try:
         if not chunk:
             break
         data += chunk
-    response = json.loads(data.decode("utf-8")) if data else {}
-    service_pid = response.get("servicePID")
-    if service_pid:
-        print(service_pid)
+    if data:
+        sys.stdout.write(data.decode("utf-8"))
 except OSError:
     pass
 finally:
@@ -191,14 +190,18 @@ finally:
     except Exception:
         pass
 PY
-  )"
-  if [[ -n "$shutdown_pid" ]]; then
-    candidate_pids="$(printf '%s\n%s\n' "$candidate_pids" "$shutdown_pid" | awk 'NF' | sort -u)"
-  fi
-  if [[ -z "$candidate_pids" ]]; then
-    rm -f "$socket_path"
-    return 0
-  fi
+}
+
+# Shared teardown once a stop function has decided which pids to wait out: poll for the pids to
+# exit and the socket to disappear, escalate to SIGTERM once `timeout` elapses, then SIGKILL after
+# a further grace period. Identical in both `spaces_profile_stop_terminal_service` (unconditional)
+# and `spaces_profile_stop_terminal_service_if_idle` (only reached once the daemon has confirmed
+# it is idle, so escalating here cannot kill a live session). Always returns 0: the callers run
+# under `set -e` and must proceed regardless of whether the daemon actually exited in time.
+_spaces_profile_wait_for_exit_and_escalate() {
+  local socket_path="$1"
+  local timeout="$2"
+  local candidate_pids="$3"
 
   local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
@@ -238,6 +241,31 @@ PY
   for pid in $candidate_pids; do
     kill -9 "$pid" >/dev/null 2>&1 || true
   done
+  return 0
+}
+
+spaces_profile_stop_terminal_service() {
+  local cli="$1"
+  local timeout="${2:-20}"
+  local socket_path
+  if ! socket_path="$(_spaces_profile_terminal_service_existing_socket_path "$cli")"; then
+    return 0
+  fi
+
+  local candidate_pids
+  candidate_pids="$(spaces_profile_socket_owner_pids "$socket_path")"
+
+  local shutdown_pid
+  shutdown_pid="$(_spaces_profile_service_command "$socket_path" shutdown | _spaces_profile_json_field 'payload.get("servicePID")' || true)"
+  if [[ -n "$shutdown_pid" ]]; then
+    candidate_pids="$(printf '%s\n%s\n' "$candidate_pids" "$shutdown_pid" | awk 'NF' | sort -u)"
+  fi
+  if [[ -z "$candidate_pids" ]]; then
+    rm -f "$socket_path"
+    return 0
+  fi
+
+  _spaces_profile_wait_for_exit_and_escalate "$socket_path" "$timeout" "$candidate_pids"
 }
 
 # Stops the profile's spacesd only when it owns no sessions, so a relaunch picks up a fresh
@@ -248,62 +276,42 @@ PY
 spaces_profile_stop_terminal_service_if_idle() {
   local cli="$1"
   local timeout="${2:-20}"
-  local socket_paths
-  if ! socket_paths="$(spaces_profile_terminal_service_socket_path "$cli")"; then
+  local socket_path
+  if ! socket_path="$(_spaces_profile_terminal_service_existing_socket_path "$cli")"; then
     return 0
   fi
-  local socket_path=""
-  local candidate_socket_path
-  while IFS= read -r candidate_socket_path; do
-    if [[ -e "$candidate_socket_path" ]]; then
-      socket_path="$candidate_socket_path"
-      break
-    fi
-  done <<<"$socket_paths"
-  [[ -n "$socket_path" ]] || return 0
 
   local candidate_pids
   candidate_pids="$(spaces_profile_socket_owner_pids "$socket_path")"
 
+  local response
+  response="$(_spaces_profile_service_command "$socket_path" shutdownIfIdle)"
+
+  # `shutdownIfIdle` reports one of three shapes: `ok` (exiting, possibly with the pid that is
+  # doing so), a busy `daemonStatus` (left running, with a session count worth telling the
+  # caller about), or neither (no reply, or a failure response with just a message). Turning
+  # that into one `outcome` line here is response *interpretation*, not the socket IO the two
+  # stop functions share, so it stays local to this function rather than in
+  # `_spaces_profile_service_command`.
   local outcome
   outcome="$(
-    python3 - "$socket_path" <<'PY' || true
-import json
-import socket
-import sys
+    printf '%s' "$response" | python3 -c '
+import json, sys
 
-socket_path = sys.argv[1]
-payload = json.dumps({"command": {"shutdownIfIdle": {}}}).encode("utf-8")
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(1)
-    client.connect(socket_path)
-    client.sendall(payload)
-    client.shutdown(socket.SHUT_WR)
-    data = b""
-    while True:
-        chunk = client.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    response = json.loads(data.decode("utf-8")) if data else {}
-    service_pid = response.get("servicePID") or 0
-    daemon_status = response.get("daemonStatus")
-    if response.get("ok"):
-        print(f"exiting {service_pid}")
-    elif daemon_status is not None:
-        # A busy daemon reports its status; a generic failure does not.
-        print(f"busy {service_pid} {daemon_status.get('activeSessionCount', 0)}")
-    else:
-        print(f"error {response.get('message', 'no response')}")
-except OSError:
-    pass
-finally:
-    try:
-        client.close()
-    except Exception:
-        pass
-PY
+data = sys.stdin.read()
+response = json.loads(data) if data.strip() else {}
+service_pid = response.get("servicePID") or 0
+daemon_status = response.get("daemonStatus")
+if response.get("ok"):
+    print(f"exiting {service_pid}")
+elif daemon_status is not None:
+    # A busy daemon reports its status; a generic failure does not.
+    sessions = daemon_status.get("activeSessionCount", 0)
+    print(f"busy {service_pid} {sessions}")
+else:
+    message = response.get("message", "no response")
+    print(f"error {message}")
+' || true
   )"
 
   case "$outcome" in
@@ -338,46 +346,8 @@ PY
     return 0
   fi
 
-  local deadline=$((SECONDS + timeout))
-  while (( SECONDS < deadline )); do
-    local live_pids=""
-    local pid
-    for pid in $candidate_pids; do
-      if kill -0 "$pid" >/dev/null 2>&1; then
-        live_pids="${live_pids}${live_pids:+ }$pid"
-      fi
-    done
-    if [[ -z "$live_pids" && ! -e "$socket_path" ]]; then
-      return 0
-    fi
-    if [[ -z "$live_pids" && -z "$(spaces_profile_socket_owner_pids "$socket_path")" ]]; then
-      rm -f "$socket_path"
-      return 0
-    fi
-    sleep 0.2
-  done
-
   # The daemon confirmed it was idle, so escalating on a stuck exit cannot kill live sessions.
-  local pid
-  for pid in $candidate_pids; do
-    kill "$pid" >/dev/null 2>&1 || true
-  done
-  deadline=$((SECONDS + 3))
-  while (( SECONDS < deadline )); do
-    local any_live=0
-    for pid in $candidate_pids; do
-      if kill -0 "$pid" >/dev/null 2>&1; then
-        any_live=1
-      fi
-    done
-    [[ "$any_live" -eq 0 ]] && return 0
-    sleep 0.2
-  done
-
-  for pid in $candidate_pids; do
-    kill -9 "$pid" >/dev/null 2>&1 || true
-  done
-  return 0
+  _spaces_profile_wait_for_exit_and_escalate "$socket_path" "$timeout" "$candidate_pids"
 }
 
 spaces_profile_wait_for_owner_pid() {
