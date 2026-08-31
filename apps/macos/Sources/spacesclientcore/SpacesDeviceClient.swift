@@ -670,18 +670,15 @@ public enum SpacesDeviceClient {
     /// Reads one file inside a workspace's checkout on a paired device (capped at 10 MiB on the daemon
     /// side; see `SpacesDeviceAPIServer.workspaceFileMaxBytes`).
     public static func workspaceFileRead(
-        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
-        requiresDirectPath: Bool = false,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil, requiresDirectPath: Bool = false,
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceFileReadResult {
         let response = try request(
-            .init(command: .workspaceFileRead(
-                .init(
-                    workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
-                    requiresDirectPath: requiresDirectPath))),
-            device: device, clientApp: clientApp,
-            profile: profile)
+            .init(
+                command: .workspaceFileRead(
+                    .init(
+                        workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                        requiresDirectPath: requiresDirectPath))), device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -695,8 +692,9 @@ public enum SpacesDeviceClient {
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceRevisionFileReadResult {
         let response = try request(
-            .init(command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))),
-            device: device, clientApp: clientApp, profile: profile)
+            .init(
+                command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))
+            ), device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceRevisionFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -709,16 +707,14 @@ public enum SpacesDeviceClient {
     /// the caller can merge against.
     public static func workspaceFileWrite(
         workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false,
-        device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceWorkspaceFileWriteResult {
         let response = try request(
             .init(
                 command: .workspaceFileWrite(
                     .init(
                         workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
-                        requiresDirectPath: requiresDirectPath))),
-            device: device, clientApp: clientApp, profile: profile)
+                        requiresDirectPath: requiresDirectPath))), device: device, clientApp: clientApp, profile: profile)
         guard let result = response.workspaceFileWrite else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -1358,29 +1354,13 @@ public enum SpacesDeviceClient {
         return false
     }
 
-    public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
-        switch command {
-        case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
-            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
-            .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,
-            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
-            longRunningMutationTimeoutSeconds
-        case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
-        case .terminalTranscript, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk,
-            .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
-            largePayloadRequestTimeoutSeconds
-        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
-            .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations,
-            .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
-            .workspaceReviewCommentsSend:
-            defaultRequestTimeoutSeconds
-        }
-    }
+    /// Delegates to `SpacesDeviceAPICommandDescriptor.timeoutSeconds`, the exhaustive per-command switch
+    /// pinned in `spacesdevicecore`. `defaultRequestTimeoutSeconds`/`agentHooksStatusRequestTimeoutSeconds`/
+    /// `longRunningMutationTimeoutSeconds`/`largePayloadRequestTimeoutSeconds` above stay in this type
+    /// (rather than moving into the descriptor) because they are also asserted against directly by
+    /// `SpacesDeviceOverviewViewModelTests`; the descriptor's own switch pins the same four values as
+    /// literals so the two cannot silently drift without a test on one side or the other catching it.
+    public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval { command.descriptor.timeoutSeconds }
 }
 
 /// The paired-device record a long-lived overview subscription publishes with, held across the

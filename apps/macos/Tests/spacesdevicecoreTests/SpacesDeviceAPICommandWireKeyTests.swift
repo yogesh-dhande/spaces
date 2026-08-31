@@ -21,27 +21,36 @@ import spacesterminalcore
 /// literals, never read back out of `SpacesDeviceAPICommand`'s own `CodingKeys`/`name`, so a silent change
 /// to the wire format fails this test even though it would not fail a test built from the same table the
 /// production code uses.
+///
+/// `SpacesDeviceAPICommandDescriptor.wireKey` (in `SpacesDeviceAPICommandDescriptor.swift`) is now the
+/// production descriptor table this file's stage-1 doc comment above anticipated: it is what
+/// `SpacesDeviceAPICommand`'s encoding contract is actually pinned into for downstream consumers, via its
+/// own default-less exhaustive switch. `everyCaseEncodesToItsGoldenWireKeyAndRoundTrips` asserts
+/// `descriptor.wireKey` against the hand-written golden key for every sample, so a case whose descriptor
+/// wire key drifts from the golden (hand-written, independent) one fails here even though both switches
+/// individually still compile. This does not fully close completeness layer 3 below — a case missing from
+/// `samples` still compiles fine, since `SpacesDeviceAPICommand` still cannot conform to `CaseIterable` and
+/// so nothing enumerates "every case" independently of a hand-maintained list — but it does mean the
+/// descriptor switch, not just `goldenWireKey`, is now exercised as the thing every non-test consumer
+/// actually reads.
 @Suite struct SpacesDeviceAPICommandWireKeyTests {
     /// One representative instance per case, in declaration order. Field values are arbitrary — this test
     /// pins the command's wire *key* and round-trip identity, not any payload type's own field encoding.
-    private static let samples: [SpacesDeviceAPICommand] = [
-        .pair(SpacesDevicePairRequest(pairingCode: "code", pairingNonce: "nonce", clientProtocolVersion: 1)),
-        .ping,
-        .daemonStatus,
-        .requestDaemonRestart,
-        .overview,
-        .createProject(SpacesDeviceProjectCreateRequest(projectDir: "/tmp/project", gitURL: nil)),
+    /// Not `private`: `SpacesDeviceAPICommandDescriptorTests` reuses this same one-per-case list so its
+    /// descriptor assertions run over the identical 74 commands this file's own assertions do, rather than
+    /// hand-building a second payload table that could drift out of sync with this one.
+    static let samples: [SpacesDeviceAPICommand] = [
+        .pair(SpacesDevicePairRequest(pairingCode: "code", pairingNonce: "nonce", clientProtocolVersion: 1)), .ping, .daemonStatus,
+        .requestDaemonRestart, .overview, .createProject(SpacesDeviceProjectCreateRequest(projectDir: "/tmp/project", gitURL: nil)),
         .previewGitProject(SpacesDeviceGitProjectPreviewRequest(gitURL: "https://example.com/repo.git")),
         .deleteProject(SpacesDeviceProjectReference(projectID: "project-1")),
         .importProject(SpacesDeviceProjectImportRequest(projectID: "project-1")),
-        .exportProject(SpacesDeviceProjectReference(projectID: "project-1")),
-        .previewProject(SpacesDeviceProjectPreviewRequest(dir: "/tmp/project")),
+        .exportProject(SpacesDeviceProjectReference(projectID: "project-1")), .previewProject(SpacesDeviceProjectPreviewRequest(dir: "/tmp/project")),
         .listDirectories(SpacesDeviceDirectoryListRequest(path: "/tmp")),
         .workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptionsRequest(projectID: "project-1")),
         .createWorkspace(
             SpacesDeviceWorkspaceCreateRequest(
-                projectID: "project-1", branch: "feature", baseBranch: "main", directoryName: "dir", notes: nil,
-                allowExistingBranchReuse: false)),
+                projectID: "project-1", branch: "feature", baseBranch: "main", directoryName: "dir", notes: nil, allowExistingBranchReuse: false)),
         .launchWorkspace(SpacesDeviceWorkspaceLifecycleRequest(workspaceID: "workspace-1")),
         .stopWorkspace(SpacesDeviceWorkspaceLifecycleRequest(workspaceID: "workspace-1")),
         .restartWorkspace(SpacesDeviceWorkspaceLifecycleRequest(workspaceID: "workspace-1")),
@@ -72,9 +81,7 @@ import spacesterminalcore
         .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: "session-1", clientID: "client-1")),
         .resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: "link")),
         .readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 1024)),
-        .subscribeDeviceOverview,
-        .agentHooksStatus,
-        .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
+        .subscribeDeviceOverview, .agentHooksStatus, .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
         .spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest(workspaceID: "workspace-1", command: "claude")),
         .listAgentSessions(SpacesDeviceListAgentSessionsRequest(workspaceID: "workspace-1")),
         .annotateAgentSession(SpacesDeviceAnnotateAgentSessionRequest(sessionID: "session-1", note: "note")),
@@ -83,8 +90,7 @@ import spacesterminalcore
         .createAutomation(Self.automationFields),
         .updateAutomation(TerminalServiceAutomationUpdatePayload(id: "automation-1", fields: Self.automationFields)),
         .setAutomationNextRun(TerminalServiceAutomationNextRunPayload(id: "automation-1", nextRunTime: "2026-01-01T00:00:00Z")),
-        .deleteAutomation(SpacesDeviceAutomationReference(id: "automation-1")),
-        .listAutomations,
+        .deleteAutomation(SpacesDeviceAutomationReference(id: "automation-1")), .listAutomations,
         .listAutomationRuns(TerminalServiceAutomationRunsListPayload(automationID: "automation-1")),
         .triggerAutomation(SpacesDeviceAutomationReference(id: "automation-1")),
         .cancelAutomationRun(SpacesDeviceAutomationRunReference(runID: "run-1")),
@@ -98,8 +104,7 @@ import spacesterminalcore
         .workspaceDiffManifestChunk(SpacesDeviceWorkspaceDiffManifestChunkRequest(workspaceID: "workspace-1", fileIndex: 0)),
         .workspaceDiffManifestRelease(SpacesDeviceWorkspaceDiffManifestReleaseRequest(workspaceID: "workspace-1", manifestID: "manifest-1")),
         .workspaceDiffFileChunk(
-            SpacesDeviceWorkspaceDiffFileChunkRequest(
-                workspaceID: "workspace-1", manifestID: "manifest-1", relativePath: "README.md", byteOffset: 0)),
+            SpacesDeviceWorkspaceDiffFileChunkRequest(workspaceID: "workspace-1", manifestID: "manifest-1", relativePath: "README.md", byteOffset: 0)),
         .subscribeWorkspaceDiffSignature(SpacesDeviceWorkspaceDiffRequest(workspaceID: "workspace-1")),
         .subscribeWorkspaceFileSignature(SpacesDeviceWorkspaceFileSignatureRequest(workspaceID: "workspace-1", path: "README.md")),
         .subscribeWorkspaceFileListSignature(SpacesDeviceWorkspaceFileListSignatureRequest(workspaceID: "workspace-1")),
@@ -133,9 +138,11 @@ import spacesterminalcore
     ///     (the set would be smaller than the list), which a bare `count == 74` check would miss.
     ///  3. What neither closes: a new 75th case added to the enum but never added to `samples` — the
     ///     switch still compiles (it only requires *a* mapping, not that every mapping is exercised) and
-    ///     the set stays "74 distinct out of 74 samples". That gap closes in the next stage, when a
-    ///     production descriptor table becomes the exhaustive enumeration source this test asserts its
-    ///     sample set against, rather than a hand-maintained list.
+    ///     the set stays "74 distinct out of 74 samples". `SpacesDeviceAPICommand` still cannot conform to
+    ///     `CaseIterable` (its cases carry differently-typed associated values), so no enumeration source
+    ///     independent of a hand-maintained list exists to close this gap against; both `goldenWireKey` and
+    ///     `SpacesDeviceAPICommandDescriptor`'s own switch are default-less exhaustive switches over the
+    ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
         #expect(keys.count == 74)
@@ -145,6 +152,11 @@ import spacesterminalcore
     @Test func everyCaseEncodesToItsGoldenWireKeyAndRoundTrips() throws {
         for command in Self.samples {
             let expectedKey = Self.goldenWireKey(command)
+
+            // `SpacesDeviceAPICommandDescriptor.wireKey` is the production source every non-test consumer
+            // reads; asserting it against the independently hand-written golden key here, per sample,
+            // catches a descriptor-switch typo or drift that the descriptor's own exhaustiveness cannot.
+            #expect(command.descriptor.wireKey == expectedKey, "\(expectedKey): descriptor.wireKey did not match the golden wire key")
 
             let data = try JSONEncoder().encode(command)
             let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -161,6 +173,17 @@ import spacesterminalcore
             let decoded = try JSONDecoder().decode(SpacesDeviceAPICommand.self, from: data)
             #expect(decoded == command, "\(expectedKey): did not round-trip to an equal command")
         }
+    }
+
+    /// The descriptor's wire keys, taken over `samples`, must be the exact same set as the golden wire
+    /// keys taken over `samples` — same 74 distinct members, none extra, none missing. Redundant with the
+    /// per-sample equality above in what it would catch (a mismatched key would fail both), but it asserts
+    /// the requirement at the set level explicitly, matching how `sampleListCoversEveryCurrentCaseExactlyOnce`
+    /// asserts distinctness at the set level rather than only per-element.
+    @Test func descriptorWireKeysMatchGoldenWireKeysAsASet() {
+        let goldenKeys = Set(Self.samples.map(Self.goldenWireKey))
+        let descriptorKeys = Set(Self.samples.map { $0.descriptor.wireKey })
+        #expect(descriptorKeys == goldenKeys)
     }
 
     /// The golden case-name -> wire-key table, hand-written independently of
