@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 import spacesterminalcore
 
 /// Raised when an automation's editable fields fail validation at the create/update boundary. Carries a
