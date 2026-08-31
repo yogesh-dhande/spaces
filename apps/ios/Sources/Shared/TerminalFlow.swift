@@ -79,7 +79,6 @@ extension PendingTerminalLaunch.Action {
 
 struct TerminalLaunchPendingView: View {
     private static let chromeControlHeight: CGFloat = 36
-    private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
     let launch: PendingTerminalLaunch
     let model: SpacesMobileAppModel
@@ -92,16 +91,13 @@ struct TerminalLaunchPendingView: View {
         VStack(spacing: 0) {
             topOverlay.padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
 
-            VStack(spacing: 18) {
-                Spacer(minLength: 0)
-                Image(systemName: launch.systemImage).font(.system(size: 34, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
+            TerminalStatusPlaceholder(systemName: launch.systemImage) {
                 ProgressView().tint(.white)
                 Text(launch.action.progressLabel).font(.body.monospaced()).foregroundStyle(.white.opacity(0.88)).multilineTextAlignment(.center)
                 Text(launch.detail).font(.footnote.monospaced()).foregroundStyle(.white.opacity(0.56)).lineLimit(2).truncationMode(.middle)
                     .multilineTextAlignment(.center).padding(.horizontal, 28)
-                Spacer(minLength: 0)
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.background(Self.surfaceBackground.ignoresSafeArea()).toolbar(.hidden, for: .navigationBar).task(id: launch.id) {
+            }
+        }.background(Theme.terminalSurface.ignoresSafeArea()).toolbar(.hidden, for: .navigationBar).task(id: launch.id) {
             guard !hasStarted else { return }
             hasStarted = true
             let session = await runLaunch()
@@ -114,8 +110,7 @@ struct TerminalLaunchPendingView: View {
         HStack(spacing: 8) {
             Button(action: onBack) {
                 Image(systemName: "chevron.left").font(.subheadline.weight(.semibold)).foregroundStyle(.white).frame(height: Self.chromeControlHeight)
-                    .padding(.horizontal, 12).background(
-                        Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+                    .padding(.horizontal, 12).background(Theme.terminalChromePillBackground)
             }.accessibilityIdentifier("terminal.launch.back").accessibilityLabel("Back")
 
             Spacer(minLength: 0)

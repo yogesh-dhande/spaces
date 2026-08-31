@@ -7,10 +7,6 @@ import spacesterminalmobileghostty
 
 struct TerminalDetailView: View {
     private static let chromeControlHeight: CGFloat = 36
-    /// The terminal surface is always dark regardless of the app's light/dark
-    /// appearance, so this uses the fixed brand dark background value
-    /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
-    private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
     /// Gap between the Copy pill and the highlight's edge, on whichever side it sits: enough that the
     /// pill never touches (let alone covers) the selected text.
     private static let selectionCopyPillGap: CGFloat = 6
@@ -111,7 +107,7 @@ struct TerminalDetailView: View {
                             }, onClearSelectionTapped: { clearSelectionOnTerminalTap() }
                         ).ignoresSafeArea(.keyboard, edges: .bottom).accessibilityIdentifier("terminal.surface").allowsHitTesting(
                             model.shouldPresentLiveSurface
-                        ).accessibilityHidden(!model.shouldPresentLiveSurface).background(Self.surfaceBackground)
+                        ).accessibilityHidden(!model.shouldPresentLiveSurface).background(Theme.terminalSurface)
 
                         if !model.shouldPresentLiveSurface { statusShell.onAppear { renderedText = "" } }
 
@@ -124,7 +120,7 @@ struct TerminalDetailView: View {
 
             if model.isDemoMode { demoNoticeBanner }
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
-        }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
+        }.background(Theme.terminalSurface.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
             .hidden, for: .navigationBar
         ).task {
             if scenePhase != .active { model.prepareForBackgrounding() }
@@ -309,7 +305,7 @@ struct TerminalDetailView: View {
                 } label: {
                     Image(systemName: appModel.isMutating ? "arrow.triangle.2.circlepath" : "ellipsis").font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white).frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight).background(
-                            Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+                            Theme.terminalChromePillBackground)
                 }.disabled(appModel.isMutating).accessibilityLabel("Terminal actions").accessibilityIdentifier("terminal.runtimeActions")
             }
         } else if model.isOwner {
@@ -377,17 +373,14 @@ struct TerminalDetailView: View {
     }
 
     private var statusShell: some View {
-        VStack(spacing: 18) {
-            Spacer(minLength: 0)
-            Image(
-                systemName: model.isOwner && model.isPreparingInput || model.isTakingOver || model.isConnecting
-                    ? "arrow.triangle.2.circlepath.circle.fill" : "lock.desktopcomputer"
-            ).font(.system(size: 34, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
+        TerminalStatusPlaceholder(
+            systemName: model.isOwner && model.isPreparingInput || model.isTakingOver || model.isConnecting
+                ? "arrow.triangle.2.circlepath.circle.fill" : "lock.desktopcomputer"
+        ) {
             Text(model.visibleText).font(.body.monospaced()).foregroundStyle(.white.opacity(0.88)).multilineTextAlignment(.center).padding(
                 .horizontal, 28)
             if model.showsTakeOverAction { takeOverButton.padding(.top, 4) }
-            Spacer(minLength: 0)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Self.surfaceBackground)
+        }.background(Theme.terminalSurface)
     }
 
     private func chromeButton<Label: View>(
@@ -395,7 +388,7 @@ struct TerminalDetailView: View {
     ) -> some View {
         Button(action: action) {
             label().foregroundStyle(.white).frame(height: Self.chromeControlHeight).padding(.horizontal, 18).background(
-                Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+                Theme.terminalChromePillBackground)
         }.accessibilityElement(children: .ignore).accessibilityLabel(accessibilityLabel).accessibilityIdentifier(accessibilityIdentifier)
     }
 

@@ -13,9 +13,6 @@ import spacesterminalcore
 /// bar) so the two full-screen detail surfaces read as the same product.
 struct BrowserSessionDetailView: View {
     private static let chromeControlHeight: CGFloat = 36
-    /// Matches `TerminalDetailView`'s fixed brand-dark background so this detail screen reads the same
-    /// regardless of the app's light/dark appearance.
-    private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
     let title: String
     let subtitle: String
@@ -48,7 +45,7 @@ struct BrowserSessionDetailView: View {
             }
 
             bottomToolbar
-        }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("browserSession.detail").toolbar(.hidden, for: .navigationBar)
+        }.background(Theme.terminalSurface.ignoresSafeArea()).accessibilityIdentifier("browserSession.detail").toolbar(.hidden, for: .navigationBar)
             .fullScreenCover(item: $markupItem) { item in
                 ScreenshotMarkupPresenter(item: item, stagedScreenshots: stagedScreenshots) { outcome in
                     markupItem = nil
@@ -183,7 +180,7 @@ struct BrowserSessionDetailView: View {
             Button("Retry") { model.retry?() }.buttonStyle(BrandPrimaryButtonStyle()).frame(width: 140).accessibilityIdentifier(
                 "browserSession.retry")
             Spacer(minLength: 0)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Self.surfaceBackground).accessibilityIdentifier("browserSession.error")
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.terminalSurface).accessibilityIdentifier("browserSession.error")
     }
 
     private func chromeButton<Label: View>(
@@ -191,7 +188,7 @@ struct BrowserSessionDetailView: View {
     ) -> some View {
         Button(action: action) {
             label().foregroundStyle(.white).frame(height: Self.chromeControlHeight).padding(.horizontal, 18).background(
-                Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+                Theme.terminalChromePillBackground)
         }.accessibilityElement(children: .ignore).accessibilityLabel(accessibilityLabel).accessibilityIdentifier(accessibilityIdentifier)
     }
 }

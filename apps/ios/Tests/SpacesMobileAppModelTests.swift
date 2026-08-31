@@ -1750,6 +1750,44 @@
             XCTAssertEqual(model.runtimeRow(forSessionID: "session-api")?.title, "api")
         }
 
+        /// The runtime-row lookups memoize an index over the published `overview`, and the cache
+        /// itself is deliberately unobserved. A lookup that hits the warm cache must still register
+        /// an observation of `overview`, or a view whose only overview dependency is this lookup
+        /// (e.g. `TerminalDetailView`'s runtime actions) would never re-render for an overview-only
+        /// update once some other state change had warmed the cache for it.
+        func testRuntimeRowLookupObservesOverviewEvenOnWarmCacheHits() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
+            // Warm the cache outside the tracking scope, so the tracked lookup below is a cache hit.
+            XCTAssertNotNil(model.runtimeRow(forSessionID: "session-api"))
+
+            // `onChange` is `@Sendable` and not guaranteed to run on the calling actor, so a bare
+            // captured `var` would race under strict concurrency checking (see the counter's doc in
+            // SpacesMobileAutomationsTests).
+            final class ChangeFlag: @unchecked Sendable {
+                private let lock = NSLock()
+                private var flagged = false
+                func set() {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    flagged = true
+                }
+                func isSet() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return flagged
+                }
+            }
+            let overviewChangeObserved = ChangeFlag()
+            withObservationTracking {
+                _ = model.runtimeRow(forSessionID: "session-api")
+            } onChange: {
+                overviewChangeObserved.set()
+            }
+            model.overview = makeOverview()
+            XCTAssertTrue(overviewChangeObserved.isSet(), "a warm-cache lookup must still depend on the published overview")
+        }
+
         func testOpenTerminalDeepLinkStagesSessionAndSelectsSpacesTab() async {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-orphan")])
