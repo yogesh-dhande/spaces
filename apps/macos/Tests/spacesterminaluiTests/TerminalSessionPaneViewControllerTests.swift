@@ -3625,7 +3625,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let refreshCountBeforeMetadataChange = controller.debugRefreshNowCallCountForTesting
 
         fakeHost.effectiveTitle = "streaming agent output"
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.sessionMetadata, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(controller.displayTitle, "streaming agent output", "the single refresh must still have picked up the new title")
         XCTAssertEqual(
@@ -3642,9 +3642,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
     /// Reasons the daemon broadcasts for screen content, at interaction frequency.
     private static let screenContentStateReasons = [
-        TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
-        TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
-        TerminalRemoteSessionStateReason.resize,
+        TerminalRemoteSessionStateReason.output.rawValue, TerminalRemoteSessionStateReason.input.rawValue,
+        TerminalRemoteSessionStateReason.inputOutput.rawValue, TerminalRemoteSessionStateReason.stateChange.rawValue,
+        TerminalRemoteSessionStateReason.scroll.rawValue, TerminalRemoteSessionStateReason.clearScreen.rawValue,
+        TerminalRemoteSessionStateReason.resize.rawValue,
     ]
 
     /// A pane showing a live Ghostty mirror has already painted whatever a screen-content payload
@@ -3684,7 +3685,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         // The state-shaped reason still refreshes, so the assertion above cannot pass by the
         // notifications simply never being delivered.
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
     }
@@ -3703,7 +3704,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 33, state: .exited, updatedAt: "2026-05-09T00:00:05Z"),
             paths: paths)
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.output, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.output.rawValue, sessionID: sessionID)
 
         XCTAssertTrue(controller.debugState.contains("child: 33"))
     }
@@ -3742,7 +3743,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         // The mirror applied the catch-up frame, so the host now has a renderable surface.
         host.hasSurface = true
         host.snapshotValue = ghosttySnapshot()
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
         XCTAssertTrue(controller.debugShowsTerminalSurface)
@@ -3778,7 +3779,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         // holds no renderable surface of its own at this point — it has never mounted the mirror for
         // this ended session — so the snapshot, not surface availability, is what promotes it.
         host.snapshotValue = ghosttySnapshot(text: "final output")
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(controller.visibleRenderer, .ghosttyEndedFinalRender)
         XCTAssertTrue(controller.debugShowsTerminalSurface)
@@ -3822,7 +3823,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(refreshCount, 0)
 
         // The notifications are delivered — a state-shaped reason still refreshes the pane.
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(refreshCount, 1)
     }
@@ -3924,7 +3925,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         refreshCount = 0
         host.hasSurface = true
-        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, sessionID: sessionID)
 
         XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
         XCTAssertEqual(refreshCount, 1)

@@ -232,7 +232,7 @@
 
         private func terminatedState() -> GhosttyRemoteSessionStatePayload {
             GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:24:00Z",
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:24:00Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:24:00Z"),

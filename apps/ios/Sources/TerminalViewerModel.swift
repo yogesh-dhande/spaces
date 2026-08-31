@@ -2036,7 +2036,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
         isConnecting = false
         guard let refreshedState else { return false }
-        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
+        if refreshedState.reasonKind == .terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
             isAwaitingTakeoverConfirmation = false
             errorMessage = nil
@@ -2073,7 +2073,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
         isConnecting = false
         guard let refreshedState else { return false }
-        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
+        if refreshedState.reasonKind == .terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
             isAwaitingTakeoverConfirmation = false
             errorMessage = nil
@@ -3114,8 +3114,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let runtime = TerminalSessionRuntimeState(
             sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-01-01T00:00:00Z", sessionStateRevision: nil,
-            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
+            sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-01-01T00:00:00Z",
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
             workingDirectory: session.workingDirectory, outputByteCount: 0)
         await applyLatestState(payload, isOutOfBand: false)

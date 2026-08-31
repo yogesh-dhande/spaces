@@ -642,7 +642,7 @@
         func testForegroundHeartbeatSessionNotRunningReadsAndAppliesFinalTerminalState() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let finalState = Self.runState(
-                childPID: 200, state: .exited, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:27:00Z")
+                childPID: 200, state: .exited, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:27:00Z")
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
                 if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
@@ -1321,7 +1321,7 @@
         func testStartingSessionRefreshesFailedStateWhenAttachReportsNotRunning() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let failedState = GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:30Z",
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:23:30Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: nil, state: .failed, updatedAt: "2026-06-04T14:23:30Z",
@@ -2539,7 +2539,8 @@
         func testARefusedExitReportFromASupersededRunDoesNotEndTheSession() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let exitReportResponse = Self.terminalStateResponse(
-                Self.runState(childPID: 199, state: .exited, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:40Z"))
+                Self.runState(
+                    childPID: 199, state: .exited, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:23:40Z"))
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
                 if case .state = request.command { return exitReportResponse }
@@ -2556,7 +2557,8 @@
             // The relaunched run as the stream reported it: a newer stamp, and a different child PID from
             // the exit report the read above answers with.
             await model.applyLatestState(
-                Self.runState(childPID: 200, state: .starting, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T14:23:45Z"),
+                Self.runState(
+                    childPID: 200, state: .starting, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-04T14:23:45Z"),
                 isOutOfBand: false)
 
             model.start()
@@ -2695,8 +2697,8 @@
 
         private nonisolated static func outputState(title: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
             GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
-                sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
                 workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
@@ -2707,7 +2709,7 @@
         ) throws -> GhosttyRemoteSessionStatePayload {
             let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil,
                 attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
@@ -2722,7 +2724,7 @@
                 baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: 5, rows: 1, cursorColumn: 0,
                 cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0, changedCellCount: 0)
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: targetRevision, sessionStateFlags: 1, screenStateRevision: targetRevision, runtimeState: nil,
                 attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.delta(delta)))
@@ -2757,7 +2759,7 @@
                 id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:23:30Z")
             let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [owner], attachments: [attachment]), title: "terminal",
                 workingDirectory: "/tmp/work", outputByteCount: 0)
@@ -2810,7 +2812,7 @@
             let attachment = TerminalAttachment(
                 sessionID: "terminal-session", clientID: attachedClient.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T14:23:30Z",
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-04T14:23:30Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-06-04T14:23:30Z"),
@@ -2822,7 +2824,7 @@
             attachmentSnapshot: TerminalSessionAttachmentSnapshot, emittedAt: String, state: TerminalSessionState = .running
         ) -> GhosttyRemoteSessionStatePayload {
             GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: 200, state: state, updatedAt: emittedAt),

@@ -421,7 +421,7 @@
             guard let self else { return }
             self.requestSurfaceRefreshAction()
             GhosttyEmbeddedAppService.shared.tick()
-            self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.inputOutput)
+            self.broadcastCurrentState(reason: .inputOutput)
         }
         private let interactiveOutputGate = InteractiveOutputGate()
         /// This session's attachment snapshot (`terminal_clients` + `terminal_attachments`) held in memory:
@@ -563,7 +563,7 @@
                 refreshRuntimeState(force: true)
                 sessionStartedAt = startedAt
                 didLogFirstOutput = false
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+                broadcastCurrentState(reason: .initial)
                 TerminalPerformance.logMetric(
                     "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
@@ -713,15 +713,13 @@
             markAllAttachmentsDetachedInCache(detachedAt: now)
             let finalPayloadPublishStartedAt = Date()
             let finalPayload = currentRemoteSessionState(
-                reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil,
-                payloadPublishStartedAt: finalPayloadPublishStartedAt)
+                reason: .terminated, outputByteCount: nil, payloadPublishStartedAt: finalPayloadPublishStartedAt)
             if let finalPayload {
                 let payloadPaths = paths
                 enqueuePersistenceWrite { databasePath in
                     try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths, databasePath: databasePath)
                 }
-                broadcastRemoteStatePayload(
-                    finalPayload, startedAt: finalPayloadPublishStartedAt, ownerClient: nil, outputByteCount: nil)
+                broadcastRemoteStatePayload(finalPayload, startedAt: finalPayloadPublishStartedAt, ownerClient: nil, outputByteCount: nil)
             }
             // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
             // above; FIFO on the serial persistence queue lands them in order and after every pending mirror
@@ -1140,7 +1138,7 @@
             } catch { fputs("spaces: ghostty handoff resume-in-place failed: \(error)\n", stderr) }
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+            broadcastCurrentState(reason: .initial)
         }
 
         /// Resume side of the exec-in-place handoff, run on a freshly built core in the
@@ -1212,7 +1210,7 @@
             sessionStartedAt = Date()
             didLogFirstOutput = false
             refreshRuntimeState(force: true)
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+            broadcastCurrentState(reason: .initial)
         }
 
         var debugOwnerEpoch: UInt64 { ownerEpoch }
@@ -1301,8 +1299,7 @@
                         // false when the real subscriber connects, and without a full-frame
                         // baseline its deltas can never apply (the pane never becomes renderable).
                         self?.currentRemoteSessionState(
-                            reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
-                            markNextBroadcastFullWhenMissingRenderUpdate: true)
+                            reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: true)
                     }
                 })
             try stateStreamServer.start()
@@ -1518,7 +1515,7 @@
             let didSet = rendererHostStorage.setSelectionAbsolute(
                 startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, rectangle: request.selectionRectangle ?? false)
             let selectionText = didSet ? rendererHostStorage.readSelectionText() : nil
-            if didSet { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection) }
+            if didSet { broadcastCurrentState(reason: .selection) }
             TerminalPerformance.logMetric(
                 "terminal_control_set_selection", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: didSet)
@@ -1534,7 +1531,7 @@
             touchClientLease(request.clientID)
             // Not owner-gated for the same reason as `controlResponseForSetSelectionRequest` above.
             rendererHostStorage.clearSelection()
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.selection)
+            broadcastCurrentState(reason: .selection)
             TerminalPerformance.logMetric(
                 "terminal_control_clear_selection", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
@@ -1794,7 +1791,7 @@
             if touchClient, let clientID = request.clientID { touchClientLease(clientID) }
             if let rejection = ownerRequestRejection(for: request, commandName: "clear", startedAt: startedAt) { return rejection }
             let cleared = rendererHostStorage.clearScreenAndScrollback()
-            if cleared { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen) }
+            if cleared { broadcastCurrentState(reason: .clearScreen) }
             TerminalPerformance.logMetric(
                 "terminal_control_clear_screen", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: cleared)
@@ -1827,7 +1824,7 @@
             }
             let scrolled = rendererHostStorage.sendScroll(
                 horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-            if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
+            if scrolled { broadcastCurrentState(reason: .scroll) }
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
@@ -2022,7 +2019,7 @@
             }
             pendingResizeBroadcastGrid = nil
             trace("resize_reflow_broadcast columns=\(columns) rows=\(rows)")
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize, preCapturedScreenState: capturedScreenState)
+            broadcastCurrentState(reason: .resize, preCapturedScreenState: capturedScreenState)
         }
 
         private func startRuntimeStateTimer() {
@@ -2424,9 +2421,7 @@
         /// force a runtime-state write the way the metadata and bell paths do.
         private func forwardClipboardWriteToOwner(_ text: String) {
             guard let ownerClientID = activeOwnerClientID() else { return }
-            broadcastCurrentState(
-                reason: TerminalRemoteSessionStateReason.clipboardWrite,
-                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
+            broadcastCurrentState(reason: .clipboardWrite, clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
         }
 
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
@@ -2506,7 +2501,7 @@
         /// rows, e.g. a dead client as owner right after a stale-client expiry.
         private func postAttachmentStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+            broadcastCurrentState(reason: .attachmentState)
         }
 
         /// Set when a metadata change (title, working directory) still owes overview subscribers a rebuild,
@@ -2522,7 +2517,7 @@
         private func postSessionMetadataDidChange() {
             TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
             owesOverviewSignalForMetadata = true
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+            broadcastCurrentState(reason: .sessionMetadata)
         }
 
         /// Posts the coalesced metadata overview signal, if one is owed. Driven by the 1 Hz tick. A session
@@ -2539,15 +2534,14 @@
             // This post covers any metadata change still owed, so the tick does not send a second one.
             owesOverviewSignalForMetadata = false
             TerminalOverviewSignal.post()
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.runtimeState)
+            broadcastCurrentState(reason: .runtimeState)
         }
 
         private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
             TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: launchConfiguration.sessionID)
             inputOutputResyncScheduler.handleOutputDidChange(interactive: interactiveResync)
             guard shouldBroadcastState else { return }
-            broadcastCurrentState(
-                reason: TerminalRemoteSessionStateReason.output, outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
+            broadcastCurrentState(reason: .output, outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
         }
 
         private func handleOwnerInputActivity(byteCount: Int) {
@@ -2574,7 +2568,7 @@
                 guard let self else { return }
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
-                self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
+                self.broadcastCurrentState(reason: .input)
             }
         }
 
@@ -2589,7 +2583,7 @@
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 guard self.screenStateRevisionNeedsExport(revision) else { return }
-                self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.stateChange)
+                self.broadcastCurrentState(reason: .stateChange)
             }
         }
 
@@ -2842,7 +2836,7 @@
 
         func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
 
-        public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
+        public func currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason = .stateChange) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
         }
 
@@ -2853,8 +2847,21 @@
         /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
         public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(
-                reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
-                markNextBroadcastFullWhenMissingRenderUpdate: true)
+                reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: true)
+        }
+
+        /// Typed convenience over the raw-string core below: every production broadcast names one of the
+        /// declared reasons, so this is what call sites use (`.initial`, `.scroll`, ...). The raw-string
+        /// overload stays private beneath it for `debugBroadcastCurrentStateForTesting`, which deliberately
+        /// drives this same pipeline with reasons outside the enum to prove unknown-reason behavior end to
+        /// end (see that function's callers).
+        private func broadcastCurrentState(
+            reason: TerminalRemoteSessionStateReason, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil,
+            clipboardWrite: TerminalClipboardWritePayload? = nil, preCapturedScreenState: LiveSessionScreenState? = nil
+        ) {
+            broadcastCurrentState(
+                reason: reason.rawValue, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, clipboardWrite: clipboardWrite,
+                preCapturedScreenState: preCapturedScreenState)
         }
 
         private func broadcastCurrentState(
@@ -2904,23 +2911,35 @@
                 logMobileTakeoverPerformance(
                     name: "remote_state_publish",
                     attributes: [
-                        "reason": payload.reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil",
-                        "output_bytes": String(outputByteCount ?? 0), "render_update": "0", "render_update_bytes": "0",
-                        "render_update_encode_ms": "0",
+                        "reason": payload.reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "output_bytes": String(outputByteCount ?? 0),
+                        "render_update": "0", "render_update_bytes": "0", "render_update_encode_ms": "0",
                     ])
                 logMobileTakeoverPerformance(
-                    name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                    attributes: framelessAttributes)
+                    name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: framelessAttributes)
             }
             TerminalPerformance.logMetric(
                 "terminal_remote_state_publish", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
-                detail: "reason=\(payload.reason) render_update=\(payload.hasRenderUpdate ? 1 : 0) bytes=\(outputByteCount ?? 0)"
-            )
+                detail: "reason=\(payload.reason) render_update=\(payload.hasRenderUpdate ? 1 : 0) bytes=\(outputByteCount ?? 0)")
             TerminalPerformance.logMetric(
                 "terminal_render_frame_payload_publish", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                 detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
+        }
+
+        /// Typed convenience over the raw-string core below; see `broadcastCurrentState`'s doc comment for
+        /// why the raw-string overload stays private and reachable (`debugCurrentRemoteSessionState`).
+        private func currentRemoteSessionState(
+            reason: TerminalRemoteSessionStateReason, outputByteCount: Int?, outputEndByteOffset: Int? = nil,
+            exportMode: RenderStateExportMode = .selfContained, markNextBroadcastFull: Bool = false,
+            markNextBroadcastFullWhenMissingRenderUpdate: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil,
+            preCapturedScreenState: LiveSessionScreenState? = nil, payloadPublishStartedAt: Date? = nil
+        ) -> GhosttyRemoteSessionStatePayload? {
+            currentRemoteSessionState(
+                reason: reason.rawValue, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: exportMode,
+                markNextBroadcastFull: markNextBroadcastFull,
+                markNextBroadcastFullWhenMissingRenderUpdate: markNextBroadcastFullWhenMissingRenderUpdate, clipboardWrite: clipboardWrite,
+                preCapturedScreenState: preCapturedScreenState, payloadPublishStartedAt: payloadPublishStartedAt)
         }
 
         private func currentRemoteSessionState(
@@ -3000,9 +3019,7 @@
                     return payload
                 }
 
-                guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else {
-                    return payload.replacingRenderUpdate(materialized: renderUpdateValue)
-                }
+                guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return payload.replacingRenderUpdate(materialized: renderUpdateValue) }
                 let sessionID = launchConfiguration.sessionID
                 let ownerKind = ownerClient?.kind.rawValue ?? "nil"
                 let publishOutputByteCount = outputByteCount
@@ -3064,21 +3081,24 @@
                 (nativeScrollRects, nativeScrollRectsOverflowed) = streamScrollRectCarry.drain(
                     mergingWith: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
             }
+            // `reason` reaches this helper as a raw wire string (see `broadcastCurrentState`'s doc comment:
+            // the debug testing hook deliberately drives this pipeline with reasons outside the enum), so
+            // it is parsed once here and every comparison below reads the parsed case. An unrecognized
+            // reason parses to nil and simply matches none of the cases below, exactly as an unmatched
+            // string comparison always did.
+            let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason)
             let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
-            let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reason != TerminalRemoteSessionStateReason.scroll
+            let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reasonKind != .scroll
             let forceFullForSelfContainedExport = exportMode == .selfContained
             let forceFullForExplicitResync =
-                reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.inputOutput
-                || reason == TerminalRemoteSessionStateReason.resize || reason == TerminalRemoteSessionStateReason.terminated
+                reasonKind == .initial || reasonKind == .inputOutput || reasonKind == .resize || reasonKind == .terminated
             let forceFull =
                 forceFullForExplicitResync || forceFullForSelfContainedExport || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision
                 || forceFullForSubscriberBaseline
             let forceFullReason =
-                if reason == TerminalRemoteSessionStateReason.initial {
-                    "initial_baseline"
-                } else if reason == TerminalRemoteSessionStateReason.inputOutput || reason == TerminalRemoteSessionStateReason.terminated {
+                if reasonKind == .initial { "initial_baseline" } else if reasonKind == .inputOutput || reasonKind == .terminated {
                     "explicit_resync"
-                } else if reason == TerminalRemoteSessionStateReason.resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
+                } else if reasonKind == .resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
                     "subscriber_baseline_reset"
                 } else if forceFullForSelfContainedExport { "self_contained_state_export" } else { "baseline_already_current" }
             let update = GhosttyRenderUpdateFactory.makeUpdate(
@@ -3153,7 +3173,7 @@
             // clear on an otherwise blank screen must still carry the frame so viewers un-paint the
             // highlight: the visible-content gate below exists to avoid exporting meaningless blank
             // frames for output-driven reasons, and does not apply to a selection change.
-            if reason == TerminalRemoteSessionStateReason.selection
+            if TerminalRemoteSessionStateReason(rawValue: reason) == .selection
                 || Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText)
             {
                 return (

@@ -123,7 +123,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
                 series.append(
                     (
                         payload(
-                            sessionID: sessionID, sequence: series.count, reason: TerminalRemoteSessionStateReason.stateChange,
+                            sessionID: sessionID, sequence: series.count, reason: TerminalRemoteSessionStateReason.stateChange.rawValue,
                             update: .full(frames[index - 1])), true
                     ))
             }
@@ -132,7 +132,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
                 ? .full(frames[0])
                 : GhosttyRenderUpdateFactory.makeUpdate(target: frames[index], baseline: GhosttyRenderUpdateBaseline(frame: frames[index - 1]))
             series.append(
-                (payload(sessionID: sessionID, sequence: series.count, reason: TerminalRemoteSessionStateReason.output, update: update), false))
+                (
+                    payload(sessionID: sessionID, sequence: series.count, reason: TerminalRemoteSessionStateReason.output.rawValue, update: update),
+                    false
+                ))
         }
         return series
     }
@@ -143,7 +146,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         var reducer = TerminalRemoteStateReducer()
         var previousPayload: GhosttyRemoteSessionStatePayload?
         return series.map { entry in
-            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite else {
+            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite.rawValue else {
                 return ApplyTarget.appliedOutput(for: TerminalRemoteStateReductionOutput(incomingPayload: entry.payload, reduction: nil, reduceMS: 0))
             }
             let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload, requestResyncOnApplyFailure: true)
@@ -179,7 +182,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         }
 
         XCTAssertEqual(collector.recorded, expected)
-        XCTAssertEqual(collector.recorded.filter { !$0.didReduce }.map(\.reason), [TerminalRemoteSessionStateReason.clipboardWrite])
+        XCTAssertEqual(collector.recorded.filter { !$0.didReduce }.map(\.reason), [TerminalRemoteSessionStateReason.clipboardWrite.rawValue])
         XCTAssertTrue(collector.recorded.allSatisfy { $0.coalescedAwayCount == 0 })
     }
 
@@ -198,12 +201,13 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let older = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
         let newer = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "frame-1"))
         // Seed the chain, then submit the newer stream frame and the older response back to back.
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(older)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(older)))
         try await waitUntil("seed applied") { collector.recorded.count == 1 }
 
-        pipeline.submit(payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(newer)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(newer)))
         pipeline.submit(
-            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.initial, update: .full(older)), isOutOfBand: true)
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.initial.rawValue, update: .full(older)),
+            isOutOfBand: true)
 
         try await waitUntil("both applied") { collector.recorded.count == 3 }
         let outputs = collector.recorded
@@ -261,7 +265,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await settle()
         XCTAssertEqual(
             collector.recorded.map(\.reason),
-            [TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.clipboardWrite, TerminalRemoteSessionStateReason.output])
+            [
+                TerminalRemoteSessionStateReason.output.rawValue, TerminalRemoteSessionStateReason.clipboardWrite.rawValue,
+                TerminalRemoteSessionStateReason.output.rawValue,
+            ])
         XCTAssertEqual(collector.recorded.map(\.frameText), ["frame-4", nil, "frame-9"])
         XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [4, 0, 4])
     }
@@ -284,10 +291,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let secondToThird = GhosttyRenderUpdateFactory.makeUpdate(target: third, baseline: GhosttyRenderUpdateBaseline(frame: second))
         XCTAssertEqual(secondToThird.kind, .delta)
         let payloads = [
-            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)),
+            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(first)),
             // Its base is revision 2, which the baseline is not: the reducer drops it and asks for a resync.
-            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: secondToThird),
-            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: .full(third)),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: secondToThird),
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(third)),
         ]
 
         let collector = OutputCollector()
@@ -326,9 +333,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let stateChangeFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "one"))
         let resizeFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "two"))
         let payloads = [
-            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(stateChangeFrame)),
-            framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState),
-            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.resize, update: .full(resizeFrame)),
+            payload(
+                sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, update: .full(stateChangeFrame)),
+            framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue),
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.resize.rawValue, update: .full(resizeFrame)),
         ]
 
         let collector = OutputCollector()
@@ -365,8 +373,9 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let attachmentFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "one"))
         let outputFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "two"))
         let payloads = [
-            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.attachmentState, update: .full(attachmentFrame)),
-            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(outputFrame)),
+            payload(
+                sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, update: .full(attachmentFrame)),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(outputFrame)),
         ]
 
         let collector = OutputCollector()
@@ -412,12 +421,12 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         // The seed applies on its own so the reducer's baseline is set before the delta below chains off
         // it; whether it applies before or during the block below is irrelevant to the reducer's chain,
         // but keeping it outside makes the two applies this test actually cares about unambiguous.
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seed)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(seed)))
         try await waitUntil("the seed applied") { collector.recorded.count == 1 }
 
         let release = blockMainThread()
-        pipeline.submit(framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState))
-        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: seedToTarget))
+        pipeline.submit(framelessPayload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: seedToTarget))
         try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == 3 }
         release.signal()
 
@@ -425,7 +434,8 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await settle()
         XCTAssertEqual(collector.recorded.count, 3, "the barrier must survive; a delta never carries a full frame")
         XCTAssertEqual(
-            collector.recorded.dropFirst().map(\.reason), [TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.output])
+            collector.recorded.dropFirst().map(\.reason),
+            [TerminalRemoteSessionStateReason.runtimeState.rawValue, TerminalRemoteSessionStateReason.output.rawValue])
         XCTAssertEqual(collector.recorded.last?.frameText, "delta-frame", "the delta must still have reduced and applied its own frame")
         XCTAssertEqual(collector.recorded.dropFirst().map(\.coalescedAwayCount), [0, 0])
     }
@@ -447,13 +457,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let pipeline = TerminalRemoteStateReductionPipeline(
             shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seed)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(seed)))
         try await waitUntil("the seed applied") { collector.recorded.count == 1 }
 
         let release = blockMainThread()
         pipeline.submit(
-            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.initial, update: .full(outOfBand)), isOutOfBand: true)
-        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: .full(stream)))
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.initial.rawValue, update: .full(outOfBand)),
+            isOutOfBand: true)
+        pipeline.submit(payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(stream)))
         try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == 3 }
         release.signal()
 
@@ -472,7 +483,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "after-copy"))
         let payloads: [GhosttyRemoteSessionStatePayload] = [
             clipboardPayload(sessionID: sessionID, sequence: 0),
-            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(frame)),
         ]
 
         let collector = OutputCollector()
@@ -489,7 +500,9 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await waitUntil("both entries applied") { collector.recorded.count == 2 }
         try await settle()
         XCTAssertEqual(collector.recorded.count, 2, "the clipboard write must survive; a full frame must not silently absorb its one-shot")
-        XCTAssertEqual(collector.recorded.map(\.reason), [TerminalRemoteSessionStateReason.clipboardWrite, TerminalRemoteSessionStateReason.output])
+        XCTAssertEqual(
+            collector.recorded.map(\.reason),
+            [TerminalRemoteSessionStateReason.clipboardWrite.rawValue, TerminalRemoteSessionStateReason.output.rawValue])
         XCTAssertEqual(collector.recorded.map(\.frameText), [nil, "after-copy"])
         XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 0])
     }
@@ -505,7 +518,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     func testFramelessCoalescibleOutputCannotAbsorbAPendingFrame() async throws {
         let sessionID = "pipeline-frame-safety"
         let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "keep-me"))
-        let framePayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(frame))
+        let framePayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(frame))
         let framelessPayload = inputPayload(sessionID: sessionID, sequence: 1)
 
         let collector = OutputCollector()
@@ -526,7 +539,8 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await waitUntil("both payloads applied") { collector.recorded.count == 2 }
         try await settle()
         XCTAssertEqual(collector.recorded.count, 2, "the frame-carrying output must not be coalesced away by the frameless one that followed it")
-        XCTAssertEqual(collector.recorded.map(\.reason), [TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input])
+        XCTAssertEqual(
+            collector.recorded.map(\.reason), [TerminalRemoteSessionStateReason.output.rawValue, TerminalRemoteSessionStateReason.input.rawValue])
         XCTAssertEqual(collector.recorded.map(\.frameText), ["keep-me", nil], "the pending frame must survive; it would be nil today")
         XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 0])
     }
@@ -560,7 +574,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await waitUntil("the burst applied") { !collector.recorded.isEmpty }
         try await settle()
         XCTAssertEqual(collector.recorded.count, 1, "a frameless run must collapse to a single apply")
-        XCTAssertEqual(collector.recorded.first?.reason, TerminalRemoteSessionStateReason.input)
+        XCTAssertEqual(collector.recorded.first?.reason, TerminalRemoteSessionStateReason.input.rawValue)
         XCTAssertEqual(collector.recorded.first?.frameText, nil)
         XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 4)
     }
@@ -609,9 +623,11 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertEqual(alphaToBravo.kind, .delta)
         XCTAssertEqual(bravoToCharlie.kind, .delta)
 
-        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(alpha))
-        let firstDeltaPayload = payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: alphaToBravo)
-        let secondDeltaPayload = payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: bravoToCharlie)
+        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(alpha))
+        let firstDeltaPayload = payload(
+            sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: alphaToBravo)
+        let secondDeltaPayload = payload(
+            sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: bravoToCharlie)
 
         let collector = RawOutputCollector()
         let probe = SubmitProbe()
@@ -662,9 +678,11 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertEqual(alphaToBravo.kind, .delta)
         XCTAssertEqual(bravoToCharlie.kind, .delta)
 
-        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(alpha))
-        let firstDeltaPayload = payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: alphaToBravo)
-        let secondDeltaPayload = payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: bravoToCharlie)
+        let seedPayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(alpha))
+        let firstDeltaPayload = payload(
+            sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: alphaToBravo)
+        let secondDeltaPayload = payload(
+            sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: bravoToCharlie)
 
         let collector = RawOutputCollector()
         let probe = SubmitProbe()
@@ -706,14 +724,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let sessionID = "pipeline-baseline-reset"
         let series: [(payload: GhosttyRemoteSessionStatePayload, isDirectFetch: Bool)] = [
             // A full frame seeds the baseline at revision 1.
-            (payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)), false),
+            (payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(first)), false),
             // A delta whose base is revision 2 cannot apply to it: the reducer clears the baseline and
             // asks for a resync.
-            (payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: secondToThird), false),
+            (payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: secondToThird), false),
             // The next delta finds no baseline at all, which is only true if the reset landed first.
-            (payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: firstToSecond), false),
+            (payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: firstToSecond), false),
             // A fetched full frame re-seeds the chain.
-            (payload(sessionID: sessionID, sequence: 3, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(third)), true),
+            (payload(sessionID: sessionID, sequence: 3, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, update: .full(third)), true),
         ]
 
         let collector = OutputCollector()
@@ -849,8 +867,10 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await settle()
         XCTAssertEqual(
             collector.recorded.map(\.reason),
-            [TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.sessionMetadata],
-            "the held screen must apply before the transition that followed it, and both exactly once")
+            [
+                TerminalRemoteSessionStateReason.output.rawValue, TerminalRemoteSessionStateReason.output.rawValue,
+                TerminalRemoteSessionStateReason.sessionMetadata.rawValue,
+            ], "the held screen must apply before the transition that followed it, and both exactly once")
         XCTAssertEqual(collector.recorded[1].frameText, "frame-3", "the transition dragged in an older frame than the one being held")
 
         // The barrier's drain must not leave the pane applying at output cadence again.
@@ -871,7 +891,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) })
 
         let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(frame)))
         try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
 
         pipeline.setHoldsScreenUpdates(true)
@@ -900,16 +920,19 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let pipeline = TerminalRemoteStateReductionPipeline(
             shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(seedFrame)))
+        pipeline.submit(
+            payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(seedFrame)))
         try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
 
         pipeline.setHoldsScreenUpdates(true)
 
         let release = blockMainThread()
         pipeline.submit(
-            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.attachmentState, update: .full(attachmentFrame)))
+            payload(
+                sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, update: .full(attachmentFrame)))
         pipeline.submit(
-            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(stateChangeFrame)))
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, update: .full(stateChangeFrame))
+        )
         try await waitUntil("both payloads reached the mailbox") { probe.submissions == 3 }
         release.signal()
 
@@ -941,7 +964,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
 
         let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
-        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)))
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(first)))
         try await waitUntil("the displayed pane applied its first frame") { collector.recorded.count == 1 }
 
         pipeline.setHoldsScreenUpdates(true)
@@ -951,7 +974,8 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             pipeline.submit(inputPayload(sessionID: sessionID, sequence: sequence))
             sequence += 1
             let frame = GhosttyRenderFrame(sessionRevision: UInt64(cycle + 1), ownerEpoch: 4, snapshot: snapshot(text: "frame-\(cycle)"))
-            pipeline.submit(payload(sessionID: sessionID, sequence: sequence, reason: TerminalRemoteSessionStateReason.output, update: .full(frame)))
+            pipeline.submit(
+                payload(sessionID: sessionID, sequence: sequence, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(frame)))
             sequence += 1
         }
         // A trailing keystroke, so the surviving entry is the frameless one: the fold has to keep the
@@ -968,7 +992,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         try await settle()
         let outputs = collector.recorded
         XCTAssertEqual(outputs.count, 2, "the held input/output cycles applied as more than one entry")
-        XCTAssertEqual(outputs[1].reason, TerminalRemoteSessionStateReason.input, "the newest held payload must survive the fold")
+        XCTAssertEqual(outputs[1].reason, TerminalRemoteSessionStateReason.input.rawValue, "the newest held payload must survive the fold")
         XCTAssertEqual(outputs[1].frameText, "frame-\(cycles)", "the fold dropped the newest frame")
         XCTAssertEqual(outputs[1].coalescedAwayCount, cycles * 2, "the held cycles did not fold into a single entry")
         XCTAssertFalse(outputs[1].requestsResync, "the chain stayed intact, so nothing had to be re-fetched from the device")
@@ -1104,7 +1128,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         var reducer = EagerlyEncodingReducer()
         var previousPayload: GhosttyRemoteSessionStatePayload?
         return series.map { entry in
-            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return nil }
+            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite.rawValue else { return nil }
             let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload)
             previousPayload = reduction.storedPayload
             return ReductionReads(reduction)
@@ -1115,7 +1139,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         var reducer = TerminalRemoteStateReducer()
         var previousPayload: GhosttyRemoteSessionStatePayload?
         return series.map { entry in
-            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return nil }
+            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite.rawValue else { return nil }
             let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload, requestResyncOnApplyFailure: true)
             previousPayload = reduction.storedPayload
             return ReductionReads(reduction)
@@ -1149,12 +1173,12 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
         let sessionID = "accessor-equivalence-resync"
         let series: [(payload: GhosttyRemoteSessionStatePayload, isDirectFetch: Bool)] = [
-            (payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)), false),
-            (payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: secondToThird), false),
-            (payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: firstToSecond), false),
+            (payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(first)), false),
+            (payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output.rawValue, update: secondToThird), false),
+            (payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output.rawValue, update: firstToSecond), false),
             (corruptPayload(sessionID: sessionID, sequence: 3), false),
-            (payload(sessionID: sessionID, sequence: 4, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(third)), true),
-            (payload(sessionID: sessionID, sequence: 5, reason: TerminalRemoteSessionStateReason.output, update: thirdToFourth), false),
+            (payload(sessionID: sessionID, sequence: 4, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, update: .full(third)), true),
+            (payload(sessionID: sessionID, sequence: 5, reason: TerminalRemoteSessionStateReason.output.rawValue, update: thirdToFourth), false),
         ]
 
         let actual = reads(for: series)
@@ -1196,15 +1220,15 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     private func corruptPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt(sequence),
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: emittedAt(sequence),
             sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: UInt64(sequence + 1), runtimeState: nil,
             attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: Data([0x00, 0x01, 0x02, 0x03]))
     }
 
     private func clipboardPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: emittedAt(sequence), sessionStateRevision: nil,
-            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live",
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: emittedAt(sequence),
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live",
             workingDirectory: "/tmp/live", outputByteCount: nil,
             clipboardWrite: TerminalClipboardWritePayload(targetClientID: "mac-owner", text: "copied"))
     }
@@ -1216,7 +1240,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     /// queue an apply instead of being absorbed into a neighbor's.
     private func sessionMetadataPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata, emittedAt: emittedAt(sequence),
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue, emittedAt: emittedAt(sequence),
             sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
             title: "live-\(sequence)", workingDirectory: "/tmp/live", outputByteCount: nil)
     }
@@ -1226,7 +1250,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     /// excludes screen state for this reason, so a daemon never attaches one.
     private func inputPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.input, emittedAt: emittedAt(sequence),
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.input.rawValue, emittedAt: emittedAt(sequence),
             sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
             title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
     }

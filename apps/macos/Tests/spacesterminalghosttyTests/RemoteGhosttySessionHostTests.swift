@@ -361,7 +361,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // state payload the host DOES cache is the fence proving the clipboard payload was served first.
         fixture.recorder.setPayloads([
             clipboardPayload(sessionID: "remote-clipboard-other", targetClientID: "someone-elses-client", text: "not for us"),
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-other", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-other", reason: TerminalRemoteSessionStateReason.output.rawValue, title: "settled"),
         ])
         waitForCondition("the payload after the clipboard write is applied") {
             _ = fixture.host.effectiveTitle
@@ -378,7 +379,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         fixture.recorder.setPayloads([
             clipboardPayload(sessionID: "remote-clipboard-not-state", targetClientID: fixture.clientID, text: "copied", title: "clipboard"),
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-not-state", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-not-state", reason: TerminalRemoteSessionStateReason.output.rawValue, title: "settled"),
         ])
         waitForCondition("owner applies the clipboard write") {
             _ = fixture.host.effectiveTitle
@@ -404,7 +406,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // artifact anyway — a real daemon clears a one-shot clipboard event after delivering it.
         fixture.recorder.setPayloads([
             clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"),
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output.rawValue, title: "later"),
         ])
         waitForCondition("owner applies the clipboard write") {
             _ = fixture.host.effectiveTitle
@@ -418,7 +420,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         // One more observed apply past the clear proves later payloads leave the pasteboard alone.
         fixture.recorder.setPayload(
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "settled"))
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output.rawValue, title: "settled"))
         waitForCondition("the payload after the clear is applied") {
             _ = fixture.host.effectiveTitle
             return fixture.host.effectiveTitle == "settled"
@@ -436,11 +439,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let takeover = payloadClaimingOwner(
             remoteStatePayloadWithTitle(
-                sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.attachmentState, title: "taken-over"),
+                sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, title: "taken-over"),
             ownerClientID: "another-mac")
         fixture.recorder.setPayloads([
             takeover, clipboardPayload(sessionID: "remote-clipboard-demoted", targetClientID: fixture.clientID, text: "not ours any more"),
-            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.output.rawValue, title: "settled"),
         ])
         waitForCondition("the takeover is applied") {
             _ = fixture.host.effectiveTitle
@@ -515,7 +519,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         -> GhosttyRemoteSessionStatePayload
     {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: "2026-07-28T00:00:03Z",
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: "2026-07-28T00:00:03Z",
             sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
             workingDirectory: "/tmp/work", outputByteCount: nil,
             clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
@@ -1212,7 +1216,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-state-stream-preserve-events")
-        let initialPayload = remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.initial)
+        let initialPayload = remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.initial.rawValue)
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -1222,17 +1226,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        waitForCondition("initial stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        waitForCondition("initial stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         server.broadcast(
             remoteStatePayload(
-                sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.output, outputByteCount: 11, outputEndByteOffset: 42))
-        server.broadcast(remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.inputOutput))
+                sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.output.rawValue, outputByteCount: 11,
+                outputEndByteOffset: 42))
+        server.broadcast(remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.inputOutput.rawValue))
 
         waitForCondition("output before input-output resync") {
-            receivedPayloads.count >= 2 && receivedPayloads[0].reason == TerminalRemoteSessionStateReason.output
-                && receivedPayloads[1].reason == TerminalRemoteSessionStateReason.inputOutput
+            receivedPayloads.count >= 2 && receivedPayloads[0].reason == TerminalRemoteSessionStateReason.output.rawValue
+                && receivedPayloads[1].reason == TerminalRemoteSessionStateReason.inputOutput.rawValue
         }
         XCTAssertEqual(receivedPayloads[0].outputByteCount, 11)
         XCTAssertEqual(receivedPayloads[0].outputEndByteOffset, 42)
@@ -1257,9 +1262,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             exitedAt: "2026-06-04T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 5, rows: 1)
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)))
 
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
@@ -1285,9 +1290,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 4, rows: 1)
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)))
 
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
@@ -1326,9 +1331,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let finalText = "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05"
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: finalText, sessionRevision: 1)))
 
         // The session's full transcript survives in output.log: 200 CRLF-terminated numbered lines.
@@ -1382,9 +1387,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let finalText = "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05"
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: finalText, sessionRevision: 1)))
 
         let transcript = Data((1...200).map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
@@ -1430,9 +1435,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let finalText = "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05"
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: finalText, sessionRevision: 1)))
         let transcript = Data((1...200).map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
 
@@ -1496,14 +1501,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 3, state: .running, updatedAt: "2026-06-05T00:00:02Z",
             title: "live-title", workingDirectory: "/tmp/live", columns: 8, rows: 5)
         let endedPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "final-01", sessionRevision: 1))
         let runningPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-05T00:00:02Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-05T00:00:02Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "RUNNING", sessionRevision: 2))
         // The relaunched run's own exit: a distinct child process, its own exit time, and a later emission
         // than the live state it follows — which is what the daemon serves for a second exit, and what
@@ -1512,9 +1517,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 3, state: .exited, updatedAt: "2026-06-05T00:00:03Z",
             exitedAt: "2026-06-05T00:00:03Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
         let secondExitPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:03Z", sessionStateRevision: 3,
-            sessionStateFlags: 1, screenStateRevision: 3, runtimeState: secondExitState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:03Z",
+            sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 3, runtimeState: secondExitState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "final-01", sessionRevision: 3))
         let recorder = DirectTerminalServiceRecorder(payload: endedPayload)
 
@@ -1593,14 +1598,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 4, state: .exited, updatedAt: "2026-06-05T00:00:02Z",
             exitedAt: "2026-06-05T00:00:02Z", title: "final-title-B", workingDirectory: "/tmp/final", columns: 8, rows: 5)
         let endedPayloadA = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedStateA, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedStateA,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "final-A", sessionRevision: 1))
         let endedPayloadB = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:02Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: exitedStateB, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-title-B", workingDirectory: "/tmp/final", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:02Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: exitedStateB,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title-B", workingDirectory: "/tmp/final", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "final-B", sessionRevision: 2))
         let recorder = DirectTerminalServiceRecorder(payload: endedPayloadA)
 
@@ -1671,9 +1676,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             exitedAt: "2026-06-05T00:00:01Z", title: "final-title-A", workingDirectory: "/tmp/final", columns: 8, rows: 5)
         let recorder = DirectTerminalServiceRecorder(
             payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedStateA, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-05T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedStateA,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "final-A", sessionRevision: 1)))
 
         // The fetch resolves with a transcript the server read from a *different* run (childPID 4,
@@ -1764,9 +1769,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
         try TerminalSessionPersistence.writeRemoteSessionState(
             GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: staleExitedState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "stale-title", workingDirectory: "/tmp/stale", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: staleExitedState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "stale-title", workingDirectory: "/tmp/stale", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "stale", sessionRevision: 1)), paths: paths)
 
         let liveRenderUpdate = try renderUpdate(text: "live", sessionRevision: 2)
@@ -1774,9 +1779,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-device.stale-final-live-test")
         ) {
             GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T00:00:02Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: liveRenderUpdate)
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-04T00:00:02Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: liveRenderUpdate)
         }
         try server.start()
         defer { server.stop() }
@@ -1796,7 +1802,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "stream-render-update", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-03T00:00:00Z",
+            sessionID: "stream-render-update", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-03T00:00:00Z",
             sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "live",
             workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
         let server = GhosttyRemoteSessionStateStreamServer(
@@ -1811,8 +1817,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        waitForCondition("render-update stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
-        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.initial })
+        waitForCondition("render-update stream payload") {
+            receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue }
+        }
+        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
         XCTAssertNotNil(payload.renderUpdate)
         let snapshot = try XCTUnwrap(payload.renderSnapshot)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: snapshot), "alpha")
@@ -1831,7 +1839,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         func payload(_ update: GhosttyRenderUpdate, revision: UInt64) throws -> GhosttyRemoteSessionStatePayload {
             GhosttyRemoteSessionStatePayload(
-                sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange,
+                sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange.rawValue,
                 emittedAt: "2026-06-03T00:00:0\(revision)Z", sessionStateRevision: revision, sessionStateFlags: 1, screenStateRevision: revision,
                 runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
@@ -1841,7 +1849,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let incomingDeltaPayload = try payload(secondDelta, revision: 3)
         let incomingFullPayload = try payload(.full(thirdFrame), revision: 3)
         let pendingMetadataPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-03T00:00:01Z",
+            sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-03T00:00:01Z",
             sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "live",
             workingDirectory: "/tmp/live", outputByteCount: nil)
 
@@ -1860,8 +1868,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.stream-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-live", reason: "initial", emittedAt: "2026-05-18T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-live", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-18T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-18T00:00:00Z",
                 title: "live", workingDirectory: "/tmp/live", columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
@@ -1888,8 +1896,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-live", reason: "output", emittedAt: "2026-05-18T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
-                screenStateRevision: 2,
+                sessionID: "remote-live", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-18T00:00:01Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-18T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 4, rows: 2),
@@ -1906,9 +1914,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachments: [TerminalAttachment(sessionID: "remote-live", clientID: ownerClient.id, mode: .owner, attachedAt: "2026-05-18T00:00:02Z")])
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-live", reason: "attachment_state", emittedAt: "2026-05-18T00:00:02Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "live",
-                workingDirectory: "/tmp/live", outputByteCount: nil))
+                sessionID: "remote-live", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: "2026-05-18T00:00:02Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot,
+                title: "live", workingDirectory: "/tmp/live", outputByteCount: nil))
 
         waitForCondition("owner update without snapshot") { host.activeOwnerClientID() == ownerClient.id }
         XCTAssertEqual(host.snapshotText(), "beta\ngamm")
@@ -1930,8 +1938,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try "from-log\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
 
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-stale-size", reason: "resize", emittedAt: "2026-05-22T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-stale-size", reason: TerminalRemoteSessionStateReason.resize.rawValue, emittedAt: "2026-05-22T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-22T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 12, rows: 2),
@@ -2012,8 +2020,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.renderable-viewer-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-renderable", reason: "initial", emittedAt: "2026-05-19T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-renderable", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-19T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-renderable", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-19T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2058,8 +2066,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.owner-focus-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-owner-focus", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-owner-focus", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-02T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
@@ -2093,8 +2101,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-owner-focus", reason: "state_change", emittedAt: "2026-06-02T00:00:01Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2,
+                sessionID: "remote-owner-focus", reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-02T00:00:01Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-06-02T00:00:01Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
@@ -2112,8 +2120,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(nil))
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-owner-focus", reason: "state_change", emittedAt: "2026-06-02T00:00:02Z", sessionStateRevision: 3,
-                sessionStateFlags: 1, screenStateRevision: 3,
+                sessionID: "remote-owner-focus", reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-02T00:00:02Z",
+                sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 3,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-06-02T00:00:02Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
@@ -2136,8 +2144,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.set-focused-no-steal-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-set-focused", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-set-focused", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-02T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-set-focused", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
@@ -2193,8 +2201,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.set-focused-reclaim-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-set-focused-reclaim", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1,
+            sessionID: "remote-set-focused-reclaim", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-02T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-set-focused-reclaim", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
@@ -2237,8 +2245,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.attachment-state-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-attachment-state", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-attachment-state", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-attachment-state", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-20T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2275,9 +2283,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             ])
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-attachment-state", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "renderable",
-                workingDirectory: "/tmp/live", outputByteCount: nil))
+                sessionID: "remote-attachment-state", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue,
+                emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil,
+                attachmentSnapshot: attachmentSnapshot, title: "renderable", workingDirectory: "/tmp/live", outputByteCount: nil))
 
         waitForCondition("attachment state owner update") { host.activeOwnerClientID() == ownerClient.id }
         waitForCondition("viewer retains rendered text after attachment state") {
@@ -2296,8 +2304,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-device.snapshot-precedence-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-snapshot-precedence", reason: "initial", emittedAt: "2026-05-21T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: nil,
+            sessionID: "remote-snapshot-precedence", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-21T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: nil,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-21T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2325,8 +2333,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try "WRONG\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-snapshot-precedence", reason: "output", emittedAt: "2026-05-21T00:00:01Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 1,
+                sessionID: "remote-snapshot-precedence", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-21T00:00:01Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 1,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-21T00:00:01Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2356,8 +2364,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2), paths: paths)
         let queue = DispatchQueue(label: "spaces.remote-device.handoff-snapshot-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-handoff-snapshot", reason: "initial", emittedAt: "2026-05-29T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: nil,
+            sessionID: "remote-handoff-snapshot", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-29T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: nil,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2389,8 +2397,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             ])
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-handoff-snapshot", reason: "attachment_state", emittedAt: "2026-05-29T00:00:01Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2,
+                sessionID: "remote-handoff-snapshot", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue,
+                emittedAt: "2026-05-29T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-29T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2420,8 +2428,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             ])
         let queue = DispatchQueue(label: "spaces.remote-device.recreate-surface-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-recreate-surface", reason: "initial", emittedAt: "2026-05-30T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1,
+            sessionID: "remote-recreate-surface", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-05-30T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-recreate-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-30T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2452,8 +2460,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try host.attach(client: client, mode: .owner, into: container)
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-recreate-surface", reason: "output", emittedAt: "2026-05-30T00:00:01Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2,
+                sessionID: "remote-recreate-surface", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-05-30T00:00:01Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-recreate-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-30T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -2560,9 +2568,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-10T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
         let recorder = DirectTerminalServiceRecorder(payload: payload)
 
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
@@ -2984,9 +2993,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// visible. It repairs no baseline, but it does stamp the client's resync throttle.
     private func framelessPayload(for fixture: RunningSessionFixture) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: fixture.launchConfiguration.sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-09T00:00:03Z",
-            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: fixture.payload.runtimeState,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil)
+            sessionID: fixture.launchConfiguration.sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue,
+            emittedAt: "2026-08-09T00:00:03Z", sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1,
+            runtimeState: fixture.payload.runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote",
+            workingDirectory: "/tmp/work", outputByteCount: nil)
     }
 
     /// A payload carrying one full frame of `text`.
@@ -2995,8 +3005,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         emittedAt: String = "2026-08-09T00:00:03Z"
     ) throws -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
-            sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: runtimeState,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: emittedAt,
+            sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: runtimeState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: text, sessionRevision: sessionRevision))
     }
@@ -3010,9 +3020,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let delta = GhosttyRenderUpdateFactory.makeUpdate(target: second, baseline: GhosttyRenderUpdateBaseline(frame: first))
         XCTAssertEqual(delta.kind, .delta)
         return GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 8,
-            sessionStateFlags: 1, screenStateRevision: 8, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-09T00:00:04Z",
+            sessionStateRevision: 8, sessionStateFlags: 1, screenStateRevision: 8, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
     }
 
     /// The lazy pane open, in the order production performs it: the host is built, its registration with
@@ -3125,7 +3136,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let emitQueue = DispatchQueue(label: "spaces.test.remote-state-emit")
         for (index, update) in updates.enumerated() {
             let payload = GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue,
                 emittedAt: "2026-07-24T00:01:\(String(format: "%02d", index))Z", sessionStateRevision: UInt64(index + 1), sessionStateFlags: 1,
                 screenStateRevision: UInt64(index + 1), runtimeState: fixture.payload.runtimeState,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
@@ -3440,14 +3451,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             target: secondFrame, baseline: GhosttyRenderUpdateBaseline(frame: firstFrame))
         XCTAssertEqual(missingBaselineDelta.kind, .delta)
         let deltaPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:01Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-10T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
             renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(missingBaselineDelta))
         let fullPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:02Z", sessionStateRevision: 2,
-            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-06-10T00:00:02Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
             renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(secondFrame)))
         let recorder = DirectTerminalServiceRecorder(payloads: [deltaPayload, fullPayload])
 
@@ -3482,9 +3493,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
         let queue = DispatchQueue(label: "spaces.remote-device.offscreen-hold-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-08-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -3511,7 +3522,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         func screenPayload(text: String, sequence: Int) throws -> GhosttyRemoteSessionStatePayload {
             GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-20T00:00:0\(sequence)Z",
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-20T00:00:0\(sequence)Z",
                 sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: UInt64(sequence + 1),
                 runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live",
                 outputByteCount: nil, renderUpdate: try renderUpdate(text: text, sessionRevision: UInt64(sequence + 1)))
@@ -3534,7 +3545,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // brings the screen the pane was holding with it.
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata, emittedAt: "2026-08-20T00:00:04Z",
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue, emittedAt: "2026-08-20T00:00:04Z",
                 sessionStateRevision: 5, sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renamed", workingDirectory: "/tmp/live", outputByteCount: nil))
         waitForCondition("the off-screen pane's title kept up with the session") { host.effectiveTitle == "renamed" }
@@ -3566,9 +3577,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
         let queue = DispatchQueue(label: "spaces.remote-device.offscreen-first-frame-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-20T00:00:00Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-08-20T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: nil, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -3594,10 +3605,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-20T00:00:01Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 2))
-        )
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-20T00:00:01Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 2)))
 
         waitForCondition("the pane reports content the controller can unhide it for") { host.hasRenderableSurface() }
         XCTAssertEqual(normalize(host.snapshotText()), "alpha")
@@ -3687,9 +3698,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
         let payload = GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-07-24T00:00:01Z", sessionStateRevision: 1,
-            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-07-24T00:00:01Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
         return RunningSessionFixture(launchConfiguration: launchConfiguration, paths: paths, payload: payload)
     }
 

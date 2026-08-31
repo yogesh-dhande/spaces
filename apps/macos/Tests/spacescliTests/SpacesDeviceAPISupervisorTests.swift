@@ -684,8 +684,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             let finalPayload = GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T12:46:31Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T12:46:31Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited,
                     updatedAt: "2026-06-04T12:46:31Z", exitedAt: "2026-06-04T12:46:31Z", title: "final-target", workingDirectory: "/tmp/work",
@@ -714,7 +714,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
 
-            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
             XCTAssertEqual(receivedPayload.renderText, "FINAL")
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
@@ -726,8 +726,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             let finalPayload = GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T12:46:31Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T12:46:31Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited,
                     updatedAt: "2026-06-04T12:46:31Z", exitedAt: "2026-06-04T12:46:31Z", title: "final-target", workingDirectory: "/tmp/work",
@@ -762,7 +762,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
 
-            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
             XCTAssertEqual(receivedPayload.renderText, "FINAL")
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
@@ -782,9 +782,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
             try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             let finalPayload = GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:23:23Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
                     .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
@@ -806,7 +806,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
 
-            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
             XCTAssertEqual(receivedPayload.renderText, "FINAL")
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
@@ -826,9 +826,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
             try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             let finalPayload = GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
-                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-06-04T14:23:23Z",
+                sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
                     .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
@@ -850,7 +850,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             }.value
 
             XCTAssertTrue(response.ok)
-            XCTAssertEqual(response.sessionState?.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(response.sessionState?.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
             XCTAssertEqual(response.sessionState?.renderText, "FINAL")
         }
     }

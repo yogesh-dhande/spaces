@@ -6553,7 +6553,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             .liveWireProjection()
         let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
         return GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
             title: runtimeState.title ?? launchConfiguration?.title ?? sessionID,
             workingDirectory: runtimeState.workingDirectory ?? launchConfiguration?.workingDirectory ?? paths.rootDirectory, outputByteCount: nil)

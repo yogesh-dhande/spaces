@@ -211,9 +211,9 @@
                 cells: [GhosttyTerminalSnapshot.Cell(codepoint: 32, foregroundRGB: 0xFFFFFF, backgroundRGB: 0, flags: 0)])
             let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: ownerEpoch, snapshot: snapshot)
             return GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-07-02T00:00:01Z", sessionStateRevision: 1,
-                sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "cat", workingDirectory: "/tmp",
-                outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-07-02T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "cat",
+                workingDirectory: "/tmp", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
         }
 
         private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {

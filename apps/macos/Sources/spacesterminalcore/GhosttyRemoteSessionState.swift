@@ -3,6 +3,10 @@ import Foundation
 public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let sessionID: String
     public let reason: String
+    /// `reason` parsed into the declared enum, for consumers that switch on it. `nil` for a reason
+    /// string this build does not recognize (an older/newer peer on the wire); `reason` itself stays
+    /// the source of truth so decoding an unrecognized reason never fails.
+    public var reasonKind: TerminalRemoteSessionStateReason? { TerminalRemoteSessionStateReason(rawValue: reason) }
     public let emittedAt: String
     public let sessionStateRevision: UInt64?
     public let sessionStateFlags: UInt32?
@@ -185,11 +189,9 @@ extension GhosttyRemoteSessionStatePayload {
     /// Producer-side form of `replacingRenderUpdate(materialized:)` that observes the one lazy binary
     /// encode. The observer runs on whichever transport first serializes the payload, never while the
     /// producer merely constructs or inspects it.
-    public func replacingRenderUpdate(
-        materialized update: GhosttyRenderUpdate, encodingObserver: @escaping GhosttyRenderUpdateEncodingObserver
-    ) -> Self {
-        replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update, encodingObserver: encodingObserver), screenStateRevision: nil)
-    }
+    public func replacingRenderUpdate(materialized update: GhosttyRenderUpdate, encodingObserver: @escaping GhosttyRenderUpdateEncodingObserver)
+        -> Self
+    { replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update, encodingObserver: encodingObserver), screenStateRevision: nil) }
 
     /// The payload with its attachment snapshot reduced to what a subscriber needs, per
     /// `TerminalSessionAttachmentSnapshot.liveWireProjection`. Producers project before building a

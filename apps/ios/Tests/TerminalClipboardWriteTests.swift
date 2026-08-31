@@ -39,7 +39,8 @@
         }
 
         private func clipboardPayload(targetClientID: String, text: String) -> GhosttyRemoteSessionStatePayload {
-            payload(reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: targetClientID, text: text))
+            payload(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, clipboardWrite: .init(targetClientID: targetClientID, text: text))
         }
 
         private func payload(reason: String, clipboardWrite: TerminalClipboardWritePayload? = nil) -> GhosttyRemoteSessionStatePayload {
@@ -57,7 +58,7 @@
                 id: "another-device", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Another device"),
                 connectedAt: "2026-07-28T00:00:00Z")
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: "2026-07-28T00:00:02Z",
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: "2026-07-28T00:00:02Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(
                     clients: [otherClient],
@@ -144,7 +145,7 @@
                 // completion point; stopped state remains inert.
                 model.submitLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied before navigating"), isOutOfBand: false)
                 model.stop()
-                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output), isOutOfBand: false)
+                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output.rawValue), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "copied before navigating")
                 XCTAssertEqual(model.latestState?.title, installedTitle, "a stale application must not mutate stopped viewer state")
@@ -161,7 +162,7 @@
                 XCTAssertEqual(pasteboard.string, "copied once")
 
                 pasteboard.string = "what the user copied next"
-                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output), isOutOfBand: false)
+                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output.rawValue), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "what the user copied next")
                 // The second payload carries no attachment snapshot of its own, so this must come from

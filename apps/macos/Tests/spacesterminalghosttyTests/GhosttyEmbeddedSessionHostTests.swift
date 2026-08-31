@@ -679,14 +679,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try host.startIfNeeded()
 
             try host.attach(client: localOwner, mode: .owner, into: nil)
-            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             let baseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
 
             let screenRevision: UInt64 = UInt64.max / 2
             host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
 
-            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.stateChange))
-            XCTAssertEqual(payload.reason, TerminalRemoteSessionStateReason.stateChange)
+            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.stateChange.rawValue))
+            XCTAssertEqual(payload.reason, TerminalRemoteSessionStateReason.stateChange.rawValue)
             XCTAssertEqual(payload.screenStateRevision, screenRevision)
             XCTAssertNotNil(payload.renderUpdate)
             let update = try XCTUnwrap(payload.decodedRenderUpdate)
@@ -728,10 +728,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil }
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
         }
         let initialPayload = try XCTUnwrap(
-            receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil })
+            receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil })
         let initialUpdate = try XCTUnwrap(initialPayload.decodedRenderUpdate)
         XCTAssertEqual(initialUpdate.kind, .full)
         var baseline: GhosttyRenderUpdateBaseline?
@@ -749,12 +749,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
-                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
+                $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.screenStateRevision == screenRevision
+                    && $0.renderUpdate != nil
             }
         }
         let payloadIndex = try XCTUnwrap(
             receivedPayloads.snapshot.firstIndex {
-                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision
+                $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.screenStateRevision == screenRevision
             })
         var stateChangeBaseline = resolvedBaseline
         for payload in receivedPayloads.snapshot[..<payloadIndex] where payload.renderUpdate != nil {
@@ -794,7 +795,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            let previousPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let previousPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             XCTAssertNotNil(previousPayload.renderUpdate)
             return Box(host)
         }
@@ -809,8 +810,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
-        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial })
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
+        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
         XCTAssertNil(initialPayload.renderUpdate)
         receivedPayloads.removeAll()
 
@@ -822,11 +823,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
-                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
+                $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.screenStateRevision == screenRevision
+                    && $0.renderUpdate != nil
             }
         }
         let payload = try XCTUnwrap(
-            receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision })
+            receivedPayloads.snapshot.first {
+                $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.screenStateRevision == screenRevision
+            })
         let update = try XCTUnwrap(payload.decodedRenderUpdate)
         XCTAssertEqual(update.kind, .full)
         XCTAssertEqual(update.fallbackReason, "subscriber_baseline_reset")
@@ -887,7 +891,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         try existingClient.start()
         defer { existingClient.stop() }
-        try await waitUntil(timeout: 30) { existingSubscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) {
+            existingSubscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue }
+        }
         capturedSnapshotBox.value = Self.snapshot(text: "bravo")
         try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
         try await waitUntil(timeout: 30) { existingSubscriberPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
@@ -899,18 +905,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
-        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial })
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
+        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
         XCTAssertNil(initialPayload.renderUpdate, "this subscriber must start with no baseline for the arm to mean anything")
         receivedPayloads.removeAll()
 
         // A scroll broadcast lands first. It ships a delta by design, so it keeps no promise.
         capturedSnapshotBox.value = Self.snapshot(text: "charl")
-        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll.rawValue) }
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll && $0.renderUpdate != nil }
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue && $0.renderUpdate != nil }
         }
-        let scrollPayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.scroll })
+        let scrollPayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue })
         XCTAssertEqual(try XCTUnwrap(scrollPayload.decodedRenderUpdate).kind, .delta, "a scroll still deltas; that is why the arm must outlive it")
 
         // The next broadcast that can carry a full frame has to keep the promise.
@@ -998,7 +1004,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in subscriberPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         capturedSnapshotBox.value = fiveByFive("b")
         try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
         try await waitUntil(timeout: 30) { subscriberPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
@@ -1010,7 +1016,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         scrollRectsBox.value = [carriedRect]
         capturedSnapshotBox.value = fiveByFive("c")
         let oneShotPayload = try await TerminalEngineActor.run {
-            host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll)
+            host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll.rawValue)
         }
         let oneShotUpdate = try XCTUnwrap(oneShotPayload?.decodedRenderUpdate)
         XCTAssertEqual(oneShotUpdate.kind, .full, "a self-contained export always forces a full frame")
@@ -1020,11 +1026,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let streamRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 5, deltaRows: 2, deltaColumns: 0)
         scrollRectsBox.value = [streamRect]
         capturedSnapshotBox.value = fiveByFive("d")
-        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll.rawValue) }
         try await waitUntil(timeout: 30) {
-            subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll && $0.renderUpdate != nil }
+            subscriberPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue && $0.renderUpdate != nil }
         }
-        let scrollPayload = try XCTUnwrap(subscriberPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.scroll })
+        let scrollPayload = try XCTUnwrap(subscriberPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue })
         let scrollUpdate = try XCTUnwrap(scrollPayload.decodedRenderUpdate)
         XCTAssertEqual(scrollUpdate.kind, .delta, "the carried rect must not itself force a full frame")
         XCTAssertEqual(
@@ -1084,9 +1090,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil }
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
         }
-        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial })
+        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
         var clientBaseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: clientBaseline.snapshot), "alpha")
         receivedPayloads.removeAll()
@@ -1106,7 +1112,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // answered with. The stream's delta baseline still describes "bravo".
         capturedSnapshotBox.value = Self.snapshot(text: "charl")
         let resyncPayload = try await TerminalEngineActor.run { () -> GhosttyRemoteSessionStatePayload in
-            try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
         }
         clientBaseline = try Self.renderBaseline(from: resyncPayload, baseline: clientBaseline)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: clientBaseline.snapshot), "charl")
@@ -1194,7 +1200,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         // The owner's resize to grid A arms the broadcast, and a reflow report for grid A arrives while the
@@ -1206,19 +1212,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // A fence rather than a sleep: the stream delivers in order, so once this scroll broadcast has been
         // received, any resize broadcast the reflow above produced would already be in hand.
-        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll } }
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll.rawValue) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue } }
         XCTAssertEqual(
-            receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }.count, 0,
+            receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue }.count, 0,
             "a report whose captured frame is still on the previous grid must ship nothing")
 
         // The terminal finishes reflowing and the genuine grid-A report lands. The arm has to have survived
         // for it, and the frame it ships has to be the grid-A one.
         capturedSnapshotBox.value = gridASnapshot
         try await TerminalEngineActor.run { host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows) }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue } }
 
-        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }
+        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue }
         XCTAssertEqual(resizePayloads.count, 1, "the arm must be spent exactly once, on the report whose frame matches")
         let resizeUpdate = try XCTUnwrap(try XCTUnwrap(resizePayloads.first).decodedRenderUpdate)
         let resizeFrame = try XCTUnwrap(resizeUpdate.fullFrame, "a resize always ships a forced-full frame")
@@ -1283,7 +1289,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         // The subscriber handshake's own export is behind us, so the counter can be reset to make the next
@@ -1297,10 +1303,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // A fence rather than a sleep: the stream delivers in order, so once this scroll broadcast has been
         // received, the resize broadcast the reflow produced is already in hand.
-        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll } }
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll.rawValue) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue } }
 
-        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }
+        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue }
         XCTAssertEqual(resizePayloads.count, 1, "the verified report ships exactly one resize frame")
         let resizeUpdate = try XCTUnwrap(try XCTUnwrap(resizePayloads.first).decodedRenderUpdate)
         let resizeFrame = try XCTUnwrap(resizeUpdate.fullFrame, "a resize always ships a forced-full frame")
@@ -1334,19 +1340,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
-            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             let initialBaseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
 
             snapshotText = "resize frame two"
             host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil))
-            let firstResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize))
+            let firstResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize.rawValue))
             let firstResizeUpdate = try XCTUnwrap(firstResizePayload.decodedRenderUpdate)
             XCTAssertEqual(firstResizeUpdate.kind, .full)
             XCTAssertEqual(firstResizeUpdate.fallbackReason, "resize_self_contained")
 
             snapshotText = "resize frame six"
             host.applySessionStateChange(.init(flags: [.screen], revision: 3, title: nil, workingDirectory: nil))
-            let secondResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize))
+            let secondResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize.rawValue))
             let secondResizeUpdate = try XCTUnwrap(secondResizePayload.decodedRenderUpdate)
             XCTAssertEqual(secondResizeUpdate.kind, .full)
             XCTAssertEqual(secondResizeUpdate.fallbackReason, "resize_self_contained")
@@ -1378,7 +1384,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
-            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.inputOutput))
+            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.inputOutput.rawValue))
             let update = try XCTUnwrap(payload.decodedRenderUpdate)
 
             XCTAssertEqual(update.kind, .full)
@@ -1409,10 +1415,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
-            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             XCTAssertNotNil(initialPayload.renderUpdate)
 
-            let inputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.input))
+            let inputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.input.rawValue))
             XCTAssertNil(inputPayload.renderUpdate)
             XCTAssertNil(inputPayload.decodedRenderUpdate)
 
@@ -1443,11 +1449,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
-            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+            let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
             let initialBaseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
 
             snapshotText = "frame two"
-            let scrollPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll))
+            let scrollPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll.rawValue))
             let scrollUpdate = try XCTUnwrap(scrollPayload.decodedRenderUpdate)
 
             XCTAssertEqual(scrollPayload.screenStateRevision, 1)
@@ -1497,11 +1503,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try host.startIfNeeded()
             try host.attach(client: localOwner, mode: .owner, into: nil)
 
-            let selectionPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.selection))
+            let selectionPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.selection.rawValue))
             XCTAssertNotNil(
                 selectionPayload.renderUpdate, "a selection broadcast (set or clear) must always carry the frame, even on an otherwise blank screen")
 
-            let outputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.output))
+            let outputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.output.rawValue))
             XCTAssertNil(outputPayload.renderUpdate, "an output-driven export on a blank screen still ships no frame")
         }
     }
@@ -1688,7 +1694,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // timer, so the row every overview and alert reads carries the new title in the same turn the
             // program reported it. Read through the state payload, which serves the in-memory
             // authoritative copy that refresh advances.
-            let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+            let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue)
             XCTAssertEqual(payload?.runtimeState?.title, "live-title")
             XCTAssertEqual(payload?.runtimeState?.workingDirectory, "/tmp/updated")
         }
@@ -1986,7 +1992,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -1996,7 +2002,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
+            receivedPayloads.snapshot.contains {
+                $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count && $0.renderUpdate != nil
+            }
         }
         // Order the absence assertion behind the resync rather than timing it out. A delayed input/output
         // resync is a `DispatchWorkItem` the scheduler puts on the engine's serial queue with a short fixed
@@ -2010,7 +2018,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             TerminalEngineActor.assumeIsolated { hostBox.value.debugBroadcastCurrentStateForTesting(reason: settleMarker) }
         }
         try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == settleMarker } }
-        XCTAssertFalse(receivedPayloads.snapshot.contains { $0.reason == "input_output" })
+        XCTAssertFalse(receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue })
     }
 
     func testInteractiveLocalOwnerCommandOutputKeepsDelayedInputOutputResync() async throws {
@@ -2040,7 +2048,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -2051,12 +2059,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
-                && receivedPayloads.snapshot.contains { $0.reason == "input_output" && $0.renderUpdate != nil }
+            receivedPayloads.snapshot.contains {
+                $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count && $0.renderUpdate != nil
+            } && receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue && $0.renderUpdate != nil }
         }
 
-        let outputIndex = try XCTUnwrap(receivedPayloads.snapshot.firstIndex { $0.reason == "output" && $0.outputByteCount == output.count })
-        let inputOutputIndex = try XCTUnwrap(receivedPayloads.snapshot.firstIndex { $0.reason == "input_output" })
+        let outputIndex = try XCTUnwrap(
+            receivedPayloads.snapshot.firstIndex {
+                $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count
+            })
+        let inputOutputIndex = try XCTUnwrap(
+            receivedPayloads.snapshot.firstIndex { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue })
         XCTAssertLessThan(outputIndex, inputOutputIndex)
         let inputOutputUpdate = try XCTUnwrap(receivedPayloads.snapshot[inputOutputIndex].decodedRenderUpdate)
         XCTAssertEqual(inputOutputUpdate.kind, .full)
@@ -2092,7 +2105,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         var baseline = try Self.renderBaseline(from: try XCTUnwrap(receivedPayloads.snapshot.first), baseline: nil)
         receivedPayloads.removeAll()
 
@@ -2103,12 +2116,16 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count }
-                && receivedPayloads.snapshot.contains { $0.reason == "input_output" }
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count }
+                && receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue }
         }
 
-        let outputIndex = try XCTUnwrap(receivedPayloads.snapshot.firstIndex { $0.reason == "output" && $0.outputByteCount == output.count })
-        let inputOutputIndex = try XCTUnwrap(receivedPayloads.snapshot.firstIndex { $0.reason == "input_output" })
+        let outputIndex = try XCTUnwrap(
+            receivedPayloads.snapshot.firstIndex {
+                $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count
+            })
+        let inputOutputIndex = try XCTUnwrap(
+            receivedPayloads.snapshot.firstIndex { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue })
         XCTAssertLessThan(outputIndex, inputOutputIndex)
         for payload in receivedPayloads.snapshot[..<outputIndex] where payload.renderUpdate != nil {
             baseline = try Self.renderBaseline(from: payload, baseline: baseline)
@@ -2155,23 +2172,24 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         let output = Data("queued output\n".utf8)
         try await TerminalEngineActor.run {
             host.debugBufferIncomingOutputForStateExport(output)
-            host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
+            host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange.rawValue)
         }
 
         // No settle window is needed for the negative below. The flush this test is about happens INSIDE the
         // state export, before the stateChange payload is built, so a nested output broadcast would be handed
         // to the stream server ahead of it — and both travel the same serial stream queue and socket in
         // order. Once the stateChange payload has arrived, a nested output payload would already have.
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue } }
 
         XCTAssertFalse(
-            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.outputByteCount == output.count }
+        )
         XCTAssertTrue(try String(contentsOfFile: paths.outputPath).hasSuffix("queued output\n"))
     }
 
@@ -2550,12 +2568,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { TerminalEngineActor.runSynchronously { host.terminate() } }
 
         try await waitUntil(timeout: 30) {
-            (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.reason == TerminalRemoteSessionStateReason.terminated
+            (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.reason == TerminalRemoteSessionStateReason.terminated.rawValue
         }
         let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
         XCTAssertEqual(runtimeState.state, .exited)
-        XCTAssertEqual(finalPayload.reason, TerminalRemoteSessionStateReason.terminated)
+        XCTAssertEqual(finalPayload.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
         XCTAssertTrue(finalPayload.renderText?.contains("final-frame") == true)
         // Finding 12 regression: terminate() detaches every client and must invalidate the cached
         // attachment snapshot, so the final persisted payload cannot advertise a still-active attachment
@@ -2945,7 +2963,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // resize, or a blank frame afterwards would prove nothing.
         let preResizePayloadBox = MutableBox<GhosttyRemoteSessionStatePayload?>(nil)
         try await waitUntil(timeout: 30) {
-            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial),
+            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue),
                 let frame = payload.decodedRenderUpdate?.fullFrame,
                 GhosttyTerminalSnapshotGrid.fullPlainText(for: frame.snapshot).contains(lastPaintedRow)
             else { return false }
@@ -2966,7 +2984,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         try streamClient.start()
         defer { streamClient.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
         receivedPayloads.removeAll()
 
         let resizeResponse = TerminalEngineActor.runSynchronously {
@@ -2975,8 +2993,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         XCTAssertTrue(resizeResponse.ok, resizeResponse.message)
 
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize } }
-        let resizePayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.resize })
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue } }
+        let resizePayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.resize.rawValue })
         let resizeUpdate = resizePayload.decodedRenderUpdate
         let resizeFrame = resizeUpdate?.fullFrame
 
@@ -2996,7 +3014,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let catchUpPassBox = MutableBox<Int>(0)
         try? await waitUntil(timeout: 10, pollInterval: 0.01) {
             catchUpPassBox.value += 1
-            guard let frame = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial)?.decodedRenderUpdate?.fullFrame
+            guard
+                let frame = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue)?.decodedRenderUpdate?
+                    .fullFrame
             else { return false }
             return frame.snapshot.columns == targetColumns && frame.snapshot.rows == targetRows
         }
@@ -3006,7 +3026,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // Whether anything the session sends afterwards repairs the picture on its own. The child never
         // repaints, so this separates "sparse frame repaired later" from "sparse frame is final".
         try? await Task.sleep(for: .seconds(3))
-        let laterPayloads = receivedPayloads.snapshot.filter { $0.reason != TerminalRemoteSessionStateReason.resize && $0.hasRenderUpdate }
+        let laterPayloads = receivedPayloads.snapshot.filter { $0.reason != TerminalRemoteSessionStateReason.resize.rawValue && $0.hasRenderUpdate }
         var repairedText: String?
         var laterDescriptions: [String] = []
         for payload in laterPayloads {
@@ -3024,7 +3044,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // than any client-side behavior.
         let settledPayloadBox = MutableBox<GhosttyRemoteSessionStatePayload?>(nil)
         try? await waitUntil(timeout: 10) {
-            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial) else { return false }
+            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue) else { return false }
             settledPayloadBox.value = payload
             guard let frame = payload.decodedRenderUpdate?.fullFrame else { return false }
             return frame.snapshot.columns == targetColumns && frame.snapshot.rows == targetRows
@@ -4621,7 +4641,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let takeover = host.handleControlRequest(.init(command: "takeover", clientID: remoteViewer.id))
             XCTAssertTrue(takeover.ok, "the takeover is decided in memory and must be accepted while its mirror is parked")
 
-            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState))
+            let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue))
             let broadcastOwner = payload.attachmentSnapshot?.attachments.first { $0.detachedAt == nil && $0.mode == .owner }
             XCTAssertEqual(broadcastOwner?.clientID, remoteViewer.id, "the broadcast must advertise the new owner immediately after the takeover")
             XCTAssertEqual(

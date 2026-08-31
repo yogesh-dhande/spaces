@@ -79,7 +79,7 @@
             func clipboardWrites() -> [TerminalClipboardWritePayload] {
                 lock.lock()
                 defer { lock.unlock() }
-                return payloads.filter { $0.reason == TerminalRemoteSessionStateReason.clipboardWrite }.compactMap(\.clipboardWrite)
+                return payloads.filter { $0.reasonKind == .clipboardWrite }.compactMap(\.clipboardWrite)
             }
 
             /// Reasons seen so far, so a test can settle on an unrelated broadcast before asserting that
@@ -246,7 +246,7 @@
             // Settle on output the core has definitely consumed, so "no clipboard write" cannot pass
             // simply because the escape sequence had not arrived yet.
             try await waitForSettledTranscript(paths.outputPath)
-            try await waitFor { subscriber.reasons().contains(TerminalRemoteSessionStateReason.output) }
+            try await waitFor { subscriber.reasons().contains(TerminalRemoteSessionStateReason.output.rawValue) }
             #expect(subscriber.clipboardWrites().isEmpty)
         }
 
@@ -294,7 +294,7 @@
             releaseChild(goFile)
 
             try await waitForSettledTranscript(paths.outputPath)
-            try await waitFor { subscriber.reasons().contains(TerminalRemoteSessionStateReason.output) }
+            try await waitFor { subscriber.reasons().contains(TerminalRemoteSessionStateReason.output.rawValue) }
             #expect(subscriber.clipboardWrites().isEmpty)
         }
 
