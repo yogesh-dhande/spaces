@@ -19,7 +19,6 @@
   --code-foreground: #98efc7;
   --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @theme inline {

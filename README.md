@@ -23,7 +23,7 @@ Manage parallel coding sessions across all of your devices
 - **MCP server** — [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, and terminals as tools. A coding agent can inspect and drive Spaces directly.
 - **Keyboard shortcuts** — focus and cycle windows scoped to the current workspace. Navigation stays inside the work you're on.
 - **Global command palette** — `⌘⌥-` jumps to any window in any workspace. One key to reach anything without hunting through Mission Control.
-<p align="center"><img src="apps/web/public/media/palette.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
+<p align="center"><img src="docs/media/palette.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 
 
 
