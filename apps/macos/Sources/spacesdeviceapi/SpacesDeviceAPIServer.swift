@@ -59,131 +59,6 @@ private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] 
 }
 
 extension SpacesDeviceAPICommand {
-    fileprivate var isAgentHookCommand: Bool {
-        switch self {
-        case .agentHooksStatus, .installAgentHooks: true
-        default: false
-        }
-    }
-
-    /// Commands whose work is measured in seconds or longer rather than in database reads. Teardown
-    /// (`.archiveWorkspace`, `.deleteProject`) stops every process and terminal in scope, removes git
-    /// worktrees, and deletes branches. Run inline on the serial state queue either of these hold up every
-    /// other connection's requests — an overview poll issued while one is running waits for the whole
-    /// operation and times out as a connection error, and so does the 2-second corroboration `.ping` a
-    /// client sends after an input-send timeout, which then tears down a healthy stream. Both transports
-    /// divert them to `workspaceTeardownQueue` instead. The client still gets one synchronous response
-    /// carrying the full outcome (including the branch-deletion notice and the refreshed overview), so the
-    /// request/response contract is unchanged.
-    ///
-    /// `.stopWorkspace` is also seconds-scale but is not part of this family; see `runsOnWorkspaceStopQueue`
-    /// for why it gets its own queue instead. `.runWorkspaceSetup` is likewise seconds-scale and separate;
-    /// see `runsOnWorkspaceSetupQueue`. The remaining seconds-scale inline commands are tracked by issue
-    /// #503.
-    fileprivate var runsOnWorkspaceTeardownQueue: Bool {
-        switch self {
-        case .archiveWorkspace, .deleteProject: true
-        default: false
-        }
-    }
-
-    /// `.stopWorkspace` runs the user's stop script to completion synchronously
-    /// (`Orchestrator.stopWorkspaceUnlocked` calls `runScript`), so a hung stop for one workspace must not
-    /// delay an `.archiveWorkspace`/`.deleteProject` for another workspace queued behind it on
-    /// `workspaceTeardownQueue`: the same false-failure-then-executes race the setup split closes (see
-    /// `runsOnWorkspaceSetupQueue`). Teardown registration happens only at dequeue
-    /// (`withTeardownRegistered`), so a delete stuck behind a busy queue looks like a plain failure to the
-    /// client and then executes anyway once the queue clears.
-    ///
-    /// Not merged into `workspaceTeardownQueue` even though archive itself runs the stop path: archive runs
-    /// its own stop inline within its own dequeued slot, so sharing a queue would buy it no ordering it
-    /// needs, while a hung standalone `.stopWorkspace` for another workspace would only block it. Stop
-    /// touches no git state, so there is no git-index serialization reason to share a queue with teardown,
-    /// and a race against another command on the same workspace is handled by the orchestrator's own
-    /// fail-fast workspace gates.
-    fileprivate var runsOnWorkspaceStopQueue: Bool {
-        switch self {
-        case .stopWorkspace: true
-        default: false
-        }
-    }
-
-    /// `.runWorkspaceSetup` runs the user-authored setup script to completion (`waitUntilExit`, unbounded),
-    /// so like teardown it would stall every other connection's requests if left on the serial state queue.
-    /// It gets its own serial queue, `workspaceSetupQueue`, rather than sharing `workspaceTeardownQueue`:
-    /// the orchestrator deliberately leaves setup ungated so a delete can proceed while setup runs (see
-    /// `WorkspaceOrchestrator+Setup.swift`), and a teardown registers its workspace as tearing down
-    /// (`withTeardownRegistered`) only after `workspaceTeardownQueue` dequeues its request. Parking
-    /// `.archiveWorkspace`/`.deleteProject` behind a running setup on a shared queue would make the delete
-    /// wait unregistered, time out client-side, reconcile as a failed delete (the workspace is still
-    /// present and not reported as tearing down), and then run anyway once the setup finishes: a false
-    /// failure verdict followed by a destructive operation the client believed it had cancelled.
-    fileprivate var runsOnWorkspaceSetupQueue: Bool {
-        switch self {
-        case .runWorkspaceSetup: true
-        default: false
-        }
-    }
-
-    /// `.startWorkspaceCommandSession` synchronously creates a terminal and waits for the injected
-    /// terminal launcher to return. Keep that startup wait off the shared state queue so a stalled launch
-    /// cannot delay unrelated overview or ping requests. The workspace lifecycle lock inside the
-    /// orchestrator still serializes this launch against mutations for the same workspace.
-    fileprivate var runsOnWorkspaceTerminalLaunchQueue: Bool {
-        switch self {
-        case .startWorkspaceCommandSession: true
-        default: false
-        }
-    }
-
-    /// Commands that wait on a terminal session's engine. The control commands each make a synchronous
-    /// round trip over that session's control socket and get no answer until the engine drains what it is
-    /// already working on; `.state` waits on the same engine from the other side, since a session this
-    /// daemon hosts live is read straight out of its core (`liveTerminalSessionStateProvider`, a
-    /// `TerminalEngineActor.runSynchronously` export) rather than over the socket. Run inline on the
-    /// serial state queue they hold it for that whole wait, so a session saturated by output stalls every
-    /// other request on the daemon — including the `.ping` a client sends precisely to ask whether the
-    /// link is still alive after an input send timed out. That probe would then time out too and the
-    /// client would tear down a healthy stream. Both transports divert these to the target session's own
-    /// lane instead (`TerminalControlLaneRegistry`), so a stalled engine holds up only that session.
-    fileprivate var runsOnTerminalControlLane: Bool {
-        switch self {
-        case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state: true
-        // round-13 Fix 3: all three review-comment mutations divert here, not just send.
-        // `.workspaceReviewCommentsSend` writes to a session's control socket exactly like
-        // `.sendTerminalInput` (see `handleWorkspaceReviewCommentsSendRequest`), so it shares that
-        // command's stall risk directly. `.workspaceReviewCommentUpsert`/`Delete` don't themselves touch a
-        // control socket, but each takes `reviewCommentQueue` for its whole body (see that queue's doc
-        // comment) to close a TOCTOU window against a concurrent send — and a send can hold that queue
-        // across its own control-socket round trip (up to the client's control-socket timeout, several
-        // seconds). Left on the state queue, an upsert/delete blocked behind a slow send would hold that
-        // queue's single serial executor for the same duration, stalling every unrelated request — pings,
-        // overview, everything — behind one comment save. Diverting them here means only other
-        // terminal-control traffic waits, never the state queue.
-        case .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend: true
-        default: false
-        }
-    }
-
-    /// File read/write/diff commands all shell out to `git` and touch the filesystem, so like the
-    /// other seconds-scale families above they would stall every other connection's requests (including
-    /// the corroboration `.ping`) if left on the serial state queue. Both transports divert them to a
-    /// serial queue scoped to the request's own workspace (`workspaceGitQueue(for:)`), so a slow diff on one
-    /// workspace stalls only that workspace's other requests, not another workspace's or the state queue's.
-    /// `.subscribeWorkspaceDiffSignature`, `.subscribeWorkspaceFileSignature`, and
-    /// `.subscribeWorkspaceFileListSignature` are not included here: all three hijack the connection
-    /// (`hijacksConnection`) before either transport's dispatch chain reaches this check, so none of
-    /// them needs a worker-queue divert of its own.
-    fileprivate var runsOnWorkspaceGitQueue: Bool {
-        switch self {
-        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk,
-            .workspaceFileList, .workspaceRefList:
-            true
-        default: false
-        }
-    }
-
     /// `.ping` is the corroboration probe a pane sends after a keystroke's control request missed its
     /// deadline, to ask whether the link is alive before it tears a stream down and shows the
     /// connection-lost banner (`DeviceTerminalSessionStateModel.startLinkCorroborationProbe`). Both
@@ -191,48 +66,17 @@ extension SpacesDeviceAPICommand {
     /// daemon busy enough to make a keystroke late is exactly the daemon whose shared queue has a backlog
     /// of inline work (`.overview` is a SQLite read plus a per-session filesystem walk, polled several
     /// times a second) — a probe that queues behind that backlog measures the backlog, not the link, and
-    /// fails precisely when it is most needed.
+    /// fails precisely when it is most needed. This is a connection-handling special case, decided before
+    /// either transport's dispatch chain is consulted, so it stays here rather than joining
+    /// `SpacesDeviceAPICommandDescriptor`: `.ping` never actually reaches `descriptor.lane`.
     fileprivate var isPingCommand: Bool {
         if case .ping = self { return true }
         return false
     }
-
-    /// Which serial lane this command's request-handling work runs on, decided purely from the command
-    /// via the predicates above. Both transports used to re-check those predicates in the same order in
-    /// two separate dispatch ladders; this is the single function that decides the lane, and
-    /// `SpacesDeviceAPIServer.queue(for:)` is the single place that resolves the fixed queue behind it.
-    fileprivate var lane: Lane {
-        if isAgentHookCommand { return .agentHook }
-        if runsOnWorkspaceTeardownQueue { return .workspaceTeardown }
-        if runsOnWorkspaceStopQueue { return .workspaceStop }
-        if runsOnWorkspaceSetupQueue { return .workspaceSetup }
-        if runsOnWorkspaceTerminalLaunchQueue { return .workspaceTerminalLaunch }
-        if runsOnTerminalControlLane { return .terminalControl }
-        if runsOnWorkspaceGitQueue { return .workspaceGit }
-        return .mainQueue
-    }
 }
 
-/// The lane a `SpacesDeviceAPICommand` dispatches to (see `SpacesDeviceAPICommand.lane`). One case per
-/// queue choice the two transports' dispatch ladders make. `.terminalControl` and `.workspaceGit` name a
-/// lane whose actual queue is resolved per request — a per-session control lane (`TerminalControlLaneRegistry`)
-/// and a per-workspace queue (`workspaceGitQueue(for:)`) — rather than one fixed instance, so
-/// `SpacesDeviceAPIServer.queue(for:)` does not cover them; each transport keeps that resolution explicit
-/// at its own call site, same as before this enum existed. `.mainQueue` means "no divert": the command runs
-/// inline on whichever queue is already dispatching it (the shared `spaces.device.api` state queue for both
-/// transports).
-private enum Lane {
-    case agentHook
-    case workspaceTeardown
-    case workspaceStop
-    case workspaceSetup
-    case workspaceTerminalLaunch
-    case terminalControl
-    case workspaceGit
-    case mainQueue
-}
-
-/// Per-session serial lanes for the engine-blocking terminal commands (`runsOnTerminalControlLane`).
+/// Per-session serial lanes for the engine-blocking terminal commands (whose descriptor lane is
+/// `.terminalControl`; see `SpacesDeviceAPICommandDescriptor`).
 ///
 /// One session's controls stay ordered among themselves — the client's input sequencer builds its
 /// delivery guarantees on top of that order — while different sessions stop serializing behind each
@@ -648,25 +492,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     // finish first. That reorders nothing a client can observe: this connection reads one
                     // response before it sends its next request, so its own commands stay ordered, and
                     // requests racing in on separate connections have no ordering guarantee to begin with.
-                    // `request.command.lane` is the single source of truth for which of these a command
-                    // takes; the Linux transport below switches over the same lane.
-                    switch request.command.lane {
-                    case .agentHook:
-                        server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .workspaceTeardown:
-                        server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .workspaceStop:
-                        server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .workspaceSetup:
-                        server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    // `request.command.descriptor.lane` is the single source of truth for which of these
+                    // a command takes; the Linux transport below switches over the same lane.
+                    switch request.command.descriptor.lane {
+                    case .agentHook: server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .workspaceTeardown: server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .workspaceStop: server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .workspaceSetup: server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .workspaceTerminalLaunch:
                         server.handleStartWorkspaceCommandSessionAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .terminalControl:
-                        server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .workspaceGit:
-                        server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    case .mainQueue:
-                        finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
+                    case .terminalControl: server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .workspaceGit: server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .mainQueue: finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
                 } catch { finishRequest(.failure(error)) }
             }
@@ -917,14 +754,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             try server.authorize(request)
                             response = SpacesDeviceAPIServer.pongResponse
                         } else {
-                            // `request.command.lane` is the single source of truth for which of these a
-                            // command takes; the Darwin transport above switches over the same lane. Every
-                            // lane but `.mainQueue` takes the same admit-then-authorize step
+                            // `request.command.descriptor.lane` is the single source of truth for which of
+                            // these a command takes; the Darwin transport above switches over the same
+                            // lane. Every lane but `.mainQueue` takes the same admit-then-authorize step
                             // (`admitAndAuthorizeOnQueue`) before handing off to its own worker-queue
                             // handler; `.mainQueue` folds that same check into the one `syncOnQueue` call
                             // that also runs `handleRequest`, so a command never diverted anywhere still
                             // gets exactly one hop onto the state queue.
-                            switch request.command.lane {
+                            switch request.command.descriptor.lane {
                             case .agentHook:
                                 try server.admitAndAuthorizeOnQueue(request)
                                 response = try server.handleAgentHookRequestOnWorkerQueue(request)
@@ -1206,19 +1043,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Login-shell probing and config writes can take seconds. Serialize them independently so they
     /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
     private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
-    /// Teardown (see `runsOnWorkspaceTeardownQueue`) runs seconds or longer: tearing a workspace or project
+    /// Teardown (commands whose descriptor lane is `.workspaceTeardown`; see
+    /// `SpacesDeviceAPICommandDescriptor`) runs seconds or longer: tearing a workspace or project
     /// down stops its processes and terminals, removes git worktrees, and deletes branches. Serialize that
     /// independently of the state queue so it cannot stall every other client's overview polls or
     /// corroboration pings behind it. Serial rather than concurrent because two teardowns in the same
     /// repository would otherwise race on the same git index lock.
     private let workspaceTeardownQueue = DispatchQueue(label: "spaces.device.api.workspace-teardown", qos: .userInitiated)
-    /// `.stopWorkspace` (see `runsOnWorkspaceStopQueue`) waits on the user's stop script to completion. It
+    /// `.stopWorkspace` (its descriptor lane is `.workspaceStop`; see `SpacesDeviceAPICommandDescriptor`)
+    /// waits on the user's stop script to completion. It
     /// gets a queue of its own rather than sharing `workspaceTeardownQueue`: a hung or long-running stop
     /// script for one workspace must never hold up an `.archiveWorkspace`/`.deleteProject` request for
     /// another workspace queued behind it. Serial, like the teardown queue, so explicit stops still
     /// serialize among themselves instead of racing the same workspace's stop state.
     private let workspaceStopQueue = DispatchQueue(label: "spaces.device.api.workspace-stop", qos: .userInitiated)
-    /// `.runWorkspaceSetup` (see `runsOnWorkspaceSetupQueue`) waits on the user's setup script to
+    /// `.runWorkspaceSetup` (its descriptor lane is `.workspaceSetup`; see `SpacesDeviceAPICommandDescriptor`)
+    /// waits on the user's setup script to
     /// completion. It gets a queue of its own rather than sharing `workspaceTeardownQueue`: a hung or
     /// long-running setup script must never hold up an `.archiveWorkspace`/`.deleteProject` request queued
     /// behind it. Serial, like the teardown queue, so two explicit setup re-runs still serialize among
@@ -1228,25 +1068,25 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// the shared request queue while retaining serial ordering among explicit starts.
     private let workspaceTerminalLaunchQueue = DispatchQueue(label: "spaces.device.api.workspace-terminal-launch", qos: .userInitiated)
 
-    /// The fixed queue behind a `Lane`, shared by both transports' dispatch chains. Covers every lane that
-    /// has one stored instance; `.terminalControl` and `.workspaceGit` resolve their queue per request
-    /// instead (a per-session lane from `terminalControlLanes`, a per-workspace queue from
-    /// `workspaceGitQueue(for:)`), and `.mainQueue` is never diverted anywhere, so neither reaches this
+    /// The fixed queue behind a `SpacesDeviceAPICommandLane`, shared by both transports' dispatch chains.
+    /// Covers every lane that has one stored instance; `.terminalControl` and `.workspaceGit` resolve their
+    /// queue per request instead (a per-session lane from `terminalControlLanes`, a per-workspace queue
+    /// from `workspaceGitQueue(for:)`), and `.mainQueue` is never diverted anywhere, so neither reaches this
     /// table — each caller keeps that resolution explicit at its own call site.
-    private func queue(for lane: Lane) -> DispatchQueue {
+    private func queue(for lane: SpacesDeviceAPICommandLane) -> DispatchQueue {
         switch lane {
         case .agentHook: return agentHookQueue
         case .workspaceTeardown: return workspaceTeardownQueue
         case .workspaceStop: return workspaceStopQueue
         case .workspaceSetup: return workspaceSetupQueue
         case .workspaceTerminalLaunch: return workspaceTerminalLaunchQueue
-        case .terminalControl, .workspaceGit, .mainQueue:
-            preconditionFailure("\(lane) resolves its queue at the call site, not through this table.")
+        case .terminalControl, .workspaceGit, .mainQueue: preconditionFailure("\(lane) resolves its queue at the call site, not through this table.")
         }
     }
 
-    /// Terminal input and control round trips block on the target session's engine (see
-    /// `runsOnTerminalControlLane`). They run on a serial lane per session (`TerminalControlLaneRegistry`)
+    /// Terminal input and control round trips block on the target session's engine (their descriptor lane
+    /// is `.terminalControl`; see `SpacesDeviceAPICommandDescriptor`). They run on a serial lane per
+    /// session (`TerminalControlLaneRegistry`)
     /// so a stalled engine holds up only that session's own controls: never another session's, and never
     /// the state queue that answers overviews and state reads.
     private let terminalControlLanes = TerminalControlLaneRegistry()
@@ -1257,7 +1097,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// could land in that window — after the send's revision check reads fresh, before its archive runs — and
     /// the send would still write and archive the text it validated, silently losing the concurrent edit even
     /// though every individual `revision` compare was correct at the instant it ran. round-13 Fix 3: all three
-    /// operations also run on a terminal-control lane (see `runsOnTerminalControlLane`) — send because it
+    /// operations also run on a terminal-control lane (descriptor lane `.terminalControl`; see
+    /// `SpacesDeviceAPICommandDescriptor`) — send because it
     /// shares `.sendTerminalInput`'s control-socket stall risk directly, upsert/delete because a mutation stuck
     /// behind a send holding this queue across that same control-socket round trip must not also hold the
     /// serial state queue hostage, stalling every unrelated request behind one comment save. Each handler
@@ -1267,7 +1108,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// (`SQLiteStore`, `TerminalControlClient.send`, `TerminalSessionPersistence`) dispatches back onto either
     /// queue.
     private let reviewCommentQueue = DispatchQueue(label: "spaces.device.api.review-comments", qos: .userInitiated)
-    /// File read/write/diff commands (see `runsOnWorkspaceGitQueue`) shell out to `git` and touch the
+    /// File read/write/diff commands (descriptor lane `.workspaceGit`; see
+    /// `SpacesDeviceAPICommandDescriptor`) shell out to `git` and touch the
     /// filesystem, which can take seconds for a large diff. Serialized per workspace (see
     /// `workspaceGitQueue(for:)`) rather than on one shared queue, so a slow diff on one workspace stalls
     /// only that workspace's other requests, never the state queue's pings/overviews or a different
@@ -2881,21 +2723,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 result: .overview(try loadOverview(store: context.store(), clientApp: request.clientApp)))
         case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
         case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
-        // Both transports divert workspace-teardown commands to `workspaceTeardownQueue` before they reach
-        // here (see `runsOnWorkspaceTeardownQueue`), so this case only keeps the switch exhaustive.
+        // Both transports divert workspace-teardown commands (descriptor lane `.workspaceTeardown`; see
+        // `SpacesDeviceAPICommandDescriptor`) to `workspaceTeardownQueue` before they reach here, so this
+        // case only keeps the switch exhaustive.
         case .deleteProject, .archiveWorkspace: return try handleWorkspaceTeardownRequest(request)
-        // Both transports divert `.stopWorkspace` to `workspaceStopQueue` before they reach here (see
-        // `runsOnWorkspaceStopQueue`), so this case only keeps the switch exhaustive.
+        // Both transports divert `.stopWorkspace` (descriptor lane `.workspaceStop`) to
+        // `workspaceStopQueue` before they reach here, so this case only keeps the switch exhaustive.
         case .stopWorkspace: return try handleWorkspaceStopRequest(request)
-        // Both transports divert `.runWorkspaceSetup` to `workspaceSetupQueue` before they reach here (see
-        // `runsOnWorkspaceSetupQueue`), so this case only keeps the switch exhaustive.
+        // Both transports divert `.runWorkspaceSetup` (descriptor lane `.workspaceSetup`) to
+        // `workspaceSetupQueue` before they reach here, so this case only keeps the switch exhaustive.
         case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
-        // Both transports divert workspace file-read/write/diff/file-list/ref-list commands to
-        // `workspaceGitQueue` before they reach here (see `runsOnWorkspaceGitQueue`), so this case only
-        // keeps the switch exhaustive.
+        // Both transports divert workspace file-read/write/diff/file-list/ref-list commands (descriptor
+        // lane `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) to `workspaceGitQueue` before they
+        // reach here, so this case only keeps the switch exhaustive.
         case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk,
-            .workspaceFileList, .workspaceRefList:
+            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
@@ -2913,7 +2755,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // workspaceFileRead/Write/Diff this has no need for the per-workspace `workspaceGitQueue`
         // serialization and runs inline on the main serial device-API queue like every other read: it's
         // read-only and fast, unlike upsert/delete/send below, which all divert to a terminal-control
-        // lane instead (see `runsOnTerminalControlLane`).
+        // lane instead (descriptor lane `.terminalControl`; see `SpacesDeviceAPICommandDescriptor`).
         case .workspaceReviewCommentList(let payload): return try handleWorkspaceReviewCommentListRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
@@ -2926,8 +2768,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         // Both transports divert engine-blocking terminal commands and review-comment mutations to a
-        // terminal-control lane before they reach here (see `runsOnTerminalControlLane`), so this case
-        // only keeps the switch exhaustive.
+        // terminal-control lane before they reach here (descriptor lane `.terminalControl`; see
+        // `SpacesDeviceAPICommandDescriptor`), so this case only keeps the switch exhaustive.
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentsSend, .workspaceReviewCommentUpsert,
             .workspaceReviewCommentDelete:
             return try handleTerminalControlLaneRequest(request)
@@ -2994,17 +2836,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// stay out of it.
         private func dispatchSync(on targetQueue: DispatchQueue, handler: (SpacesDeviceAPIServer) throws -> SpacesDeviceAPIResponse) throws
             -> SpacesDeviceAPIResponse
-        {
-            try targetQueue.sync { try handler(self) }
-        }
+        { try targetQueue.sync { try handler(self) } }
     #endif
 
     #if canImport(Network) && canImport(Security)
         private func handleAgentHookRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
-        ) {
-            dispatchAsync(on: queue(for: .agentHook), handler: { try $0.handleAgentHookRequest(request) }, completion: completion)
-        }
+        ) { dispatchAsync(on: queue(for: .agentHook), handler: { try $0.handleAgentHookRequest(request) }, completion: completion) }
     #endif
 
     #if os(Linux) && canImport(OpenSSL)
@@ -3013,7 +2851,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     #endif
 
-    /// Runs one workspace-teardown command (see `runsOnWorkspaceTeardownQueue`).
+    /// Runs one workspace-teardown command (descriptor lane `.workspaceTeardown`; see
+    /// `SpacesDeviceAPICommandDescriptor`).
     ///
     /// The `RequestContext` is created here rather than passed in from `handleRequest` so its store and
     /// orchestrator are opened and used only on `workspaceTeardownQueue`, per the confinement rule: a
@@ -3028,7 +2867,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs `.stopWorkspace` (see `runsOnWorkspaceStopQueue`) on its own serial queue, confined the same
+    /// Runs `.stopWorkspace` (descriptor lane `.workspaceStop`; see `SpacesDeviceAPICommandDescriptor`) on
+    /// its own serial queue, confined the same
     /// way `handleWorkspaceTeardownRequest` and `handleWorkspaceSetupRequest` confine their stores: a
     /// request handled on one queue must not touch a `SQLiteStore` opened on another.
     private func handleWorkspaceStopRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3039,7 +2879,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs `.runWorkspaceSetup` (see `runsOnWorkspaceSetupQueue`) on its own serial queue, confined the
+    /// Runs `.runWorkspaceSetup` (descriptor lane `.workspaceSetup`; see `SpacesDeviceAPICommandDescriptor`)
+    /// on its own serial queue, confined the
     /// same way `handleWorkspaceTeardownRequest` confines its store and orchestrator, and for the same
     /// reason: setup and teardown never share a `RequestContext`, since a request handled on one queue
     /// must not touch a `SQLiteStore` opened on the other.
@@ -3051,7 +2892,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs `.startWorkspaceCommandSession` (see `runsOnWorkspaceTerminalLaunchQueue`) on its own serial
+    /// Runs `.startWorkspaceCommandSession` (descriptor lane `.workspaceTerminalLaunch`; see
+    /// `SpacesDeviceAPICommandDescriptor`) on its own serial
     /// queue, confined the same way `handleWorkspaceSetupRequest` confines its store and orchestrator.
     private func handleWorkspaceTerminalLaunchRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
         let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
@@ -3061,7 +2903,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs one workspace file-read/write/diff/file-list/ref-list command (see `runsOnWorkspaceGitQueue`) on
+    /// Runs one workspace file-read/write/diff/file-list/ref-list command (descriptor lane
+    /// `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) on
     /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
     /// a request handled on one queue must not touch a `SQLiteStore` opened on another.
     private func handleWorkspaceGitRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3099,29 +2942,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #if canImport(Network) && canImport(Security)
         private func handleWorkspaceTeardownRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
-        ) {
-            dispatchAsync(
-                on: queue(for: .workspaceTeardown), handler: { try $0.handleWorkspaceTeardownRequest(request) }, completion: completion)
-        }
+        ) { dispatchAsync(on: queue(for: .workspaceTeardown), handler: { try $0.handleWorkspaceTeardownRequest(request) }, completion: completion) }
 
         private func handleWorkspaceStopRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
-        ) {
-            dispatchAsync(on: queue(for: .workspaceStop), handler: { try $0.handleWorkspaceStopRequest(request) }, completion: completion)
-        }
+        ) { dispatchAsync(on: queue(for: .workspaceStop), handler: { try $0.handleWorkspaceStopRequest(request) }, completion: completion) }
 
         private func handleWorkspaceSetupRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
-        ) {
-            dispatchAsync(on: queue(for: .workspaceSetup), handler: { try $0.handleWorkspaceSetupRequest(request) }, completion: completion)
-        }
+        ) { dispatchAsync(on: queue(for: .workspaceSetup), handler: { try $0.handleWorkspaceSetupRequest(request) }, completion: completion) }
 
         private func handleStartWorkspaceCommandSessionAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
             dispatchAsync(
-                on: queue(for: .workspaceTerminalLaunch), handler: { try $0.handleWorkspaceTerminalLaunchRequest(request) },
-                completion: completion)
+                on: queue(for: .workspaceTerminalLaunch), handler: { try $0.handleWorkspaceTerminalLaunchRequest(request) }, completion: completion)
         }
 
         private func handleWorkspaceGitRequestAsync(
@@ -3180,8 +3015,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     #endif
 
-    /// Runs one engine-blocking terminal command or Code pane review-comment mutation (see
-    /// `runsOnTerminalControlLane`). Terminal handlers read session files and talk to a control socket;
+    /// Runs one engine-blocking terminal command or Code pane review-comment mutation (descriptor lane
+    /// `.terminalControl`; see `SpacesDeviceAPICommandDescriptor`). Terminal handlers read session files and
+    /// talk to a control socket;
     /// review-comment handlers open their own `SQLiteStore` because this request bypasses the
     /// queue-confined `RequestContext` created by `handleRequest`.
     private func handleTerminalControlLaneRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -4327,18 +4163,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Reads a bounded regular checkout file. The revision-read endpoint shares this exact path so
     /// its returned CAS baseline has the same containment, type, and cap guarantees as a normal file read.
     private func workspaceFileReadResponse(
-        relativePath: String, workspaceDir: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
-        requiresDirectPath: Bool = false
+        relativePath: String, workspaceDir: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil, requiresDirectPath: Bool = false
     ) -> SpacesDeviceAPIResponse {
         let resolvedPath: String
         do {
-            resolvedPath = try (
-                requiresDirectPath
-                    ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: relativePath, workspaceDir: workspaceDir)
-                    : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: relativePath, workspaceDir: workspaceDir))
+            resolvedPath =
+                try
+                (requiresDirectPath
+                ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: relativePath, workspaceDir: workspaceDir)
+                : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: relativePath, workspaceDir: workspaceDir))
         } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
+            return SpacesDeviceAPIResponse(ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
 
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath), let size = attributes[.size] as? Int else {
@@ -4362,8 +4197,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // search/execute permission), so the file is confirmed to exist; a nil bounded read here means it
             // could not be opened/read (e.g. permissions), never that it is missing. Reporting `.notFound`
             // would be a silent conflation an automated retry could misinterpret as "safe to create".
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "File '\(relativePath)' exists but could not be read.", errorCode: .internalError)
+            return SpacesDeviceAPIResponse(ok: false, message: "File '\(relativePath)' exists but could not be read.", errorCode: .internalError)
         }
         guard data.count <= Self.workspaceFileMaxBytes else {
             // The stat-based check above is the cheap fast path; this is the guard that cannot be raced — the
@@ -4380,11 +4214,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
                 let comparisonPath = oldPath ?? relativePath
                 switch try gitTreePath(at: comparisonBaseRevision, relativePath: comparisonPath, workspaceDir: workspaceDir) {
-                case .missing:
-                    comparisonOldData = nil
+                case .missing: comparisonOldData = nil
                 case .nonRegular:
-                    return SpacesDeviceAPIResponse(
-                        ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
+                    return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
                     comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
                         ["-C", workspaceDir, "cat-file", "--filters", "\(comparisonBaseRevision):./\(comparisonPath)"], timeout: 10,
@@ -4392,9 +4224,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
             } catch SpacesRuntimeError.outputExceededCap {
                 return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
-            } catch {
-                return SpacesDeviceAPIResponse(ok: false, message: "Could not read the comparison file.", errorCode: .internalError)
-            }
+            } catch { return SpacesDeviceAPIResponse(ok: false, message: "Could not read the comparison file.", errorCode: .internalError) }
         } else {
             comparisonOldData = nil
         }
@@ -4412,8 +4242,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         return workspaceFileReadResponse(
-            relativePath: request.relativePath, workspaceDir: workspaceDir,
-            comparisonBaseRevision: request.comparisonBaseRevision, oldPath: request.oldPath, requiresDirectPath: request.requiresDirectPath)
+            relativePath: request.relativePath, workspaceDir: workspaceDir, comparisonBaseRevision: request.comparisonBaseRevision,
+            oldPath: request.oldPath, requiresDirectPath: request.requiresDirectPath)
     }
 
     /// Reads one blob from an immutable commit, never from the working tree. The path is validated as a
@@ -4441,11 +4271,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let targetHash: String
         let targetIsExecutable: Bool
         switch try gitTreePath(at: request.revision, relativePath: request.relativePath, workspaceDir: workspaceDir) {
-        case .missing:
-            return SpacesDeviceAPIResponse(ok: false, message: "File was not found at this revision.", errorCode: .notFound)
+        case .missing: return SpacesDeviceAPIResponse(ok: false, message: "File was not found at this revision.", errorCode: .notFound)
         case .nonRegular:
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "File at this revision is not a regular file.", errorCode: .invalidArgument)
+            return SpacesDeviceAPIResponse(ok: false, message: "File at this revision is not a regular file.", errorCode: .invalidArgument)
         case .regularBlob(let objectID, let mode):
             targetHash = objectID
             targetIsExecutable = mode == "100755"
@@ -4469,19 +4297,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // divergence. The temporary input is exactly the response's CAS baseline, so the equality
         // check cannot verify different bytes from those the editor would later save. Git tracks the
         // executable bit too, so exact equivalence needs both the filtered blob and direct leaf mode.
-        let worktreeIsExecutable = lastCommitDirectWorktreeExecutable(
-            relativePath: request.relativePath, workspaceDir: workspaceDir)
+        let worktreeIsExecutable = lastCommitDirectWorktreeExecutable(relativePath: request.relativePath, workspaceDir: workspaceDir)
         let filteredWorktreeHash: String?
         if worktreeIsExecutable == targetIsExecutable {
             let baselineData = Data(base64Encoded: worktreeFile.base64Data)!
-            filteredWorktreeHash = try gitFilteredHash(
-                data: baselineData, relativePath: request.relativePath, workspaceDir: workspaceDir)
+            filteredWorktreeHash = try gitFilteredHash(data: baselineData, relativePath: request.relativePath, workspaceDir: workspaceDir)
         } else {
             filteredWorktreeHash = nil
         }
         let parent = try workspaceGitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^"], timeout: 2, allowedExitCodes: [0, 1])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^"], timeout: 2, allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
         let comparisonOldData: Data?
         if parent.isEmpty {
             comparisonOldData = nil
@@ -4489,11 +4315,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let oldPath = request.oldPath ?? request.relativePath
             do {
                 switch try gitTreePath(at: parent, relativePath: oldPath, workspaceDir: workspaceDir) {
-                case .missing:
-                    comparisonOldData = nil
+                case .missing: comparisonOldData = nil
                 case .nonRegular:
-                    return SpacesDeviceAPIResponse(
-                        ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
+                    return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
                     comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
                         ["-C", workspaceDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10,
@@ -4507,8 +4331,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             ok: true, message: "Read workspace revision file.",
             result: .workspaceRevisionFileRead(
                 .init(
-                    worktreeFile: worktreeFile,
-                    isWorktreeEquivalentToRevision: filteredWorktreeHash == targetHash,
+                    worktreeFile: worktreeFile, isWorktreeEquivalentToRevision: filteredWorktreeHash == targetHash,
                     comparisonOldBase64Data: comparisonOldData?.base64EncodedString())))
     }
 
@@ -4521,8 +4344,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not prepare Git filter input."])
         }
         defer { try? FileManager.default.removeItem(at: input) }
-        return try workspaceGitClient.runGitAndCapture(
-            ["-C", workspaceDir, "hash-object", "--path=\(relativePath)", input.path], timeout: 10)
+        return try workspaceGitClient.runGitAndCapture(["-C", workspaceDir, "hash-object", "--path=\(relativePath)", input.path], timeout: 10)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -4540,21 +4362,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             ["-C", workspaceDir, "ls-tree", "-z", revision, "--", ":(literal)\(relativePath)"], timeout: 10)
         let entries = output.split(separator: "\0", omittingEmptySubsequences: true)
         guard entries.count <= 1 else {
-            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "Git tree lookup returned multiple entries for one literal path.",
-            ])
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 500,
+                userInfo: [NSLocalizedDescriptionKey: "Git tree lookup returned multiple entries for one literal path."])
         }
         guard let entry = entries.first else { return .missing }
         guard let tab = entry.firstIndex(of: "\t") else {
-            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "Git tree lookup returned malformed output.",
-            ])
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Git tree lookup returned malformed output."])
         }
         let fields = entry[..<tab].split(separator: " ", omittingEmptySubsequences: true)
         guard fields.count == 3 else {
-            throw NSError(domain: "SpacesDeviceAPIServer", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "Git tree lookup returned malformed metadata.",
-            ])
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Git tree lookup returned malformed metadata."])
         }
         guard fields[1] == "blob" else { return .nonRegular }
         switch fields[0] {
@@ -4596,7 +4416,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard revision.utf8.count == 40 || revision.utf8.count == 64 else { return false }
         return revision.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102) }
     }
-
 
     private static func isSafeGitRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.utf8.contains(0) else { return false }
@@ -4650,13 +4469,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         let resolvedPath: String
         do {
-            resolvedPath = try (
-                request.requiresDirectPath
-                    ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
-                    : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir))
+            resolvedPath =
+                try
+                (request.requiresDirectPath
+                ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+                : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir))
         } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
+            return SpacesDeviceAPIResponse(ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
         guard let newData = Data(base64Encoded: request.base64Data) else {
             return SpacesDeviceAPIResponse(ok: false, message: "File content is not valid base64.", errorCode: .invalidArgument)
@@ -5196,7 +5015,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// round-13 Fix 3: stays on the main serial device-API queue and does not take `reviewCommentQueue` — it
     /// is a read-only draft list with no compare-then-write step to protect, unlike upsert/delete/send below
-    /// (all diverted to a terminal-control lane; see `runsOnTerminalControlLane`).
+    /// (all diverted to a terminal-control lane; descriptor lane `.terminalControl`, see
+    /// `SpacesDeviceAPICommandDescriptor`).
     private func handleWorkspaceReviewCommentListRequest(_ request: SpacesDeviceWorkspaceReviewCommentListRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -5214,8 +5034,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `handleWorkspaceReviewCommentDeleteRequest`) rather than silently creating a fresh draft under a
     /// caller-supplied id the store never issued. Only a nil `id` is a create.
     ///
-    /// Runs on a terminal-control lane (see `runsOnTerminalControlLane`), which has no
-    /// `RequestContext` of its own, so — mirroring `handleWorkspaceReviewCommentsSendRequest` — this opens
+    /// Runs on a terminal-control lane (descriptor lane `.terminalControl`; see
+    /// `SpacesDeviceAPICommandDescriptor`), which has no `RequestContext` of its own, so — mirroring
+    /// `handleWorkspaceReviewCommentsSendRequest` — this opens
     /// its own `SQLiteStore` directly instead of depending on one. Its store read+write body still runs
     /// inside `reviewCommentQueue.sync` (see that queue's doc comment) so it cannot interleave with a
     /// `.workspaceReviewCommentsSend` mid-flight on the same draft.
@@ -5331,8 +5152,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `updatedAt`) is the token: `updatedAt` has whole-second resolution, so two edits inside the same
     /// second would leave it unchanged and this check would silently pass over genuinely stale text.
     ///
-    /// Runs on a terminal-control lane (see `runsOnTerminalControlLane`), which has no `RequestContext` of
-    /// its own — mirrors `computeWorkspaceDiffScopeSignature`'s "a store belongs to the queue that opened
+    /// Runs on a terminal-control lane (descriptor lane `.terminalControl`; see
+    /// `SpacesDeviceAPICommandDescriptor`), which has no `RequestContext` of its own — mirrors
+    /// `computeWorkspaceDiffScopeSignature`'s "a store belongs to the queue that opened
     /// it" confinement rule by opening its own `SQLiteStore` here rather than sharing one from `queue`.
     ///
     /// The entire body additionally runs inside `try reviewCommentQueue.sync` (see that queue's doc comment):
@@ -5440,7 +5262,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
         }
-        let session = try context.orchestrator().createWorkspaceTerminalSession(workspaceID: request.workspaceID, title: nil, command: request.command)
+        let session = try context.orchestrator().createWorkspaceTerminalSession(
+            workspaceID: request.workspaceID, title: nil, command: request.command)
         return try refreshedMutationResponse(
             context: context, message: "Started workspace command session.", workspaceID: request.workspaceID, sessionID: session.id,
             launchedTerminalSession: try launchedTerminalSessionSummary(session, workspaceID: request.workspaceID))

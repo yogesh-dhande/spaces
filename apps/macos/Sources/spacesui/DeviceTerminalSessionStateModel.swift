@@ -787,8 +787,9 @@
         /// is dropped rather than tearing down a healthy replacement.
         ///
         /// Treating a missed probe as conclusive leans on the daemon answering `.ping` off its
-        /// engine-blocked queues (`SpacesDeviceAPIServer.runsOnTerminalControlLane`). Against a daemon
-        /// predating that divert, saturation stalls the ping too and the verdict reproduces the
+        /// engine-blocked queues (the terminal-control lane commands divert to; see
+        /// `SpacesDeviceAPICommandDescriptor` in `spacesdevicecore`). Against a daemon predating that
+        /// divert, saturation stalls the ping too and the verdict reproduces the
         /// bare-timeout teardown this probe replaces — the same banner the old client raised, two seconds
         /// later. Accepted rather than gated on a daemon-reported capability: clients and daemons ship in
         /// lockstep with no compatibility guarantees yet, and the mixed pairing merely degrades to the
