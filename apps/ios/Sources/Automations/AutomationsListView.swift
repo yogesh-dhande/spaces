@@ -137,10 +137,10 @@ extension StatusDot.Kind {
     /// (failed or timed out — both read as the same "needs attention" red ring), and `.idle` for
     /// everything else (queued, canceled, skipped, or no run yet).
     init(automationRunStatus status: String?) {
-        switch status {
-        case "running": self = .running
-        case "succeeded": self = .succeeded
-        case "failed", "timed_out": self = .exited
+        switch status.flatMap(AutomationRunStatus.init(rawValue:)) {
+        case .running: self = .running
+        case .succeeded: self = .succeeded
+        case .failed, .timedOut: self = .exited
         default: self = .idle
         }
     }

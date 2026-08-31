@@ -117,7 +117,7 @@ struct AutomationDetailView: View {
     /// the list row's single-line `SpacesMobileAutomations.excerpt`. Deliberately unclamped: the screen
     /// scrolls, and hiding part of the command would misrepresent what the automation does.
     private func commandBlock(_ automation: TerminalServiceAutomationSummary) -> some View {
-        let command = automation.kind == "agent" ? (automation.agentPrompt ?? "") : automation.script
+        let command = AutomationKind(rawValue: automation.kind) == .agent ? (automation.agentPrompt ?? "") : automation.script
         return Text(command).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
             .padding(10).background(Theme.surface2).clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)).padding(.horizontal, 20).padding(
                 .top, 4)

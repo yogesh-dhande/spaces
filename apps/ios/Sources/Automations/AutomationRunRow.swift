@@ -68,7 +68,9 @@ struct AutomationRunRowsList: View {
         if let started = SpacesMobileAutomations.startedDescription(run, relativeTo: model.relativeTimeReference) { detailParts.append(started) }
         if let duration = SpacesMobileAutomations.durationDescription(run, relativeTo: model.relativeTimeReference) { detailParts.append(duration) }
         if let exitCode = run.exitCode { detailParts.append("exit \(exitCode)") }
-        if run.status == "skipped", let reason = run.skipReason { detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))") }
+        if AutomationRunStatus(rawValue: run.status) == .skipped, let reason = run.skipReason {
+            detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))")
+        }
 
         let isNavigable = SpacesMobileAutomations.runIsNavigable(run)
         let band = BandRow(

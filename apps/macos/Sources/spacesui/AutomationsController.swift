@@ -69,19 +69,6 @@ import workspacecore
     /// The open next-run popover, held so opening another chip's popover replaces it rather than stacking.
     private var nextRunPopover: NSPopover?
 
-    private let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter
-    }()
-    private let durationFormatter: DateComponentsFormatter = {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute, .second]
-        formatter.unitsStyle = .abbreviated
-        formatter.maximumUnitCount = 2
-        return formatter
-    }()
-
     // MARK: - Presentation
 
     /// Deep-links to the Runs tab, filtered to a device, and shows the pane — used by an automation alert
@@ -740,18 +727,15 @@ import workspacecore
     }
 
     private func startedDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
-        guard let iso = run.startedAt, let date = TerminalSessionTimestamp.date(from: iso) else { return "" }
-        return "started \(relativeFormatter.localizedString(for: date, relativeTo: Date()))"
+        guard let date = AutomationRunFormatting.date(run.startedAt) else { return "" }
+        return "started \(AutomationRunFormatting.relativePhrase(for: date, relativeTo: Date()))"
     }
 
     /// How long an ended run took. A run still going reports nothing: "took 3 m" alongside its own live
     /// spinner would claim a total it has not reached, and "started 3 m ago" already carries that fact.
     private func durationDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
-        guard let startISO = run.startedAt, let start = TerminalSessionTimestamp.date(from: startISO), let endISO = run.endedAt,
-            let end = TerminalSessionTimestamp.date(from: endISO)
-        else { return "" }
-        let interval = max(0, end.timeIntervalSince(start))
-        return durationFormatter.string(from: interval).map { "took \($0)" } ?? ""
+        guard let start = AutomationRunFormatting.date(run.startedAt), let end = AutomationRunFormatting.date(run.endedAt) else { return "" }
+        return AutomationRunFormatting.durationPhrase(from: start, to: end).map { "took \($0)" } ?? ""
     }
 
     // MARK: - Actions
