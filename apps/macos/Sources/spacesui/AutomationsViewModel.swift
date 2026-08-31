@@ -54,6 +54,10 @@ struct AutomationTableRow: Sendable, Equatable, Identifiable {
 
     /// The raw `AutomationRunStatus` value of the most recent run, or nil if it has never run.
     var lastRunStatus: String? { latestRun?.status }
+
+    /// `lastRunStatus` parsed once, or nil if it has never run or its raw value doesn't match a known case
+    /// (an unrecognized status still displays via `lastRunStatus`, which stays available raw).
+    var latestRunStatus: AutomationRunStatus? { latestRun.flatMap { AutomationRunStatus(rawValue: $0.status) } }
 }
 
 /// What the automations table's leading status dot reports for one row.
@@ -180,7 +184,7 @@ enum AutomationsViewModel {
     /// markers, but their stale overview snapshots never contribute live activity to the sidebar.
     static func runningRunCount(from inputs: [AutomationDeviceInput]) -> Int {
         inputs.reduce(0) { count, input in
-            count + (input.isReachable ? input.runs.count(where: { $0.status == AutomationRunStatus.running.rawValue }) : 0)
+            count + (input.isReachable ? input.runs.count(where: { AutomationRunStatus(rawValue: $0.status) == .running }) : 0)
         }
     }
 
@@ -210,7 +214,7 @@ enum AutomationsViewModel {
 
     /// An automation's currently-running run, newest first when a concurrency policy allowed more than one.
     static func runningRun(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> TerminalServiceAutomationRunSummary? {
-        runs.filter { $0.automationID == automationID && $0.status == AutomationRunStatus.running.rawValue }.max { lhs, rhs in
+        runs.filter { $0.automationID == automationID && AutomationRunStatus(rawValue: $0.status) == .running }.max { lhs, rhs in
             (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt)
         }
     }
@@ -225,10 +229,14 @@ enum AutomationsViewModel {
     /// queued/running one is not yet an outcome. The entry text names the automation, the failure, and the
     /// device (e.g. "Nightly audit failed (exit 3) on This Mac").
     static func alertEntries(deviceID: String, deviceName: String, runs: [TerminalServiceAutomationRunSummary]) -> [AutomationAlertEntry] {
-        runs.filter { $0.status == "failed" || $0.status == "timed_out" }.map { run in
-            AutomationAlertEntry(
-                attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)", text: alertText(run: run, deviceName: deviceName),
-                deviceID: deviceID, runID: run.id, status: run.status,
+        runs.compactMap { run -> AutomationAlertEntry? in
+            // Parsed once here, right where each run's raw status enters the alerts pipeline, and reused
+            // below instead of re-deriving it from the raw string a second time in `alertText`.
+            let status = AutomationRunStatus(rawValue: run.status)
+            guard status == .failed || status == .timedOut else { return nil }
+            return AutomationAlertEntry(
+                attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)",
+                text: alertText(run: run, status: status, deviceName: deviceName), deviceID: deviceID, runID: run.id, status: run.status,
                 eventDate: (run.endedAt ?? run.createdAt).flatMap(TerminalSessionTimestamp.date(from:)))
         }.sorted { lhs, rhs in
             switch (lhs.eventDate, rhs.eventDate) {
@@ -239,13 +247,15 @@ enum AutomationsViewModel {
         }
     }
 
-    /// The human-readable attention text for a failed/timed-out run.
-    private static func alertText(run: TerminalServiceAutomationRunSummary, deviceName: String) -> String {
+    /// The human-readable attention text for a failed/timed-out run. `status` is always `.failed` or
+    /// `.timedOut` given the `alertEntries` filter above; the `default` case falls back to the run's raw
+    /// status verbatim, matching what a caller would see before this run's status was ever parsed.
+    private static func alertText(run: TerminalServiceAutomationRunSummary, status: AutomationRunStatus?, deviceName: String) -> String {
         let name = run.automationName ?? "Automation"
         let outcome: String
-        switch run.status {
-        case "timed_out": outcome = "timed out"
-        case "failed": outcome = run.exitCode.map { "failed (exit \($0))" } ?? "failed"
+        switch status {
+        case .timedOut: outcome = "timed out"
+        case .failed: outcome = run.exitCode.map { "failed (exit \($0))" } ?? "failed"
         default: outcome = run.status
         }
         return "\(name) \(outcome) on \(deviceName)"
@@ -258,7 +268,7 @@ enum AutomationsViewModel {
     static func rowStatus(for row: AutomationTableRow) -> AutomationRowStatus {
         if row.runningRun != nil { return .running }
         guard row.automation.enabled else { return .disabled }
-        switch row.latestRun.flatMap({ AutomationRunStatus(rawValue: $0.status) }) {
+        switch row.latestRunStatus {
         case .failed, .timedOut: return .failed
         default: return .ready
         }
