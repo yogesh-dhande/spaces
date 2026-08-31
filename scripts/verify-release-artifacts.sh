@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO_ROOT/scripts/spaces-release-helpers.sh"
+
 require_notarization=0
 
 while [[ $# -gt 0 ]]; do
@@ -30,36 +33,6 @@ if [[ ! -f "$DMG_PATH" ]]; then
   echo "Error: DMG not found at $DMG_PATH" >&2
   exit 1
 fi
-
-require_universal_binary() {
-  local binary_path="$1"
-  local label="$2"
-  local archs
-
-  if [[ ! -f "$binary_path" ]]; then
-    echo "Error: Missing $label at $binary_path" >&2
-    exit 1
-  fi
-
-  archs="$(lipo -archs "$binary_path")"
-  echo "$label architectures: $archs"
-
-  case " $archs " in
-    *" arm64 "* ) ;;
-    *)
-      echo "Error: $label is missing arm64 support." >&2
-      exit 1
-      ;;
-  esac
-
-  case " $archs " in
-    *" x86_64 "* ) ;;
-    *)
-      echo "Error: $label is missing x86_64 support." >&2
-      exit 1
-      ;;
-  esac
-}
 
 echo "Verifying signed DMG..."
 codesign --verify --verbose=2 "$DMG_PATH"
@@ -97,17 +70,17 @@ for app_path in "$mountpoint/Install Spaces.app" "$mountpoint/Spaces.app"; do
 done
 
 echo "Verifying bundled binary architectures..."
-require_universal_binary \
+spaces_release_require_universal_binary_verbose \
   "$mountpoint/Spaces.app/Contents/MacOS/SpacesApp" \
   "Spaces.app main executable"
-require_universal_binary \
+spaces_release_require_universal_binary_verbose \
   "$mountpoint/Spaces.app/Contents/Resources/spaces" \
   "Spaces.app bundled CLI"
-require_universal_binary \
+spaces_release_require_universal_binary_verbose \
   "$mountpoint/Spaces.app/Contents/Resources/spacesd" \
   "Spaces.app bundled spacesd daemon"
 bundled_caddy="$mountpoint/Spaces.app/Contents/Resources/caddy"
-require_universal_binary "$bundled_caddy" "Spaces.app bundled Caddy"
+spaces_release_require_universal_binary_verbose "$bundled_caddy" "Spaces.app bundled Caddy"
 echo "Verifying bundled Caddy signature..."
 codesign --verify --strict --verbose=2 "$bundled_caddy"
 
@@ -143,7 +116,7 @@ if [[ ! -f "$ghostty_vt_real_dylib" ]]; then
   echo "Error: Missing bundled libghostty-vt real dylib at $ghostty_vt_real_dylib" >&2
   exit 1
 fi
-require_universal_binary \
+spaces_release_require_universal_binary_verbose \
   "$ghostty_vt_real_dylib" \
   "Spaces.app bundled libghostty-vt"
 

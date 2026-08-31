@@ -11,6 +11,7 @@ SPACES_CLI="$2"
 SPACESD="$3"
 BUNDLE_OUTPUT="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO_ROOT/scripts/spaces-release-helpers.sh"
 DEFAULT_CADDY_BIN="$REPO_ROOT/apps/macos/.local/caddy/caddy"
 CADDY_BIN="${5:-$DEFAULT_CADDY_BIN}"
 SPARKLE_FRAMEWORK="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -70,56 +71,21 @@ shopt -s nullglob
 ghostty_vt_dylibs=("$GHOSTTYVT_LIB_DIR"/libghostty-vt*.dylib)
 shopt -u nullglob
 
-binary_has_arch() {
-  local archs="$1"
-  local arch="$2"
-  case " $archs " in
-    *" $arch "* ) return 0 ;;
-    * ) return 1 ;;
-  esac
-}
-
-require_universal_macos_binary() {
-  local binary_path="$1"
-  local label="$2"
-  local archs
-
-  if [[ ! -f "$binary_path" ]]; then
-    echo "Error: Missing $label at $binary_path" >&2
-    exit 1
-  fi
-
-  archs="$(lipo -archs "$binary_path" 2>/dev/null || true)"
-  if ! binary_has_arch "$archs" arm64 || ! binary_has_arch "$archs" x86_64; then
-    echo "Error: $label must be universal arm64+x86_64, but found: ${archs:-unknown} ($binary_path)" >&2
-    exit 1
-  fi
-}
-
-is_universal_macos_binary() {
-  local binary_path="$1"
-  local archs
-
-  [[ -f "$binary_path" ]] || return 1
-  archs="$(lipo -archs "$binary_path" 2>/dev/null || true)"
-  binary_has_arch "$archs" arm64 && binary_has_arch "$archs" x86_64
-}
-
 copy_or_build_universal_ghostty_vt_dylibs() {
   local destination_dir="$1"
   local source_dylib="$GHOSTTYVT_LIB_DIR/libghostty-vt.dylib"
   local real_source_dylib
 
-  if [[ -e "$source_dylib" || -L "$source_dylib" ]]; then
-    if real_source_dylib="$(realpath "$source_dylib" 2>/dev/null)" && is_universal_macos_binary "$real_source_dylib"; then
+  if spaces_release_dylib_copy_candidate "$source_dylib"; then
+    if real_source_dylib="$(realpath "$source_dylib" 2>/dev/null)" && spaces_release_is_universal_binary "$real_source_dylib"; then
       cp -P "${ghostty_vt_dylibs[@]}" "$destination_dir/"
-      require_universal_macos_binary "$destination_dir/$(basename "$real_source_dylib")" "bundled libghostty-vt dylib"
+      spaces_release_require_universal_binary "$destination_dir/$(basename "$real_source_dylib")" "bundled libghostty-vt dylib"
       return
     fi
   fi
 
   local universal_static="$GHOSTTYVT_LIB_DIR/ghostty-vt.xcframework/macos-arm64_x86_64/libghostty-vt.a"
-  require_universal_macos_binary "$universal_static" "Ghostty VT static xcframework library"
+  spaces_release_require_universal_binary "$universal_static" "Ghostty VT static xcframework library"
 
   echo "Building universal libghostty-vt dylib from $universal_static"
   xcrun clang \
@@ -135,7 +101,7 @@ copy_or_build_universal_ghostty_vt_dylibs() {
     "$universal_static"
   ln -s libghostty-vt.0.1.0.dylib "$destination_dir/libghostty-vt.0.dylib"
   ln -s libghostty-vt.0.dylib "$destination_dir/libghostty-vt.dylib"
-  require_universal_macos_binary "$destination_dir/libghostty-vt.0.1.0.dylib" "bundled libghostty-vt dylib"
+  spaces_release_require_universal_binary "$destination_dir/libghostty-vt.0.1.0.dylib" "bundled libghostty-vt dylib"
 }
 
 rm -rf "$BUNDLE_OUTPUT"
@@ -151,7 +117,7 @@ cp "$SPACESD" "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 cp -R "$GHOSTTY_RESOURCES_DIR" "$BUNDLE_OUTPUT/Contents/Resources/ghostty"
 cp -R "$GHOSTTY_TERMINFO_DIR" "$BUNDLE_OUTPUT/Contents/Resources/terminfo"
-require_universal_macos_binary "$CADDY_BIN" "caddy router binary"
+spaces_release_require_universal_binary "$CADDY_BIN" "caddy router binary"
 cp "$CADDY_BIN" "$BUNDLE_OUTPUT/Contents/Resources/caddy"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/caddy"
 cp -R "$SPARKLE_FRAMEWORK" "$BUNDLE_OUTPUT/Contents/Frameworks/"
