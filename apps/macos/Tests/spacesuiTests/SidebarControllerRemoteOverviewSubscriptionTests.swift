@@ -408,9 +408,9 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(SidebarController.pullFailureStillDescribesDevice(pullGeneration: 3, currentGeneration: 3))
     }
 
-    /// A success is gated on a *different* counter than a failure: `remoteOverviewPushApplyGenerations`,
+    /// A success is gated on a *different* counter than a failure: `DeviceSyncState.pushApplyGeneration`,
     /// bumped only where a subscription push actually applies an overview, not
-    /// `remoteOverviewPullGenerations`, bumped by a retry or a network-path change that install no data of
+    /// `DeviceSyncState.pullGeneration`, bumped by a retry or a network-path change that install no data of
     /// their own. A retry-style invalidation must not touch whether an in-flight pull's eventual success
     /// still applies: it would otherwise strand the sidebar on nothing until the next watchdog tick, even
     /// though the pull's answer is the freshest one available.
