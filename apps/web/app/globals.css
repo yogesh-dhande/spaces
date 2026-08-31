@@ -17,6 +17,14 @@
   /* Terminal-styled code blocks. */
   --code-surface: #0f1820;
   --code-foreground: #98efc7;
+  /* Cool-grey Space Black palette for the PhoneFrame device shell (see
+     app/components/device-frames.tsx): rail gradient stops, then the
+     near-black bezel ring between the metal rail and the glass/screen. */
+  --device-metal-hilite: #5a5d62;
+  --device-metal-light: #4a4d52;
+  --device-metal-mid: #35373b;
+  --device-metal-dark: #1c1d1f;
+  --device-bezel: #080809;
   --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
 }

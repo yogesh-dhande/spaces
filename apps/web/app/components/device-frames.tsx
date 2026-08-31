@@ -11,10 +11,11 @@
 // as a mid-band shadow (not a second near-black), leaving a visible step
 // down to BEZEL_COLOR where the metal actually ends — that step is what
 // stops a dark rail on a dark page from reading as a flat plastic slab.
-const METAL_HILITE = "#5a5d62";
-const METAL_LIGHT = "#4a4d52";
-const METAL_MID = "#35373b";
-const METAL_DARK = "#1c1d1f";
+// Values live as shared tokens in globals.css (--device-metal-*, --device-bezel).
+const METAL_HILITE = "var(--device-metal-hilite)";
+const METAL_LIGHT = "var(--device-metal-light)";
+const METAL_MID = "var(--device-metal-mid)";
+const METAL_DARK = "var(--device-metal-dark)";
 // The phone rail's vertical gradient stops: brightest at the very top and
 // bottom (and along the corner arcs), with a darker METAL_MID band through
 // the middle of each long side — an approximation of how brushed aluminium
@@ -24,7 +25,7 @@ const METAL_RAIL_GRADIENT = `linear-gradient(180deg, ${METAL_HILITE} 0%, ${METAL
 // Near-black bezel ring between the metal rail and the glass/screen — this
 // is what actually makes the rail read as metal instead of as a flat
 // colored border; without it the rail has no dark edge to contrast against.
-const BEZEL_COLOR = "#080809";
+const BEZEL_COLOR = "var(--device-bezel)";
 
 type DeviceFrameProps = {
   src: string;
@@ -78,7 +79,7 @@ export function PhoneFrame({ src, alt, className = "", priority }: DeviceFramePr
           className="rounded-[11cqw] p-[2.2%]"
           style={{
             background: METAL_RAIL_GRADIENT,
-            boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.55), inset 0 0 0 3px ${METAL_DARK}66`,
+            boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.55), inset 0 0 0 3px color-mix(in srgb, ${METAL_DARK} 40%, transparent)`,
           }}
         >
           {/* Bezel: distinct near-black ring inside the rail. */}
