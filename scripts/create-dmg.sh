@@ -55,6 +55,11 @@ emit_result() {
   printf 'LAUNCH_AGENT_PATH=%s\n' "$4"
 }
 
+# Deliberately self-contained rather than sharing scripts/spaces-release-helpers.sh: this function is
+# part of a heredoc written byte-for-byte into .install-spaces.sh, which ships standalone on the DMG
+# and runs under admin privileges on the end user's Mac with no repository checkout to source from.
+# That is also why it uses absolute tool paths (minimal-PATH admin shell) and per-file existence
+# guards (the installer shell does not set nullglob).
 copy_ghostty_vt_dylibs() {
   local copied=0
   local source_dylib
