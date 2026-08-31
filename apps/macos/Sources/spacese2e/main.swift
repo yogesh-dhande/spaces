@@ -2989,13 +2989,14 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         let connection = makeConnection()
         try waitUntilReady(connection)
         try send(requestData: requestData, connection: connection)
-        let semaphore = DispatchSemaphore(value: 0)
         let box = TunnelResponseLineBox()
-        receiveTunnelResponseLine(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            connection.cancel()
-            throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API tunnel response.")
-        }
+        try NWConnectionSyncBridge.waitForSignal(
+            timeout: 10,
+            onTimeout: {
+                connection.cancel()
+                return DeviceAPIRequestError.timeout("Timed out waiting for the Device API tunnel response.")
+            }
+        ) { semaphore in receiveTunnelResponseLine(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore) }
         if let error = box.error() {
             connection.cancel()
             throw error
@@ -3007,16 +3008,16 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     /// Writes raw bytes into an opened tunnel pipe. Unlike `send(requestData:connection:)`, no
     /// newline is appended: the connection no longer speaks newline-delimited JSON.
     func sendTunnelBytes(_ data: Data, over connection: NWConnection) throws {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
-        connection.send(
-            content: data,
-            completion: .contentProcessed { error in
-                if let error { box.setError(error) }
-                semaphore.signal()
-            })
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw DeviceAPIRequestError.timeout("Timed out sending bytes through the service tunnel.")
+        let box = TransportResultBox()
+        try NWConnectionSyncBridge.waitForSignal(
+            timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out sending bytes through the service tunnel.") }
+        ) { semaphore in
+            connection.send(
+                content: data,
+                completion: .contentProcessed { error in
+                    if let error { box.setError(error) }
+                    semaphore.signal()
+                })
         }
         if let error = box.error() { throw error }
     }
@@ -3080,52 +3081,50 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
 
     private func waitUntilReady(_ connection: NWConnection) throws {
         let queue = DispatchQueue(label: "spaces.e2e.mobile.request")
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready: semaphore.signal()
-            case .failed(let error):
-                box.setError(error)
-                semaphore.signal()
-            default: break
+        let box = TransportResultBox()
+        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out connecting to the Device API.") }) {
+            semaphore in
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: semaphore.signal()
+                case .failed(let error):
+                    box.setError(error)
+                    semaphore.signal()
+                default: break
+                }
             }
+            connection.start(queue: queue)
         }
-        connection.start(queue: queue)
-        guard semaphore.wait(timeout: .now() + 10) == .success else { throw DeviceAPIRequestError.timeout("Timed out connecting to the Device API.") }
         if let error = box.error() { throw error }
     }
 
     private func send(requestData: Data, connection: NWConnection) throws {
         var payload = requestData
         payload.append(0x0A)
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
-        connection.send(
-            content: payload,
-            completion: .contentProcessed { error in
-                if let error { box.setError(error) }
-                semaphore.signal()
-            })
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw DeviceAPIRequestError.timeout("Timed out sending the Device API request.")
+        let box = TransportResultBox()
+        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out sending the Device API request.") }) {
+            semaphore in
+            connection.send(
+                content: payload,
+                completion: .contentProcessed { error in
+                    if let error { box.setError(error) }
+                    semaphore.signal()
+                })
         }
         if let error = box.error() { throw error }
     }
 
     private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
-        receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.")
+        let box = TransportResultBox()
+        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.") }) {
+            semaphore in receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
         }
         if let error = box.error() { throw error }
         return box.responseData()
     }
 
     private func receiveSingleResponse(
-        from connection: NWConnection, buffered buffer: LineFrameBuffer, box: DeviceAPIRequestResultBox, semaphore: DispatchSemaphore
+        from connection: NWConnection, buffered buffer: LineFrameBuffer, box: TransportResultBox, semaphore: DispatchSemaphore
     ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
@@ -3182,38 +3181,6 @@ private enum DeviceAPIRequestError: LocalizedError {
         case .emptyResponse: "The Device API connection closed before returning a response."
         case .timeout(let message): message
         }
-    }
-}
-
-private final class DeviceAPIRequestResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedError: Error?
-    private var storedResponseData = Data()
-
-    func setError(_ error: Error) {
-        lock.lock()
-        storedError = error
-        lock.unlock()
-    }
-
-    func error() -> Error? {
-        lock.lock()
-        let error = storedError
-        lock.unlock()
-        return error
-    }
-
-    func setResponseData(_ data: Data) {
-        lock.lock()
-        storedResponseData = data
-        lock.unlock()
-    }
-
-    func responseData() -> Data {
-        lock.lock()
-        let data = storedResponseData
-        lock.unlock()
-        return data
     }
 }
 
