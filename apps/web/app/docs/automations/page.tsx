@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { DocsShell } from "../components/docs-shell";
 import { CopyablePrompt } from "../components/copyable-prompt";
+import { Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Automations",
@@ -106,8 +107,7 @@ export default function AutomationsDocsPage() {
       description="Schedule a coding agent with a prompt in two minutes, or run any shell script — on your Mac or a connected Linux box, on demand or on a schedule, even when Spaces is closed."
       pagePath="/docs/automations"
     >
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">What Is an Automation?</h2>
+      <Section title="What Is an Automation?">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           An automation is a named task tied to one device — your Mac or a paired Linux box — that runs either when you trigger it or on a cron
           schedule you set in that device&apos;s local time. It keeps running whether Spaces is open or quit, and a remote automation keeps its own
@@ -116,10 +116,9 @@ export default function AutomationsDocsPage() {
           below Alerts in the sidebar and merges automations and runs across every paired device into one pane, with a device filter for when more
           than one is connected.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Schedule an Agent</h2>
+      <Section title="Schedule an Agent">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The fastest way to use Automations: give it a name, pick a <a className="text-accent hover:underline" href="/docs/workspaces">workspace</a>,
           write a prompt, and set a schedule (or leave it Manual and run it whenever you like). No shell script, no cron syntax to memorize unless
@@ -146,10 +145,9 @@ export default function AutomationsDocsPage() {
           recording skipped runs, or holding the next one queued, until the session ends on its own — or you close it, or use{" "}
           <strong>End agents</strong> on the run to reap it yourself. Nothing ever kills a live agent automatically.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Script Automations</h2>
+      <Section title="Script Automations">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           For anything a single prompt doesn&apos;t cover — a maintenance job, a health check, an orchestrator that fans work out to several
           agents itself — a Script automation runs plain multiline shell text in the device&apos;s login shell, from a working directory you type
@@ -160,10 +158,9 @@ export default function AutomationsDocsPage() {
           Switching an Agent automation to Script prefills the editor with the equivalent CLI — spawning the agent, then sending the prompt — a
           starting point for a script that needs to do more than deliver one prompt (see <em>Orchestrated batch</em> below).
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Trigger, Concurrency, and Timeout</h2>
+      <Section title="Trigger, Concurrency, and Timeout">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           These fields work the same way for either kind.
         </p>
@@ -182,10 +179,9 @@ export default function AutomationsDocsPage() {
           />
           <Field name="Timeout" description="An optional wall-clock budget. A run over budget is asked to stop and, if it doesn't, force-stopped shortly after." />
         </ul>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
+      <Section title="Runs">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The Runs tab lists every run of every automation, newest first, with its status, trigger (manual, cron, or a missed-run catch-up), start
           time, duration, and exit code; a skipped run shows why it was skipped. Open a running run to watch its live terminal exactly as it
@@ -203,10 +199,9 @@ export default function AutomationsDocsPage() {
           Spaces keeps the newest 100 runs of each automation and prunes older ones together with their saved logs, so run history stays useful
           without growing unbounded.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">On iPhone</h2>
+      <Section title="On iPhone">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The Automations tab on iOS shows the paired device&apos;s automations and lets you run one now or cancel one that&apos;s running —
           creating, editing, and deleting an automation stay Mac-only. Each row shows a status dot for its most recent run, its trigger, the next
@@ -215,10 +210,9 @@ export default function AutomationsDocsPage() {
           End agents action on a finished one with a lingering agent — iOS shows status only, with no terminal or replay view. The tab badges how
           many runs are currently in flight on the device.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Example Patterns</h2>
+      <Section title="Example Patterns">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Four patterns to copy and adapt. Two are Agent automations you set up entirely in the form; the other two are Script automations for
           cases that need more than one prompt.
@@ -258,17 +252,16 @@ export default function AutomationsDocsPage() {
           Pre-approve those tool calls in the agent&apos;s own permission settings before scheduling it, and set a timeout so a batch that runs
           long or hangs doesn&apos;t run forever.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">See Also</h2>
+      <Section title="See Also">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a> — how agent state, hooks, and Alerts work for any agent, spawned or not.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/orchestration">Agent Orchestration</a> — the copy-paste orchestrator prompt behind the orchestrated-batch pattern.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/cli">CLI Reference</a> — full flags for <code>spaces agent spawn</code> and <code>spaces terminal send</code>.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/ios">iOS App</a> — pairing a device so its Automations screen can view, trigger, and cancel runs.</li>
         </ul>
-      </article>
+      </Section>
     </DocsShell>
   );
 }

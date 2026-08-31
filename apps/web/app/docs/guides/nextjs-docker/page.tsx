@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
-import { card, prose, list, code } from "../../components/guide-styles";
+import { list, code } from "../../components/guide-styles";
+import { Prose, Section } from "../../components/section";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js (Docker Compose)",
@@ -16,24 +17,22 @@ export default function NextjsDockerGuidePage() {
       description="Use this when your app runs in containers and you want workspace-isolated host ports with clear container health visibility."
       pagePath="/docs/guides"
     >
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
-        <p className={prose}>
+      <Section title="Use Case">
+        <Prose>
           Your Next.js service runs via Compose. You need branch-isolated environments
           and deterministic port mapping per workspace.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
+      <Section title="Project Settings Explained">
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
           <code>{`frontend`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Spaces assigns each service its own host port per workspace. Compose maps host <code>$SPACES_FRONTEND_PORT</code> to container port <code>3000</code>.
-        </p>
+        </Prose>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
           <code>{`services:
@@ -49,27 +48,27 @@ export default function NextjsDockerGuidePage() {
         <pre className={code}>
           <code>{`cp .env.example .env`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Copying <code>.env</code> gives each workspace an isolated env file.
           Symlink can reduce duplication, but one edit impacts all linked workspaces.
           Point <code>cp</code> at whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <pre className={code}>
           <code>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT docker compose up --build`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           The process keeps Compose attached in one terminal, which is useful for live logs and interactive shutdown.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
         <pre className={code}>
           <code>{`$SPACES_FRONTEND_URL`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           This targets the workspace-specific service mapping. Without named services, one workspace can accidentally open another workspace&apos;s frontend.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Stop Script: stop vs down</h3>
         <pre className={code}>
@@ -83,7 +82,7 @@ docker compose down`}</code>
           <li>• Use <code>stop</code> for day-to-day pause/resume; use <code>down</code> when you need a clean teardown.</li>
         </ul>
 
-      </article>
+      </Section>
 
       <Link
         href="/docs/guides"

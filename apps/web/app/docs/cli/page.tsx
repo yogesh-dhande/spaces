@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CodeBlock, Cmd } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
+import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "CLI Reference",
@@ -24,8 +25,7 @@ export default function CliReferencePage() {
       description="The spaces CLI is intentionally minimal. It exposes grouped project, workspace, agent, terminal, and MCP commands for automation and terminal workflows."
       pagePath="/docs/cli"
     >
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
+      <Section title="Overview">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, Codex, or opencode, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
         </p>
@@ -34,26 +34,23 @@ spaces project list
 spaces workspace list
 spaces workspace start
 spaces agent signal blocked`}</CodeBlock>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Version</h2>
+      <Section title="Version">
         <CodeBlock>{`spaces --version`}</CodeBlock>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+        <Prose>
           Prints the installed Spaces CLI version.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Projects</h2>
+      <Section title="Projects">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           <Cmd>spaces project list</Cmd> prints the projects in the active profile, or on a paired device with <Cmd>--device</Cmd>.
         </p>
         <CodeBlock>{`spaces project list [--device <name-or-id>]`}</CodeBlock>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
+      <Section title="Workspaces">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Workspace commands list, create, start, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview.
         </p>
@@ -71,10 +68,9 @@ spaces workspace restart --device <name-or-id> --workspace <workspace-id>`}</Cod
           <Flag name="--workspace <id>" description="Workspace ID for start and restart. Local commands infer the deepest workspace containing the current directory when omitted; paired-device commands require it." />
           <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, and restart. Defaults to this machine." />
         </ul>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Terminals</h2>
+      <Section title="Terminals">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Terminal commands inspect and drive Spaces-owned terminal sessions on the same-machine daemon. Sessions survive app quit, so commands started here stay discoverable through <Cmd>spaces terminal list</Cmd>.
         </p>
@@ -97,10 +93,9 @@ spaces terminal show <session-id>`}</CodeBlock>
           <Flag name="--lines <count>" description="Number of lines to print. Defaults to 20." />
           <Flag name="show <session>" description="Opens a native Spaces window for the session in owner-seeking mode on macOS." />
         </ul>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Agent Signal</h2>
+      <Section title="Agent Signal">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Coding agents report their lifecycle explicitly for a workspace and terminal session. Inside a Spaces-managed terminal, the command reads the workspace and terminal-session IDs from environment. Spaces uses these events to surface blocked and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
         </p>
@@ -120,10 +115,9 @@ spaces agent signal exit`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent labels come from what the agent reports at <code>init</code>, or from the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Agent Orchestration</h2>
+      <Section title="Agent Orchestration">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Beyond reporting state, the CLI lets one terminal drive other coding agents. <Cmd>spaces agent list</Cmd> and <Cmd>spaces agent status</Cmd> show tracked agents (add <Cmd>--json</Cmd> for machine output); <Cmd>spaces agent annotate</Cmd> leaves a note. <Cmd>spaces agent spawn</Cmd> starts a supported agent (claude, codex, or opencode) in a new workspace terminal and blocks until Spaces detects it running — no hooks required. Spawn delivers no prompt: once it returns, send the first prompt with <Cmd>spaces terminal send</Cmd>. <Cmd>spaces agent subscribe</Cmd> watches a child and injects a clickable notice block into your terminal when it goes blocked, done, or exits. <Cmd>spaces agent kill</Cmd> ends a child and its terminal; it refuses a session that is not a coding agent. To steer a child, send it keystrokes with <Cmd>spaces terminal send</Cmd> — an agent&apos;s status still reflects only what the agent itself reports. Every command except <Cmd>signal</Cmd> accepts <Cmd>--device</Cmd> to target a paired device (remote spawn requires <Cmd>--workspace</Cmd>).
         </p>
@@ -137,10 +131,9 @@ spaces agent kill <session>`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Subscriptions can watch a child on this device or, with <Cmd>--device</Cmd>, on a paired one. Notices are delivered only while the subscriber is idle, so one never lands mid-task, and a subscription that would form a watch cycle is rejected. The same actions are available to an MCP client, but <code>spaces agent signal</code> is deliberately never an MCP tool.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
+      <Section title="Pairing">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH. Use <Cmd>--ssh-port</Cmd> for SSH ports other than 22.
         </p>
@@ -152,10 +145,9 @@ spaces device pair --ssh user@host [--ssh-port <port>]
 spaces device pair --link <spaces-pair-link>
 spaces device list
 spaces device remove <name-or-id>`}</CodeBlock>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
+      <Section title="Typical Flow">
         <CodeBlock>{`spaces project list
 spaces workspace create --project <project-id> --branch bugfix/login-timeout
 cd <workspace-directory>
@@ -164,10 +156,10 @@ spaces agent signal init
 spaces agent signal working
 # ... later ...
 spaces agent signal blocked`}</CodeBlock>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+        <Prose>
           The GUI remains the primary place to configure templates and edit workspace details. The CLI stays focused on explicit profile, workspace, terminal, and agent automation.
-        </p>
-      </article>
+        </Prose>
+      </Section>
     </DocsShell>
   );
 }

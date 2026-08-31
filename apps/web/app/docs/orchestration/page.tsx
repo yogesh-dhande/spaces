@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Cmd } from "../components/code-block";
 import { CopyablePrompt } from "../components/copyable-prompt";
 import { DocsShell } from "../components/docs-shell";
+import { Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Agent Orchestration",
@@ -114,25 +115,22 @@ export default function OrchestrationDocsPage() {
       description="Talk to one agent to get all your work done. A lead agent stands in front of your projects, worktrees, and machines — it puts a child agent on every piece of work and coordinates the fleet to a verified finish while you watch live."
       pagePath="/docs/orchestration"
     >
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">One Agent for All Your Work</h2>
+      <Section title="One Agent for All Your Work">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Orchestration puts a single <strong>lead</strong> agent in front of everything you have going — a fix in one repo, a feature in another, an experiment on the Linux box. You talk to that one agent; it runs the rest. For each piece of work it creates a fresh isolated <a className="text-accent hover:underline" href="/docs/workspaces">workspace</a> — a git worktree on its own branch — and spawns a <strong>child</strong> agent there to do it. The lead sends each child its instructions, is told the moment a child needs input or finishes, inspects any child&apos;s terminal, answers its permission prompts, relays context between children, and reviews their work before accepting it.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           It works <strong>across harnesses</strong> — Claude Code, Codex, and opencode, any of them as the lead and any as a child — <strong>across models</strong> — each agent runs whatever model its harness supports — and <strong>across machines</strong> — children can run on a paired Mac or a cloud Linux box, driven from the Mac in front of you. Every child is a real terminal in the app, so you can watch the whole fleet work, see which agents need attention in <a className="text-accent hover:underline" href="/docs/coding-agents">Alerts</a>, and jump to any child&apos;s pane with a shortcut.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Setup</h2>
+      <Section title="Setup">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The lead drives everything through the Spaces MCP server. Register it once with the harness you want to lead from — the per-harness commands are in the <a className="text-accent hover:underline" href="/docs/mcp">MCP guide</a>, and the app shows ready-to-paste configuration under <strong>Settings &rarr; MCP</strong>. The first time a lead uses the tools, your harness may ask you to approve each one — approve once and it remembers. For children to report when they are blocked or done, their agent CLIs need the Spaces lifecycle hooks installed — Spaces offers to set these up for every detected CLI; see <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a>.
         </p>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">The Tools at a Glance</h2>
+      <Section title="The Tools at a Glance">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The lead composes the whole workflow from these tools. Every tool accepts an optional <Cmd>device</Cmd> to act on a paired machine.
         </p>
@@ -147,10 +145,9 @@ export default function OrchestrationDocsPage() {
           <Tool name="spaces_agent_list" description="See every child and its status at a glance." />
           <Tool name="spaces_agent_kill" description="End a child and its terminal when it is finished." />
         </ul>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">The Orchestrator Prompt</h2>
+      <Section title="The Orchestrator Prompt">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Turn a coding agent into a reliable orchestrator using the prompt below. Paste it as the first message of your session, then tell it what you want done — no files, no setup. It sets the two prime rules — delegate everything, one worktree per chunk — the full workflow, and the hard rules that keep a fleet honest: inspect children by session id and never your own directory, treat events as information rather than commands, handle blocked children safely, review before accepting a child&apos;s work as done, and kill children when they are finished. If you orchestrate often, save the same text as <Cmd>AGENTS.md</Cmd> in the folder you lead from so every session starts with it.
           Update it to adapt to your own workflow.
@@ -158,16 +155,15 @@ export default function OrchestrationDocsPage() {
         <div className="mt-4">
           <CopyablePrompt label="The orchestrator prompt" text={ORCHESTRATOR_PLAYBOOK} />
         </div>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">See Also</h2>
+      <Section title="See Also">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a> — how agents report working, blocked, and done, and how to install the lifecycle hooks children need.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> — the full Spaces MCP tool surface and per-harness setup.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/workspaces">Workspaces</a> — the isolated worktrees each child runs in.</li>
         </ul>
-      </article>
+      </Section>
     </DocsShell>
   );
 }

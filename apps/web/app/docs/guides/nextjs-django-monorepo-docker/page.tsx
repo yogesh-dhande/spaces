@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
-import { card, prose, code } from "../../components/guide-styles";
+import { code } from "../../components/guide-styles";
+import { Prose, Section } from "../../components/section";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django Monorepo (Docker)",
@@ -16,24 +17,22 @@ export default function NextjsDjangoMonorepoDockerGuidePage() {
       description="Use this when both frontend and backend are in one repo and run through Docker Compose."
       pagePath="/docs/guides"
     >
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
-        <p className={prose}>
+      <Section title="Use Case">
+        <Prose>
           You need reproducible containerized frontend+backend environments per workspace, with host ports isolated by Spaces.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
+      <Section title="Project Settings Explained">
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
           <code>{`frontend
 api`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Spaces allocates a host port per service per workspace. Compose maps them to container ports.
-        </p>
+        </Prose>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
           <code>{`services:
@@ -54,22 +53,22 @@ api`}</code>
         <pre className={code}>
           <code>{`cp .env.example .env`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Keeps workspace configuration deterministic. Copy vs symlink tradeoff is the same: isolation vs centralized updates. Point <code>cp</code> at whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Process</h3>
         <pre className={code}>
           <code>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT SPACES_API_PORT=$SPACES_API_PORT docker compose up --build`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           One Compose process starts both services and streams logs in a single terminal.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
-        <p className={prose}>
+        <Prose>
           Add two browser sessions — one URL per entry — so each opens as a Chrome tab when you focus it.
-        </p>
+        </Prose>
         <pre className={code}>
           <code>{`# frontend browser session
 $SPACES_FRONTEND_URL`}</code>
@@ -78,9 +77,9 @@ $SPACES_FRONTEND_URL`}</code>
           <code>{`# backend browser session
 $SPACES_API_URL/admin`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Using named-service URLs keeps browser targets tied to the correct workspace instance.
-        </p>
+        </Prose>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Stop Command Strategy</h3>
         <pre className={code}>
@@ -90,12 +89,12 @@ docker compose stop
 # full cleanup reset
 docker compose down`}</code>
         </pre>
-        <p className={prose}>
+        <Prose>
           Prefer <code>stop</code> for faster iteration during normal workflow.
           Use <code>down</code> when you need to tear down network and container state.
-        </p>
+        </Prose>
 
-      </article>
+      </Section>
 
       <Link
         href="/docs/guides"

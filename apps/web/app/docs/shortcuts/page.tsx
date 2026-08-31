@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
+import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Keyboard Shortcuts",
@@ -30,8 +31,7 @@ export default function ShortcutsDocsPage() {
       description="Spaces is designed for keyboard-first context switching between running workspaces and captured windows."
       pagePath="/docs/shortcuts"
     >
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Default Shortcuts</h2>
+      <Section title="Default Shortcuts">
         <div className="mt-3 overflow-x-auto rounded-sm border border-line/70">
           <table className="min-w-full border-collapse text-left text-sm">
             <thead className="bg-background-soft/70 text-foreground">
@@ -52,35 +52,31 @@ export default function ShortcutsDocsPage() {
             </tbody>
           </table>
         </div>
-      </article>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Focus vs Cycle</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+      <Section title="Focus vs Cycle">
+        <Prose>
           Numbered shortcuts open or focus the selected workspace&apos;s ordered targets, including configured browser sessions, stopped process rows, and live coding agents. Next/previous window shortcuts cycle only through targets that already have an open tracked Chrome tab or Spaces terminal pane.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">The Leader</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+      <Section title="The Leader">
+        <Prose>
           The leader is the shared modifier — <code>cmd+alt</code> by default — used for workspace and app shortcuts like next/previous window, next/previous workspace, Alerts, editor, new terminal, and Finder. Change the leader once and all of those move with it. Moving the sidebar selection is bound only to leader+up/leader+down, so plain arrow keys stay out of navigation.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Terminal Text Zoom</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+      <Section title="Terminal Text Zoom">
+        <Prose>
           The zoom shortcuts work while a terminal pane has focus, and range from 9 to 18 points; Spaces starts at 12 points and there is no reset key, so you step back down to return to it. One size is shared across the app, so zooming resizes text in every open terminal pane at once, and it is remembered the next time you launch Spaces. <code>cmd+0</code> is not a zoom key: it keeps focusing the tenth numbered target, in a terminal pane the same as everywhere else.
-        </p>
-      </article>
+        </Prose>
+      </Section>
 
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Customization</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+      <Section title="Customization">
+        <Prose>
           The workspace and app shortcuts are configurable from Settings (<code>cmd+,</code>) Menu. The terminal text zoom shortcuts are fixed.
-        </p>
-      </article>
+        </Prose>
+      </Section>
     </DocsShell>
   );
 }
