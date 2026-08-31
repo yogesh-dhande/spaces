@@ -342,10 +342,18 @@
 
         // MARK: - Device API
 
-        /// The request sender does blocking pinned-TLS I/O, so every call runs off the main actor.
+        /// The request sender does blocking pinned-TLS I/O, so every call runs on a dedicated thread
+        /// rather than the main actor or the Swift cooperative pool: a pool thread parked in that I/O
+        /// must never be the only thing standing between the pool and a deadlock (issue #611).
         private static func send(_ request: TerminalServiceRequest, using sender: @escaping RemoteGhosttyTerminalServiceRequestSender) async
             -> Result<TerminalServiceResponse, Error>
-        { await Task.detached(priority: .userInitiated) { do { return .success(try sender(request)) } catch { return .failure(error) } }.value }
+        {
+            do {
+                return .success(try await SpacesBlockingIOThread.run(name: "spaces.terminal-link.send") { try sender(request) })
+            } catch {
+                return .failure(error)
+            }
+        }
 
         /// Runs off the main actor (nonisolated) so the chunk-reader closure handed to the shared
         /// transfer helper is not main-actor-isolated. Honors `Task` cancellation via the helper.
@@ -361,11 +369,11 @@
         private static func readChunk(
             sessionID: String, linkID: String, offset: Int64, limit: Int, using sender: @escaping RemoteGhosttyTerminalServiceRequestSender
         ) async throws -> SpacesDeviceTerminalLinkChunk {
-            let response = try await Task.detached(priority: .userInitiated) {
+            let response = try await SpacesBlockingIOThread.run(name: "spaces.terminal-link.read-chunk") {
                 try sender(
                     TerminalServiceRequest(
                         command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: linkID, offset: offset, limit: limit))))
-            }.value
+            }
             guard response.ok else { throw LinkOpenError(message: response.message) }
             guard let wire = response.terminalLinkChunk else { throw LinkOpenError(message: "The session's host returned no data for the link.") }
             return SpacesDeviceTerminalLinkChunk(
