@@ -263,14 +263,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         outlineView.dataSource = self
     }
 
-    /// Cancels in-flight reload state. Called from the host's background-service
-    /// teardown and termination paths.
-    func stopSidebarTasks() {
-        pendingReloadScope = nil
-        reloadCoordinator.stop()
-        stopRemoteOverviewSubscriptions()
-    }
-
     func cancelSidebarReloadTask() { reloadCoordinator.cancelCurrentTask() }
 
     /// Reloads sidebar metadata after a database write, signaled by whichever
@@ -882,13 +874,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         refreshRemoteOverviewSubscriptions()
         startDeviceReachabilityWatchdog()
         deviceNetworkPathWatcher.start { [weak self] in self?.handleNetworkPathChange() }
-    }
-
-    func stopRemoteOverviewSubscriptions() {
-        deviceReachabilityWatchdogTimer?.invalidate()
-        deviceReachabilityWatchdogTimer = nil
-        deviceNetworkPathWatcher.stop()
-        for client in remoteOverviewSubscriptions.disable() { client.stop() }
     }
 
     private func startDeviceReachabilityWatchdog() {
@@ -2640,51 +2625,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
             return
         }
-    }
-
-    private func sidebarMetadataRow(
-        symbol: String, text: String, isSelected: Bool, leadingIndent: CGFloat = 0, trailingSymbol: String? = nil, trailingColor: NSColor? = nil
-    ) -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 4
-        row.translatesAutoresizingMaskIntoConstraints = false
-
-        if leadingIndent > 0 {
-            let indent = NSView()
-            indent.translatesAutoresizingMaskIntoConstraints = false
-            indent.widthAnchor.constraint(equalToConstant: leadingIndent).isActive = true
-            indent.setContentHuggingPriority(.required, for: .horizontal)
-            row.addArrangedSubview(indent)
-        }
-
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        icon.contentTintColor = sidebarMetadataTextColor(isSelected: isSelected)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 10).isActive = true
-
-        let label = NSTextField(labelWithString: text)
-        label.font = Typography.metadata
-        label.textColor = sidebarMetadataTextColor(isSelected: isSelected)
-        label.lineBreakMode = .byTruncatingTail
-
-        row.addArrangedSubview(icon)
-        row.addArrangedSubview(label)
-
-        if let trailingSymbol {
-            let trailingIcon = NSImageView()
-            trailingIcon.image = NSImage(systemSymbolName: trailingSymbol, accessibilityDescription: nil)
-            trailingIcon.contentTintColor = trailingColor ?? sidebarMetadataTextColor(isSelected: isSelected)
-            trailingIcon.translatesAutoresizingMaskIntoConstraints = false
-            trailingIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-            trailingIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
-            row.addArrangedSubview(trailingIcon)
-        }
-
-        return row
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {

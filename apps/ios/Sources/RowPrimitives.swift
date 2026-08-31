@@ -98,18 +98,3 @@ struct BrandPrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Labeled inset text field used in compact brand forms.
-struct BrandTextField: View {
-    let label: String
-    @Binding var text: String
-    var placeholder: String = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
-            TextField(placeholder, text: $text).font(.system(size: 14)).foregroundStyle(Theme.text).textInputAutocapitalization(.never)
-                .autocorrectionDisabled().padding(.horizontal, 10).padding(.vertical, 8).background(
-                    Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-    }
-}

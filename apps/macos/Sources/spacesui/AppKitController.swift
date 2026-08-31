@@ -145,18 +145,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var latestDate: Date? { items.compactMap(\.eventDate).max() }
     }
 
-    struct MissingConfiguredProcessAlertsItem: Sendable, Equatable {
-        let attentionID: String
-        let label: String
-        let detail: String?
-        let processKey: String
-    }
-
-    enum StatusColorStyle: Sendable {
-        case metadata
-        case warning
-    }
-
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
         case automations
@@ -2497,14 +2485,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         events.map(\.id)
     }
 
-    /// Resolves a session's kind from the loaded device overview (not the daemon
-    /// database). Used to decide whether an ad hoc session stops once it has no live
-    /// attachments. See `terminalSessionKind(sessionID:overviews:)` for the resolution
-    /// rules.
-    private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
-        Self.terminalSessionKind(sessionID: sessionID, overviews: deviceSections.compactMap { $0.overview })
-    }
-
     /// Pure kind resolution over the loaded device overviews: top-level sessions carry
     /// their row kind, and process/agent rows identify configured workspace sessions.
     /// Automation runs are also consulted before falling back to `.shell`: a run's own
@@ -2553,23 +2533,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func trimmedNonEmpty(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
-    }
-
-    static func deviceIDCandidate(name: String?, sshHost: String?, daemonHost: String?) -> String {
-        let source = trimmedNonEmpty(name) ?? trimmedNonEmpty(sshHost) ?? trimmedNonEmpty(daemonHost) ?? "remote-device"
-        var scalars: [UnicodeScalar] = []
-        var lastWasSeparator = false
-        for scalar in source.lowercased().unicodeScalars {
-            if CharacterSet.alphanumerics.contains(scalar) {
-                scalars.append(scalar)
-                lastWasSeparator = false
-            } else if !lastWasSeparator {
-                scalars.append("-")
-                lastWasSeparator = true
-            }
-        }
-        let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return slug.isEmpty ? "remote-device" : slug
     }
 
     /// Whether closing a terminal pane should ask the daemon to stop the ad hoc session behind it.
@@ -2971,10 +2934,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             stateStreamSubscriber: stateStreamSubscriber, transcriptProvider: transcriptProvider, agentSignalHandler: agentSignalHandler,
             linkOpenHandler: linkOpenHandler, inputFailureHandler: inputFailureHandler)
     }
-
-    nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
-        -> TerminalServiceSessionSummary
-    { try appBuiltInTerminalSessionLauncher()(launchConfiguration) }
 
     nonisolated static func appBuiltInTerminalSessionLauncher(
         createSession: @escaping @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary = {
@@ -4908,11 +4867,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.startRemoteOverviewSubscriptions()
     }
 
-    private func stopBackgroundServices() {
-        sidebar.stopSidebarTasks()
-        didStartBackgroundServices = false
-    }
-
     func reconcileRemoteBrowserForwards(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload) {
         guard device.id != localDeviceID else { return }
         let manager = browserSSHForwardManager
@@ -5013,20 +4967,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func logBackgroundRefreshFailure(_ error: Error, source: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
         fputs("spaces: background_refresh_failure source=\(source) error=\(String(describing: error))\n", stderr)
-    }
-
-    private func clearSidebarSelectionForTransientDetail() {
-        let previousProjectID = selectedProjectID
-        let previousWorkspaceID = selectedWorkspaceID
-        suppressOutlineSelectionChanges = true
-        selectedProjectID = nil
-        selectedWorkspaceID = nil
-        lastSelectedRow = -1
-        outlineView.deselectAll(nil)
-        suppressOutlineSelectionChanges = false
-        refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
-        updateAlertsRowAppearance()
     }
 
     /// The id of the device that owns a workspace/project, or nil when no loaded device
@@ -6476,37 +6416,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    func settingsSettingRow(name: String, hint: String, control: NSView) -> NSView {
-        let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = Typography.rowLabel
-
-        let hintLabel = NSTextField(labelWithString: hint)
-        hintLabel.font = Typography.metadata
-        hintLabel.textColor = .secondaryLabelColor
-        hintLabel.lineBreakMode = .byWordWrapping
-        hintLabel.maximumNumberOfLines = 2
-        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let labelStack = NSStackView()
-        labelStack.orientation = .vertical
-        labelStack.alignment = .leading
-        labelStack.spacing = 2
-        labelStack.addArrangedSubview(nameLabel)
-        labelStack.addArrangedSubview(hintLabel)
-        labelStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        labelStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        control.setContentHuggingPriority(.required, for: .horizontal)
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 14
-        row.addArrangedSubview(labelStack)
-        row.addArrangedSubview(control)
-        return row
-    }
-
     func buildShortcutRowsContainer() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -6799,70 +6708,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
         }
 
-        return section
-    }
-
-    private func projectDetailSection(title: String, subtitle: String = "", trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
-        let section = NSView()
-        section.translatesAutoresizingMaskIntoConstraints = false
-        section.setContentHuggingPriority(.required, for: .vertical)
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = Typography.sectionTitle
-        titleLabel.textColor = Theme.text
-
-        let titleStack = NSStackView()
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 2
-        titleStack.addArrangedSubview(titleLabel)
-        if !subtitle.isEmpty {
-            let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = Typography.metadata
-            subtitleLabel.textColor = Theme.muted
-            subtitleLabel.lineBreakMode = .byTruncatingTail
-            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            titleStack.addArrangedSubview(subtitleLabel)
-        }
-        titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let headerRow = NSStackView(views: trailingView.map { [titleStack, spacer, $0] } ?? [titleStack, spacer])
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.edgeInsets = Theme.cardContentInsets
-        headerRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let innerStack = NSStackView()
-        innerStack.orientation = .vertical
-        innerStack.alignment = .leading
-        innerStack.spacing = 0
-        innerStack.translatesAutoresizingMaskIntoConstraints = false
-        innerStack.addArrangedSubview(headerRow)
-        for view in contentViews { innerStack.addArrangedSubview(view) }
-
-        let divider = ColoredBackgroundView()
-        divider.fillColor = Theme.border
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
-
-        section.addSubview(innerStack)
-        section.addSubview(divider)
-        NSLayoutConstraint.activate([
-            innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-            innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor), innerStack.topAnchor.constraint(equalTo: section.topAnchor),
-            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor), divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor), divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
-        ])
-        headerRow.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
-        for view in contentViews {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
-        }
         return section
     }
 
@@ -8493,20 +8338,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func labeledValue(title: String, value: String) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        let label = NSTextField(labelWithString: "\(title):")
-        label.font = Typography.compactTitle
-        let valueField = NSTextField(labelWithString: value)
-        valueField.font = Typography.rowDetail
-        valueField.lineBreakMode = .byTruncatingMiddle
-        stack.addArrangedSubview(label)
-        stack.addArrangedSubview(valueField)
-        return stack
-    }
-
     private func statusRow(isRunning: Bool) -> NSView {
         let stack = NSStackView()
         stack.orientation = .horizontal
@@ -8533,44 +8364,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
     }
 
-    private func shortcutSettingsRow(setting: ShortcutSetting) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-
-        let title = NSTextField(labelWithString: setting.label)
-        title.font = Typography.rowDetail
-        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let captureButton = actionButton(
-            title: shortcutCaptureButtonTitle(setting: setting), symbol: nil, tooltip: "Click to capture shortcut",
-            action: #selector(beginShortcutCapture(_:)), primary: false)
-        captureButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
-        captureButton.alignment = .center
-        captureButton.font = Typography.monoBody
-        captureButton.isBordered = false
-        captureButton.translatesAutoresizingMaskIntoConstraints = false
-        captureButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        captureButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        captureButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        captureButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
-        updateShortcutCaptureButtonText(captureButton, text: shortcutCaptureButtonTitle(setting: setting), active: false)
-        styleShortcutCaptureButton(captureButton, active: false)
-        shortcutButtonsBySetting[setting.settingKey] = captureButton
-
-        let resetButton = actionButton(
-            title: "Reset", symbol: nil, tooltip: "Reset to default shortcut", action: #selector(resetShortcutSetting(_:)), primary: false)
-        resetButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
-        resetButton.setContentHuggingPriority(.required, for: .horizontal)
-
-        row.addArrangedSubview(title)
-        row.addArrangedSubview(captureButton)
-        row.addArrangedSubview(resetButton)
-        return row
-    }
-
     private func shortcutCaptureButtonTitle(setting: ShortcutSetting) -> String {
         if activeShortcutCaptureSetting == setting {
             if setting.capturesModifierOnly, !pendingLeaderCaptureModifiers.isEmpty {
@@ -8589,8 +8382,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func actionTitle(base: String, setting: ShortcutSetting) -> String { "\(base) (\(shortcutHint(for: setting)))" }
-
-    private func actionTooltip(base: String, setting: ShortcutSetting) -> String { "\(base) (\(shortcutHint(for: setting)))" }
 
     private func shortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers) }
@@ -8929,20 +8720,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return scroll
     }
 
-    private func insetContainerView(_ content: NSView, inset: CGFloat = 8) -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = true
-        container.autoresizingMask = [.width, .height]
-        container.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
-            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
-            content.topAnchor.constraint(equalTo: container.topAnchor, constant: inset),
-            content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -inset),
-        ])
-        return container
-    }
-
     private func makeEditableTextView() -> InlineWorkspaceEditorTextView {
         let textView = InlineWorkspaceEditorTextView()
         textView.isEditable = true
@@ -9033,18 +8810,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func beginClientDeviceRename(_ sender: NSMenuItem) { devicePairing.beginClientDeviceRename(sender) }
     func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) { devicePairing.renderDeviceSettings(response: response) }
     func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse { devicePairing.currentDeviceControlResponse() }
-
-    private func centeredPanelRow(_ view: NSView) -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        view.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.centerXAnchor.constraint(equalTo: container.centerXAnchor), view.topAnchor.constraint(equalTo: container.topAnchor),
-            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        return container
-    }
 
     func clientDatabase() throws -> SpacesClientDatabase { try SpacesClientDatabase.defaultDatabase() }
 
@@ -10234,11 +9999,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
-    }
-
-    private func parseProcesses(_ raw: String) -> [ProcessTemplate] {
-        _ = raw
-        return []
     }
 
     nonisolated static func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
@@ -11470,8 +11230,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Resolves a window-shortcut press to a device-agnostic focus target. Alerts focus
     /// uses the clicked attention item; otherwise the target is reconstructed from the
     /// selected workspace's overview — the same path for local and remote workspaces.
-    private func windowShortcutResolution(index: Int) -> DeviceWindowShortcutResolution { windowShortcutResolutionContext(index: index).resolution }
-
     private func windowShortcutResolutionContext(index: Int) -> WindowFocusResolutionContext {
         if showingAlerts {
             guard let request = alerts.alertsFocusRequest(for: index) else {
@@ -12038,26 +11796,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let keyText = index == 10 ? "0" : String(index)
         guard let windowShortcutSpec else { return "⌘\(keyText)" }
         return displayShortcut(windowShortcutSpec, keyText: keyText)
-    }
-
-    private func selectNextVisibleWorkspace() {
-        let allVisible = orderedSidebarWorkspaces()
-        guard !allVisible.isEmpty else { return }
-        if let currentID = selectedWorkspaceID, let idx = allVisible.firstIndex(where: { $0.id == currentID }) {
-            selectWorkspace(allVisible[(idx + 1) % allVisible.count])
-        } else {
-            selectWorkspace(allVisible[0])
-        }
-    }
-
-    private func selectPreviousVisibleWorkspace() {
-        let allVisible = orderedSidebarWorkspaces()
-        guard !allVisible.isEmpty else { return }
-        if let currentID = selectedWorkspaceID, let idx = allVisible.firstIndex(where: { $0.id == currentID }) {
-            selectWorkspace(allVisible[(idx - 1 + allVisible.count) % allVisible.count])
-        } else {
-            selectWorkspace(allVisible[allVisible.count - 1])
-        }
     }
 
     private func focusGlobalWindowNavigation(direction: Int) {
