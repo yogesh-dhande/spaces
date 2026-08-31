@@ -469,6 +469,7 @@ extension AppKitController {
             guard let deviceWorkspace = context.overview.workspaces.first(where: { $0.id == context.workspaceID }) else { continue }
             let overview = context.overview
             let workspaceID = context.workspaceID
+            let sessionsByID = Dictionary(overview.sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
             let windows = deviceTerminalWindows(from: detail.terminalRows)
             let processes = runningProcesses(from: detail.processRows)
@@ -498,7 +499,7 @@ extension AppKitController {
                     let rowText = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
                     label = rowText.label
                     detailText = terminalPaletteSecondaryLabel(
-                        liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessions: overview.sessions)
+                        liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessionsByID: sessionsByID)
                     status = .none
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { continue }
@@ -511,7 +512,7 @@ extension AppKitController {
                     else { continue }
                     label = agentWindow.label?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
                     detailText = terminalPaletteSecondaryLabel(
-                        liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessions: overview.sessions)
+                        liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessionsByID: sessionsByID)
                     status = .agent(agentWindow.status)
                 case .browser: continue
                 }
