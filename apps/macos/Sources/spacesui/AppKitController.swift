@@ -1832,7 +1832,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let summary: SpacesDeviceTerminalSessionSummary
     }
 
-    typealias TerminalSessionOverviewResolver = @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceOverviewResolution
+    typealias TerminalSessionOverviewResolver = @Sendable (DeviceRequestContext) throws -> SpacesDeviceOverviewResolution
 
     /// The overview session summary for a session and the device that owns it,
     /// when the session is currently surfaced in a loaded device overview.
@@ -1912,14 +1912,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func resolveSessionSummaryMatchOffMain(
         sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp,
-        resolveOverview: @escaping TerminalSessionOverviewResolver = { device, clientApp in
-            try SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp)
-        }
+        resolveOverview: @escaping TerminalSessionOverviewResolver = { context in try SpacesDeviceClient.resolveOverview(context: context) }
     ) async -> TerminalSessionSummaryMatch? {
         await Task.detached(priority: .userInitiated) {
-            guard let summary = try? resolveOverview(device, clientApp).overview?.overview.sessions.first(where: { $0.id == sessionID }) else {
-                return nil
-            }
+            guard
+                let summary = try? resolveOverview(DeviceRequestContext(device: device, clientApp: clientApp)).overview?.overview.sessions.first(
+                    where: { $0.id == sessionID })
+            else { return nil }
             return TerminalSessionSummaryMatch(device: device, summary: summary)
         }.value
     }
@@ -1984,7 +1983,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // read the refreshed record's fingerprint. Resolving before the bootstrap would pair the
                 // rotated daemon's fresh host/port with the stale token file's fingerprint — its
                 // re-bootstrap branch only fires on a missing token — and pin-fail every connect.
-                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(device: refreshedLocalDevice ?? device, clientApp: clientApp)
+                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(
+                    context: DeviceRequestContext(device: refreshedLocalDevice ?? device, clientApp: clientApp))
                 return .success(credentials)
             } catch { return .failure(error) }
         }.value
@@ -2367,7 +2367,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let epoch = self.panelCoordinator.paneReplacementEpoch
             let result = await Self.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.openWorkspaceTerminal(
-                    workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    workspaceID: workspaceID,
+                    context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             }
             switch result {
             case .success(let response):
@@ -2564,8 +2565,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self else { return }
             let result = await Self.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.stopWorkspaceTerminalIfBareShell(
-                    workspaceID: workspaceID, sessionID: sessionID, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    workspaceID: workspaceID, sessionID: sessionID,
+                    context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             }
             // Only a session the daemon actually terminated changed any row; a kept session leaves the
             // sidebar exactly as it was, so reloading for it would be pure churn on every pane close.
@@ -3177,7 +3178,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the reconciler just tries again on its next attempt.
     nonisolated private static func deviceOverviewFetch(device: SpacesPairedDeviceRecord) async -> SpacesDeviceOverviewPayload? {
         await Task.detached(priority: .userInitiated) {
-            (try? SpacesDeviceClient.overview(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))?.overview
+            (try? SpacesDeviceClient.overview(
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))?
+                .overview
         }.value
     }
 
@@ -3188,7 +3191,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             do {
                 return .success(
                     try SpacesDeviceClient.workspaceCreateOptions(
-                        selectedProjectID: projectID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
+                        selectedProjectID: projectID,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))
             } catch { return .failure(error) }
         }.value
     }
@@ -3200,7 +3204,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             do {
                 return .success(
                     try SpacesDeviceClient.previewProject(
-                        dir: dir, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
+                        dir: dir,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))
             } catch { return .failure(error) }
         }.value
     }
@@ -3208,7 +3213,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func deviceDirectorySuggestions(path: String, device: SpacesPairedDeviceRecord) async -> [String] {
         await Task.detached(priority: .userInitiated) {
             (try? SpacesDeviceClient.listDirectories(
-                path: path, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))) ?? []
+                path: path,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))) ?? []
         }.value
     }
 
@@ -3222,7 +3228,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             do {
                 return .success(
                     try SpacesDeviceClient.previewGitProject(
-                        gitURL: gitURL, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
+                        gitURL: gitURL,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))
             } catch { return .failure(error) }
         }.value
     }
@@ -3463,7 +3470,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             localOfflineMessage = bootstrapOfflineMessage
         } else {
             do {
-                let resolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: clientApp)
+                let resolution = try SpacesDeviceClient.resolveOverview(context: DeviceRequestContext(device: localDevice, clientApp: clientApp))
                 // Endpoint recovery can bootstrap a different live port. Carry that refreshed record into
                 // the UI so later actions do not keep dialing the stale address that provoked recovery.
                 if let device = resolution.overview?.device {
@@ -5571,8 +5578,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let epoch = panelCoordinator.paneReplacementEpoch
         let response = try SpacesDeviceClient.updateWorkspaceConfig(
             workspaceID: workspaceID,
-            config: Self.deviceWorkspaceConfig(from: settings, resolvedBrowserSessions: workspace.config.resolvedBrowserSessions), device: device,
-            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            config: Self.deviceWorkspaceConfig(from: settings, resolvedBrowserSessions: workspace.config.resolvedBrowserSessions),
+            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
         applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
     }
 
@@ -5969,7 +5976,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// installer pokes the live daemon for the same in-place handoff this RPC triggers.
     private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord) {
         Task { @MainActor [weak self] in
-            do { _ = try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value } catch {
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDeviceClient.requestDaemonRestart(context: DeviceRequestContext(device: device))
+                }.value
+            } catch {
                 return
             }
             guard let self else { return }
@@ -7694,8 +7705,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let epoch = panelCoordinator.paneReplacementEpoch
             let response = try SpacesDeviceClient.updateWorkspaceMetadata(
-                workspaceID: workspaceID, notes: trimmed.isEmpty ? nil : trimmed, updatesNotes: true, device: device,
-                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                workspaceID: workspaceID, notes: trimmed.isEmpty ? nil : trimmed, updatesNotes: true,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             workspaceNotesPopover?.close()
             workspaceNotesPopover = nil
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
@@ -7867,8 +7878,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             processes: current.processes, browserSessions: current.browserSessions)
                         let epoch = panelCoordinator.paneReplacementEpoch
                         let response = try SpacesDeviceClient.updateProjectConfig(
-                            projectID: project.id, config: updated, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            projectID: project.id, config: updated,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                         applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspace.id)
                     } else {
                         showError(deviceUnavailableError(deviceID: project.deviceID))
@@ -8873,7 +8884,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let epoch = self.panelCoordinator.paneReplacementEpoch
             let result = await Self.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.runWorkspaceSetup(
-                    workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    workspaceID: workspaceID,
+                    context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             }
             sender?.isEnabled = true
             switch result {
@@ -9053,7 +9065,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let device = deviceForDaemonStateMutation() {
                 let epoch = panelCoordinator.paneReplacementEpoch
                 let response = try SpacesDeviceClient.exportProjectSpacesYAML(
-                    projectID: refs.projectID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    projectID: refs.projectID,
+                    context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                 applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch)
                 showInfoMessage(title: "Exported spaces.yaml", message: response.message)
                 return
@@ -9079,8 +9092,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 let epoch = panelCoordinator.paneReplacementEpoch
                 let response = try SpacesDeviceClient.importProjectSpacesYAML(
-                    projectID: refs.projectID, updateAllWorkspaces: updateAllWorkspaces, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    projectID: refs.projectID, updateAllWorkspaces: updateAllWorkspaces,
+                    context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                 refs.hasPendingImportedConfig = false
                 refs.pendingImportUpdateAllWorkspaces = false
                 refs.importButton.isHidden = false
@@ -9196,7 +9209,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let epoch = self.panelCoordinator.paneReplacementEpoch
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.deleteProject(
-                        projectID: projectID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        projectID: projectID,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                 }
                 switch result {
                 case .success(let response):
@@ -9257,8 +9271,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     let epoch = self.panelCoordinator.paneReplacementEpoch
                     let result = await Self.deviceMutation(device: device) { device in
                         try SpacesDeviceClient.createProject(
-                            projectDir: projectDir, gitURL: gitURL, config: config, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            projectDir: projectDir, gitURL: gitURL, config: config,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     }
                     switch result {
                     case .success(let response):
@@ -9517,8 +9531,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     let result = await Self.deviceMutation(device: device) { device in
                         try SpacesDeviceClient.createWorkspace(
                             projectID: input.projectID, branch: input.branch, baseBranch: input.baseBranch, notes: input.notes,
-                            allowExistingBranchReuse: input.allowExistingBranchReuse, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            allowExistingBranchReuse: input.allowExistingBranchReuse,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     }
                     switch result {
                     case .success(let response):
@@ -9644,7 +9658,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let epoch = panelCoordinator.paneReplacementEpoch
         let result = await Self.deviceMutation(device: device) { device in
             try SpacesDeviceClient.launchWorkspace(
-                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                workspaceID: id,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
         }
         switch result {
         // The overview in the response is the one this device just published, so it is applied to
@@ -9674,7 +9689,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let epoch = panelCoordinator.paneReplacementEpoch
         let result = await Self.deviceMutation(device: device) { device in
             try SpacesDeviceClient.restartWorkspace(
-                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                workspaceID: id,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
         }
         switch result {
         case .success(let response):
@@ -9708,7 +9724,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let epoch = panelCoordinator.paneReplacementEpoch
         let result = await Self.deviceMutation(device: device) { device in
             try SpacesDeviceClient.stopWorkspace(
-                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                workspaceID: id,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
         }
         switch result {
         case .success(let response):
@@ -9809,8 +9826,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let epoch = self.panelCoordinator.paneReplacementEpoch
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.archiveWorkspace(
-                        workspaceID: id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        workspaceID: id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                 }
                 switch result {
                 case .success(let response):
@@ -10305,8 +10322,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let epoch = self.panelCoordinator.paneReplacementEpoch
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.runWorkspaceProcess(
-                        workspaceID: workspaceID, processKey: processName, processTemplateID: nil, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        workspaceID: workspaceID, processKey: processName, processTemplateID: nil,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                 }
                 switch result {
                 case .success(let response):
@@ -10337,8 +10354,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                     let epoch = self.panelCoordinator.paneReplacementEpoch
                     let response = try SpacesDeviceClient.stopWorkspaceProcess(
-                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     logPerfMetric(
                         "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
@@ -10366,8 +10383,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                     let epoch = self.panelCoordinator.paneReplacementEpoch
                     let response = try SpacesDeviceClient.restartWorkspaceProcess(
-                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil,
+                        context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     logPerfMetric(
                         "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
@@ -11556,8 +11573,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     workspaceID: workspaceID,
                     operation: { device in
                         try SpacesDeviceClient.runWorkspaceProcess(
-                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     })
             else { return false }
             rememberWindowNavigationFocus(
@@ -12265,8 +12282,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 isGitRepo: isGitProject(refs.projectID), pendingImportUpdateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces)
             let epoch = panelCoordinator.paneReplacementEpoch
             let response = try SpacesDeviceClient.updateProjectConfig(
-                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces, device: device,
-                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces,
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.discardImportedConfigButton.isHidden = true

@@ -88,6 +88,8 @@ Every client — the Mac app, the iOS app, and the CLI/MCP server — reaches da
 
 Per-command routing metadata for the Device API — a command's wire key, the serial lane its handling runs on, and `SpacesDeviceClient`'s request timeout — is pinned in one exhaustive switch, `SpacesDeviceAPICommand.descriptor` in `spacesdevicecore/SpacesDeviceAPICommandDescriptor.swift`. Both device-API transports (`spacesdeviceapi/SpacesDeviceAPIServer.swift`) read `descriptor.lane` to route a request, and `SpacesDeviceClient.requestTimeoutSeconds(for:)` reads `descriptor.timeoutSeconds`; `spacesdeviceapi` still owns everything about how a lane actually executes — the fixed `DispatchQueue` table, the per-session/per-workspace dynamic queue resolvers, and the dispatch helpers. Agent-hook commands are exactly the `.agentHook` lane (`agentHooksStatus`, `installAgentHooks`), so a caller gates on that lane rather than a separate flag.
 
+Every `SpacesDeviceClient` request carries the same identity triple — which paired device to reach, which client app is asking, and the acting profile — bundled as `DeviceRequestContext` (`spacesclientcore/DeviceRequestContext.swift`, `Sendable`) so call chains forward one value instead of re-threading three parameters through every hop. The context's initializer owns the defaults (`macOSClientApp()`, nil profile), keeping every caller's effective arguments identical to spelling the triple out. Only true request-identity tails take a context: helpers that *produce* the device (`bootstrapLocalDevice` and the other bootstrap/discovery entry points) and `mergeAdvertisedHosts`, which widens a device record independent of who is asking, keep bare parameters by design.
+
 ```mermaid
 flowchart LR
   subgraph macclient["macOS client"]

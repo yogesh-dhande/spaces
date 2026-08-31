@@ -335,8 +335,8 @@ extension AppKitController {
                 Task { @MainActor in
                     let request = await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
                         try SpacesDeviceClient.runWorkspaceProcess(
-                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     }
                     completion(request.map { .terminal($0) })
                 }

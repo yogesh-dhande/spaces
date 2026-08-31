@@ -12,8 +12,9 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
     func testCompatibleEmbeddedStatusResolvesWithoutSecondHandshake() throws {
         let probe = RequestProbe()
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: .init(installationID: "i", bundleID: "b", platform: "macos", deviceName: "Mac", appVersion: "1.0"),
-            profile: nil, requestProvider: probe.provider(overviewStatus: Self.status(protocolVersion: SpacesWireProtocol.version)))
+            context: DeviceRequestContext(
+                device: Self.device, clientApp: .init(installationID: "i", bundleID: "b", platform: "macos", deviceName: "Mac", appVersion: "1.0")),
+            requestProvider: probe.provider(overviewStatus: Self.status(protocolVersion: SpacesWireProtocol.version)))
 
         XCTAssertEqual(resolution.compatibility, .compatible)
         XCTAssertNotNil(resolution.overview)
@@ -25,7 +26,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
     func testIncompatibleEmbeddedStatusBlocksWithoutSecondHandshake() throws {
         let probe = RequestProbe()
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil,
+            context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp),
             requestProvider: probe.provider(overviewStatus: Self.status(protocolVersion: SpacesWireProtocol.version + 1)))
 
         XCTAssertEqual(resolution.compatibility, .clientTooOld)
@@ -39,7 +40,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         // A wire-incompatible daemon's overview cannot decode at all (modeled as a thrown error); the
         // frozen-core handshake stays decodable and reports the incompatibility.
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil,
+            context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp),
             requestProvider: probe.provider(
                 overviewError: POSIXError(.EILSEQ), handshakeStatus: Self.status(protocolVersion: SpacesWireProtocol.version + 1)))
 
@@ -52,7 +53,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         let probe = RequestProbe()
         XCTAssertThrowsError(
             try SpacesDeviceClient.resolveOverview(
-                device: Self.device, clientApp: Self.clientApp, profile: nil,
+                context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp),
                 requestProvider: probe.provider(overviewError: POSIXError(.ECONNREFUSED), handshakeError: POSIXError(.ECONNREFUSED))))
         XCTAssertEqual(probe.commandNames, ["overview", "daemonStatus"])
     }
@@ -69,7 +70,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         let probe = LocalEndpointProbe(livePort: Self.livePort)
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            context: DeviceRequestContext(device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root)),
             requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
 
         XCTAssertEqual(resolution.compatibility, .compatible)
@@ -91,7 +92,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         let probe = LocalEndpointProbe(livePort: Self.livePort, protocolVersion: SpacesWireProtocol.version + 1)
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            context: DeviceRequestContext(device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root)),
             requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
 
         XCTAssertEqual(resolution.compatibility, .clientTooOld)
@@ -114,7 +115,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         let probe = LocalEndpointProbe(livePort: Self.livePort, daemonRunning: false)
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            context: DeviceRequestContext(device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root)),
             requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
 
         XCTAssertEqual(resolution.compatibility, .compatible)
@@ -133,7 +134,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         probe.rejectsFirstOverviewAsUnauthorized = true
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.localDevice(port: Self.livePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            context: DeviceRequestContext(device: Self.localDevice(port: Self.livePort), clientApp: Self.clientApp, profile: Self.profile(root: root)),
             requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
 
         XCTAssertEqual(resolution.compatibility, .compatible)
@@ -150,8 +151,8 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         let probe = LocalEndpointProbe(livePort: Self.livePort)
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: staleDevice, clientApp: Self.clientApp, profile: Self.profile(root: root), requestProvider: probe.requestProvider,
-            database: database, bootstrap: probe.bootstrapProvider)
+            context: DeviceRequestContext(device: staleDevice, clientApp: Self.clientApp, profile: Self.profile(root: root)),
+            requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
 
         XCTAssertEqual(resolution.compatibility, .compatible)
         XCTAssertEqual(resolution.overview?.device.certificateFingerprint, "SHA256:local")
@@ -174,7 +175,8 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
 
         XCTAssertThrowsError(
             try SpacesDeviceClient.resolveOverview(
-                device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+                context: DeviceRequestContext(
+                    device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root)),
                 requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
         ) { error in XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(error)) }
         XCTAssertEqual(probe.bootstrapCount, 1)
@@ -192,8 +194,8 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         // offline: no local bootstrap can re-resolve it and none is attempted.
         XCTAssertThrowsError(
             try SpacesDeviceClient.resolveOverview(
-                device: Self.device, clientApp: Self.clientApp, profile: Self.profile(root: root), requestProvider: probe.requestProvider,
-                database: database, bootstrap: probe.bootstrapProvider))
+                context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp, profile: Self.profile(root: root)),
+                requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider))
         XCTAssertEqual(probe.bootstrapCount, 0)
         // The wire-compatibility handshake fallback still runs for a remote device.
         XCTAssertEqual(probe.commandNames, ["overview", "daemonStatus"])
@@ -257,7 +259,7 @@ private final class RequestProbe: @unchecked Sendable {
             version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version),
         overviewError: Error? = nil, handshakeStatus: TerminalServiceDaemonStatus? = nil, handshakeError: Error? = nil
     ) -> SpacesDeviceClient.DeviceRequestProvider {
-        { request, _, _, _ in
+        { request, _ in
             self.lock.lock()
             self.names.append(request.command.name)
             self.lock.unlock()
@@ -329,7 +331,8 @@ private final class LocalEndpointProbe: @unchecked Sendable {
     }
 
     var requestProvider: SpacesDeviceClient.DeviceRequestProvider {
-        { request, device, _, _ in
+        { request, context in
+            let device = context.device
             self.lock.lock()
             self.ports.append(device.port)
             self.fingerprints.append(device.certificateFingerprint)

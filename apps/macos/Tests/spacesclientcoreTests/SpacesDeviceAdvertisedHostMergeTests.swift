@@ -25,7 +25,7 @@ final class SpacesDeviceAdvertisedHostMergeTests: XCTestCase {
         XCTAssertEqual(resolver.candidateHosts, ["studio.local"])
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil,
+            context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp),
             requestProvider: Self.requestProvider(advertised: ["192.168.1.50", "100.64.0.1"]), database: database)
 
         XCTAssertNotNil(resolution.overview)
@@ -50,7 +50,7 @@ final class SpacesDeviceAdvertisedHostMergeTests: XCTestCase {
         let resolver = SpacesDeviceEndpointRegistry.resolver(for: Self.device, certificateFingerprint: Self.device.certificateFingerprint)
 
         let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil,
+            context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp),
             requestProvider: Self.requestProvider(advertised: ["192.168.1.50", "100.64.0.1"]), database: database)
 
         let published = try XCTUnwrap(resolution.overview?.device)
@@ -93,7 +93,8 @@ final class SpacesDeviceAdvertisedHostMergeTests: XCTestCase {
         let resolver = SpacesDeviceEndpointRegistry.resolver(for: Self.device, certificateFingerprint: Self.device.certificateFingerprint)
 
         _ = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil, requestProvider: Self.requestProvider(advertised: []), database: database)
+            context: DeviceRequestContext(device: Self.device, clientApp: Self.clientApp), requestProvider: Self.requestProvider(advertised: []),
+            database: database)
 
         // An empty list means the daemon reported nothing, never that it has no addresses.
         XCTAssertEqual(try database.pairedDevice(id: Self.device.id)?.hosts, ["studio.local"])
@@ -106,7 +107,7 @@ final class SpacesDeviceAdvertisedHostMergeTests: XCTestCase {
         let resolver = SpacesDeviceEndpointRegistry.resolver(for: Self.localDevice, certificateFingerprint: Self.localDevice.certificateFingerprint)
 
         _ = try SpacesDeviceClient.resolveOverview(
-            device: Self.localDevice, clientApp: Self.clientApp, profile: nil,
+            context: DeviceRequestContext(device: Self.localDevice, clientApp: Self.clientApp),
             requestProvider: Self.requestProvider(advertised: ["192.168.1.50", "100.64.0.1"]), database: database)
 
         // This Mac's own daemon is reached over loopback and re-resolves itself through the control
@@ -133,7 +134,7 @@ final class SpacesDeviceAdvertisedHostMergeTests: XCTestCase {
     }
 
     private static func requestProvider(advertised: [String]) -> SpacesDeviceClient.DeviceRequestProvider {
-        { _, _, _, _ in
+        { _, _ in
             SpacesDeviceAPIResponse(
                 ok: true, message: "ok",
                 result: .overview(

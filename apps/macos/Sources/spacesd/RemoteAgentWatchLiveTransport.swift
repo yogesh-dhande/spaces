@@ -20,7 +20,8 @@ extension RemoteAgentWatchTransport {
                 guard pairedDeviceHasRequiredCredentials(device: device) else { return .unavailable(reason: "missing_credentials") }
                 do {
                     let client = try SpacesDeviceClient.subscribeOverview(
-                        device: device, clientApp: clientApp, onOverview: { _ in onSignal() }, onDisconnect: onDisconnect)
+                        context: DeviceRequestContext(device: device, clientApp: clientApp), onOverview: { _ in onSignal() },
+                        onDisconnect: onDisconnect)
                     return .connected(client)
                 } catch {
                     return .unavailable(reason: "connect_failed error=\(error)")
@@ -30,7 +31,7 @@ extension RemoteAgentWatchTransport {
                 guard let device = try SpacesClientDatabase.defaultDatabase().pairedDevice(id: deviceID) else {
                     throw RemoteAgentWatchListingError.deviceUnpaired
                 }
-                return try SpacesDeviceClient.listAgentSessions(device: device, clientApp: clientApp)
+                return try SpacesDeviceClient.listAgentSessions(context: DeviceRequestContext(device: device, clientApp: clientApp))
             })
     }
 

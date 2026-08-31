@@ -164,7 +164,10 @@ import workspacecore
         Task { @MainActor [weak self] in
             let results = await Task.detached(priority: .userInitiated) {
                 requests.map { request -> (String, [TerminalServiceAutomationRunSummary]?) in
-                    do { return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(device: request.device, clientApp: clientApp)) } catch {
+                    do {
+                        let context = DeviceRequestContext(device: request.device, clientApp: clientApp)
+                        return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(context: context))
+                    } catch {
                         return (request.deviceID, nil)
                     }
                 }
@@ -774,8 +777,8 @@ import workspacecore
     }
 
     private func runNow(deviceID: String, automationID: String) {
-        performMutation(deviceID: deviceID) { device, clientApp in
-            try SpacesDeviceClient.triggerAutomation(id: automationID, device: device, clientApp: clientApp)
+        performMutation(deviceID: deviceID) { context in
+            try SpacesDeviceClient.triggerAutomation(id: automationID, context: context)
         }
     }
 
@@ -812,11 +815,10 @@ import workspacecore
     private func setNextRun(deviceID: String, automationID: String, at instant: Date) async -> String? {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else { return "That device is not available." }
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
+        let context = DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
         let error = await Task.detached(priority: .userInitiated) { () -> Error? in
             do {
-                _ = try SpacesDeviceClient.setAutomationNextRun(
-                    id: automationID, nextRunTime: instant, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-                )
+                _ = try SpacesDeviceClient.setAutomationNextRun(id: automationID, nextRunTime: instant, context: context)
                 return nil
             } catch { return error }
         }.value
@@ -851,8 +853,8 @@ import workspacecore
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        performMutation(deviceID: deviceID) { device, clientApp in
-            try SpacesDeviceClient.deleteAutomation(id: automationID, device: device, clientApp: clientApp)
+        performMutation(deviceID: deviceID) { context in
+            try SpacesDeviceClient.deleteAutomation(id: automationID, context: context)
         }
     }
 
@@ -862,22 +864,22 @@ import workspacecore
         else { return }
         let enabled = sender.state == .on
         let fields = AppKitController.automationFields(from: automation, enabled: enabled)
-        performMutation(deviceID: deviceID, serializationKey: "\(deviceID)::\(automationID)") { device, clientApp in
-            try SpacesDeviceClient.updateAutomation(id: automationID, fields: fields, device: device, clientApp: clientApp)
+        performMutation(deviceID: deviceID, serializationKey: "\(deviceID)::\(automationID)") { context in
+            try SpacesDeviceClient.updateAutomation(id: automationID, fields: fields, context: context)
         }
     }
 
     @objc private func cancelRunTapped(_ sender: NSButton) {
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
-        performMutation(deviceID: deviceID) { device, clientApp in
-            try SpacesDeviceClient.cancelAutomationRun(runID: runID, device: device, clientApp: clientApp)
+        performMutation(deviceID: deviceID) { context in
+            try SpacesDeviceClient.cancelAutomationRun(runID: runID, context: context)
         }
     }
 
     @objc private func endAgentsTapped(_ sender: NSButton) {
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
-        performMutation(deviceID: deviceID) { device, clientApp in
-            try SpacesDeviceClient.endAutomationAgents(runID: runID, device: device, clientApp: clientApp)
+        performMutation(deviceID: deviceID) { context in
+            try SpacesDeviceClient.endAutomationAgents(runID: runID, context: context)
         }
     }
 
@@ -891,7 +893,7 @@ import workspacecore
     /// offline remote this renders whatever cached overview exists, which is acceptable.
     private func performMutation(
         deviceID: String, serializationKey: String? = nil,
-        _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void
+        _ operation: @escaping @Sendable (DeviceRequestContext) throws -> Void
     ) {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()
@@ -899,11 +901,12 @@ import workspacecore
         }
         resetRetainedRunHistory()
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
+        let context = DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
         let run: @MainActor @Sendable () async -> Void = { [weak self] in
             guard let self else { return }
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in
                 do {
-                    try operation(device, SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    try operation(context)
                     return nil
                 } catch { return error }
             }.value

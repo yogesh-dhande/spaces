@@ -1410,9 +1410,9 @@ import workspacecore
 
         let match = await AppKitController.resolveSessionSummaryMatchOffMain(
             sessionID: "session-ended", device: device, clientApp: clientApp,
-            resolveOverview: { device, _ in
+            resolveOverview: { context in
                 SpacesDeviceOverviewResolution(
-                    overview: SpacesDeviceOverview(device: device, overview: overview), daemonStatus: nil, compatibility: nil)
+                    overview: SpacesDeviceOverview(device: context.device, overview: overview), daemonStatus: nil, compatibility: nil)
             })
 
         let resolved = try #require(match)
@@ -1442,10 +1442,10 @@ import workspacecore
 
         let match = await AppKitController.resolveSessionSummaryMatchOffMain(
             sessionID: "session-cold", device: device, clientApp: clientApp,
-            resolveOverview: { device, _ in
+            resolveOverview: { context in
                 recorder.record(Thread.isMainThread)
                 return SpacesDeviceOverviewResolution(
-                    overview: SpacesDeviceOverview(device: device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
+                    overview: SpacesDeviceOverview(device: context.device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
                     daemonStatus: nil, compatibility: nil)
             })
 

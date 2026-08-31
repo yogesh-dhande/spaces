@@ -74,8 +74,7 @@ extension SpacesDeviceClientError: SpacesDeviceErrorCodeProviding {
 
 public enum SpacesDeviceClient {
     public typealias LocalBootstrapProvider = @Sendable (SpacesDeviceClientApp, _ presentedToken: String?) throws -> SpacesDeviceAPIControlResponse
-    typealias DeviceRequestProvider =
-        @Sendable (SpacesDeviceAPIRequest, SpacesPairedDeviceRecord, SpacesDeviceClientApp, SpacesProfile?) throws -> SpacesDeviceAPIResponse
+    typealias DeviceRequestProvider = @Sendable (SpacesDeviceAPIRequest, DeviceRequestContext) throws -> SpacesDeviceAPIResponse
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
     static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
@@ -206,9 +205,7 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesDeviceOverview {
         try localOverview(
             database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap,
-            requestProvider: { request, device, clientApp, profile in
-                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
-            })
+            requestProvider: { request, context in try SpacesDeviceClient.request(request, context: context) })
     }
 
     static func localOverview(
@@ -217,49 +214,43 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesDeviceOverview {
         let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
         let device = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
-        do { return try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
+        let context = DeviceRequestContext(device: device, clientApp: clientApp, profile: profile)
+        do { return try overview(context: context, requestProvider: requestProvider) } catch {
             guard isDeviceAPITransportFailure(error) else { throw error }
             let refreshedDevice = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
-            return try overview(device: refreshedDevice, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+            let refreshedContext = DeviceRequestContext(device: refreshedDevice, clientApp: clientApp, profile: profile)
+            return try overview(context: refreshedContext, requestProvider: requestProvider)
         }
     }
 
     /// Fetches the overview for a specific paired device, independent of which device is currently active.
     /// Used to populate the multi-device sidebar where every paired device is shown at once.
-    public static func overview(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
-        throws -> SpacesDeviceOverview
-    {
-        try overview(
-            device: device, clientApp: clientApp, profile: profile,
-            requestProvider: { request, device, clientApp, profile in
-                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
-            })
+    public static func overview(context: DeviceRequestContext) throws -> SpacesDeviceOverview {
+        try overview(context: context, requestProvider: { request, context in try SpacesDeviceClient.request(request, context: context) })
     }
 
-    private static func overview(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
-    ) throws -> SpacesDeviceOverview {
-        let response = try requestProvider(.init(command: .overview), device, clientApp, profile)
+    private static func overview(context: DeviceRequestContext, requestProvider: DeviceRequestProvider) throws -> SpacesDeviceOverview {
+        let response = try requestProvider(.init(command: .overview), context)
         guard let overview = response.overview else { throw SpacesDeviceClientError.missingOverview }
-        return SpacesDeviceOverview(device: device, overview: overview)
+        return SpacesDeviceOverview(device: context.device, overview: overview)
     }
 
     /// Opens a live device-overview subscription: the paired daemon pushes a
     /// fresh overview whenever its database changes, so the client stays current
     /// without polling. The returned client must be retained and `stop()`ped.
     public static func subscribeOverview(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-        onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        context: DeviceRequestContext, onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceAPIOverviewStreamClient {
-        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         // The record this subscription publishes with, carried across deliveries. A stream outlives many
         // overviews, and only the delivery that actually widens the candidates gets a merged record back;
         // without carrying it, every later delivery would republish the record captured at subscribe time
         // and walk the learned address back out of the caller's state.
-        let publishedRecord = PairedDeviceRecordBox(device)
+        let publishedRecord = PairedDeviceRecordBox(context.device)
         let client = try SpacesDeviceAPIOverviewStreamClient(
-            authToken: authToken, clientApp: clientApp,
-            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
+            authToken: authToken, clientApp: context.clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint),
             onOverview: { payload in
                 // Every delivery is the daemon's own current view of where it is reachable, so this is
                 // where a pushed overview widens the device's candidate addresses. Once per delivery, not
@@ -288,6 +279,10 @@ public enum SpacesDeviceClient {
     /// the candidates, and a client that keeps holding it hands the narrower list back to
     /// `SpacesDeviceEndpointRegistry.resolver(for:certificateFingerprint:)`, whose reconcile would then
     /// strip the address this merge just learned right back out of the live resolver.
+    ///
+    /// Takes a bare `device:` rather than a `DeviceRequestContext`: this merge has nothing to do with
+    /// which client app or profile is asking, only with the device record being widened, so it is not
+    /// part of the request-identity tail the context bundles.
     @discardableResult static func mergeAdvertisedHosts(
         device: SpacesPairedDeviceRecord, status: TerminalServiceDaemonStatus?, database providedDatabase: SpacesClientDatabase? = nil
     ) -> SpacesPairedDeviceRecord? {
@@ -312,46 +307,34 @@ public enum SpacesDeviceClient {
 
     /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
     /// caller can classify compatibility against this build.
-    public static func daemonStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> TerminalServiceDaemonStatus {
-        try daemonStatus(
-            device: device, clientApp: clientApp, profile: profile,
-            requestProvider: { request, device, clientApp, profile in
-                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
-            })
+    public static func daemonStatus(context: DeviceRequestContext) throws -> TerminalServiceDaemonStatus {
+        try daemonStatus(context: context, requestProvider: { request, context in try SpacesDeviceClient.request(request, context: context) })
     }
 
-    private static func daemonStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
-    ) throws -> TerminalServiceDaemonStatus {
-        let response = try requestProvider(.init(command: .daemonStatus), device, clientApp, profile)
+    private static func daemonStatus(context: DeviceRequestContext, requestProvider: DeviceRequestProvider) throws -> TerminalServiceDaemonStatus {
+        let response = try requestProvider(.init(command: .daemonStatus), context)
         guard let status = response.daemonStatus else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return status
     }
 
-    /// Reports availability + Spaces hook-install status for supported coding agents on `device`
+    /// Reports availability + Spaces hook-install status for supported coding agents on `context`'s device
     /// (local or remote). Read-only.
-    public static func agentHooksStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [AgentHookStatus] {
-        let response = try request(.init(command: .agentHooksStatus), device: device, clientApp: clientApp, profile: profile)
+    public static func agentHooksStatus(context: DeviceRequestContext) throws -> [AgentHookStatus] {
+        let response = try request(.init(command: .agentHooksStatus), context: context)
         guard let payload = response.agentHooksStatus else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return payload.agents
     }
 
-    /// Idempotently installs Spaces lifecycle hooks for `kinds` on `device` (local or remote). Returns
-    /// fresh status for every supported agent plus one failure entry per requested agent that could not
-    /// be installed — an install lands partially, so a non-empty `failures` does not mean nothing
+    /// Idempotently installs Spaces lifecycle hooks for `kinds` on `context`'s device (local or remote).
+    /// Returns fresh status for every supported agent plus one failure entry per requested agent that could
+    /// not be installed — an install lands partially, so a non-empty `failures` does not mean nothing
     /// happened. Throws only when the request itself fails.
-    @discardableResult public static func installAgentHooks(
-        _ kinds: [CodingAgent], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> AgentHookInstallOutcome {
-        let response = try request(.init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
+    @discardableResult public static func installAgentHooks(_ kinds: [CodingAgent], context: DeviceRequestContext) throws -> AgentHookInstallOutcome {
+        let response = try request(.init(command: .installAgentHooks(.init(kinds: kinds))), context: context)
         guard let payload = response.agentHooksInstall else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -366,24 +349,16 @@ public enum SpacesDeviceClient {
     /// stored local port is not durable. A pinned-identity failure or unauthorized response similarly
     /// refreshes the stored certificate or token and retries once. This is the per-refresh hot path; see
     /// `docs/implementation.md` (device compatibility handshake).
-    public static func resolveOverview(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceOverviewResolution {
-        try resolveOverview(
-            device: device, clientApp: clientApp, profile: profile,
-            requestProvider: { request, device, clientApp, profile in
-                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
-            })
+    public static func resolveOverview(context: DeviceRequestContext) throws -> SpacesDeviceOverviewResolution {
+        try resolveOverview(context: context, requestProvider: { request, context in try SpacesDeviceClient.request(request, context: context) })
     }
 
     static func resolveOverview(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
-        database providedDatabase: SpacesClientDatabase? = nil,
+        context: DeviceRequestContext, requestProvider: DeviceRequestProvider, database providedDatabase: SpacesClientDatabase? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalRecoveryBootstrapProvider
     ) throws -> SpacesDeviceOverviewResolution {
         do {
-            return try resolutionFromInlineStatus(
-                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase)
+            return try resolutionFromInlineStatus(context: context, requestProvider: requestProvider, database: providedDatabase)
         } catch {
             // The local daemon's Device API endpoint is not durable: it can idle-shut-down, be restarted,
             // or be relaunched on a freshly assigned port, so the port in the caller's `paired_devices`
@@ -392,22 +367,21 @@ public enum SpacesDeviceClient {
             // is gone". Only the local device needs that step: a remote device's candidate addresses are
             // already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`), so a transport
             // failure there means every address it knows was tried and none answered.
-            guard device.id == SpacesPairedDeviceRecord.localDeviceID else {
-                return try resolutionFromHandshake(
-                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
+            guard context.device.id == SpacesPairedDeviceRecord.localDeviceID else {
+                return try resolutionFromHandshake(context: context, requestProvider: requestProvider, overviewError: error)
             }
             if isDeviceAPITransportFailure(error) {
                 return try recoveredLocalResolution(
-                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
-                    bootstrap: bootstrap, metricName: "terminal_device_local_endpoint_recovery")
+                    context: context, requestProvider: requestProvider, database: providedDatabase, bootstrap: bootstrap,
+                    metricName: "terminal_device_local_endpoint_recovery")
             }
             // The daemon can retain its port while rotating its TLS identity. A local bootstrap is the
             // trusted authority for that identity, so refresh the stored fingerprint and retry once.
             // This remains local-only: a remote device with the same failure must be re-paired.
             if SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) {
                 return try recoveredLocalResolution(
-                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
-                    bootstrap: bootstrap, metricName: "terminal_device_local_identity_recovery")
+                    context: context, requestProvider: requestProvider, database: providedDatabase, bootstrap: bootstrap,
+                    metricName: "terminal_device_local_identity_recovery")
             }
             // Routine sidebar refreshes trust the stored token so their steady state has no bootstrap
             // round-trip. If the daemon reset its pairing state while remaining reachable, the overview
@@ -415,11 +389,10 @@ public enum SpacesDeviceClient {
             // turning the optimization into a permanent authorization failure.
             if case SpacesDeviceClientError.requestRejected(_, .unauthorized) = error {
                 return try recoveredLocalResolution(
-                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
-                    bootstrap: bootstrap, metricName: "terminal_device_local_authorization_recovery")
+                    context: context, requestProvider: requestProvider, database: providedDatabase, bootstrap: bootstrap,
+                    metricName: "terminal_device_local_authorization_recovery")
             }
-            return try resolutionFromHandshake(
-                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
+            return try resolutionFromHandshake(context: context, requestProvider: requestProvider, overviewError: error)
         }
     }
 
@@ -432,33 +405,32 @@ public enum SpacesDeviceClient {
     /// that silently fails to produce an overview is otherwise indistinguishable in the app log from a
     /// session that was never resolvable.
     private static func recoveredLocalResolution(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
-        database providedDatabase: SpacesClientDatabase?, bootstrap: LocalBootstrapProvider, metricName: String
+        context: DeviceRequestContext, requestProvider: DeviceRequestProvider, database providedDatabase: SpacesClientDatabase?,
+        bootstrap: LocalBootstrapProvider, metricName: String
     ) throws -> SpacesDeviceOverviewResolution {
         let startedAt = Date()
         let refreshed: SpacesPairedDeviceRecord
         do {
             let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
-            refreshed = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+            refreshed = try bootstrapLocalDevice(database: database, clientApp: context.clientApp, profile: context.profile, bootstrap: bootstrap)
         } catch {
             // The daemon could not be started or would not answer its control socket, so there is no
             // current endpoint to retry against. `isLocalDaemonUnreachableError` classifies this for the
             // caller, which degrades to an offline local section.
             logLocalRecoveryMetric(
-                metricName: metricName, device: device, refreshedPort: nil, startedAt: startedAt, success: false, stage: "bootstrap")
+                metricName: metricName, device: context.device, refreshedPort: nil, startedAt: startedAt, success: false, stage: "bootstrap")
             throw error
         }
+        let refreshedContext = DeviceRequestContext(device: refreshed, clientApp: context.clientApp, profile: context.profile)
         do {
-            let resolution = try resolutionFromInlineStatus(
-                device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+            let resolution = try resolutionFromInlineStatus(context: refreshedContext, requestProvider: requestProvider)
             logLocalRecoveryMetric(
-                metricName: metricName, device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
+                metricName: metricName, device: context.device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
             return resolution
         } catch {
             logLocalRecoveryMetric(
-                metricName: metricName, device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
-            return try resolutionFromHandshake(
-                device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
+                metricName: metricName, device: context.device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
+            return try resolutionFromHandshake(context: refreshedContext, requestProvider: requestProvider, overviewError: error)
         }
     }
 
@@ -473,15 +445,14 @@ public enum SpacesDeviceClient {
     /// One overview round-trip, resolved through the compatibility verdict the overview carries inline —
     /// so the compatible steady state needs no second round-trip.
     private static func resolutionFromInlineStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
-        database providedDatabase: SpacesClientDatabase? = nil
+        context: DeviceRequestContext, requestProvider: DeviceRequestProvider, database providedDatabase: SpacesClientDatabase? = nil
     ) throws -> SpacesDeviceOverviewResolution {
-        let payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview
+        let payload = try overview(context: context, requestProvider: requestProvider).overview
         let status = payload.daemonStatus
         // The pull path's once-per-refresh point, matching the subscription's once-per-delivery point.
         // The resolution carries the merged record, so the caller adopts the widened candidates instead
         // of holding the copy it read before this call.
-        let resolved = mergeAdvertisedHosts(device: device, status: status, database: providedDatabase) ?? device
+        let resolved = mergeAdvertisedHosts(device: context.device, status: status, database: providedDatabase) ?? context.device
         let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
         let overview = verdict.isCompatible ? SpacesDeviceOverview(device: resolved, overview: payload) : nil
         return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
@@ -492,10 +463,9 @@ public enum SpacesDeviceClient {
     /// "blocked" (render the block, no overview); anything else rethrows `overviewError` as a genuine
     /// connection error to surface.
     private static func resolutionFromHandshake(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
-        overviewError: any Error
+        context: DeviceRequestContext, requestProvider: DeviceRequestProvider, overviewError: any Error
     ) throws -> SpacesDeviceOverviewResolution {
-        if let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) {
+        if let status = try? daemonStatus(context: context, requestProvider: requestProvider) {
             let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
             if !verdict.isCompatible { return SpacesDeviceOverviewResolution(overview: nil, daemonStatus: status, compatibility: verdict) }
         }
@@ -504,181 +474,135 @@ public enum SpacesDeviceClient {
 
     /// Frozen-core restart request: asks the daemon to restart itself. The OS service manager
     /// (launchd `KeepAlive` / systemd `Restart=always`) respawns it from the updated binary.
-    @discardableResult public static func requestDaemonRestart(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse { try request(.init(command: .requestDaemonRestart), device: device, clientApp: clientApp, profile: profile) }
+    @discardableResult public static func requestDaemonRestart(context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .requestDaemonRestart), context: context)
+    }
 
-    public static func workspaceCreateOptions(
-        selectedProjectID: String?, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceWorkspaceCreateOptions {
-        let response = try request(
-            .init(command: .workspaceCreateOptions(.init(projectID: selectedProjectID))), device: device, clientApp: clientApp, profile: profile)
+    public static func workspaceCreateOptions(selectedProjectID: String?, context: DeviceRequestContext) throws -> SpacesDeviceWorkspaceCreateOptions
+    {
+        let response = try request(.init(command: .workspaceCreateOptions(.init(projectID: selectedProjectID))), context: context)
         guard let options = response.workspaceCreateOptions else {
             throw SpacesDeviceClientError.requestRejected(message: "The device did not return workspace create options.", code: nil)
         }
         return options
     }
 
-    public static func previewProject(
-        dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceProjectPreview {
-        let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
+    public static func previewProject(dir: String, context: DeviceRequestContext) throws -> SpacesDeviceProjectPreview {
+        let response = try request(.init(command: .previewProject(.init(dir: dir))), context: context)
         guard let preview = response.projectPreview else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return preview
     }
 
-    public static func listDirectories(
-        path: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [String] {
-        let response = try request(.init(command: .listDirectories(.init(path: path))), device: device, clientApp: clientApp, profile: profile)
+    public static func listDirectories(path: String, context: DeviceRequestContext) throws -> [String] {
+        let response = try request(.init(command: .listDirectories(.init(path: path))), context: context)
         return response.directorySuggestions?.paths ?? []
     }
 
-    public static func createProject(
-        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), device: device, clientApp: clientApp,
-            profile: profile)
-    }
+    public static func createProject(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, context: DeviceRequestContext)
+        throws -> SpacesDeviceAPIResponse
+    { try request(.init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), context: context) }
 
     /// Loads a git repository's `spaces.yaml` (single file, no clone) to populate the add-project form,
     /// along with any managed directories a later Create would replace. The full clone happens at Create.
-    public static func previewGitProject(
-        gitURL: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceGitProjectPreview {
-        let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), device: device, clientApp: clientApp, profile: profile)
+    public static func previewGitProject(gitURL: String, context: DeviceRequestContext) throws -> SpacesDeviceGitProjectPreview {
+        let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), context: context)
         guard let preview = response.gitProjectPreview else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return preview
     }
 
-    public static func deleteProject(
-        projectID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .deleteProject(.init(projectID: projectID))), device: device, clientApp: clientApp, profile: profile)
+    public static func deleteProject(projectID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .deleteProject(.init(projectID: projectID))), context: context)
     }
 
-    public static func importProjectSpacesYAML(
-        projectID: String, updateAllWorkspaces: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .importProject(.init(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
+    public static func importProjectSpacesYAML(projectID: String, updateAllWorkspaces: Bool = false, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .importProject(.init(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces))), context: context) }
 
-    public static func exportProjectSpacesYAML(
-        projectID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .exportProject(.init(projectID: projectID))), device: device, clientApp: clientApp, profile: profile)
+    public static func exportProjectSpacesYAML(projectID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .exportProject(.init(projectID: projectID))), context: context)
     }
 
     public static func createWorkspace(
         projectID: String, branch: String?, baseBranch: String?, directoryName: String? = nil, notes: String? = nil,
-        allowExistingBranchReuse: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        allowExistingBranchReuse: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
                 command: .createWorkspace(
                     .init(
                         projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes,
-                        allowExistingBranchReuse: allowExistingBranchReuse))), device: device, clientApp: clientApp, profile: profile)
+                        allowExistingBranchReuse: allowExistingBranchReuse))), context: context)
     }
 
-    public static func launchWorkspace(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .launchWorkspace(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func launchWorkspace(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .launchWorkspace(.init(workspaceID: workspaceID))), context: context)
     }
 
-    public static func stopWorkspace(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .stopWorkspace(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func stopWorkspace(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .stopWorkspace(.init(workspaceID: workspaceID))), context: context)
     }
 
-    public static func restartWorkspace(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .restartWorkspace(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func restartWorkspace(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .restartWorkspace(.init(workspaceID: workspaceID))), context: context)
     }
 
     public static func archiveWorkspace(
-        workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
-                command: .archiveWorkspace(
-                    .init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch))), device: device,
-            clientApp: clientApp, profile: profile)
+                command: .archiveWorkspace(.init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch))
+            ), context: context)
     }
 
-    public static func runWorkspaceSetup(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .runWorkspaceSetup(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func runWorkspaceSetup(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .runWorkspaceSetup(.init(workspaceID: workspaceID))), context: context)
     }
 
     public static func updateProjectConfig(
-        projectID: String, config: SpacesDeviceProjectConfig, updateAllWorkspaces: Bool = false, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        projectID: String, config: SpacesDeviceProjectConfig, updateAllWorkspaces: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(command: .updateProjectConfig(.init(projectID: projectID, config: config, updateAllWorkspaces: updateAllWorkspaces))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
-    public static func updateProjectMetadata(
-        projectID: String, isHidden: Bool, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .updateProjectMetadata(.init(projectID: projectID, isHidden: isHidden, updatesHidden: true))), device: device,
-            clientApp: clientApp, profile: profile)
+    public static func updateProjectMetadata(projectID: String, isHidden: Bool, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .updateProjectMetadata(.init(projectID: projectID, isHidden: isHidden, updatesHidden: true))), context: context)
     }
 
-    public static func updateWorkspaceConfig(
-        workspaceID: String, config: SpacesDeviceWorkspaceConfig, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .updateWorkspaceConfig(.init(workspaceID: workspaceID, config: config))), device: device, clientApp: clientApp,
-            profile: profile)
-    }
+    public static func updateWorkspaceConfig(workspaceID: String, config: SpacesDeviceWorkspaceConfig, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .updateWorkspaceConfig(.init(workspaceID: workspaceID, config: config))), context: context) }
 
     public static func updateWorkspaceMetadata(
         workspaceID: String, branch: String? = nil, notes: String? = nil, updatesBranch: Bool = false, updatesNotes: Bool = false,
-        isHidden: Bool? = nil, updatesHidden: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        isHidden: Bool? = nil, updatesHidden: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
                 command: .updateWorkspaceMetadata(
                     .init(
                         workspaceID: workspaceID, branch: branch, notes: notes, updatesBranch: updatesBranch, updatesNotes: updatesNotes,
-                        isHidden: isHidden, updatesHidden: updatesHidden))), device: device, clientApp: clientApp, profile: profile)
+                        isHidden: isHidden, updatesHidden: updatesHidden))), context: context)
     }
 
     /// Reads one file inside a workspace's checkout on a paired device (capped at 10 MiB on the daemon
     /// side; see `SpacesDeviceAPIServer.workspaceFileMaxBytes`).
     public static func workspaceFileRead(
         workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil, requiresDirectPath: Bool = false,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceFileReadResult {
         let response = try request(
             .init(
                 command: .workspaceFileRead(
                     .init(
                         workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
-                        requiresDirectPath: requiresDirectPath))), device: device, clientApp: clientApp, profile: profile)
+                        requiresDirectPath: requiresDirectPath))), context: context)
         guard let result = response.workspaceFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -688,13 +612,11 @@ public enum SpacesDeviceClient {
     /// Verifies one immutable Last Commit target against its checkout and returns its first-parent
     /// comparison side after Git's configured checkout filters.
     public static func workspaceRevisionFileRead(
-        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil, context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceRevisionFileReadResult {
         let response = try request(
-            .init(
-                command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))
-            ), device: device, clientApp: clientApp, profile: profile)
+            .init(command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))),
+            context: context)
         guard let result = response.workspaceRevisionFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -707,14 +629,14 @@ public enum SpacesDeviceClient {
     /// the caller can merge against.
     public static func workspaceFileWrite(
         workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceFileWriteResult {
         let response = try request(
             .init(
                 command: .workspaceFileWrite(
                     .init(
                         workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
-                        requiresDirectPath: requiresDirectPath))), device: device, clientApp: clientApp, profile: profile)
+                        requiresDirectPath: requiresDirectPath))), context: context)
         guard let result = response.workspaceFileWrite else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -724,13 +646,13 @@ public enum SpacesDeviceClient {
     /// Reads one bounded changed-file metadata chunk before the Editor begins fetching patch bodies.
     public static func workspaceDiffManifestChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String? = nil, fileIndex: Int,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceDiffManifestChunkResult {
         let response = try request(
             .init(
                 command: .workspaceDiffManifestChunk(
                     .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, fileIndex: fileIndex))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
         guard let result = response.workspaceDiffManifestChunk else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -741,15 +663,14 @@ public enum SpacesDeviceClient {
     /// range unchanged for every later offset.
     public static func workspaceDiffFileChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
-        transferID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        transferID: String? = nil, context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceDiffFileChunkResult {
         let response = try request(
             .init(
                 command: .workspaceDiffFileChunk(
                     .init(
                         workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                        byteOffset: byteOffset, transferID: transferID))), device: device, clientApp: clientApp, profile: profile)
+                        byteOffset: byteOffset, transferID: transferID))), context: context)
         guard let result = response.workspaceDiffFileChunk else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -761,14 +682,14 @@ public enum SpacesDeviceClient {
     /// ambiguous connection failure.
     public static func cancelWorkspaceDiffFileChunk(
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, relativePath: String, byteOffset: Int,
-        transferID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        transferID: String, context: DeviceRequestContext
     ) throws {
         let response = try request(
             .init(
                 command: .workspaceDiffFileChunk(
                     .init(
                         workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, relativePath: relativePath,
-                        byteOffset: byteOffset, transferID: transferID, cancel: true))), device: device, clientApp: clientApp, profile: profile)
+                        byteOffset: byteOffset, transferID: transferID, cancel: true))), context: context)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
     }
 
@@ -776,24 +697,18 @@ public enum SpacesDeviceClient {
     /// Editor generation is superseded or has consumed all of the patches it needs; daemon TTL reaps an
     /// abandoned generation.
     public static func cancelWorkspaceDiffManifest(
-        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, context: DeviceRequestContext
     ) throws {
         let response = try request(
-            .init(
-                command: .workspaceDiffManifestRelease(
-                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID))), device: device,
-            clientApp: clientApp, profile: profile)
+            .init(command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID))),
+            context: context)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
     }
 
     /// Lists every path in a workspace's checkout on a paired device, for the Editor pane's file tree and
     /// quick-open (see `SpacesDeviceWorkspaceFileListRequest`).
-    public static func workspaceFileList(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceWorkspaceFileListResult {
-        let response = try request(
-            .init(command: .workspaceFileList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func workspaceFileList(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceWorkspaceFileListResult {
+        let response = try request(.init(command: .workspaceFileList(.init(workspaceID: workspaceID))), context: context)
         guard let result = response.workspaceFileList else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -802,11 +717,8 @@ public enum SpacesDeviceClient {
 
     /// Lists the branches and recent commits the Compare dialog's ref search offers, on a paired device
     /// (see `SpacesDeviceWorkspaceRefListRequest`).
-    public static func workspaceRefList(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceWorkspaceRefListResult {
-        let response = try request(
-            .init(command: .workspaceRefList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func workspaceRefList(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceWorkspaceRefListResult {
+        let response = try request(.init(command: .workspaceRefList(.init(workspaceID: workspaceID))), context: context)
         guard let result = response.workspaceRefList else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -815,11 +727,8 @@ public enum SpacesDeviceClient {
 
     /// Draft review comments for a workspace's code pane, on a paired device. Sent-and-archived comments
     /// are never included — v1 has no archive-browsing UI (see docs/spec.md).
-    public static func workspaceReviewCommentList(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceReviewComment] {
-        let response = try request(
-            .init(command: .workspaceReviewCommentList(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func workspaceReviewCommentList(workspaceID: String, context: DeviceRequestContext) throws -> [SpacesDeviceReviewComment] {
+        let response = try request(.init(command: .workspaceReviewCommentList(.init(workspaceID: workspaceID))), context: context)
         guard let result = response.workspaceReviewCommentList else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -830,13 +739,13 @@ public enum SpacesDeviceClient {
     /// names one this workspace owns and has not yet sent (see `SpacesDeviceWorkspaceReviewCommentUpsertRequest`).
     public static func workspaceReviewCommentUpsert(
         workspaceID: String, id: String? = nil, filePath: String, side: SpacesDeviceReviewCommentSide, lineNumber: Int, lineText: String,
-        body: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        body: String, context: DeviceRequestContext
     ) throws -> SpacesDeviceReviewComment {
         let response = try request(
             .init(
                 command: .workspaceReviewCommentUpsert(
                     .init(workspaceID: workspaceID, id: id, filePath: filePath, side: side, lineNumber: lineNumber, lineText: lineText, body: body))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
         guard let result = response.workspaceReviewCommentUpsert else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -844,14 +753,9 @@ public enum SpacesDeviceClient {
     }
 
     /// Deletes one review-comment draft on a paired device.
-    @discardableResult public static func workspaceReviewCommentDelete(
-        workspaceID: String, id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .workspaceReviewCommentDelete(.init(workspaceID: workspaceID, id: id))), device: device, clientApp: clientApp,
-            profile: profile)
-    }
+    @discardableResult public static func workspaceReviewCommentDelete(workspaceID: String, id: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .workspaceReviewCommentDelete(.init(workspaceID: workspaceID, id: id))), context: context) }
 
     /// Writes `text` to `sessionID`'s terminal input, then archives every comment in `comments` (id plus
     /// the caller's last-seen `revision`, for the daemon's stale-version check), on a paired device — see
@@ -859,12 +763,11 @@ public enum SpacesDeviceClient {
     /// send-then-archive, and the ordering guarantee it does (and does not) give. A write failure or a
     /// version mismatch leaves every named comment as an untouched draft.
     @discardableResult public static func workspaceReviewCommentsSend(
-        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry], context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(command: .workspaceReviewCommentsSend(.init(workspaceID: workspaceID, sessionID: sessionID, text: text, comments: comments))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
     /// Opens a live per-(workspace, ref, lastCommit)-scope diff-signature subscription: the paired daemon
@@ -874,14 +777,13 @@ public enum SpacesDeviceClient {
     /// `lastCommit` select the same scope the manifest would; pass the same values to both so their
     /// subscription and results agree. The returned client must be retained and `stop()`ped.
     public static func subscribeWorkspaceDiffSignature(
-        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        workspaceID: String, refName: String? = nil, lastCommit: Bool = false, context: DeviceRequestContext,
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceWorkspaceDiffSignatureStreamClient {
-        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         let client = try SpacesDeviceWorkspaceDiffSignatureStreamClient(
-            workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, authToken: authToken, clientApp: clientApp,
-            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, authToken: authToken, clientApp: context.clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
             onDisconnect: onDisconnect)
         try client.start()
         return client
@@ -893,14 +795,13 @@ public enum SpacesDeviceClient {
     /// same `relativePath`) on delivery rather than trust any content carried on the frame. The returned
     /// client must be retained and `stop()`ped.
     public static func subscribeWorkspaceFileSignature(
-        workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void,
-        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, relativePath: String, context: DeviceRequestContext,
+        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceWorkspaceFileSignatureStreamClient {
-        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         let client = try SpacesDeviceWorkspaceFileSignatureStreamClient(
-            workspaceID: workspaceID, path: relativePath, authToken: authToken, clientApp: clientApp,
-            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            workspaceID: workspaceID, path: relativePath, authToken: authToken, clientApp: context.clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
             onDisconnect: onDisconnect)
         try client.start()
         return client
@@ -910,122 +811,85 @@ public enum SpacesDeviceClient {
     /// whenever the authoritative `workspaceFileList` result changes, and the caller re-fetches
     /// `workspaceFileList` on delivery rather than trusting any listing payload on the frame.
     public static func subscribeWorkspaceFileListSignature(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        workspaceID: String, context: DeviceRequestContext,
         onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceWorkspaceFileListSignatureStreamClient {
-        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         let client = try SpacesDeviceWorkspaceFileListSignatureStreamClient(
-            workspaceID: workspaceID, authToken: authToken, clientApp: clientApp,
-            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            workspaceID: workspaceID, authToken: authToken, clientApp: context.clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
             onDisconnect: onDisconnect)
         try client.start()
         return client
     }
 
-    public static func openWorkspaceTerminal(
-        workspaceID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .openWorkspaceTerminal(.init(workspaceID: workspaceID))), device: device, clientApp: clientApp, profile: profile)
+    public static func openWorkspaceTerminal(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .openWorkspaceTerminal(.init(workspaceID: workspaceID))), context: context)
     }
 
-    public static func stopWorkspaceTerminal(
-        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .stopWorkspaceTerminal(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device, clientApp: clientApp,
-            profile: profile)
-    }
+    public static func stopWorkspaceTerminal(workspaceID: String, sessionID: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .stopWorkspaceTerminal(.init(workspaceID: workspaceID, sessionID: sessionID))), context: context) }
 
     /// Asks the owning daemon to stop an ad hoc terminal the user closed, which it does only when the
     /// terminal is idle at a bare shell prompt with no surviving owner attachment. The response's
     /// `terminatedTerminalSession` reports whether it did.
-    public static func stopWorkspaceTerminalIfBareShell(
-        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
+    public static func stopWorkspaceTerminalIfBareShell(workspaceID: String, sessionID: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: workspaceID, sessionID: sessionID))), context: context) }
 
-    public static func renameTerminalSession(
-        workspaceID: String, sessionID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
+    public static func renameTerminalSession(workspaceID: String, sessionID: String, title: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title))), context: context) }
 
     /// Renames a coding-agent row. An empty title clears the rename, restoring the name the agent reports
     /// for itself.
-    public static func renameAgentSession(
-        workspaceID: String, agentID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
+    public static func renameAgentSession(workspaceID: String, agentID: String, title: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), context: context) }
 
-    public static func runWorkspaceProcess(
-        workspaceID: String, processKey: String, processTemplateID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
+    public static func runWorkspaceProcess(workspaceID: String, processKey: String, processTemplateID: String?, context: DeviceRequestContext)
+        throws -> SpacesDeviceAPIResponse
+    {
         try request(
             .init(command: .runWorkspaceProcess(.init(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
     public static func stopWorkspaceProcess(
-        workspaceID: String, processID: String?, processKey: String?, processTemplateID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, processID: String?, processKey: String?, processTemplateID: String?, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
                 command: .stopWorkspaceProcess(
                     .init(workspaceID: workspaceID, processID: processID, processKey: processKey, processTemplateID: processTemplateID))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
     public static func restartWorkspaceProcess(
-        workspaceID: String, processID: String?, processKey: String?, processTemplateID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, processID: String?, processKey: String?, processTemplateID: String?, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
                 command: .restartWorkspaceProcess(
                     .init(workspaceID: workspaceID, processID: processID, processKey: processKey, processTemplateID: processTemplateID))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
-    public static func stopCodingAgent(
-        workspaceID: String, agentID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), device: device, clientApp: clientApp,
-            profile: profile)
+    public static func stopCodingAgent(workspaceID: String, agentID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), context: context)
     }
 
     /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send text/bytes --device`).
     @discardableResult public static func sendTerminalInput(
-        sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), device: device,
-            clientApp: clientApp, profile: profile)
+        try request(.init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), context: context)
     }
 
     /// Rendered plain-text tail of a terminal session on a paired device (`spaces terminal tail --device`).
-    public static func tailTerminalOutput(
-        sessionID: String, lines: Int? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> String {
-        let response = try request(
-            .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
+    public static func tailTerminalOutput(sessionID: String, lines: Int? = nil, context: DeviceRequestContext) throws -> String {
+        let response = try request(.init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), context: context)
         guard let output = response.terminalOutput else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -1035,47 +899,36 @@ public enum SpacesDeviceClient {
     /// Starts an arbitrary command in a new workspace terminal on a paired device. The daemon runs it
     /// through the workspace's interactive login shell; a supported coding agent becomes selectable only
     /// after the regular foreground detector observes it.
-    @discardableResult public static func startWorkspaceCommandSession(
-        workspaceID: String, command: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .startWorkspaceCommandSession(.init(workspaceID: workspaceID, command: command))), device: device, clientApp: clientApp,
-            profile: profile)
-    }
+    @discardableResult public static func startWorkspaceCommandSession(workspaceID: String, command: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .startWorkspaceCommandSession(.init(workspaceID: workspaceID, command: command))), context: context) }
 
     /// Spawns a coding agent on a paired device (`spaces agent spawn --device`). Returns the created
     /// session id (via the mutation result) so the caller polls readiness with `listAgentSessions`; the
     /// daemon runs the same supported-agent hook gate as the local spawn before creating the session.
     @discardableResult public static func spawnAgentSession(
-        workspaceID: String, command: String, title: String? = nil, automationRunID: String? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, command: String, title: String? = nil, automationRunID: String? = nil, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title, automationRunID: automationRunID))),
-            device: device, clientApp: clientApp, profile: profile)
+            context: context)
     }
 
     /// Coding-agent sessions on a paired device (`spaces agent list/status --device`), also used for
     /// remote spawn-readiness polling. `workspaceID`/`sessionID` narrow the listing; both optional.
-    public static func listAgentSessions(
-        workspaceID: String? = nil, sessionID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceAgentSessionRow] {
-        let response = try request(
-            .init(command: .listAgentSessions(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device, clientApp: clientApp,
-            profile: profile)
+    public static func listAgentSessions(workspaceID: String? = nil, sessionID: String? = nil, context: DeviceRequestContext) throws
+        -> [SpacesDeviceAgentSessionRow]
+    {
+        let response = try request(.init(command: .listAgentSessions(.init(workspaceID: workspaceID, sessionID: sessionID))), context: context)
         return response.agentSessions ?? []
     }
 
     /// Sets (or clears, with an empty note) a coding-agent session's note on a paired device
     /// (`spaces agent annotate --device`). Returns the updated row.
-    @discardableResult public static func annotateAgentSession(
-        sessionID: String, note: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceAgentSessionRow] {
-        let response = try request(
-            .init(command: .annotateAgentSession(.init(sessionID: sessionID, note: note))), device: device, clientApp: clientApp, profile: profile)
+    @discardableResult public static func annotateAgentSession(sessionID: String, note: String, context: DeviceRequestContext) throws
+        -> [SpacesDeviceAgentSessionRow]
+    {
+        let response = try request(.init(command: .annotateAgentSession(.init(sessionID: sessionID, note: note))), context: context)
         return response.agentSessions ?? []
     }
 
@@ -1083,109 +936,81 @@ public enum SpacesDeviceClient {
     /// kill --device`). The daemon routes through its `killAgentSession` flow, which handles both a
     /// hook-signaled child (its subscribers told it exited before the row is deleted) and a
     /// not-yet-signaled `.agent`-kind session (terminated), so the client makes one call for both cases.
-    @discardableResult public static func killAgentSession(
-        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .killAgentSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+    @discardableResult public static func killAgentSession(sessionID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .killAgentSession(.init(sessionID: sessionID))), context: context)
     }
 
     // MARK: - Automations
 
     /// Creates an automation on a paired device. The daemon validates the draft (non-empty fields, a
     /// parseable cron for a cron trigger) and returns the created automation as a one-element list.
-    @discardableResult public static func createAutomation(
-        _ fields: TerminalServiceAutomationFields, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationSummary] {
-        try request(.init(command: .createAutomation(fields)), device: device, clientApp: clientApp, profile: profile).automations ?? []
-    }
+    @discardableResult public static func createAutomation(_ fields: TerminalServiceAutomationFields, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationSummary]
+    { try request(.init(command: .createAutomation(fields)), context: context).automations ?? [] }
 
     /// Applies a full-field update (including enable/disable) to an automation on a paired device. Returns
     /// the updated automation as a one-element list.
-    @discardableResult public static func updateAutomation(
-        id: String, fields: TerminalServiceAutomationFields, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationSummary] {
-        try request(.init(command: .updateAutomation(.init(id: id, fields: fields))), device: device, clientApp: clientApp, profile: profile)
-            .automations ?? []
-    }
+    @discardableResult public static func updateAutomation(id: String, fields: TerminalServiceAutomationFields, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationSummary]
+    { try request(.init(command: .updateAutomation(.init(id: id, fields: fields))), context: context).automations ?? [] }
 
     /// Overrides an automation's next occurrence on a paired device with `nextRunTime`. The daemon validates
     /// the instant (future, on an enabled automation) and returns the updated automation as a one-element
     /// list; the cron schedule resumes after the overridden run fires.
-    @discardableResult public static func setAutomationNextRun(
-        id: String, nextRunTime: Date, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationSummary] {
+    @discardableResult public static func setAutomationNextRun(id: String, nextRunTime: Date, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationSummary]
+    {
         try request(
             .init(command: .setAutomationNextRun(.init(id: id, nextRunTime: TerminalSessionTimestamp.fractionalString(from: nextRunTime)))),
-            device: device, clientApp: clientApp, profile: profile
+            context: context
         ).automations ?? []
     }
 
     /// Deletes an automation on a paired device (cancelling any running run and cleaning up its artifacts).
-    @discardableResult public static func deleteAutomation(
-        id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .deleteAutomation(.init(id: id))), device: device, clientApp: clientApp, profile: profile)
+    @discardableResult public static func deleteAutomation(id: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .deleteAutomation(.init(id: id))), context: context)
     }
 
     /// Lists the automations configured on a paired device.
-    public static func listAutomations(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationSummary] {
-        try request(.init(command: .listAutomations), device: device, clientApp: clientApp, profile: profile).automations ?? []
+    public static func listAutomations(context: DeviceRequestContext) throws -> [TerminalServiceAutomationSummary] {
+        try request(.init(command: .listAutomations), context: context).automations ?? []
     }
 
     /// Lists automation runs on a paired device, newest first; `automationID` narrows to one automation.
-    public static func listAutomationRuns(
-        automationID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationRunSummary] {
-        try request(.init(command: .listAutomationRuns(.init(automationID: automationID))), device: device, clientApp: clientApp, profile: profile)
-            .automationRuns ?? []
-    }
+    public static func listAutomationRuns(automationID: String? = nil, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationRunSummary]
+    { try request(.init(command: .listAutomationRuns(.init(automationID: automationID))), context: context).automationRuns ?? [] }
 
     /// Manually triggers an automation on a paired device, returning the started run as a one-element list.
-    @discardableResult public static func triggerAutomation(
-        id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationRunSummary] {
-        try request(.init(command: .triggerAutomation(.init(id: id))), device: device, clientApp: clientApp, profile: profile).automationRuns ?? []
-    }
+    @discardableResult public static func triggerAutomation(id: String, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationRunSummary]
+    { try request(.init(command: .triggerAutomation(.init(id: id))), context: context).automationRuns ?? [] }
 
     /// Cancels an automation run on a paired device, returning the canceled run as a one-element list.
-    @discardableResult public static func cancelAutomationRun(
-        runID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationRunSummary] {
-        try request(.init(command: .cancelAutomationRun(.init(runID: runID))), device: device, clientApp: clientApp, profile: profile).automationRuns
-            ?? []
-    }
+    @discardableResult public static func cancelAutomationRun(runID: String, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationRunSummary]
+    { try request(.init(command: .cancelAutomationRun(.init(runID: runID))), context: context).automationRuns ?? [] }
 
     /// Ends the still-live coding-agent sessions attributed to a terminal automation run on a paired device,
     /// returning the run (its status unchanged) as a one-element list. Used to reap an `agent`-kind run's
     /// session that was left open after the agent signalled done.
-    @discardableResult public static func endAutomationAgents(
-        runID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [TerminalServiceAutomationRunSummary] {
-        try request(.init(command: .endAutomationAgents(.init(runID: runID))), device: device, clientApp: clientApp, profile: profile).automationRuns
-            ?? []
-    }
+    @discardableResult public static func endAutomationAgents(runID: String, context: DeviceRequestContext) throws
+        -> [TerminalServiceAutomationRunSummary]
+    { try request(.init(command: .endAutomationAgents(.init(runID: runID))), context: context).automationRuns ?? [] }
 
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
-    public static func terminalSessions(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceTerminalSessionSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.sessions }
+    public static func terminalSessions(context: DeviceRequestContext) throws -> [SpacesDeviceTerminalSessionSummary] {
+        try overview(context: context).overview.sessions
+    }
 
     /// Projects on a paired device, read from the overview (`spaces project list --device`). Reuses the
     /// overview the sidebar already loads rather than a dedicated listing command.
-    public static func projects(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
-        throws -> [SpacesDeviceProjectSummary]
-    { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
+    public static func projects(context: DeviceRequestContext) throws -> [SpacesDeviceProjectSummary] { try overview(context: context).overview.projects }
 
     /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`).
-    public static func workspaces(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceWorkspaceSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.workspaces }
+    public static func workspaces(context: DeviceRequestContext) throws -> [SpacesDeviceWorkspaceSummary] {
+        try overview(context: context).overview.workspaces
+    }
 
     /// Reads a device's Device API credentials (pinned TLS certificate fingerprint and auth token),
     /// transparently re-bootstrapping the local device when its token is missing; the re-bootstrap also
@@ -1194,25 +1019,25 @@ public enum SpacesDeviceClient {
     /// device cannot regenerate its own identity, so a missing remote fingerprint surfaces as
     /// `missingCertificateFingerprint` (the client must re-pair); a remote token is returned as-is
     /// (possibly nil, the pre-existing behavior).
-    public static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?)
-        throws -> (certificateFingerprint: String, authToken: String?)
+    public static func credentialsEnsuringLocalRecovery(context: DeviceRequestContext) throws -> (certificateFingerprint: String, authToken: String?)
     {
+        let device = context.device
         if device.id == SpacesPairedDeviceRecord.localDeviceID {
             var record = device
-            if try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile) == nil,
-                let refreshed = try ensureLocalDeviceCredentials(clientApp: clientApp, profile: profile)
+            if try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: context.profile) == nil,
+                let refreshed = try ensureLocalDeviceCredentials(clientApp: context.clientApp, profile: context.profile)
             {
                 record = refreshed
             }
             guard let fingerprint = normalizedFingerprint(record.certificateFingerprint) else {
                 throw SpacesDeviceClientError.missingCertificateFingerprint(deviceName: device.name, isLocal: true)
             }
-            return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+            return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: context.profile))
         }
         guard let fingerprint = normalizedFingerprint(device.certificateFingerprint) else {
             throw SpacesDeviceClientError.missingCertificateFingerprint(deviceName: device.name, isLocal: false)
         }
-        return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+        return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: context.profile))
     }
 
     private static func normalizedFingerprint(_ value: String) -> String? {
@@ -1220,15 +1045,12 @@ public enum SpacesDeviceClient {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    public static func request(
-        _ request: SpacesDeviceAPIRequest, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+    public static func request(_ request: SpacesDeviceAPIRequest, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         let client = try SpacesDeviceAPIRequestClient(
-            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint),
             timeoutSeconds: requestTimeoutSeconds(for: request.command))
-        let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
+        let response = try client.request(authenticated(request, authToken: authToken, clientApp: context.clientApp))
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return response
     }
