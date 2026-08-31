@@ -18,7 +18,7 @@ struct SpacesMobileAutomationRunRow: Identifiable, Equatable, Sendable {
     let run: TerminalServiceAutomationRunSummary
 
     var id: String { run.id }
-    var isRunning: Bool { run.status == "running" }
+    var isRunning: Bool { AutomationRunStatus(rawValue: run.status) == .running }
 }
 
 /// A derived alert entry for a failed or timed-out automation run. Automation failures keep their own
@@ -59,7 +59,9 @@ enum SpacesMobileAutomations {
     /// Count of runs currently in flight across every automation on the device — the Automations
     /// tab's badge count. Unlike `lastRunStatus`, which is scoped to one automation's most recent run,
     /// this counts every running run regardless of which automation started it.
-    static func runningCount(_ runs: [TerminalServiceAutomationRunSummary]) -> Int { runs.filter { $0.status == "running" }.count }
+    static func runningCount(_ runs: [TerminalServiceAutomationRunSummary]) -> Int {
+        runs.count(where: { AutomationRunStatus(rawValue: $0.status) == .running })
+    }
 
     /// Runs newest first (by start-or-create time; a queued/skipped run never started), optionally
     /// narrowed to one automation — nil lists every run, the "Recent Runs" view.
@@ -91,7 +93,7 @@ enum SpacesMobileAutomations {
     }
 
     static func triggerSummary(_ automation: TerminalServiceAutomationSummary) -> String {
-        guard automation.triggerKind == "cron" else { return "Manual" }
+        guard AutomationTriggerKind(rawValue: automation.triggerKind) == .cron else { return "Manual" }
         return automation.cronExpression.map { "Cron: \($0)" } ?? "Cron"
     }
 
@@ -100,7 +102,7 @@ enum SpacesMobileAutomations {
     /// nothing to show. Mirrors `AutomationsViewModel.excerpt` on the Mac — the row shows no type icon or
     /// label, so this excerpt (plus the name) is how a user tells an agent automation from a script one.
     static func excerpt(_ automation: TerminalServiceAutomationSummary) -> String {
-        let source = automation.kind == "agent" ? (automation.agentPrompt ?? "") : automation.script
+        let source = AutomationKind(rawValue: automation.kind) == .agent ? (automation.agentPrompt ?? "") : automation.script
         return firstNonEmptyLine(source)
     }
 
@@ -124,7 +126,8 @@ enum SpacesMobileAutomations {
     /// only if at least one attributed agent's terminal session is still live. Mirrors
     /// `AutomationsViewModel.endAgentsAvailable` on the Mac.
     static func endAgentsAvailable(_ run: TerminalServiceAutomationRunSummary) -> Bool {
-        guard run.status != "running", run.status != "queued" else { return false }
+        let status = AutomationRunStatus(rawValue: run.status)
+        guard status != .running, status != .queued else { return false }
         return run.attributedAgents.contains { $0.live }
     }
 
@@ -142,7 +145,7 @@ enum SpacesMobileAutomations {
     static func nextFireDescription(_ automation: TerminalServiceAutomationSummary, relativeTo now: Date = Date()) -> String? {
         guard automation.enabled, let fireDate = date(automation.nextFireTime) else { return nil }
         guard fireDate > now else { return "next due" }
-        return "next \(relativeFormatter().localizedString(for: fireDate, relativeTo: now))"
+        return "next \(relativeFormatter.localizedString(for: fireDate, relativeTo: now))"
     }
 
     /// The "Next run" fact row's value on the detail screen. The row is a chip that opens the next-run
@@ -156,8 +159,8 @@ enum SpacesMobileAutomations {
     /// has none. A one-time next-run override arrives as `nextFireTime` like any cron occurrence does, so
     /// a manual automation holding an override reads as scheduled rather than as manual.
     static func nextRunSummary(_ automation: TerminalServiceAutomationSummary) -> String {
-        if let fireDate = date(automation.nextFireTime) { return "Scheduled: \(absoluteFormatter().string(from: fireDate))" }
-        return automation.triggerKind == "cron" ? "Not scheduled" : "Manual"
+        if let fireDate = date(automation.nextFireTime) { return "Scheduled: \(absoluteFormatter.string(from: fireDate))" }
+        return AutomationTriggerKind(rawValue: automation.triggerKind) == .cron ? "Not scheduled" : "Manual"
     }
 
     /// Rejects a next-run instant that is not in the future, so the sheet says so inline instead of making
@@ -170,15 +173,15 @@ enum SpacesMobileAutomations {
     /// (`AutomationDetailView`) where the automation name is already the screen's own title, so repeating
     /// it on every row would be redundant — the outcome is the thing that differs row to row.
     static func statusTitle(_ run: TerminalServiceAutomationRunSummary) -> String {
-        switch run.status {
-        case "queued": "Queued"
-        case "running": "Running"
-        case "succeeded": "Succeeded"
-        case "failed": "Failed"
-        case "timed_out": "Timed out"
-        case "canceled": "Canceled"
-        case "skipped": "Skipped"
-        default: run.status.capitalized
+        switch AutomationRunStatus(rawValue: run.status) {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .succeeded: "Succeeded"
+        case .failed: "Failed"
+        case .timedOut: "Timed out"
+        case .canceled: "Canceled"
+        case .skipped: "Skipped"
+        case nil: run.status.capitalized
         }
     }
 
@@ -203,9 +206,9 @@ enum SpacesMobileAutomations {
     /// rather than as the present. Neither reads right, so the boundary — `now` at or before `started` — is
     /// worded directly instead of routing through the formatter at all.
     static func startedDescription(_ run: TerminalServiceAutomationRunSummary, relativeTo now: Date = Date()) -> String? {
-        guard let started = date(run.startedAt) else { return nil }
+        guard let started = AutomationRunFormatting.date(run.startedAt) else { return nil }
         guard now > started else { return "started now" }
-        return "started \(relativeFormatter().localizedString(for: started, relativeTo: now))"
+        return "started \(AutomationRunFormatting.relativePhrase(for: started, relativeTo: now))"
     }
 
     /// Wall-clock duration for a run that has started: its end time if ended, else `now` for a still-
@@ -214,10 +217,9 @@ enum SpacesMobileAutomations {
     /// already keeps this safe against a `now` that trails `started` — the same skew `startedDescription`
     /// guards against — since a negative interval floors to zero rather than rendering a negative time.
     static func durationDescription(_ run: TerminalServiceAutomationRunSummary, relativeTo now: Date = Date()) -> String? {
-        guard let started = date(run.startedAt) else { return nil }
-        let end = date(run.endedAt) ?? now
-        let interval = max(0, end.timeIntervalSince(started))
-        return durationFormatter().string(from: interval)
+        guard let started = AutomationRunFormatting.date(run.startedAt) else { return nil }
+        let end = AutomationRunFormatting.date(run.endedAt) ?? now
+        return AutomationRunFormatting.durationPhrase(from: started, to: end)
     }
 
     /// Human-readable reason for a skipped run, from `AutomationRunSkipReason`'s raw value.
@@ -234,7 +236,8 @@ enum SpacesMobileAutomations {
     /// ever ran), so it stays inert. Every other status opens something, live while running or its
     /// read-only ended transcript once finished.
     static func runIsNavigable(_ run: TerminalServiceAutomationRunSummary) -> Bool {
-        run.terminalSessionID != nil && run.status != "skipped" && run.status != "queued"
+        let status = AutomationRunStatus(rawValue: run.status)
+        return run.terminalSessionID != nil && status != .skipped && status != .queued
     }
 
     /// The terminal session a run row opens on tap, or nil when the row is not navigable (see
@@ -248,15 +251,15 @@ enum SpacesMobileAutomations {
         guard runIsNavigable(run), let sessionID = run.terminalSessionID else { return nil }
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
         let workspace = run.workspaceID.flatMap { id in overview?.workspaces.first { $0.id == id } }
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let isRunning = run.status == "running"
+        let timestamp = TerminalSessionTimestamp.string(from: Date())
+        let isRunning = AutomationRunStatus(rawValue: run.status) == .running
         return SpacesDeviceTerminalSessionSummary(
             id: sessionID, title: run.automationName ?? "Automation", liveTitle: nil, workingDirectory: "", shell: "", command: nil,
             state: isRunning ? .running : .exited, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
             workspaceID: run.workspaceID ?? "", workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
             projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: isRunning,
             isSubscriptionAvailable: isRunning, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            rowKind: run.kind == "agent" ? .agent : .liveSession, rowSourceID: run.id, hasFinalRender: false)
+            rowKind: AutomationKind(rawValue: run.kind) == .agent ? .agent : .liveSession, rowSourceID: run.id, hasFinalRender: false)
     }
 
     /// The terminal session an attributed-agent chip opens on tap: overview-first, else synthesized, the
@@ -266,7 +269,7 @@ enum SpacesMobileAutomations {
     {
         if let session = overview?.sessions.first(where: { $0.id == agent.terminalSessionID }) { return session }
         let workspace = agent.workspaceID.flatMap { id in overview?.workspaces.first { $0.id == id } }
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = TerminalSessionTimestamp.string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
             id: agent.terminalSessionID, title: agent.title ?? "Agent", liveTitle: nil, workingDirectory: "", shell: "", command: nil,
             state: agent.live ? .running : .exited, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
@@ -280,33 +283,33 @@ enum SpacesMobileAutomations {
     /// plain (non-fractional) formatter the daemon uses to produce them (see `AutomationWireSummary`).
     private static func date(_ iso: String?) -> Date? { iso.flatMap(TerminalSessionTimestamp.date(from:)) }
 
-    private static func relativeFormatter() -> RelativeDateTimeFormatter {
+    /// Formatter construction is expensive and these derivations are re-evaluated on every SwiftUI render,
+    /// so the formatters are built once and reused rather than per call. Not `Sendable`, but every call
+    /// site is a SwiftUI view derivation on the main actor, and the formatters are never mutated after
+    /// init, matching the `nonisolated(unsafe)` formatter-caching idiom used elsewhere in the codebase
+    /// (e.g. `TerminalSessionTimestamp`).
+    nonisolated(unsafe) private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter
-    }
+    }()
 
-    private static func absoluteFormatter() -> DateFormatter {
+    nonisolated(unsafe) private static let absoluteFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter
-    }
-
-    private static func durationFormatter() -> DateComponentsFormatter {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute, .second]
-        formatter.unitsStyle = .abbreviated
-        formatter.maximumUnitCount = 2
-        return formatter
-    }
+    }()
 }
 
 /// Pure derivation of automation-run alert entries, mirroring `AutomationsViewModel.alertEntries` on
 /// the Mac.
 enum SpacesMobileAutomationAlerts {
     static func entries(runs: [TerminalServiceAutomationRunSummary]) -> [SpacesMobileAutomationAlertEntry] {
-        runs.filter { $0.status == "failed" || $0.status == "timed_out" }.map { run -> (entry: SpacesMobileAutomationAlertEntry, date: Date?) in
+        runs.filter { run in
+            let status = AutomationRunStatus(rawValue: run.status)
+            return status == .failed || status == .timedOut
+        }.map { run -> (entry: SpacesMobileAutomationAlertEntry, date: Date?) in
             let entry = SpacesMobileAutomationAlertEntry(
                 id: "alert:automationrun:\(run.id):\(run.status)", automationName: run.automationName ?? "Automation", outcome: outcome(for: run),
                 runID: run.id, status: run.status)
@@ -321,9 +324,9 @@ enum SpacesMobileAutomationAlerts {
     }
 
     private static func outcome(for run: TerminalServiceAutomationRunSummary) -> String {
-        switch run.status {
-        case "timed_out": "Timed out"
-        case "failed": run.exitCode.map { "Failed (exit \($0))" } ?? "Failed"
+        switch AutomationRunStatus(rawValue: run.status) {
+        case .timedOut: "Timed out"
+        case .failed: run.exitCode.map { "Failed (exit \($0))" } ?? "Failed"
         default: run.status
         }
     }
