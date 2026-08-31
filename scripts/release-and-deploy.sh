@@ -44,9 +44,8 @@ TAG="v$VERSION"
 RELEASE_URL="https://github.com/yogesh-dhande/spaces/releases/tag/$TAG"
 REMOTE_ARTIFACT_DIR="$REPO_ROOT/dist/remote"
 
-set -a
-source "$REPO_ROOT/.env"
-set +a
+source "$SCRIPTS_DIR/spaces-e2e-env.sh"
+spaces_e2e_require_env "$REPO_ROOT"
 
 SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://usespaces.dev/releases/appcast.xml}"
 
