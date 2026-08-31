@@ -3492,6 +3492,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         let collapseStates = (try? database.projectCollapseStates(deviceID: resolvedDevice.id)) ?? [:]
+        // Not DeviceSectionContent.derive: the two profile events below time the mapping and alerts phases separately.
         let mapped = deviceSidebarData(from: localOverview, deviceID: resolvedDevice.id, projectCollapseStates: collapseStates)
         let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
         logStartupSnapshotProfile(
@@ -5458,18 +5459,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         removeCodePaneRecoveryStateForDeletedWorkspaces(
             deviceID: deviceID, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
         let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
-        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
-            deviceSections[index].projects = mapped.projects
-            deviceSections[index].workspacesByProject = mapped.workspacesByProject
-            deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
+            let content = DeviceSectionContent.derive(
+                from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName, projectCollapseStates: collapseStates)
+            deviceSections[index].projects = content.projects
+            deviceSections[index].workspacesByProject = content.workspacesByProject
+            deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
             deviceSections[index].overview = overview
             // Rebuild for every section, not just local: this overview is authoritative for `deviceID`
             // regardless of origin, and alerts groups carry visibility (`isFromHiddenWorkspace`), so a
             // remote mutation response must refresh them too or the alerts pane/badge/palette show stale
             // visibility until the next remote push (which already rebuilds via `applyRemoteDeviceSection`).
-            deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(
-                from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName)
+            deviceSections[index].alertsGroups = content.alertsGroups
         }
         // A mutation can change what the palette may list (a hide/unhide changes row visibility), and a
         // remote mutation never touches the local database, so no snapshot reload arrives to invalidate
