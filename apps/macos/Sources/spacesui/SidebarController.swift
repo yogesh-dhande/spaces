@@ -1334,12 +1334,13 @@ private struct DeviceSyncState {
             // one recovered from the reachable-but-incompatible placeholder, which clears it), so diffing
             // against it seeds with no false transitions without needing a separate first-load guard.
             let previousWorkspaceRuntimeStatusByID = host.deviceSections[index].workspaceRuntimeStatusByID
-            let mapped = AppKitController.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
-            host.deviceSections[index].projects = mapped.projects
-            host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
-            host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
-                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
+            let content = DeviceSectionContent.derive(
+                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName,
+                projectCollapseStates: collapseStates)
+            host.deviceSections[index].projects = content.projects
+            host.deviceSections[index].workspacesByProject = content.workspacesByProject
+            host.deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
+            host.deviceSections[index].alertsGroups = content.alertsGroups
             host.deviceSections[index].overview = overview.overview
             // A pushed remote overview can change what the palette may list (another client hiding a
             // workspace changes row visibility) without any local database write, so no snapshot reload
@@ -1405,7 +1406,7 @@ private struct DeviceSyncState {
                 deviceID: deviceID,
                 workspaceIDs: Set(
                     Self.workspaceIDsTransitionedToNotRunning(
-                        previous: previousWorkspaceRuntimeStatusByID, current: mapped.workspaceRuntimeStatusByID)))
+                        previous: previousWorkspaceRuntimeStatusByID, current: content.workspaceRuntimeStatusByID)))
         case .failure(let error):
             let reason = error.localizedDescription
             let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)
