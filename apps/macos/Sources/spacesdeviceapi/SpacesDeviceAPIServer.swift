@@ -3244,7 +3244,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Maps a thrown error to its wire failure category at the top-level flatten points, where a typed
     /// error collapses into `(ok:false, message:)`. `authorize` and `resolvedRunningProcessID` rewrap
     /// failures as `NSError(domain: "SpacesDeviceAPIServer")` carrying the HTTP-like status in `code`,
-    /// so those codes drive the mapping directly.
+    /// so those codes drive the mapping directly; `SpacesDevicePairingError` and `AgentHookInstallerError`
+    /// are likewise Device API-specific pre-checks. The classification shared with the profile transport
+    /// (`SpacesDaemonErrorClassification.errorCode(_:)`, so a client sees one code for one cause regardless
+    /// of transport) lives in `SpacesDeviceWireErrorClassification`.
     static func errorCode(for error: any Error) -> SpacesDeviceErrorCode {
         let nsError = error as NSError
         if nsError.domain == "SpacesDeviceAPIServer" {
@@ -3256,28 +3259,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         if error is SpacesDevicePairingError { return .unauthorized }
-        if let workspaceError = error as? WorkspaceError {
-            switch workspaceError {
-            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
-            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .gitCommandTimedOut, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            // Only ever thrown by the handoff-only admission guard, never by a shutdown, so it always
-            // carries the handoff code. This mapping predates issue #334's broader gap (this transport's
-            // `.ping` and its agent-session killer are not teardown-aware at all); it is corrected here
-            // only because the code it referenced changed meaning, not as a #334 fix.
-            case .daemonHandoffInProgress: return .handingOff
-            }
-        }
         // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
         // formed, so this is the host lacking a capability rather than a client mistake.
         if error is AgentHookInstallerError { return .capabilityMissing }
-        // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are
-        // all well-formed-request client errors, so they surface as invalidArgument with their descriptive
-        // message rather than a generic internal error.
-        if error is AutomationValidationError { return .invalidArgument }
-        if error is AutomationCronScheduleError { return .invalidArgument }
-        if error is DecodingError { return .invalidArgument }
-        return .internalError
+        return SpacesDeviceWireErrorClassification.errorCode(error)
     }
 
     static func failureResponse(for error: any Error) -> SpacesDeviceAPIResponse {

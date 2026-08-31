@@ -220,30 +220,14 @@ enum SpacesDaemonProfileCommandRouting {
 }
 
 /// Maps a thrown error to its machine-readable `SpacesDeviceErrorCode` for the profile (terminal-service)
-/// transport. Factored out of the daemon controller so it is unit-testable and stays byte-for-byte aligned
-/// with the Device API server's `SpacesDeviceAPIServer.errorCode(for:)`: both wire surfaces must classify
-/// the same failure identically, so a client sees one code for one cause regardless of transport.
+/// transport. Factored out of the daemon controller so it is unit-testable. The common classification —
+/// shared with the Device API's `SpacesDeviceAPIServer.errorCode(for:)` so a client sees one code for one
+/// cause regardless of transport — lives in `SpacesDeviceWireErrorClassification`; this wrapper only adds
+/// the profile transport's own pre-check for `SpacesRuntimeError`, a type the Device API transport never sees.
 enum SpacesDaemonErrorClassification {
     static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode {
-        if let workspaceError = error as? WorkspaceError {
-            switch workspaceError {
-            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
-            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .gitCommandTimedOut, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
-            // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
-            // handoff code, not the generic teardown one.
-            case .daemonHandoffInProgress: return .handingOff
-            }
-        }
         if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
-        // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are
-        // well-formed-request client errors, so they surface as invalidArgument with their descriptive
-        // message rather than a generic internal error.
-        if error is AutomationValidationError { return .invalidArgument }
-        if error is AutomationCronScheduleError { return .invalidArgument }
-        if error is DecodingError { return .invalidArgument }
-        return .internalError
+        return SpacesDeviceWireErrorClassification.errorCode(error)
     }
 }
 
