@@ -87,6 +87,7 @@
 		CAEFA68B6F87086897B9C88D /* TerminalWebArtifactView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD6C69B64AFC5E704DE3C780 /* TerminalWebArtifactView.swift */; };
 		CB1B5A32EFD07A648C2D62D7 /* AutomationsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E05F8671F750CBD22F18BA /* AutomationsTabView.swift */; };
 		CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */; };
+		CC9BE600FFDAD3618A2B73EA /* TerminalStatusPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A446E68361CD59FD3DC262A /* TerminalStatusPlaceholder.swift */; };
 		CE84B0FF1DC4CB5EDA866C6A /* BrowserProxySmokeTestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8558FA040BF164F6A5B8023F /* BrowserProxySmokeTestView.swift */; };
 		D0B4C0F091C90EB03AD39FBF /* AutomationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A33AA21ACE786B701587CBB /* AutomationRows.swift */; };
 		D183BA192ECF922B5E5C8ABB /* DemoRecordingLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6F4966D314DE711EE58992 /* DemoRecordingLibrary.swift */; };
@@ -188,6 +189,7 @@
 		88E7B08D6033170F0AB8DF17 /* DemoDeviceBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDeviceBackendTests.swift; sourceTree = "<group>"; };
 		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		895AC546F077905FD8E53CF9 /* AlertsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsTabView.swift; sourceTree = "<group>"; };
+		8A446E68361CD59FD3DC262A /* TerminalStatusPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStatusPlaceholder.swift; sourceTree = "<group>"; };
 		963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileConnectionSettings.swift; sourceTree = "<group>"; };
 		9653B3B66E0DCF0C0583B3B5 /* TerminalFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFlow.swift; sourceTree = "<group>"; };
 		99364D0D95BDF6680EFCD26D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -501,6 +503,7 @@
 				E211844B3CD4B88CDE16411F /* BandPrimitives.swift */,
 				573064C6726817E7F264E9C5 /* RootTabView.swift */,
 				9653B3B66E0DCF0C0583B3B5 /* TerminalFlow.swift */,
+				8A446E68361CD59FD3DC262A /* TerminalStatusPlaceholder.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -711,6 +714,7 @@
 				189B543B2482D133D6D7E1EE /* TerminalSafariView.swift in Sources */,
 				9261D2604F3E18C26DDE8817 /* TerminalSelectionCopyPill.swift in Sources */,
 				FC3463966BD5A2B12D66C278 /* TerminalSelectionCopyPillLayout.swift in Sources */,
+				CC9BE600FFDAD3618A2B73EA /* TerminalStatusPlaceholder.swift in Sources */,
 				43857F33AFBE626C3EF5B3A6 /* TerminalTextArtifactView.swift in Sources */,
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
 				45EE757E4B53081A0EA81D69 /* TerminalViewerOpenScreenHold.swift in Sources */,

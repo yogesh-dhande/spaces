@@ -59,6 +59,24 @@ enum Theme {
     /// Running status dot halo.
     static let statusRunningHalo = dynamic(\.statusRunningHalo)
 
+    // MARK: Terminal chrome
+
+    /// The terminal surface's fixed background, used by the terminal and browser-session detail
+    /// screens. Always dark regardless of the app's light/dark appearance (the live terminal
+    /// surface itself never follows system appearance), so this is a plain literal rather than a
+    /// `dynamic` token — it happens to match the default theme's dark `background` (15, 21, 23)
+    /// but must not be derived from `ActiveTheme.descriptor`, or a non-default theme would bleed
+    /// into a surface that is supposed to stay fixed.
+    static let terminalSurface = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
+
+    /// Chrome-pill background shared by the terminal/browser-session overlay bar's buttons (back,
+    /// actions menu): a translucent black capsule with a faint white hairline border. Fixed
+    /// opacities rather than dynamic tokens, since this chrome always sits over the fixed-dark
+    /// `terminalSurface` above regardless of the app's appearance.
+    static var terminalChromePillBackground: some View {
+        Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
+    }
+
     // MARK: Helpers
 
     private static func dynamic(_ token: KeyPath<ThemeAppearanceTokens, ThemeColor>) -> Color {

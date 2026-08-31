@@ -453,7 +453,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
     /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
     private(set) var isDemoModeEnabled: Bool
-    var overview: SpacesDeviceOverviewPayload?
+    /// `didSet` invalidates `cachedRuntimeRowIndex`: every assignment here (a fresh fetch, or one of the
+    /// several resets to `nil`) replaces the runtime rows the index was built from, so a stale index must
+    /// not survive it.
+    var overview: SpacesDeviceOverviewPayload? { didSet { cachedRuntimeRowIndex = nil } }
     /// The clock every relative-time label (automation next-fire, run started/duration, alert age) reads
     /// at render time instead of calling `Date()` directly. Advances in 30-second jumps off the existing
     /// poll cadence (`advanceRelativeTimeReferenceIfDue`, called from every `performRefresh`) — matching
@@ -2671,12 +2674,46 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return terminalSession(from: terminalRow, in: searchOverview)
     }
 
-    func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
-        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
+    /// Session-ID and row-ID lookup index over the runtime rows derived from the published `overview`,
+    /// for `runtimeRow(forSessionID:)` and the published-overview `refreshedSession(forRowID:)` below —
+    /// both are called on every body evaluation of hot chrome (e.g. `TerminalDetailView.runtimeRow`),
+    /// and previously rebuilt every workspace's runtime rows with `flatMap` and linearly scanned them on
+    /// every call. First key wins on a duplicate session/row id, matching the `.first {}` scans this
+    /// replaces.
+    private struct RuntimeRowIndex {
+        let bySessionID: [String: SpacesMobileWorkspaceRuntimeRow]
+        let byRowID: [String: SpacesMobileWorkspaceRuntimeRow]
     }
 
+    /// Built lazily on first access after `overview` changes; `overview`'s `didSet` clears this back to
+    /// `nil`. Not observed by `@Observable`: it is a derived cache of the published `overview`, not
+    /// independent state a view should re-render on.
+    @ObservationIgnored private var cachedRuntimeRowIndex: RuntimeRowIndex?
+
+    private var runtimeRowIndex: RuntimeRowIndex {
+        // Read `overview` through its observable getter on every lookup — including cache hits.
+        // The cache is `@ObservationIgnored`, so without this read a warm-cache body evaluation
+        // would register no dependency on `overview`, and a later overview-only update would not
+        // invalidate the view (stale terminal title/actions until unrelated state changed).
+        let overview = self.overview
+        if let cachedRuntimeRowIndex { return cachedRuntimeRowIndex }
+        var bySessionID: [String: SpacesMobileWorkspaceRuntimeRow] = [:]
+        var byRowID: [String: SpacesMobileWorkspaceRuntimeRow] = [:]
+        for row in overview?.workspaces.flatMap(workspaceRuntimeRows(for:)) ?? [] {
+            byRowID[row.id] = byRowID[row.id] ?? row
+            if let sessionID = row.sessionID { bySessionID[sessionID] = bySessionID[sessionID] ?? row }
+        }
+        let index = RuntimeRowIndex(bySessionID: bySessionID, byRowID: byRowID)
+        cachedRuntimeRowIndex = index
+        return index
+    }
+
+    func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? { runtimeRowIndex.bySessionID[sessionID] }
+
     /// See `terminalSession(for:)`/`terminalSession(for:in:)`: reads the published `overview`.
-    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? { refreshedSession(forRowID: rowID, in: overview) }
+    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? {
+        runtimeRowIndex.byRowID[rowID].flatMap { terminalSession(for: $0, in: overview) }
+    }
 
     /// See `terminalSession(for:in:)`: a caller reading its own fetch or mutation response's evidence
     /// passes that overview explicitly instead of going through `refreshedSession(forRowID:)`.
