@@ -11,6 +11,7 @@ let systemLibraryTargets: [Target] = [
     .systemLibrary(name: "OpenSSL", pkgConfig: "openssl"),
 ]
 let ghosttyKitSupportTargets: [Target] = []
+let macTestSupportTargets: [Target] = []
 let ghosttyKitTargetDependencies: [Target.Dependency] = []
 let mobileGhosttyTargets: [Target] = []
 let mobileGhosttyProducts: [Product] = []
@@ -37,6 +38,15 @@ let ghosttyKitSupportTargets: [Target] = [
 ]
 let ghosttyKitTargetDependencies: [Target.Dependency] = [
     .target(name: "GhosttyKit", condition: .when(platforms: [.macOS]))
+]
+// Shared support code for the mac-only test targets below. A plain target (not a test target) so
+// XCTest/swift-testing helpers can `import spacestestsupport` without pulling `@testable` access
+// into shared code; only public API of its dependencies may be used here.
+let macTestSupportTargets: [Target] = [
+    .target(
+        name: "spacestestsupport",
+        dependencies: ["workspacecore", "spacesterminalcore", "spacesdevicecore"]
+    )
 ]
 let mobileGhosttyTargets: [Target] = [
     .target(
@@ -116,7 +126,7 @@ let macOnlyProducts: [Product] = [
 ]
 #endif
 
-let supportTargets: [Target] = ghosttyKitSupportTargets + [
+let supportTargets: [Target] = ghosttyKitSupportTargets + macTestSupportTargets + [
     .target(
         name: "ghosttyvtshim",
         cSettings: [
@@ -266,17 +276,21 @@ let executableTargets: [Target] = [
         .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
         .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
-        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
+        .testTarget(
+            name: "workspacecoreTests",
+            dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore", "spacestestsupport"]
+        ),
         .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
         .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
         .testTarget(name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore", "spacesterminalcore"]),
-        .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore", "spacesdevicecore"]),
+        .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore", "spacesdevicecore", "spacestestsupport"]),
         .testTarget(
             name: "spacescliTests",
             dependencies: [
                 "spacescli",
                 "spacesclientcore",
                 "spacesdeviceapi",
+                "spacestestsupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )

@@ -1,6 +1,7 @@
 import CryptoKit
 import XCTest
 import spacesterminalcore
+import spacestestsupport
 
 @testable import systembridge
 @testable import workspacecore
