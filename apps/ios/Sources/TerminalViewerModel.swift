@@ -1015,8 +1015,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         do {
             try await bridgeClient.resize(
-                sessionID: session.id, clientID: clientID, columns: columns, rows: rows, ownerEpoch: currentOwnerEpoch, resizeSerial: nil,
-                timeout: Self.stateRequestTimeout)
+                context: TerminalCommandContext(sessionID: session.id, clientID: clientID, ownerEpoch: currentOwnerEpoch), columns: columns,
+                rows: rows, resizeSerial: nil, timeout: Self.stateRequestTimeout)
         } catch {
             // A demo resize only records the viewport in memory; a failure leaves the current frame in
             // place, so there is nothing to recover.
@@ -1206,12 +1206,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Carries the current owner epoch when there is one and none when there is not, like every other
         // input this viewer sends: an absent epoch means the paste is not epoch-gated, not that the
         // terminal is unready.
-        let ownerEpoch = currentOwnerEpoch
-        try await performRequestUsingInputChannel {
-            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context, payload] commandChannel in
             try await bridgeClient.pasteImage(
-                sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: payload.fileExtension, imageData: payload.imageData,
-                timeout: Self.pasteImageRequestTimeout, commandChannel: commandChannel)
+                context: context, fileExtension: payload.fileExtension, imageData: payload.imageData, timeout: Self.pasteImageRequestTimeout,
+                commandChannel: commandChannel)
         }
     }
 
@@ -1372,42 +1371,35 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func performSendTextRequest(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async throws {
-        let ownerEpoch = currentOwnerEpoch
-        try await performRequestUsingInputChannel {
-            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline, asPaste] commandChannel in
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context, appendNewline, asPaste] commandChannel in
             try await bridgeClient.sendText(
-                sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline, asPaste: asPaste,
-                timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
+                context: context, text: text, appendNewline: appendNewline, asPaste: asPaste, timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel)
         }
     }
 
     private func performSendKeyRequest(_ key: String) async throws {
-        let ownerEpoch = currentOwnerEpoch
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
         if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
-            try await performRequestUsingInputChannel {
-                [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
-                try await bridgeClient.clearScreen(
-                    sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout,
-                    commandChannel: commandChannel)
+            try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
+                try await bridgeClient.clearScreen(context: context, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
             }
             return
         }
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
-            try await bridgeClient.sendKey(
-                sessionID: sessionID, clientID: clientID, key: key, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel)
+        try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
+            try await bridgeClient.sendKey(context: context, key: key, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 
     private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
         async throws
     {
-        let ownerEpoch = currentOwnerEpoch
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
             try await bridgeClient.scroll(
-                sessionID: sessionID, clientID: clientID, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
-                scrollMods: scrollMods == 0 ? nil : scrollMods, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel)
+                context: context, horizontal: horizontal, vertical: vertical, scrollMods: scrollMods == 0 ? nil : scrollMods,
+                pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 
@@ -2329,9 +2321,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     resizeSerial &+= 1
                     let currentResizeSerial = resizeSerial
                     try await bridgeClient.resize(
-                        sessionID: session.id, clientID: clientID, columns: targetViewportSize.columns, rows: targetViewportSize.rows,
-                        ownerEpoch: currentOwnerEpoch, resizeSerial: currentResizeSerial, timeout: Self.inputRequestTimeout,
-                        commandChannel: commandChannel)
+                        context: TerminalCommandContext(sessionID: session.id, clientID: clientID, ownerEpoch: currentOwnerEpoch),
+                        columns: targetViewportSize.columns, rows: targetViewportSize.rows, resizeSerial: currentResizeSerial,
+                        timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                     // Provisional: a matching frame reducing before the stream wait ends downgrades this
                     // to `.settled` below. Left as `.resizedAwaitingFrame` it means the wait is what times

@@ -48,7 +48,9 @@
 		7CB275F461388D1B1B686182 /* TerminalComposerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3768855D78AF654041E08AB /* TerminalComposerSheet.swift */; };
 		7CC21253772D51391A1D51CE /* markdown-it.LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = B219C157E4D55E66E276E995 /* markdown-it.LICENSE */; };
 		7DDB293A89690CBA0099D136 /* AgentGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB9E795017B860ABC7458AE3 /* AgentGroups.swift */; };
+		7ECC54F84964136165C34CDE /* TerminalCommandContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92FFB319423FE9AD2BABE15 /* TerminalCommandContext.swift */; };
 		7EDA6B0BD06A4DD60457B347 /* AutomationDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860FB18D54BADD35ECB29BD9 /* AutomationDetailView.swift */; };
+		7FA3B26342D2139D12534FAE /* CreateWorkspaceConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 287FA9ABE17A92D0A80A6BCA /* CreateWorkspaceConfig.swift */; };
 		80D3ABF883A2086A4640F3B2 /* DemoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F4FA0908BD2A07419E7AAD5 /* DemoMode.swift */; };
 		8114F3BD1347A9DEFA285F34 /* AutomationsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C2C77E3995840835C0CF5B /* AutomationsListView.swift */; };
 		86DE89DD870097152C07726A /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEAC1705996DF60D174EFB /* AppAppearance.swift */; };
@@ -143,6 +145,7 @@
 		19C2C77E3995840835C0CF5B /* AutomationsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsListView.swift; sourceTree = "<group>"; };
 		1B11B42462E003B2C51B35EE /* DemoDeviceBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDeviceBackend.swift; sourceTree = "<group>"; };
 		1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDeleteSheet.swift; sourceTree = "<group>"; };
+		287FA9ABE17A92D0A80A6BCA /* CreateWorkspaceConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateWorkspaceConfig.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStore.swift; sourceTree = "<group>"; };
@@ -223,6 +226,7 @@
 		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E53FFF8DEBBE16CAD6A99B6C /* TerminalSelectionCopyPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSelectionCopyPill.swift; sourceTree = "<group>"; };
 		E8FE2BBCE61C8A226A4E5C39 /* SpacesMobileDemoModeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDemoModeUITests.swift; sourceTree = "<group>"; };
+		E92FFB319423FE9AD2BABE15 /* TerminalCommandContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalCommandContext.swift; sourceTree = "<group>"; };
 		F242C1DB3E9B92832963F8A6 /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ghostty; path = ../macos/.local/ghosttykit/Resources/ghostty; sourceTree = SOURCE_ROOT; };
 		F271EB1FD55E1D03CB0CC6AC /* BrowserProxyHTTPHead.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxyHTTPHead.swift; sourceTree = "<group>"; };
 		F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerModel.swift; sourceTree = "<group>"; };
@@ -303,6 +307,7 @@
 				C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */,
 				07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */,
 				BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */,
+				287FA9ABE17A92D0A80A6BCA /* CreateWorkspaceConfig.swift */,
 				62FF73FDCE8A0B4AAFF043E4 /* DaemonCompatibilityPresentation.swift */,
 				F5D30357B101A99C39E09E4C /* DaemonVersionHeroView.swift */,
 				684BF4A0996100451CA52A51 /* MobileAppVersion.swift */,
@@ -318,6 +323,7 @@
 				963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */,
 				38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */,
 				68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */,
+				E92FFB319423FE9AD2BABE15 /* TerminalCommandContext.swift */,
 				C3768855D78AF654041E08AB /* TerminalComposerSheet.swift */,
 				7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */,
 				DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */,
@@ -667,6 +673,7 @@
 				5FD4313E441F15B6AFE8A029 /* BrowserProxyTunnel.swift in Sources */,
 				97C8F1FB9702650BC7FB37BC /* BrowserSessionDetailView.swift in Sources */,
 				33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */,
+				7FA3B26342D2139D12534FAE /* CreateWorkspaceConfig.swift in Sources */,
 				C1287CB131F488EC06CE9C9F /* DaemonCompatibilityPresentation.swift in Sources */,
 				9E4E70FE0BB5C7F3F710F316 /* DaemonVersionHeroView.swift in Sources */,
 				C8E96C4D0660016873DBB35F /* DemoDeviceBackend.swift in Sources */,
@@ -694,6 +701,7 @@
 				030BFF03D2B9BF6C0F540BAB /* SubscriptionGateView.swift in Sources */,
 				D678F5742B641547A7EED9CE /* SubscriptionSettingsSection.swift in Sources */,
 				AAED3289F85B868C2AA29B44 /* SubscriptionStore.swift in Sources */,
+				7ECC54F84964136165C34CDE /* TerminalCommandContext.swift in Sources */,
 				7CB275F461388D1B1B686182 /* TerminalComposerSheet.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				B4B0A237C6F8325405C27F93 /* TerminalFlow.swift in Sources */,

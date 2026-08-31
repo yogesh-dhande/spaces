@@ -21,7 +21,9 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "pasted")
             }
 
-            try await client.pasteImage(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7, fileExtension: "png", imageData: imageData)
+            try await client.pasteImage(
+                context: TerminalCommandContext(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7), fileExtension: "png",
+                imageData: imageData)
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "terminalPasteImage")
@@ -47,7 +49,8 @@
             }
 
             try await client.pasteImage(
-                sessionID: "session-shell", clientID: "client-ios", ownerEpoch: nil, fileExtension: "png", imageData: Data([0x01]))
+                context: TerminalCommandContext(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: nil), fileExtension: "png",
+                imageData: Data([0x01]))
 
             guard case .terminalPasteImage(let payload)? = await recorder.snapshot().first?.command else {
                 XCTFail("Expected terminalPasteImage request.")
@@ -69,7 +72,8 @@
             }
 
             try await client.pasteImage(
-                sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7, fileExtension: "png", imageData: Data([0x01]))
+                context: TerminalCommandContext(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7), fileExtension: "png",
+                imageData: Data([0x01]))
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.clientApp?.deviceName, "Sentinel iPhone")
@@ -102,7 +106,8 @@
 
             do {
                 try await client.pasteImage(
-                    sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7, fileExtension: "png", imageData: Data([0x01]))
+                    context: TerminalCommandContext(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7), fileExtension: "png",
+                    imageData: Data([0x01]))
                 XCTFail("Expected pasteImage to throw when the response is not ok.")
             } catch let error as SpacesDeviceAPIClientError {
                 switch error {
