@@ -394,13 +394,10 @@ extension WorkspaceOrchestrator {
     /// stale row satisfy the new template and suppress launching it; see
     /// `matchingConfiguredTemplateForMissingCheck`.
     func matchingConfiguredTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
-        if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty,
-            let template = settings?.processes.first(where: { $0.id == templateID })
-        {
-            return template
-        }
         let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return settings?.processes.first(where: { self.processKey(for: $0) == processKey })
+        return firstConfiguredTemplate(
+            templateID: process.templateID, in: settings?.processes, unconditionalNameFallback: true,
+            nameMatches: { self.processKey(for: $0) == processKey })
     }
 
     /// The missing-check's own resolution, stricter than `matchingConfiguredTemplate` in exactly one case:
@@ -414,10 +411,31 @@ extension WorkspaceOrchestrator {
     /// `templateID` at all (never had per-process identity, or genuinely never configured) still resolves by
     /// name, same as `matchingConfiguredTemplate`; that path is unaffected by this restriction.
     func matchingConfiguredTemplateForMissingCheck(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
-        let trimmedTemplateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard trimmedTemplateID.isEmpty else { return settings?.processes.first(where: { $0.id == trimmedTemplateID }) }
         let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return settings?.processes.first(where: { self.processKey(for: $0) == processKey })
+        return firstConfiguredTemplate(
+            templateID: process.templateID, in: settings?.processes, unconditionalNameFallback: false,
+            nameMatches: { self.processKey(for: $0) == processKey })
+    }
+
+    /// Shared resolution order behind `matchingConfiguredTemplate`, `matchingConfiguredTemplateForMissingCheck`,
+    /// and `recoverMissingConfiguredProcessUnlocked`: match by trimmed templateID first, then by name.
+    /// `unconditionalNameFallback` captures the one behavioral split between those callers: `true` lets a
+    /// set-but-unmatched templateID still fall through to the name match (the ad hoc substitution
+    /// `matchingConfiguredTemplate`'s callers want, per its own doc comment); `false` returns nil outright
+    /// in that case, because the other two callers must not let a stale id be satisfied by an unrelated
+    /// same-named template. `nameMatches` captures the other split: callers keyed by a `RunningProcessRecord`
+    /// compare through `processKey(for:)` (which falls back to command when name is empty), while
+    /// `recoverMissingConfiguredProcessUnlocked` is handed an already-resolved key string and compares by
+    /// name alone via `configuredProcessMatchesKey`.
+    private func firstConfiguredTemplate(
+        templateID: String?, in templates: [ProcessTemplate]?, unconditionalNameFallback: Bool, nameMatches: (ProcessTemplate) -> Bool
+    ) -> ProcessTemplate? {
+        let trimmedTemplateID = templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedTemplateID.isEmpty {
+            if let matched = templates?.first(where: { $0.id == trimmedTemplateID }) { return matched }
+            guard unconditionalNameFallback else { return nil }
+        }
+        return templates?.first(where: nameMatches)
     }
 
     func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
@@ -707,11 +725,9 @@ extension WorkspaceOrchestrator {
         let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let trimmedTemplateID = processTemplateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let template: ProcessTemplate? =
-            if !trimmedTemplateID.isEmpty { (settings?.processes ?? []).first(where: { $0.id == trimmedTemplateID }) } else {
-                (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) })
-            }
+        let template = firstConfiguredTemplate(
+            templateID: processTemplateID, in: settings?.processes, unconditionalNameFallback: false,
+            nameMatches: { configuredProcessMatchesKey($0, key: processKey) })
         guard let template else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
 
         let running = try store.runningProcesses(workspaceID: workspaceID)
