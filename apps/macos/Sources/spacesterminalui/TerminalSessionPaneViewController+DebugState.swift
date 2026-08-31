@@ -149,28 +149,6 @@ extension TerminalSessionPaneViewController {
         TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
         refreshNow()
     }
-    func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
-    var debugSelectedRange: NSRange { outputView.selectedRange() }
-    func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
-        let targetOriginY = max(0, maxOriginY - offset)
-        outputScrollView.contentView.scroll(to: NSPoint(x: 0, y: min(targetOriginY, maxOriginY)))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputOffsetFromBottom: CGFloat {
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        return max(0, outputView.bounds.height - visibleRect.maxY)
-    }
-    func debugScrollOutputHorizontally(to offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginX = max(0, documentView.bounds.width - visibleRect.width)
-        outputScrollView.contentView.scroll(to: NSPoint(x: max(0, min(offset, maxOriginX)), y: visibleRect.minY))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
     var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }
@@ -186,13 +164,10 @@ extension TerminalSessionPaneViewController {
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
         ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
     }
-    var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
     var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }
     var debugTerminalSearchState: GhosttyTerminalSearchDebugState {
         ghosttyRendererHost?.debugSearchState ?? .init(isVisible: false, query: "", total: nil, selected: nil)
     }
-    var debugTerminalSearchVisible: Bool { debugTerminalSearchState.isVisible }
-    var debugTerminalSearchQuery: String { debugTerminalSearchState.query }
     var debugOutputDisablesSmartSubstitutions: Bool {
         !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
             && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled

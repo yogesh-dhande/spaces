@@ -1009,18 +1009,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
         return ownerClient.id == client.id ? .owner : .viewer
     }
 
-    func shouldDeferInitialOwnerPresentation(wasVisible: Bool, runningUnderXCTest: Bool) -> Bool {
-        guard !isStartingRuntimeState(lastObservedRuntimeState) else { return false }
-        return !runningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
-            && !ownerRendererReadyForInitialPresentation()
-    }
-
-    func ownerRendererReadyForInitialPresentation() -> Bool {
-        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return true }
-        guard !isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) else { return true }
-        return isPresentingLiveGhosttyMirror
-    }
-
     private var hasRenderableGhosttySurface: Bool { ghosttyRendererHost?.hasRenderableSurface() == true }
 
     /// True when the pane is already showing the live Ghostty mirror: it holds the owner surface

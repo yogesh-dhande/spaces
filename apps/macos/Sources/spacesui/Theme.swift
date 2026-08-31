@@ -19,8 +19,6 @@ enum Theme {
     static let surface2 = dynamic(\.surface2)
     /// Floating palette background — slightly darker than surface so selection tints read lighter.
     static let paletteSurface = dynamic(\.paletteSurface)
-    /// Sidebar background.
-    static let sidebarBg = dynamic(\.sidebarBackground)
 
     // MARK: Text
 
