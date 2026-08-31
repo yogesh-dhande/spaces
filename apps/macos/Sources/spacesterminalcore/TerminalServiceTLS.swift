@@ -1058,29 +1058,33 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             let expectedFingerprint = certificateFingerprint
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
 
-            let ready = DispatchSemaphore(value: 0)
             let errorBox = TransportResultBox()
-            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
-                expectedFingerprint: expectedFingerprint,
-                pinFailure: { error in
-                    errorBox.setError(error)
-                    ready.signal()
-                })
-
-            let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-            createdConnection.stateUpdateHandler = { [errorBox] state in
-                switch state {
-                case .ready: ready.signal()
-                case .failed(let error):
-                    errorBox.setError(TerminalServiceTLSError.connectionFailed(String(describing: error)))
-                    ready.signal()
-                default: break
+            var createdConnection: NWConnection!
+            try NWConnectionSyncBridge.waitForSignal(
+                timeout: timeout,
+                onTimeout: {
+                    createdConnection.cancel()
+                    return errorBox.error() ?? TerminalServiceTLSError.requestTimedOut
                 }
-            }
-            createdConnection.start(queue: queue)
-            guard ready.wait(timeout: .now() + timeout) == .success else {
-                createdConnection.cancel()
-                throw errorBox.error() ?? TerminalServiceTLSError.requestTimedOut
+            ) { ready in
+                let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                    expectedFingerprint: expectedFingerprint,
+                    pinFailure: { error in
+                        errorBox.setError(error)
+                        ready.signal()
+                    })
+                let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+                connection.stateUpdateHandler = { [errorBox] state in
+                    switch state {
+                    case .ready: ready.signal()
+                    case .failed(let error):
+                        errorBox.setError(TerminalServiceTLSError.connectionFailed(String(describing: error)))
+                        ready.signal()
+                    default: break
+                    }
+                }
+                createdConnection = connection
+                connection.start(queue: queue)
             }
             if let error = errorBox.error() {
                 createdConnection.cancel()
@@ -1090,24 +1094,24 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         }
 
         private func send(_ data: Data, on connection: NWConnection, timeout: TimeInterval) throws {
-            let sent = DispatchSemaphore(value: 0)
             let errorBox = TransportResultBox()
-            connection.send(
-                content: data, contentContext: .defaultMessage, isComplete: false,
-                completion: .contentProcessed { [errorBox] error in
-                    if let error { errorBox.setError(TerminalServiceTLSError.connectionFailed(String(describing: error))) }
-                    sent.signal()
-                })
-            guard sent.wait(timeout: .now() + timeout) == .success else { throw TerminalServiceTLSError.requestTimedOut }
+            try NWConnectionSyncBridge.waitForSignal(timeout: timeout, onTimeout: { TerminalServiceTLSError.requestTimedOut }) { sent in
+                connection.send(
+                    content: data, contentContext: .defaultMessage, isComplete: false,
+                    completion: .contentProcessed { [errorBox] error in
+                        if let error { errorBox.setError(TerminalServiceTLSError.connectionFailed(String(describing: error))) }
+                        sent.signal()
+                    })
+            }
             if let error = errorBox.error() { throw error }
         }
 
         private func readResponseLine(on connection: NWConnection, timeout: TimeInterval) throws -> Data {
             if let line = readBuffer.popLine() { return line }
-            let received = DispatchSemaphore(value: 0)
             let resultBox = TransportResultBox()
-            receiveLine(on: connection, resultBox: resultBox, completion: received)
-            guard received.wait(timeout: .now() + timeout) == .success else { throw TerminalServiceTLSError.requestTimedOut }
+            try NWConnectionSyncBridge.waitForSignal(timeout: timeout, onTimeout: { TerminalServiceTLSError.requestTimedOut }) { received in
+                receiveLine(on: connection, resultBox: resultBox, completion: received)
+            }
             if let error = resultBox.error() { throw error }
             return resultBox.responseData()
         }

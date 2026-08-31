@@ -101,29 +101,33 @@ public enum SpacesPinnedTLSConnector {
 
         init(host: String, port: Int, expectedFingerprint: String, timeout: TimeInterval) throws {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesPinnedTLSConnectionError.invalidPort(port) }
-            let ready = DispatchSemaphore(value: 0)
             let pinBox = TransportResultBox()
-            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
-                expectedFingerprint: expectedFingerprint,
-                pinFailure: { error in
-                    pinBox.setErrorIfUnset(error)
-                    ready.signal()
-                })
-
-            let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-            createdConnection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: ready.signal()
-                case .failed(let error):
-                    if pinBox.error() == nil { pinBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
-                    ready.signal()
-                default: break
+            var createdConnection: NWConnection!
+            try NWConnectionSyncBridge.waitForSignal(
+                timeout: timeout,
+                onTimeout: {
+                    createdConnection.cancel()
+                    return pinBox.error() ?? SpacesPinnedTLSConnectionError.timeout
                 }
-            }
-            createdConnection.start(queue: queue)
-            guard ready.wait(timeout: .now() + timeout) == .success else {
-                createdConnection.cancel()
-                throw pinBox.error() ?? SpacesPinnedTLSConnectionError.timeout
+            ) { ready in
+                let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                    expectedFingerprint: expectedFingerprint,
+                    pinFailure: { error in
+                        pinBox.setErrorIfUnset(error)
+                        ready.signal()
+                    })
+                let candidateConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+                candidateConnection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: ready.signal()
+                    case .failed(let error):
+                        if pinBox.error() == nil { pinBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
+                        ready.signal()
+                    default: break
+                    }
+                }
+                createdConnection = candidateConnection
+                candidateConnection.start(queue: queue)
             }
             if let error = pinBox.error() {
                 createdConnection.cancel()
@@ -153,26 +157,27 @@ public enum SpacesPinnedTLSConnector {
             let connection = try activeConnection()
             var payload = line
             payload.append(0x0A)
-            let sent = DispatchSemaphore(value: 0)
             let errorBox = TransportResultBox()
-            connection.send(
-                content: payload, contentContext: .defaultMessage, isComplete: false,
-                completion: .contentProcessed { error in
-                    if let error { errorBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
-                    sent.signal()
-                })
-            guard sent.wait(timeout: .now() + timeout) == .success else { throw SpacesPinnedTLSConnectionError.timeout }
+            try NWConnectionSyncBridge.waitForSignal(timeout: timeout, onTimeout: { SpacesPinnedTLSConnectionError.timeout }) { sent in
+                connection.send(
+                    content: payload, contentContext: .defaultMessage, isComplete: false,
+                    completion: .contentProcessed { error in
+                        if let error { errorBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
+                        sent.signal()
+                    })
+            }
             if let error = errorBox.error() { throw error }
         }
 
         func readLine(timeout: TimeInterval) throws -> Data {
             let connection = try activeConnection()
             if let line = popBufferedLine() { return line }
-            let received = DispatchSemaphore(value: 0)
-            let resultBox = SpacesPinnedTLSLineBox()
-            receiveLine(on: connection, resultBox: resultBox, completion: received)
-            guard received.wait(timeout: .now() + timeout) == .success else { throw SpacesPinnedTLSConnectionError.timeout }
-            return try resultBox.value()
+            let resultBox = TransportResultBox()
+            try NWConnectionSyncBridge.waitForSignal(timeout: timeout, onTimeout: { SpacesPinnedTLSConnectionError.timeout }) { received in
+                receiveLine(on: connection, resultBox: resultBox, completion: received)
+            }
+            if let error = resultBox.error() { throw error }
+            return resultBox.responseData()
         }
 
         private func popBufferedLine() -> Data? {
@@ -181,10 +186,10 @@ public enum SpacesPinnedTLSConnector {
             return readBuffer.popLine()
         }
 
-        private func receiveLine(on connection: NWConnection, resultBox: SpacesPinnedTLSLineBox, completion: DispatchSemaphore) {
+        private func receiveLine(on connection: NWConnection, resultBox: TransportResultBox, completion: DispatchSemaphore) {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [self] content, _, isComplete, error in
                 if let error {
-                    resultBox.set(.failure(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))))
+                    resultBox.setError(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error)))
                     completion.signal()
                     return
                 }
@@ -192,20 +197,20 @@ public enum SpacesPinnedTLSConnector {
                 if let content, !content.isEmpty { readBuffer.append(content) }
                 if let line = readBuffer.popLine() {
                     stateLock.unlock()
-                    resultBox.set(.success(line))
+                    resultBox.setResponseData(line)
                     completion.signal()
                     return
                 }
                 if isComplete {
                     guard !readBuffer.isEmpty else {
                         stateLock.unlock()
-                        resultBox.set(.failure(SpacesPinnedTLSConnectionError.connectionClosed))
+                        resultBox.setError(SpacesPinnedTLSConnectionError.connectionClosed)
                         completion.signal()
                         return
                     }
                     let line = readBuffer.drainRemainder()
                     stateLock.unlock()
-                    resultBox.set(.success(line))
+                    resultBox.setResponseData(line)
                     completion.signal()
                     return
                 }
@@ -253,22 +258,6 @@ public enum SpacesPinnedTLSConnector {
         }
     }
 
-    private final class SpacesPinnedTLSLineBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedResult: Result<Data, any Error>?
-
-        func set(_ result: Result<Data, any Error>) {
-            lock.lock()
-            storedResult = result
-            lock.unlock()
-        }
-
-        func value() throws -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return try storedResult?.get() ?? Data()
-        }
-    }
 #endif
 
 #if os(Linux) && canImport(OpenSSL)
