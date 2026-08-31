@@ -1,19 +1,6 @@
 import Foundation
 import spacesterminalcore
 
-/// The two versions a daemon-version state spans: the build that is running now, and the build that
-/// closes the gap. `from` is always the side that has to move, so it renders muted and `to` carries the
-/// emphasis; the states differ only in whose versions these are, which the who-line says. Mirrors the
-/// Mac block's pair so both clients say the same thing the same way.
-struct DaemonVersionPair: Equatable {
-    let from: String
-    let to: String
-
-    /// Stands in for a version this state has no fact for: the target when what lands is whatever the
-    /// user installs on the device. An honest hole beats a number the app would have to invent.
-    static let unknown = "?"
-}
-
 /// What the device screen says about the active device's daemon version, decided in one pure place so
 /// the decision is unit-testable without a SwiftUI hierarchy and the two renderings cannot disagree
 /// about which state they are in.
@@ -73,15 +60,16 @@ enum DaemonCompatibilityPresentation: Equatable {
         remedy: DaemonUpdateRemedy, status: TerminalServiceDaemonStatus, isBlocked: Bool, stagedApplyDidNotLand: Bool, deviceName: String,
         clientVersion: String
     ) -> DaemonCompatibilityPresentation {
-        let runningVersion = displayVersion(status.version)
+        let runningVersion = DaemonVersionPair.displayVersion(status.version)
         switch remedy {
         case .none: return .none
 
         case .updateClient:
             return .hero(
                 Hero(
-                    eyebrow: "CAN'T CONNECT — THIS APP NEEDS AN UPDATE",
-                    versionPair: DaemonVersionPair(from: displayVersion(clientVersion), to: runningVersion), whoLine: "this app · \(deviceName)",
+                    eyebrow: DaemonCompatibilityCopy.updateClientEyebrow,
+                    versionPair: DaemonVersionPair(from: DaemonVersionPair.displayVersion(clientVersion), to: runningVersion),
+                    whoLine: DaemonCompatibilityCopy.updateClientWhoLine(deviceName: deviceName),
                     body: "\(deviceName) speaks a newer connection protocol than this app. Update Spaces from the App Store to reconnect.",
                     actionTitle: nil))
 
@@ -102,9 +90,9 @@ enum DaemonCompatibilityPresentation: Equatable {
             // refused look identical from here, so this reports what has not happened.
             return .hero(
                 Hero(
-                    eyebrow: "CAN'T CONNECT — UPDATE READY TO APPLY", versionPair: pair,
-                    whoLine: "Spaces \(stagedVersion) is already on \(deviceName)",
-                    body: "Its daemon didn't pick the update up, and nothing running on \(deviceName) was interrupted.", actionTitle: "Update Daemon")
+                    eyebrow: DaemonCompatibilityCopy.stagedUpdateNotLandedEyebrow, versionPair: pair,
+                    whoLine: DaemonCompatibilityCopy.stagedUpdateNotLandedWhoLine(installedVersion: stagedVersion, deviceName: deviceName),
+                    body: DaemonCompatibilityCopy.stagedUpdateNotLandedBody(deviceName: deviceName), actionTitle: "Update Daemon")
             )
 
         case .installUpdateOnDevice:
@@ -121,9 +109,4 @@ enum DaemonCompatibilityPresentation: Equatable {
                     actionTitle: nil))
         }
     }
-
-    /// A version string the app has no value for renders as the same honest hole an absent target does,
-    /// rather than as a blank gap in the pair. `TerminalServiceDaemonStatus.version` decodes to an empty
-    /// string when a peer omits it, which is exactly the case with no fact to state.
-    private static func displayVersion(_ version: String) -> String { version.isEmpty ? DaemonVersionPair.unknown : version }
 }

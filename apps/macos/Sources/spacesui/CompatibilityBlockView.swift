@@ -60,18 +60,12 @@ final class CompatibilityBlockView: NSView {
         }
     }
 
-    /// The two versions the hero spans: the build that is running now, and the build that closes the
-    /// gap. `from` is always the side that has to move, so it renders muted and `to` carries the
-    /// emphasis; the states differ only in whose versions these are, which the who-line says.
-    struct VersionPair: Equatable {
-        let from: String
-        let to: String
-
-        /// Stands in for a version this state has no fact for: the daemon version in the no-status
-        /// fallback, and the target on a Mac, where what lands is whatever the user chooses to install.
-        /// An honest hole beats a number the app would have to invent.
-        static let unknown = "?"
-    }
+    /// The two versions the hero spans, shared with iOS as `DaemonVersionPair` (see
+    /// `spacesterminalcore/DaemonCompatibilityCopy.swift`) so both clients' version heroes state the same
+    /// two numbers the same way. `.unknown` stands in for a version this state has no fact for: the
+    /// daemon version in the no-status fallback, and the target on a Mac, where what lands is whatever
+    /// the user chooses to install.
+    typealias VersionPair = DaemonVersionPair
 
     /// Pure "what should the block show" descriptor, independent of AppKit so it is unit-testable
     /// without instantiating a view. `actionButtonTitle == nil` means no button is rendered.
@@ -310,8 +304,9 @@ final class CompatibilityBlockView: NSView {
             // here it is this app's build against the daemon's. That is a statement of the two builds in
             // play, not a comparison: which one is behind came from the wire verdict.
             return Content(
-                eyebrow: "CAN'T CONNECT — THIS APP NEEDS AN UPDATE",
-                versionPair: VersionPair(from: clientVersion, to: daemonVersion ?? VersionPair.unknown), whoLine: "this app · \(deviceName)",
+                eyebrow: DaemonCompatibilityCopy.updateClientEyebrow,
+                versionPair: VersionPair(from: clientVersion, to: daemonVersion ?? VersionPair.unknown),
+                whoLine: DaemonCompatibilityCopy.updateClientWhoLine(deviceName: deviceName),
                 body: "\(deviceName) speaks a newer connection protocol than this app, so update this app to reconnect to it.", footnote: nil,
                 installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
 
@@ -326,9 +321,9 @@ final class CompatibilityBlockView: NSView {
             // The wording never calls the apply a failure: a daemon that is slow to restart and one that
             // refused look identical from here, so this reports what has not happened.
             return Content(
-                eyebrow: "CAN'T CONNECT — UPDATE READY TO APPLY", versionPair: VersionPair(from: daemonVersion, to: installedVersion),
-                whoLine: "Spaces \(installedVersion) is already on \(deviceName)",
-                body: "Its daemon didn't pick the update up, and nothing running on \(deviceName) was interrupted.", footnote: nil,
+                eyebrow: DaemonCompatibilityCopy.stagedUpdateNotLandedEyebrow, versionPair: VersionPair(from: daemonVersion, to: installedVersion),
+                whoLine: DaemonCompatibilityCopy.stagedUpdateNotLandedWhoLine(installedVersion: installedVersion, deviceName: deviceName),
+                body: DaemonCompatibilityCopy.stagedUpdateNotLandedBody(deviceName: deviceName), footnote: nil,
                 installerCommand: isLinuxDaemon ? linuxApplyStagedUpdateCommand : nil, actionButtonTitle: "Try Again", showsProgress: false)
 
         case .installUpdateOnDevice(let daemonVersion):
