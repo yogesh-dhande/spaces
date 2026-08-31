@@ -23,6 +23,34 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 }
 
+/// Per-remote-device bookkeeping for the overview pull/push pipeline, keyed by device ID in
+/// `SidebarController.remoteOverviewSyncStates`. A device with no entry yet reads as this struct's
+/// default state: never fetched, no pull in flight, both generation counters at 0 — the same
+/// defaulting the four separate dictionaries/set this replaced gave a device on first contact.
+private struct DeviceSyncState {
+    /// Timestamp of the last successful overview fetch, so polls driven by local events don't
+    /// re-request every remote's overview on every cycle.
+    var lastFetchInstant: ContinuousClock.Instant?
+    /// Whether an overview pull is currently in flight for this device, so nothing starts a second
+    /// connection to a device that is still answering (or still timing out).
+    var pullInFlight = false
+    /// Counter stamped onto each pull, bumped whenever something moves the ground it was dialing
+    /// on — a user retry, a network-path change, or a subscription push applying newer data; see
+    /// `SidebarController.invalidateInFlightRemoteOverviewPulls`. Gates only a pull's *failure*: a
+    /// retry or network change installs no data of its own, so a failure that predates one of those
+    /// tells us nothing (the ground moved before we heard back) and is discarded, but a *success* is
+    /// discarded only when a push actually applied something newer — gated separately by
+    /// `pushApplyGeneration`, since a success is otherwise the freshest answer regardless of what
+    /// else moved.
+    var pullGeneration = 0
+    /// Counter bumped only where a subscription push applies its overview (`onOverview`, alongside
+    /// the `invalidateInFlightRemoteOverviewPulls` call). A pull captures this at its start and
+    /// compares it at completion: if it advanced, a push applied newer data while the pull was in
+    /// flight, so the pull's success is stale and is discarded instead of overwriting what is
+    /// already showing.
+    var pushApplyGeneration = 0
+}
+
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
 /// its state, plus the sidebar's data load/merge pipeline and the Alerts row chrome.
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
@@ -100,6 +128,24 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// and invalidated together with `visibleWorkspacesCache` (every overview change
     /// reassigns the host's `workspacesByProject`, which invalidates both).
     private var runtimeTargetItemsCache: [String: [SidebarRuntimeTargetItem]] = [:]
+    /// Memoized project-id -> index into `host.projects`, on the same NSOutlineView data-source/cell
+    /// hot path as `visibleWorkspacesCache`. Deliberately caches a *position*, not a `ProjectSummary`
+    /// value: `updateProjectCollapsedStateInMemory` flips a project's `isCollapsed` by replacing
+    /// `host.projects[index]` in place, without reassigning the array or going through the invalidation
+    /// point below, so a cached value copy would go stale on exactly the change callers most need to
+    /// see. A cached position stays correct through that mutation, because it changes a field, not the
+    /// array's length or order. `nil` means "needs rebuilding"; `rebuildFlatSidebarData` is the only
+    /// place `host.projects` is reassigned wholesale, so setting this to `nil` there is exact.
+    private var projectsByID: [String: Int]?
+    /// Memoized device-id -> index into `host.deviceSections`, same hot path and same position-not-
+    /// value reasoning as `projectsByID`: a section's fields (loadState, compatibility, overview, ...)
+    /// are mutated in place at many call sites that never touch this cache. A cached position stays
+    /// correct through those, because `host.deviceSections` only ever grows — an `insert(at: 0)` for
+    /// the local device's first snapshot, or an `append` for a newly discovered remote — and each of
+    /// those sites either reaches `rebuildFlatSidebarData` synchronously before anything reads a device
+    /// row again, or (the local-insert site, whose same apply pass reads the inserted record for the
+    /// silent-handoff check) clears this itself at the mutation. `nil` means "needs rebuilding".
+    private var deviceSectionsByID: [String: Int]?
     /// Workspaces the user pinned open by an explicit mouse interaction — clicking the
     /// workspace row or expanding it with its disclosure chevron. A pinned workspace
     /// stays expanded even after the selection moves away, until the user collapses it
@@ -117,25 +163,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// its title for an editor while this matches (same pattern as the device rename).
     private var renamingRuntimeTarget: (workspaceID: String, item: SidebarRuntimeTargetItem)?
     weak var renamingRuntimeTargetField: NSTextField?
-    /// Per-remote-device timestamp of the last successful overview fetch, so polls driven by
-    /// local events don't re-request every remote's overview on every cycle.
-    private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
-    /// Remote devices with an overview pull in flight, so nothing starts a second connection to a
-    /// device that is still answering (or still timing out).
-    private var remoteOverviewPullsInFlight: Set<String> = []
-    /// Per-device counter stamped onto each pull, bumped whenever something moves the ground it was
-    /// dialing on — a user retry, a network-path change, or a subscription push applying newer data; see
-    /// `invalidateInFlightRemoteOverviewPulls`. Gates only a pull's *failure*: a retry or network change
-    /// installs no data of its own, so a failure that predates one of those tells us nothing (the ground
-    /// moved before we heard back) and is discarded, but a *success* is discarded only when a push
-    /// actually applied something newer — gated separately by `remoteOverviewPushApplyGenerations`, since a
-    /// success is otherwise the freshest answer regardless of what else moved.
-    private var remoteOverviewPullGenerations: [String: Int] = [:]
-    /// Per-device counter bumped only where a subscription push applies its overview (`onOverview`,
-    /// alongside the `invalidateInFlightRemoteOverviewPulls` call). A pull captures this at its start and
-    /// compares it at completion: if it advanced, a push applied newer data while the pull was in flight,
-    /// so the pull's success is stale and is discarded instead of overwriting what is already showing.
-    private var remoteOverviewPushApplyGenerations: [String: Int] = [:]
+    /// Per-remote-device overview pull/push bookkeeping: last successful fetch instant, whether a
+    /// pull is in flight, and the two generation counters that gate a stale pull result. A device
+    /// with no entry yet reads as `DeviceSyncState()`'s defaults; see that struct's field comments
+    /// for what each part does.
+    private var remoteOverviewSyncStates: [String: DeviceSyncState] = [:]
     /// Pacing for pulls that fail. The in-flight guard above bounds how many connections a failing
     /// device carries at once but not how often it is dialed, and only a successful pull stamps the
     /// freshness window; this is what keeps a device that fails fast from being re-dialed by every
@@ -467,6 +499,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 from: previousLocalSection, carriesFreshInstall: retainedContent == nil)
         } else {
             host.deviceSections.insert(localSection, at: 0)
+            // The insert shifts every remote section's position, and the handoff check on the next
+            // line reads the just-inserted local record through `deviceSection(id:)` — before this
+            // apply reaches `rebuildFlatSidebarData`, whose invalidation would come too late for it.
+            deviceSectionsByID = nil
         }
         host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
         host.localDeviceID = snapshot.localDeviceID
@@ -701,7 +737,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // spam remote overview requests; a freshly paired device has no recorded
             // instant and refreshes immediately. Forced reloads (explicit refresh,
             // mutations that expect fresh remote data) bypass the gate.
-            if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
+            if !forceRefresh, let last = remoteOverviewSyncStates[record.id]?.lastFetchInstant, now - last < freshnessWindow { continue }
             // `bypassesBackoff` is independent of `forceRefresh`: a forced reload bypasses the freshness
             // gate for every device regardless of who asked (there is no per-device freshness cost to
             // that), but only a caller that actually asked for this device — the Reload command, or a
@@ -744,9 +780,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // stamp to throttle it; the backoff above is what paces its attempts. This guard is what keeps a
         // burst of sidebar reloads — or a watchdog tick landing while a previous connect is still timing
         // out — from stacking connections on it.
-        guard remoteOverviewPullsInFlight.insert(record.id).inserted else { return }
-        let generation = remoteOverviewPullGenerations[record.id] ?? 0
-        let pushApplyGenerationAtStart = remoteOverviewPushApplyGenerations[record.id] ?? 0
+        var syncState = remoteOverviewSyncStates[record.id, default: DeviceSyncState()]
+        guard !syncState.pullInFlight else { return }
+        syncState.pullInFlight = true
+        let generation = syncState.pullGeneration
+        let pushApplyGenerationAtStart = syncState.pushApplyGeneration
+        remoteOverviewSyncStates[record.id] = syncState
         // Captured at pull start, the moment this attempt's eventual data begins going stale relative to
         // any pane replacement that lands while it is in flight; see `PanelCoordinator.paneReplacementEpoch`.
         let capturedEpoch = host.panelCoordinator.paneReplacementEpoch
@@ -764,22 +803,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 } catch { return .failure(error) }
             }.value
             guard let self else { return }
-            self.remoteOverviewPullsInFlight.remove(record.id)
+            self.remoteOverviewSyncStates[record.id]?.pullInFlight = false
             // Stamp only a fetch that produced data. A failed pull left nothing fresh to protect, so
             // letting it hold the window would suppress the next 30 s of attempts and keep the device
             // parked in offline for no reason; it arms the backoff instead, which paces the retries
             // without freezing the device's state for a fixed window.
             switch result {
             case .success:
-                self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
+                self.remoteOverviewSyncStates[record.id, default: DeviceSyncState()].lastFetchInstant = ContinuousClock.now
                 // A success is a fresh read of the device and applies unless a push actually installed
                 // newer data while this pull was in flight — a retry or network-path change moves the
                 // ground but installs no data of its own, so it must not discard a success on its own; see
-                // `remoteOverviewPushApplyGenerations`.
+                // `DeviceSyncState.pushApplyGeneration`.
                 guard
                     Self.pullSuccessStillFreshest(
                         pushApplyGeneration: pushApplyGenerationAtStart,
-                        currentPushApplyGeneration: self.remoteOverviewPushApplyGenerations[record.id] ?? 0)
+                        currentPushApplyGeneration: self.remoteOverviewSyncStates[record.id]?.pushApplyGeneration ?? 0)
                 else {
                     // A subscription push already applied a newer overview while this pull was in flight.
                     // Applying this snapshot now would retarget/prune the sidebar's open panes against data
@@ -793,7 +832,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             case .failure:
                 guard
                     Self.pullFailureStillDescribesDevice(
-                        pullGeneration: generation, currentGeneration: self.remoteOverviewPullGenerations[record.id] ?? 0)
+                        pullGeneration: generation, currentGeneration: self.remoteOverviewSyncStates[record.id]?.pullGeneration ?? 0)
                 else {
                     DeviceLinkTrace.log(deviceID: record.id, event: "pull_failure_superseded")
                     return
@@ -813,15 +852,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Deliberately does not gate a pull's *success*: a retry or network-path change moves the ground but
     /// installs no data of its own, so an in-flight pull's success is still the freshest answer for the
     /// device and must apply. Only a push, which does install data, can make a success stale — tracked
-    /// separately by `remoteOverviewPushApplyGenerations`, bumped alongside this call in `onOverview`.
+    /// separately by `DeviceSyncState.pushApplyGeneration`, bumped alongside this call in `onOverview`.
     ///
     /// The in-flight attempt is deliberately not cancelled or replaced. Its connect is a blocking dial
     /// inside a detached task, and letting a second one start alongside it is exactly the connection
-    /// stacking `remoteOverviewPullsInFlight` exists to prevent; what replaces it is the subscription
+    /// stacking `DeviceSyncState.pullInFlight` exists to prevent; what replaces it is the subscription
     /// (already open, in the push case) reopened in the other cases, with the watchdog's next tick behind
     /// that.
     private func invalidateInFlightRemoteOverviewPulls(deviceID: String) {
-        remoteOverviewPullGenerations[deviceID] = (remoteOverviewPullGenerations[deviceID] ?? 0) + 1
+        remoteOverviewSyncStates[deviceID, default: DeviceSyncState()].pullGeneration += 1
     }
 
     /// Whether a completed pull's *failure* still describes the device, or belongs to an attempt
@@ -1094,9 +1133,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // A push is always the newer answer for this device: retire whatever pull is mid-flight so
                 // its eventual failure cannot report this device offline on stale grounds, and record that
                 // this push is about to apply data newer than any pull success already in flight (see
-                // `remoteOverviewPushApplyGenerations`).
+                // `DeviceSyncState.pushApplyGeneration`).
                 self.invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
-                self.remoteOverviewPushApplyGenerations[deviceID] = (self.remoteOverviewPushApplyGenerations[deviceID] ?? 0) + 1
+                self.remoteOverviewSyncStates[deviceID, default: DeviceSyncState()].pushApplyGeneration += 1
                 self.applyRemoteDeviceSection(
                     deviceID: deviceID,
                     result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)),
@@ -1448,6 +1487,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// surface: a rename reaches this client only in an overview, and no overview update re-renders a
     /// global panel window (see `PanelCoordinator.refreshGlobalPanelTitles`).
     func rebuildFlatSidebarData() {
+        // `host.projects` is about to be reassigned wholesale (the only place that happens), and
+        // `host.deviceSections`'s structural changes — the only kind that move an entry's position —
+        // are always already committed by the time this runs (every insert/append site reaches this
+        // function synchronously before anything reads a row again); see `projectsByID`/
+        // `deviceSectionsByID`'s doc comments. Clearing both here is exact for both.
+        projectsByID = nil
+        deviceSectionsByID = nil
         let merged = AppKitController.mergedSidebarData(sections: host.deviceSections)
         host.projects = merged.projects
         host.workspacesByProject = merged.workspacesByProject
@@ -1634,23 +1680,45 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 isRenaming: renamingRuntimeTarget.map { $0.workspaceID == workspace.id && $0.item.key == item.key } ?? false))
     }
 
-    func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
-        host.deviceSections.first(where: { $0.deviceID == deviceID })?.device
+    /// Resolves a project by id through `projectsByID`, rebuilding that position index on first use
+    /// after an invalidation. The single lookup every other project-by-id site in this file now goes
+    /// through, so the outline's per-row and data-source paths pay for one linear scan per reload
+    /// instead of one per row queried.
+    private func project(id projectID: String) -> ProjectSummary? {
+        if projectsByID == nil {
+            projectsByID = host.projects.enumerated().reduce(into: [:]) { index, entry in index[entry.element.id] = entry.offset }
+        }
+        guard let index = projectsByID?[projectID] else { return nil }
+        return host.projects[index]
     }
 
-    func deviceSection(id deviceID: String) -> DeviceSection? { host.deviceSections.first(where: { $0.deviceID == deviceID }) }
+    func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
+        deviceSection(id: deviceID)?.device
+    }
+
+    /// Resolves a device section by id through `deviceSectionsByID`, rebuilding that position index on
+    /// first use after an invalidation. The single lookup every other device-section-by-id site in this
+    /// file now goes through.
+    func deviceSection(id deviceID: String) -> DeviceSection? {
+        if deviceSectionsByID == nil {
+            deviceSectionsByID = host.deviceSections.enumerated().reduce(into: [:]) { index, entry in index[entry.element.deviceID] = entry.offset }
+        }
+        guard let index = deviceSectionsByID?[deviceID] else { return nil }
+        return host.deviceSections[index]
+    }
 
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
         // host.workspaceIndex is a flat id -> (projectID, workspace) map rebuilt alongside
         // workspacesByProject (see its didSet), so this is O(1) plus one linear scan over
         // projects (typically far smaller than projects x workspaces) instead of a nested scan.
-        guard let entry = host.workspaceIndex[id], let project = host.projects.first(where: { $0.id == entry.projectID }) else { return nil }
+        // `project(id:)` turns that linear scan into an O(1) lookup too, via `projectsByID`.
+        guard let entry = host.workspaceIndex[id], let project = project(id: entry.projectID) else { return nil }
         return (project, entry.workspace)
     }
 
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
-        let project = host.projects.first(where: { $0.id == projectID })
+        let project = project(id: projectID)
         let result = (host.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
             lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
@@ -1883,7 +1951,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// the whole point of an outage staying browsable — dimmed, with the device named in a tooltip so
     /// the state is readable from the row itself and not only from the section caption above it.
     private func dimmedForUnreachableDevice(_ cell: NSTableCellView, deviceID: String) -> NSTableCellView {
-        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }), section.loadState != .loaded else { return cell }
+        guard let section = deviceSection(id: deviceID), section.loadState != .loaded else { return cell }
         cell.alphaValue = AppKitController.sidebarRowAlpha(loadState: section.loadState)
         // A retry leaves the rows dimmed while the section reads "loading…", so the tooltip is written
         // only for the state it would actually be true of.
@@ -1892,14 +1960,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func deviceSectionName(deviceID: String) -> String {
-        host.deviceSections.first(where: { $0.deviceID == deviceID })?.displayName ?? deviceID
+        deviceSection(id: deviceID)?.displayName ?? deviceID
     }
 
     /// Gathers this device's section facts and resolves what its header's caption area shows. The
     /// retry-availability read is the same one the button's action consults, so a visible recovery button
     /// always has something to attempt.
     private func deviceSectionStatus(deviceID: String) -> SidebarDeviceSectionStatus {
-        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }) else { return .none }
+        guard let section = deviceSection(id: deviceID) else { return .none }
         return SidebarDeviceSectionStatus.resolve(
             loadState: section.loadState, isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: deviceID),
             isUpdatePending: section.daemonStatus?.isUpdatePending == true)
@@ -1925,7 +1993,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         contentRow.addArrangedSubview(nameLabel)
         contentRow.addArrangedSubview(NSView())
 
-        let section = host.deviceSections.first(where: { $0.deviceID == deviceID })
+        let section = deviceSection(id: deviceID)
         if let compatibility = section?.compatibility, !compatibility.isCompatible {
             // Device headers are non-selectable, so an incompatible device's only affordance is this
             // caption button, which opens the compatibility block (restart/update) in the detail pane.
@@ -2717,7 +2785,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// The credential read is deliberately behind the offline check: it touches the paired-device
     /// records and the credential store, and every device row is rebuilt on every outline reload.
     private func deviceSectionOffersRetry(deviceID: String) -> Bool {
-        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }), section.loadState.isOffline else { return false }
+        guard let section = deviceSection(id: deviceID), section.loadState.isOffline else { return false }
         let hasCredentials =
             !section.isLocal
             && (host.macPairedDevices().first(where: { $0.id == deviceID }).map(AppKitController.pairedDeviceHasRequiredCredentials) ?? false)
@@ -2931,11 +2999,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // true when currently expanded (want to collapse); false when currently collapsed (want to expand).
         // Uses in-memory state instead of isItemExpanded, which may be unreliable when the outline
         // cell is hidden by indentationPerLevel = 0.
-        let isCollapsed = !(host.projects.first(where: { $0.id == projectID })?.isCollapsed ?? false)
+        let isCollapsed = !(project(id: projectID)?.isCollapsed ?? false)
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
         do {
-            let deviceID = host.projects.first(where: { $0.id == projectID })?.deviceID ?? host.localDeviceID
+            let deviceID = project(id: projectID)?.deviceID ?? host.localDeviceID
             try host.clientDatabase().setProjectCollapsed(deviceID: deviceID, projectID: projectID, isCollapsed: isCollapsed)
             updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
         } catch {
@@ -3014,7 +3082,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// project has no workspace rows (its project row stands in for its single workspace),
     /// so there is nothing to apply.
     private func applyWorkspaceExpansionState(inProject projectID: String) {
-        guard host.projects.first(where: { $0.id == projectID })?.isGitRepo == true else { return }
+        guard project(id: projectID)?.isGitRepo == true else { return }
         for workspace in visibleWorkspaces(projectID: projectID) {
             guard let row = rowIndex(forWorkspaceID: workspace.id), let item = host.outlineView.item(atRow: row) else { continue }
             if isWorkspaceExpanded(workspace.id) { host.outlineView.expandItem(item) } else { host.outlineView.collapseItem(item) }
