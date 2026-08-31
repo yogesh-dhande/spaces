@@ -196,6 +196,40 @@ extension SpacesDeviceAPICommand {
         if case .ping = self { return true }
         return false
     }
+
+    /// Which serial lane this command's request-handling work runs on, decided purely from the command
+    /// via the predicates above. Both transports used to re-check those predicates in the same order in
+    /// two separate dispatch ladders; this is the single function that decides the lane, and
+    /// `SpacesDeviceAPIServer.queue(for:)` is the single place that resolves the fixed queue behind it.
+    fileprivate var lane: Lane {
+        if isAgentHookCommand { return .agentHook }
+        if runsOnWorkspaceTeardownQueue { return .workspaceTeardown }
+        if runsOnWorkspaceStopQueue { return .workspaceStop }
+        if runsOnWorkspaceSetupQueue { return .workspaceSetup }
+        if runsOnWorkspaceTerminalLaunchQueue { return .workspaceTerminalLaunch }
+        if runsOnTerminalControlLane { return .terminalControl }
+        if runsOnWorkspaceGitQueue { return .workspaceGit }
+        return .mainQueue
+    }
+}
+
+/// The lane a `SpacesDeviceAPICommand` dispatches to (see `SpacesDeviceAPICommand.lane`). One case per
+/// queue choice the two transports' dispatch ladders make. `.terminalControl` and `.workspaceGit` name a
+/// lane whose actual queue is resolved per request — a per-session control lane (`TerminalControlLaneRegistry`)
+/// and a per-workspace queue (`workspaceGitQueue(for:)`) — rather than one fixed instance, so
+/// `SpacesDeviceAPIServer.queue(for:)` does not cover them; each transport keeps that resolution explicit
+/// at its own call site, same as before this enum existed. `.mainQueue` means "no divert": the command runs
+/// inline on whichever queue is already dispatching it (the shared `spaces.device.api` state queue for both
+/// transports).
+private enum Lane {
+    case agentHook
+    case workspaceTeardown
+    case workspaceStop
+    case workspaceSetup
+    case workspaceTerminalLaunch
+    case terminalControl
+    case workspaceGit
+    case mainQueue
 }
 
 /// Per-session serial lanes for the engine-blocking terminal commands (`runsOnTerminalControlLane`).
@@ -614,21 +648,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     // finish first. That reorders nothing a client can observe: this connection reads one
                     // response before it sends its next request, so its own commands stay ordered, and
                     // requests racing in on separate connections have no ordering guarantee to begin with.
-                    if request.command.isAgentHookCommand {
+                    // `request.command.lane` is the single source of truth for which of these a command
+                    // takes; the Linux transport below switches over the same lane.
+                    switch request.command.lane {
+                    case .agentHook:
                         server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnWorkspaceTeardownQueue {
+                    case .workspaceTeardown:
                         server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnWorkspaceStopQueue {
+                    case .workspaceStop:
                         server.handleWorkspaceStopRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnWorkspaceSetupQueue {
+                    case .workspaceSetup:
                         server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnWorkspaceTerminalLaunchQueue {
+                    case .workspaceTerminalLaunch:
                         server.handleStartWorkspaceCommandSessionAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnTerminalControlLane {
+                    case .terminalControl:
                         server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else if request.command.runsOnWorkspaceGitQueue {
+                    case .workspaceGit:
                         server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
-                    } else {
+                    case .mainQueue:
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
                 } catch { finishRequest(.failure(error)) }
@@ -879,53 +916,42 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             // request and composed the answer.
                             try server.authorize(request)
                             response = SpacesDeviceAPIServer.pongResponse
-                        } else if request.command.isAgentHookCommand {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleAgentHookRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnWorkspaceTeardownQueue {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnWorkspaceStopQueue {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleWorkspaceStopRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnWorkspaceSetupQueue {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleWorkspaceSetupRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnWorkspaceTerminalLaunchQueue {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleStartWorkspaceCommandSessionOnWorkerQueue(request)
-                        } else if request.command.runsOnTerminalControlLane {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleTerminalControlRequestOnWorkerQueue(request)
-                        } else if request.command.runsOnWorkspaceGitQueue {
-                            try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                            }
-                            response = try server.handleWorkspaceGitRequestOnWorkerQueue(request)
                         } else {
-                            response = try server.syncOnQueue {
-                                try server.admitOnQueue()
-                                try server.authorize(request)
-                                return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                            // `request.command.lane` is the single source of truth for which of these a
+                            // command takes; the Darwin transport above switches over the same lane. Every
+                            // lane but `.mainQueue` takes the same admit-then-authorize step
+                            // (`admitAndAuthorizeOnQueue`) before handing off to its own worker-queue
+                            // handler; `.mainQueue` folds that same check into the one `syncOnQueue` call
+                            // that also runs `handleRequest`, so a command never diverted anywhere still
+                            // gets exactly one hop onto the state queue.
+                            switch request.command.lane {
+                            case .agentHook:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleAgentHookRequestOnWorkerQueue(request)
+                            case .workspaceTeardown:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
+                            case .workspaceStop:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleWorkspaceStopRequestOnWorkerQueue(request)
+                            case .workspaceSetup:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleWorkspaceSetupRequestOnWorkerQueue(request)
+                            case .workspaceTerminalLaunch:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleStartWorkspaceCommandSessionOnWorkerQueue(request)
+                            case .terminalControl:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleTerminalControlRequestOnWorkerQueue(request)
+                            case .workspaceGit:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleWorkspaceGitRequestOnWorkerQueue(request)
+                            case .mainQueue:
+                                response = try server.syncOnQueue {
+                                    try server.admitOnQueue()
+                                    try server.authorize(request)
+                                    return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                                }
                             }
                         }
                     } catch {
@@ -1201,6 +1227,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Arbitrary command sessions wait synchronously for terminal startup, so run them independently of
     /// the shared request queue while retaining serial ordering among explicit starts.
     private let workspaceTerminalLaunchQueue = DispatchQueue(label: "spaces.device.api.workspace-terminal-launch", qos: .userInitiated)
+
+    /// The fixed queue behind a `Lane`, shared by both transports' dispatch chains. Covers every lane that
+    /// has one stored instance; `.terminalControl` and `.workspaceGit` resolve their queue per request
+    /// instead (a per-session lane from `terminalControlLanes`, a per-workspace queue from
+    /// `workspaceGitQueue(for:)`), and `.mainQueue` is never diverted anywhere, so neither reaches this
+    /// table — each caller keeps that resolution explicit at its own call site.
+    private func queue(for lane: Lane) -> DispatchQueue {
+        switch lane {
+        case .agentHook: return agentHookQueue
+        case .workspaceTeardown: return workspaceTeardownQueue
+        case .workspaceStop: return workspaceStopQueue
+        case .workspaceSetup: return workspaceSetupQueue
+        case .workspaceTerminalLaunch: return workspaceTerminalLaunchQueue
+        case .terminalControl, .workspaceGit, .mainQueue:
+            preconditionFailure("\(lane) resolves its queue at the call site, not through this table.")
+        }
+    }
+
     /// Terminal input and control round trips block on the target session's engine (see
     /// `runsOnTerminalControlLane`). They run on a serial lane per session (`TerminalControlLaneRegistry`)
     /// so a stalled engine holds up only that session's own controls: never another session's, and never
@@ -2926,20 +2970,46 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     #if canImport(Network) && canImport(Security)
-        private func handleAgentHookRequestAsync(
-            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        /// Hops onto `targetQueue`, runs `handler`, and marshals its result back onto `queue` for
+        /// `completion`. The one async dispatch every fixed-queue lane's triple uses (see `queue(for:)`
+        /// for which lanes those are); `.terminalControl` and `.workspaceGit` keep their own dispatch below
+        /// instead of routing through here, because either would change what happens if `self` has already
+        /// deallocated by the time `targetQueue` runs `handler` — `.terminalControl`'s lane must still be
+        /// released, and `.workspaceGit`'s queue is resolved (and possibly minted) before this ever runs.
+        private func dispatchAsync(
+            on targetQueue: DispatchQueue, handler: @escaping (SpacesDeviceAPIServer) throws -> SpacesDeviceAPIResponse,
+            completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            agentHookQueue.async { [weak self] in
+            targetQueue.async { [weak self] in
                 guard let self else { return }
-                let result = Result { try self.handleAgentHookRequest(request) }
+                let result = Result { try handler(self) }
                 self.queue.async { completion(result) }
             }
         }
     #endif
 
     #if os(Linux) && canImport(OpenSSL)
+        /// Runs `handler` synchronously on `targetQueue`. The Linux counterpart to `dispatchAsync` above,
+        /// for the same set of fixed-queue lanes and the same reason `.terminalControl`/`.workspaceGit`
+        /// stay out of it.
+        private func dispatchSync(on targetQueue: DispatchQueue, handler: (SpacesDeviceAPIServer) throws -> SpacesDeviceAPIResponse) throws
+            -> SpacesDeviceAPIResponse
+        {
+            try targetQueue.sync { try handler(self) }
+        }
+    #endif
+
+    #if canImport(Network) && canImport(Security)
+        private func handleAgentHookRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            dispatchAsync(on: queue(for: .agentHook), handler: { try $0.handleAgentHookRequest(request) }, completion: completion)
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
         private func handleAgentHookRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try agentHookQueue.sync { try handleAgentHookRequest(request) }
+            try dispatchSync(on: queue(for: .agentHook)) { try $0.handleAgentHookRequest(request) }
         }
     #endif
 
@@ -2978,6 +3048,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         switch request.command {
         case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
         default: preconditionFailure("Only `.runWorkspaceSetup` runs on the workspace-setup queue.")
+        }
+    }
+
+    /// Runs `.startWorkspaceCommandSession` (see `runsOnWorkspaceTerminalLaunchQueue`) on its own serial
+    /// queue, confined the same way `handleWorkspaceSetupRequest` confines its store and orchestrator.
+    private func handleWorkspaceTerminalLaunchRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
+        default: preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
         }
     }
 
@@ -3020,47 +3100,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func handleWorkspaceTeardownRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            workspaceTeardownQueue.async { [weak self] in
-                guard let self else { return }
-                let result = Result { try self.handleWorkspaceTeardownRequest(request) }
-                self.queue.async { completion(result) }
-            }
+            dispatchAsync(
+                on: queue(for: .workspaceTeardown), handler: { try $0.handleWorkspaceTeardownRequest(request) }, completion: completion)
         }
 
         private func handleWorkspaceStopRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            workspaceStopQueue.async { [weak self] in
-                guard let self else { return }
-                let result = Result { try self.handleWorkspaceStopRequest(request) }
-                self.queue.async { completion(result) }
-            }
+            dispatchAsync(on: queue(for: .workspaceStop), handler: { try $0.handleWorkspaceStopRequest(request) }, completion: completion)
         }
 
         private func handleWorkspaceSetupRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            workspaceSetupQueue.async { [weak self] in
-                guard let self else { return }
-                let result = Result { try self.handleWorkspaceSetupRequest(request) }
-                self.queue.async { completion(result) }
-            }
+            dispatchAsync(on: queue(for: .workspaceSetup), handler: { try $0.handleWorkspaceSetupRequest(request) }, completion: completion)
         }
 
         private func handleStartWorkspaceCommandSessionAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
-            workspaceTerminalLaunchQueue.async { [weak self] in
-                guard let self else { return }
-                let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
-                let result = Result {
-                    guard case .startWorkspaceCommandSession(let payload) = request.command else {
-                        preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
-                    }
-                    return try self.handleStartWorkspaceCommandSessionRequest(payload, context: context)
-                }
-                self.queue.async { completion(result) }
-            }
+            dispatchAsync(
+                on: queue(for: .workspaceTerminalLaunch), handler: { try $0.handleWorkspaceTerminalLaunchRequest(request) },
+                completion: completion)
         }
 
         private func handleWorkspaceGitRequestAsync(
@@ -3081,37 +3142,27 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             // Called already confined to `queue` (see `processBufferedLines`), so resolving (and, on first
             // use, creating) the per-workspace queue here is safe before hopping off `queue` to run the git
-            // work itself.
-            let targetQueue = workspaceGitQueue(for: workspaceID)
-            targetQueue.async { [weak self] in
-                guard let self else { return }
-                let result = Result { try self.handleWorkspaceGitRequest(request) }
-                self.queue.async { completion(result) }
-            }
+            // work itself. The queue is resolved dynamically per-workspace, so this can't route through
+            // `dispatchAsync`'s fixed `queue(for:)` lookup; only the final hop matches that shape.
+            dispatchAsync(on: workspaceGitQueue(for: workspaceID), handler: { try $0.handleWorkspaceGitRequest(request) }, completion: completion)
         }
     #endif
 
     #if os(Linux) && canImport(OpenSSL)
         private func handleWorkspaceTeardownRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try workspaceTeardownQueue.sync { try handleWorkspaceTeardownRequest(request) }
+            try dispatchSync(on: queue(for: .workspaceTeardown)) { try $0.handleWorkspaceTeardownRequest(request) }
         }
 
         private func handleWorkspaceStopRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try workspaceStopQueue.sync { try handleWorkspaceStopRequest(request) }
+            try dispatchSync(on: queue(for: .workspaceStop)) { try $0.handleWorkspaceStopRequest(request) }
         }
 
         private func handleWorkspaceSetupRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try workspaceSetupQueue.sync { try handleWorkspaceSetupRequest(request) }
+            try dispatchSync(on: queue(for: .workspaceSetup)) { try $0.handleWorkspaceSetupRequest(request) }
         }
 
         private func handleStartWorkspaceCommandSessionOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-            try workspaceTerminalLaunchQueue.sync {
-                let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
-                guard case .startWorkspaceCommandSession(let payload) = request.command else {
-                    preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
-                }
-                return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
-            }
+            try dispatchSync(on: queue(for: .workspaceTerminalLaunch)) { try $0.handleWorkspaceTerminalLaunchRequest(request) }
         }
 
         private func handleWorkspaceGitRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3125,7 +3176,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // Unlike the macOS path above, this runs off `queue` (see the caller), so resolving the
             // per-workspace queue must itself hop onto `queue` rather than touching the dictionary directly.
             let targetQueue = try syncOnQueue { workspaceGitQueue(for: workspaceID) }
-            return try targetQueue.sync { try handleWorkspaceGitRequest(request) }
+            return try dispatchSync(on: targetQueue) { try $0.handleWorkspaceGitRequest(request) }
         }
     #endif
 
@@ -3147,6 +3198,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     #if canImport(Network) && canImport(Security)
+        // Bespoke, not routed through `dispatchAsync`: the retained lane must be released even if `self`
+        // has deallocated by the time it runs, so the release has to live in a `defer` that closes over
+        // `terminalControlLanes` independently of `self` — `dispatchAsync`'s `guard let self else { return }`
+        // runs the handler only when `self` is still alive and has no way to run a caller-supplied cleanup
+        // on the nil-self path.
         private func handleTerminalControlRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
@@ -3240,6 +3296,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
+
+    #if os(Linux) && canImport(OpenSSL)
+        /// Admits and authorizes on `queue`, in the one hop every worker-queue lane but `.mainQueue` takes
+        /// before handing off to its own handler (`.mainQueue` folds this same check into the single
+        /// `syncOnQueue` call that also runs `handleRequest`, so it does not call this). Riding both checks
+        /// in one hop, rather than two, keeps a teardown from landing between the check and the work (see
+        /// `admitOnQueue`'s doc comment). The Darwin transport never needs this: it admits/authorizes once
+        /// on `queue` before it ever branches on lane (see `dispatchOnDeviceAPIQueue`), so its worker-queue
+        /// handlers only need to hop, not re-check.
+        private func admitAndAuthorizeOnQueue(_ request: SpacesDeviceAPIRequest) throws {
+            try syncOnQueue {
+                try admitOnQueue()
+                try authorize(request)
+            }
+        }
+    #endif
 
     /// Maps a thrown error to its wire failure category at the top-level flatten points, where a typed
     /// error collapses into `(ok:false, message:)`. `authorize` and `resolvedRunningProcessID` rewrap
