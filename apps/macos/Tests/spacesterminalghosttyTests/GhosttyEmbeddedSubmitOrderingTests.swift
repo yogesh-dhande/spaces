@@ -74,6 +74,39 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
     private static func occurrences(of needle: String, in haystack: String) -> Int { haystack.components(separatedBy: needle).count - 1 }
 
+    /// Serializes an 8 MiB host-PTY submit write against every other process running this test file, not
+    /// just against other tests inside this one process. SwiftPM's parallel runner dispatches
+    /// `testEmbeddedSubmitAnswersOnlyOnceItsHostPTYWriteCompleted` and
+    /// `testEmbeddedSubmitWhoseHostPTYWriteFailsReportsFailure` to two separate worker processes at the
+    /// same instant, and the kernel PTY write path is superlinear in concurrent large writers: one 8 MiB
+    /// writer finishes in 0.21s, two concurrent writers take 3.75s each, three take 6.86s each. That puts
+    /// the concurrent pair right at the 4s acknowledgement deadline
+    /// (`TerminalControlHandling.writeAcknowledgementTimeout`), so the pair fails under any extra machine
+    /// load. An in-process lock (an actor, a semaphore) cannot serialize writers running in separate
+    /// processes, so this uses a file lock instead: see issue #579.
+    private func withSerializedLargePTYWrite<T>(_ body: () async throws -> T) async throws -> T {
+        let lockPath = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-tests-large-pty-write.lock").path
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else {
+            XCTFail("Failed to open the large-PTY-write lock file at \(lockPath).")
+            throw NSError(domain: "GhosttyEmbeddedSubmitOrderingTests", code: 2)
+        }
+        defer {
+            flock(fd, LOCK_UN)
+            close(fd)
+        }
+        let deadline = Date().addingTimeInterval(60)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if Date() >= deadline {
+                throw NSError(
+                    domain: "GhosttyEmbeddedSubmitOrderingTests", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for the large-PTY-write lock."])
+            }
+            try await Task.sleep(for: .milliseconds(50), clock: .continuous)
+        }
+        return try await body()
+    }
+
     func testRapidSubmitSendsReachChildAsSeparateSubmissions() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
@@ -219,18 +252,21 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
         let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
         let hostBox = Box(host)
-        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
         let outputPath = paths.outputPath
         try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
 
-        let sentAt = ContinuousClock.now
-        let response = host.core.handleControlRequest(
-            TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
+        try await withSerializedLargePTYWrite {
+            defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
 
-        XCTAssertTrue(response.ok, response.message)
-        XCTAssertGreaterThanOrEqual(
-            sentAt.duration(to: .now), .milliseconds(150),
-            "the submit answered before its bytes could have reached the PTY, so it answered for ghostty's queue instead")
+            let sentAt = ContinuousClock.now
+            let response = host.core.handleControlRequest(
+                TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
+
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertGreaterThanOrEqual(
+                sentAt.duration(to: .now), .milliseconds(150),
+                "the submit answered before its bytes could have reached the PTY, so it answered for ghostty's queue instead")
+        }
     }
 
     /// The failure half of the same contract, and the case the acknowledgement exists for: the submit's
@@ -248,21 +284,24 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
         let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
         let hostBox = Box(host)
-        defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
         let outputPath = paths.outputPath
         try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
 
-        let childPID = try XCTUnwrap(TerminalEngineActor.runSynchronously { hostBox.value.core.childPID() })
-        let killer = Task.detached {
-            try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
-            kill(childPID, SIGKILL)
-        }
-        let response = host.core.handleControlRequest(
-            TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
-        await killer.value
+        try await withSerializedLargePTYWrite {
+            defer { TerminalEngineActor.runSynchronously { hostBox.value.terminate() } }
 
-        XCTAssertFalse(response.ok, "a submit whose bytes never reached the PTY must not report success")
-        XCTAssertEqual(response.errorCode, .sessionNotRunning)
+            let childPID = try XCTUnwrap(TerminalEngineActor.runSynchronously { hostBox.value.core.childPID() })
+            let killer = Task.detached {
+                try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
+                kill(childPID, SIGKILL)
+            }
+            let response = host.core.handleControlRequest(
+                TerminalControlRequest(command: "send", text: String(repeating: "A", count: 8 << 20), appendNewline: true))
+            await killer.value
+
+            XCTAssertFalse(response.ok, "a submit whose bytes never reached the PTY must not report success")
+            XCTAssertEqual(response.errorCode, .sessionNotRunning)
+        }
     }
 
     /// A send answers for its bytes, not for its enqueue: a session torn down while the submit still had a

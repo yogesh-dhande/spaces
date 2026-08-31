@@ -136,13 +136,13 @@ import Foundation
                 }
                 return true
             }
-            runtimeConfig.read_clipboard_cb = { _, _, _ in false }
+            // Mobile surfaces are display-only mirrors that parse no VT stream, so no clipboard request
+            // ever originates there: reads are reported unsupported, the confirm callback never fires,
+            // and a program's clipboard write reaches the phone through the session stream (forwarded
+            // by the owning daemon), never through this runtime callback.
+            runtimeConfig.read_clipboard_cb = { _, _, _, _, _, _ in GHOSTTY_CLIPBOARD_READ_UNSUPPORTED }
             runtimeConfig.confirm_read_clipboard_cb = { _, _, _, _ in }
-            runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in
-                guard let content, len > 0 else { return }
-                let data = Data(bytes: content, count: Int(len))
-                UIPasteboard.general.string = String(decoding: data, as: UTF8.self)
-            }
+            runtimeConfig.write_clipboard_cb = { _, _, _, _, _ in }
             runtimeConfig.close_surface_cb = { _, _ in }
             return runtimeConfig
         }

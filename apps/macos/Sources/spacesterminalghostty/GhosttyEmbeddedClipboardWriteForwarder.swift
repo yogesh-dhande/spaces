@@ -12,14 +12,19 @@
     /// owner and drops it when nothing owns the session.
     enum GhosttyEmbeddedClipboardWriteForwarder {
         /// Matches `SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES` in the Linux vt shim, so both cores refuse the
-        /// same runaway payload and a session behaves identically on either daemon.
+        /// same runaway payload and a session behaves identically on either daemon. The generated Ghostty
+        /// config's `clipboard-write-limit-bytes` carries this same value, so Ghostty itself refuses a
+        /// larger OSC 5522 transaction before it ever reaches this forwarder.
         static let maximumClipboardWriteBytes = 1 * 1024 * 1024
 
         static func forward(
             userdata: UnsafeMutableRawPointer?, location: ghostty_clipboard_e, content: UnsafePointer<ghostty_clipboard_content_s>?, count: Int
         ) {
             // Spaces carries only the system clipboard; the selection clipboard has no counterpart on
-            // a client device.
+            // a client device. The embedded write callback carries no result back to Ghostty, so a
+            // Kitty clipboard (OSC 5522) write dropped here (selection location, or no `text/plain`
+            // representation) still reads to the program as acknowledged. Accepted: such writes have
+            // nothing Spaces could deliver, and reporting failure would need a fork-side ABI change.
             guard location == GHOSTTY_CLIPBOARD_STANDARD else { return }
             // Mirror surfaces set no `GhosttyEmbeddedSurfaceUserData`, so a null userdata means this is
             // not a daemon session surface and there is no session to attribute the write to.

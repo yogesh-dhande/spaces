@@ -665,6 +665,20 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
         return NULL;
     }
 
+    // Without this, libghostty-vt spools up to its 64 MiB default per OSC 5522 (Kitty clipboard)
+    // write transaction before the shim's own size check in spaces_ghostty_vt_on_clipboard_write
+    // ever runs. Capping it here to the same limit the shim enforces means an oversized 5522
+    // transaction fails with EFBIG before it is buffered. OSC 52 writes are unaffected by this
+    // option; they are bounded by escape-sequence length and still go through the shim's
+    // SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES check on the decoded payload.
+    size_t clipboard_write_max_bytes = SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES;
+    if (session->symbols.terminal_set(
+            session->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, &clipboard_write_max_bytes
+        ) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
     if (session->symbols.render_state_new(NULL, &session->render_state) != GHOSTTY_SUCCESS) {
         spaces_ghostty_vt_session_free(session);
         return NULL;
@@ -777,27 +791,53 @@ static bool spaces_ghostty_vt_on_color_scheme(GhosttyTerminal terminal, void *us
     return true;
 }
 
-static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
+// Answers a clipboard write request. The request is only valid until this returns, so the reply
+// must happen before that: the request carries the terminal's own reply function and an opaque
+// ctx that trampoline needs, both of which are meaningless once the callback that received the
+// request returns.
+static void spaces_ghostty_vt_reply_clipboard_write(const GhosttyClipboardWrite *request, GhosttyClipboardWriteResult result) {
+    GhosttyClipboardWriteReply reply = {
+        .size = sizeof(GhosttyClipboardWriteReply),
+        .result = result,
+        .remember = false,
+    };
+    request->reply(request, &reply);
+}
+
+// Records a clipboard clear (no text content, cleared flag set) and acknowledges the write.
+// Shared by the two sites that mean "clear": zero-length request contents, and a chosen text/plain
+// representation whose data.len is itself zero.
+static void spaces_ghostty_vt_record_clipboard_clear(
+    SpacesGhosttyVtSession *session, const GhosttyClipboardWrite *request
+) {
+    free(session->pending.clipboard_text);
+    session->pending.clipboard_text = NULL;
+    session->pending.clipboard_len = 0;
+    session->pending.clipboard_cleared = true;
+    spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS);
+}
+
+static void spaces_ghostty_vt_on_clipboard_write(
     GhosttyTerminal terminal, void *userdata, const GhosttyClipboardWrite *request
 ) {
     (void)terminal;
     SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
-    if (session == NULL || request == NULL) return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
-    // Sized struct: a request smaller than this build's struct predates a field read below.
-    if (request->size < sizeof(GhosttyClipboardWrite)) return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    if (session == NULL || request == NULL) return;
+    // Sized struct: a request smaller than this build's struct predates a field read below,
+    // including the `reply` field itself, so this must be checked before touching it. Returning
+    // without calling reply is the contract's own definition of a denial.
+    if (request->size < sizeof(GhosttyClipboardWrite)) return;
 
     // Spaces carries only the system clipboard; the selection clipboards have no counterpart here.
     if (request->location != GHOSTTY_CLIPBOARD_LOCATION_STANDARD) {
         session->pending.clipboard_dropped = true;
-        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+        spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED);
+        return;
     }
 
     if (request->contents_len == 0) {
-        free(session->pending.clipboard_text);
-        session->pending.clipboard_text = NULL;
-        session->pending.clipboard_len = 0;
-        session->pending.clipboard_cleared = true;
-        return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+        spaces_ghostty_vt_record_clipboard_clear(session, request);
+        return;
     }
 
     // The representations are alternative encodings of one value; Spaces stores text, so the first
@@ -813,27 +853,36 @@ static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
     }
     if (chosen == NULL) {
         session->pending.clipboard_dropped = true;
-        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+        spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED);
+        return;
     }
     if (chosen->data.len > (size_t)SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES) {
         session->pending.clipboard_dropped = true;
-        return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+        spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA);
+        return;
+    }
+    // An empty text/plain representation is a clear, matching the macOS forwarder
+    // (GhosttyEmbeddedClipboardWriteForwarder): a zero-length payload here is not a zero-length write.
+    if (chosen->data.len == 0) {
+        spaces_ghostty_vt_record_clipboard_clear(session, request);
+        return;
     }
 
     // The payload is borrowed for the callback's duration only, so it is copied here.
-    char *copy = (char *)malloc(chosen->data.len > 0 ? chosen->data.len : 1);
+    char *copy = (char *)malloc(chosen->data.len);
     if (copy == NULL) {
         session->pending.clipboard_dropped = true;
-        return GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR;
+        spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR);
+        return;
     }
-    if (chosen->data.len > 0 && chosen->data.ptr != NULL) memcpy(copy, chosen->data.ptr, chosen->data.len);
+    if (chosen->data.ptr != NULL) memcpy(copy, chosen->data.ptr, chosen->data.len);
 
     // Last write of the turn wins, including over a clear that arrived earlier in the same turn.
     free(session->pending.clipboard_text);
     session->pending.clipboard_text = copy;
     session->pending.clipboard_len = chosen->data.len;
     session->pending.clipboard_cleared = false;
-    return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+    spaces_ghostty_vt_reply_clipboard_write(request, GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS);
 }
 
 bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
@@ -854,6 +903,11 @@ bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
         {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
         {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
         {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+        // GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately not registered: with no read callback,
+        // libghostty-vt denies OSC 52 "?" and OSC 5522 reads itself, and Spaces has nothing to serve
+        // there anyway. The daemon holds no clipboard of its own (a session's clipboard lives on the
+        // owning client, see docs/implementation.md), and there is no path from the daemon back to a
+        // client's pasteboard for a read to draw from.
     };
 
     // Every registration is attempted and every result folded in: the caller depends on these events

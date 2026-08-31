@@ -138,6 +138,8 @@ git -C apps/macos/vendor/ghostty push origin HEAD:spaces
 git add apps/macos/vendor/ghostty
 ```
 
+The fork's own test gate is the Zig suites, run inside the submodule with the pinned Zig toolchain: `zig build`, `zig build test -Demit-xcframework=false -Demit-macos-app=false`, and `zig build test-lib-vt`. Plain `zig build test` additionally builds and runs Ghostty.app's Xcode suite (`macos/GhosttyTests`), which tests the upstream Swift app Spaces never links and whose test host loads only on macOS 26 (it references `SwiftUI.Glass`); that suite is not part of the gate. Spaces consumes only `GhosttyKit.xcframework` and `libghostty-vt`, which the Zig suites and the Spaces verification gate cover.
+
 PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete for that build environment; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass from the primary checkout, which owns the shared cache that the `rm` clears so setup exercises the download rather than a cache restore:
 
 ```bash

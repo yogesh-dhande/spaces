@@ -54,6 +54,23 @@ import ghosttyvtshim
 
     private func osc52(_ payload: String) -> String { "\u{1B}]52;c;\(payload)\u{07}" }
 
+    /// One Kitty clipboard protocol (OSC 5522) packet: `ESC ] 5522 ; <metadata> [; <base64 payload>] BEL`.
+    /// A nil payload omits the payload section entirely (used by the commit packet, which carries none).
+    private func kitty5522(_ metadata: String, payload: String? = nil) -> String {
+        guard let payload else { return "\u{1B}]5522;\(metadata)\u{07}" }
+        return "\u{1B}]5522;\(metadata);\(payload)\u{07}"
+    }
+
+    /// A complete Kitty clipboard write transaction targeting the standard clipboard: the `type=write`
+    /// packet that opens it, one `type=wdata` packet carrying the base64-encoded `text/plain` payload,
+    /// and the empty-mime `type=wdata` packet that commits it. Wire format per
+    /// src/terminal/kitty/clipboard_write.zig and osc/parsers/kitty_clipboard_protocol.zig.
+    private func kittyClipboardWrite(_ text: String) -> String {
+        let mime = Data("text/plain".utf8).base64EncodedString()
+        let payload = Data(text.utf8).base64EncodedString()
+        return kitty5522("type=write") + kitty5522("type=wdata:mime=\(mime)", payload: payload) + kitty5522("type=wdata")
+    }
+
     @Test func bellsAreCountedAndTheDrainEmptiesTheSink() throws {
         let session = try makeSession()
         defer { spaces_ghostty_vt_session_free(session) }
@@ -157,6 +174,56 @@ import ghosttyvtshim
         let events = drain(session)
         #expect(events.clipboardDropped)
         #expect(events.clipboardText == nil)
+    }
+
+    /// The Kitty clipboard protocol (OSC 5522) answers every write with a status packet on the same
+    /// write-pty path as other query replies, distinct from OSC 52 which has no acknowledgement at all.
+    /// A committed write both raises the same clipboardText event OSC 52 does and reports success
+    /// (status=DONE) to the writing program, rather than the EPERM a denied write would send.
+    @Test func kittyClipboardWriteIsAcknowledged() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, kittyClipboardWrite("kitty clipboard text"))
+        let events = drain(session)
+        #expect(events.clipboardText == "kitty clipboard text")
+        #expect(!events.clipboardDropped)
+        #expect(events.ptyResponse == "\u{1B}]5522;type=write:status=DONE\u{07}")
+    }
+
+    /// A chosen text/plain representation whose payload is itself empty is a clear, not a zero-length
+    /// write: the transaction still commits (status=DONE) but the shim must record clipboard_cleared
+    /// rather than clipboard_len == 0, matching the macOS forwarder's treatment of an empty write as a
+    /// clear (GhosttyEmbeddedClipboardWriteForwarder).
+    @Test func aZeroLengthKittyTextWriteReportsAClear() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, kittyClipboardWrite("stale"))
+        #expect(drain(session).clipboardText == "stale")
+
+        write(session, kittyClipboardWrite(""))
+        let events = drain(session)
+        #expect(events.clipboardCleared)
+        #expect(events.clipboardText == nil)
+        #expect(events.ptyResponse == "\u{1B}]5522;type=write:status=DONE\u{07}")
+    }
+
+    /// GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES is set to SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES at
+    /// session creation, so an oversized 5522 transaction is rejected by libghostty-vt's own transaction
+    /// buffer (EFBIG) before the payload ever reaches the shim's clipboard_write callback: no clipboardText
+    /// event, no clipboardDropped either, since the callback that sets it is never invoked.
+    @Test func oversizedKittyClipboardWriteIsRejectedBeforeBuffering() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        let oversized = String(repeating: "a", count: Int(SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES) + 3)
+        let mime = Data("text/plain".utf8).base64EncodedString()
+        let payload = Data(oversized.utf8).base64EncodedString()
+        write(session, kitty5522("type=write") + kitty5522("type=wdata:mime=\(mime)", payload: payload))
+        let events = drain(session)
+        #expect(events.clipboardText == nil)
+        #expect(events.ptyResponse == "\u{1B}]5522;type=write:status=EFBIG\u{07}")
     }
 
     /// Terminal queries are answered through the write-pty effect, in the order the terminal emitted

@@ -29,8 +29,10 @@ Use the Zig toolchain pinned in `apps/macos/scripts/setup_ghostty.sh` (`ZIG_VERS
 In the submodule, all three must exit 0:
 
 1. `zig build`
-2. `zig build test`  (an advisory `failed command: ... xcodebuild test` line with overall exit 0 is a known artifact; if in doubt run the macOS Xcode suite standalone)
+2. `zig build test -Demit-xcframework=false -Demit-macos-app=false`
 3. `zig build test-lib-vt`
+
+Step 2 runs the Zig suites only. Plain `zig build test` also runs Ghostty.app's Xcode suite (`macos/GhosttyTests`), which tests the Swift app Spaces never links, and that test host needs macOS 26 to load (it references `SwiftUI.Glass`, upstream fd17869d1). Spaces consumes only `GhosttyKit.xcframework` and `libghostty-vt`, which steps 1 and 3, the Zig suites, and the Spaces gate cover, so the Xcode suite is not part of the fork gate.
 
 Then push: `git push origin spaces`.
 
