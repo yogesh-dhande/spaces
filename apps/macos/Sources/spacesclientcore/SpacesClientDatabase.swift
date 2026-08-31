@@ -378,12 +378,6 @@ public final class SpacesClientDatabase {
             bindings: [deviceID, workspaceID, targetURL])?.first.flatMap(Int.init)
     }
 
-    public func clearBrowserSessionWindowID(deviceID: String, workspaceID: String, targetURL: String) throws {
-        try execute(
-            sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ? AND target_url = ?",
-            bindings: [deviceID, workspaceID, targetURL])
-    }
-
     /// Every tracked Chrome window/tab mapping for a workspace's browser sessions, so the GUI can
     /// close the session tabs when the workspace stops.
     public func browserSessionWindowIDs(deviceID: String, workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {

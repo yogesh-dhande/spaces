@@ -285,17 +285,6 @@ extension WorkspaceOrchestrator {
         return command
     }
 
-    func preservesForegroundAgentCommandDetail(_ window: WindowRecord) -> Bool {
-        guard window.roleValue == .terminal, terminalHost(for: window.app) == .spaces, let sessionID = terminalSessionID(for: window) else {
-            return false
-        }
-        guard terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind == .shell else { return false }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
-            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.foregroundDetectedAgentKind != nil
-        else { return false }
-        return ((try? store.agentWindows(workspaceID: window.workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
-    }
-
     /// The name a coding-agent row carries when nothing reported one. A hook `init` signal carries no
     /// label and foreground detection cannot classify every command, so nameless registrations are
     /// routine; registration stores this as the row's real label rather than leaving the row nameless, so

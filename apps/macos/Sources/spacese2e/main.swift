@@ -1851,23 +1851,6 @@ private struct SeedFixtureCommand: ParsableCommand {
         try emitJSON(payload)
     }
 
-    /// Resolves the executable up front because the seeded process command is
-    /// launched by the GUI app, not by an interactive shell that necessarily
-    /// inherits the user's PATH customizations.
-    private func resolveExecutablePath(named name: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [name]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = Pipe()
-        try process.run()
-        let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        process.waitUntilExit()
-        guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
-        return path
-    }
-
     private func shellQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
     private func shellToken(_ raw: String) -> String { raw.contains("$") ? raw : shellQuoted(raw) }
@@ -2874,13 +2857,6 @@ extension TerminalServiceRequest {
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
-
-private func normalizeRemoteRoot(_ path: String) -> String {
-    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmed == "/" { return "/" }
-    if trimmed == "$HOME" || trimmed.hasPrefix("$HOME/") || trimmed == "~" || trimmed.hasPrefix("~/") { return trimmed }
-    return "/" + trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-}
 
 private func normalizedOptional(_ value: String?) -> String? { normalizedNonEmpty(value) }
 

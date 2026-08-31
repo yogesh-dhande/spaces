@@ -10,14 +10,6 @@ extension WorkspaceOrchestrator {
         return config
     }
 
-    @discardableResult public func updateRouterPort(_ port: Int) throws -> AppConfig {
-        guard port > 0, port <= 65535 else { throw WorkspaceError.invalidArgument(message: "Router port must be between 1 and 65535.") }
-        var config = try store.appConfig()
-        config.routerPort = port
-        try store.setAppConfig(config)
-        return config
-    }
-
     /// Builds the full Caddy route table: one route per service across every workspace,
     /// mapping `<service>.<workspace-slug>.localhost` to the service's assigned local port. All
     /// non-archived workspaces are routed (not just running ones) so service URLs stay stable; Caddy
