@@ -137,7 +137,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// `UIPasteboard.general`.
     var pasteboardOverrideForTesting: UIPasteboard?
     var isConnecting = false
+    /// Shadow of `isConnecting`. See `TerminalViewerState.swift`; not read by product code yet.
+    @ObservationIgnored private var connectionState = TerminalViewerConnectionState.idle
     var isBusy = false
+    /// Shadow of `isBusy` + `isAwaitingTakeoverConfirmation`. See `TerminalViewerState.swift`; not read
+    /// by product code yet.
+    @ObservationIgnored private var takeoverAttemptState = TerminalViewerTakeoverAttemptState.none
     var isSessionUnavailable = false
     var isSynchronizingOwnership = false {
         didSet {
@@ -151,6 +156,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("ownership_sync scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)")
         }
     }
+    /// Shadow of `isOwnershipSynchronizationScheduled` + `isSynchronizingOwnership`. See
+    /// `TerminalViewerState.swift`; not read by product code yet.
+    @ObservationIgnored private var ownershipSyncState = TerminalViewerOwnershipSyncState.idle
     var isInputSurfaceReady = false {
         didSet {
             guard isInputSurfaceReady != oldValue else { return }
@@ -216,6 +224,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
     private var isStopping = false
     private var hasSentStopDetach = false
+    /// Shadow of `isStopping` + `hasSentStopDetach`. See `TerminalViewerState.swift`; not read by
+    /// product code yet.
+    @ObservationIgnored private var runState = TerminalViewerRunState.running
     private var hasAttachedToSession = false
     private var viewerAttachmentLifecycle: UInt64 = 0
     /// `viewerAttachmentLifecycle` at the moment `latestState` last received a payload that actually
@@ -242,6 +253,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var isSceneActive = true
     private var foregroundResumeCycle: UInt64 = 0
     private var isForegroundResumeEvaluationPending = false
+    /// Shadow of `isSceneActive` + `isForegroundResumeEvaluationPending`. See
+    /// `TerminalViewerState.swift`; not read by product code yet.
+    @ObservationIgnored private var sceneState = TerminalViewerSceneState.active(resume: .none)
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
@@ -552,9 +566,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             hasSentStopDetach = false
         }
         isStopping = false
+        runState = .running
         isSessionUnavailable = false
         hasAttemptedAutomaticTakeover = false
         hasRetriedEndedStateAfterStreamClose = false
+        assertShadowConsistency()
         trace("start")
         if isEndedState {
             reconnectTask = Task { [weak self] in await self?.loadEndedState() }
@@ -682,7 +698,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isSceneActive = false
         foregroundResumeCycle &+= 1
         isForegroundResumeEvaluationPending = true
+        sceneState = .backgrounded(resume: .pending)
         trace("background_arm_foreground_state_evaluation cycle=\(foregroundResumeCycle)")
+        assertShadowConsistency()
     }
 
     /// Evaluates the ownership result associated with the foreground resume. Its stream reconnects without
@@ -692,12 +710,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !isStopping, !isEndedState else { return }
         let needsForegroundEvaluation = isForegroundResumeEvaluationPending || !isSceneActive
         isSceneActive = true
-        guard needsForegroundEvaluation else { return }
+        sceneState = isForegroundResumeEvaluationPending ? .active(resume: .pending) : .active(resume: .none)
+        guard needsForegroundEvaluation else {
+            assertShadowConsistency()
+            return
+        }
         if !isForegroundResumeEvaluationPending {
             foregroundResumeCycle &+= 1
             isForegroundResumeEvaluationPending = true
+            sceneState = .active(resume: .pending)
             trace("foreground_arm_remounted_state_evaluation cycle=\(foregroundResumeCycle)")
         }
+        assertShadowConsistency()
         let resumeCycle = foregroundResumeCycle
         let lifecycle = viewerAttachmentLifecycle
         let clientID = remoteClient.id
@@ -772,6 +796,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     )? {
         guard !hasSentStopDetach else { return nil }
         hasSentStopDetach = true
+        // `isStopping`/`runState` land here, immediately after `hasSentStopDetach`, so that by the time
+        // `cancelAutomaticTakeover()` runs below the whole Axis A transition (and this call's Axis C
+        // clears) has already landed: everything in between (`shouldDetach` etc.) reads neither flag, so
+        // this reordering is behavior-preserving and lets `cancelAutomaticTakeover()` assert its own
+        // consistency instead of needing an exemption.
+        isStopping = true
+        runState = .stopped(detachSent: true)
         let pendingAttachment = viewerAttachmentOperation
         let pendingAutomaticTakeover = automaticTakeoverTask
         let shouldDetach = (hasAttachedToSession || pendingAttachment != nil || pendingAutomaticTakeover != nil) && !isEndedState
@@ -780,12 +811,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         viewerAttachmentOperation = nil
         viewerAttachmentLifecycle &+= 1
         cancelAutomaticTakeover()
-        isStopping = true
         isBusy = false
         isAwaitingTakeoverConfirmation = false
+        takeoverAttemptState = .none
         hasAttachedToSession = false
         hasAttemptedAutomaticTakeover = false
         isForegroundResumeEvaluationPending = false
+        sceneState = isSceneActive ? .active(resume: .none) : .backgrounded(resume: .none)
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reconnectTask?.cancel()
@@ -819,6 +851,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasRetriedEndedStateAfterStreamClose = false
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
+        ownershipSyncState = .idle
+        assertShadowConsistency()
         return (channel, clientID, pendingAttachment, pendingAutomaticTakeover, shouldDetach)
     }
 
@@ -846,11 +880,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let clientID = remoteClient.id
         guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         isConnecting = true
+        connectionState = .connecting
         defer {
             if isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) {
                 isConnecting = false
                 reconnectTask = nil
             }
+            // Derived from the flag rather than assumed `.idle`: on the stale-lifecycle path above,
+            // `isConnecting` is left as whatever another, current lifecycle's connect/reconnect set it
+            // to, and this keeps `connectionState` exactly mirroring that value instead of the state
+            // this call started with.
+            connectionState = isConnecting ? .connecting : .idle
+            assertShadowConsistency()
         }
         trace("ended_state_load")
         _ = await refreshLatestState(
@@ -879,10 +920,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         isAwaitingTakeoverConfirmation = true
+        takeoverAttemptState = .awaitingConfirmation
+        // Runs on every exit (normal return, early guard return, or throw), so this is the one place
+        // that reliably observes this attempt's final `isBusy`/`isAwaitingTakeoverConfirmation` pair
+        // regardless of which branch below produced it.
         defer {
             if isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), automaticContext.map(isCurrentAutomaticTakeover) ?? true {
                 isBusy = false
             }
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
+            assertShadowConsistency()
         }
         trace("takeover_begin")
         do {
@@ -926,15 +973,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             errorMessage = nil
             if !isOwner {
                 isAwaitingTakeoverConfirmation = false
+                takeoverAttemptState = TerminalViewerTakeoverAttemptState(
+                    isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
                 trace("takeover_unconfirmed")
                 return
             }
             isAwaitingTakeoverConfirmation = false
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             trace("takeover_success state=\(takeoverState == nil ? 0 : 1) owner=\(isOwner ? 1 : 0)")
         } catch {
             guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
+            // Mirrored immediately (not left to the defer below): `handleAuthenticationFailure` a few
+            // lines down calls `cancelAutomaticTakeover()`, whose own consistency assert would otherwise
+            // observe this clear before the defer's mirror has run.
             isAwaitingTakeoverConfirmation = false
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             if Self.isTransientReconnectError(error) {
                 trace("takeover_transient_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
                 errorMessage = nil
@@ -1732,13 +1786,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let reconnectSilently = shouldReconnectSilently
         trace("connect_begin silent=\(reconnectSilently ? 1 : 0) attach_before_subscribe=\(shouldAttachBeforeSubscribing ? 1 : 0)")
         if reconnectSilently { isConnecting = false } else { isConnecting = true }
+        connectionState = isConnecting ? .connecting : .idle
         do {
             if shouldAttachBeforeSubscribing {
                 try await attachViewerForCurrentLifecycle()
-                guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+                guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                    assertShadowConsistency()
+                    return
+                }
                 trace("connect_attach_success")
             }
-            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                assertShadowConsistency()
+                return
+            }
             let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID) { [weak self] payload in
                 guard let self else { return }
                 guard self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
@@ -1757,6 +1818,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
                 handle.cancel()
+                assertShadowConsistency()
                 return
             }
             streamHandle = handle
@@ -1776,16 +1838,28 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap", lifecycle: lifecycle,
                 clientID: clientID, isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) }
             )
-            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                assertShadowConsistency()
+                return
+            }
             // Only a non-owner settles `isConnecting` on a bootstrap that answered nothing: an owner
             // reconnects silently, so it never raised the flag in the first place.
-            if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
+            if refreshedState == nil, !isOwner, !isStopping {
+                isConnecting = false
+                connectionState = .idle
+            }
+            assertShadowConsistency()
         } catch {
-            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                assertShadowConsistency()
+                return
+            }
             reconnectTask = nil
             isConnecting = false
+            connectionState = .idle
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             await handleConnectError(error)
+            assertShadowConsistency()
         }
     }
 
@@ -1962,21 +2036,29 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("disconnect error=\(sanitizedTraceDetail(error?.localizedDescription ?? "nil")) silent=\(reconnectSilently ? 1 : 0)")
         streamHandle = nil
         isConnecting = false
+        connectionState = .idle
         if !reconnectSilently {
             isAwaitingTakeoverConfirmation = false
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
         }
-        if isStopping { return }
+        if isStopping {
+            assertShadowConsistency()
+            return
+        }
         if isEndedState {
             isBusy = false
             isConnecting = false
             isAwaitingTakeoverConfirmation = false
+            connectionState = .idle
+            takeoverAttemptState = .none
             errorMessage = nil
             if latestState?.renderSnapshot == nil, !hasRetriedEndedStateAfterStreamClose {
                 hasRetriedEndedStateAfterStreamClose = true
                 await loadEndedState()
             }
+            assertShadowConsistency()
             return
         }
         if let error {
@@ -1991,11 +2073,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             if let unavailableMessage = unavailableMessage(for: error) {
                 isSessionUnavailable = true
                 errorMessage = unavailableMessage
+                assertShadowConsistency()
                 return
             }
             if isTransient, latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         }
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
+        assertShadowConsistency()
     }
 
     private func handleConnectError(_ error: Error) async {
@@ -2022,18 +2106,41 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let clientID = remoteClient.id
         trace("missing_live_stream_state_refresh reason=\(reason)")
         isBusy = false
+        // A concurrent `takeOver()` may be suspended awaiting its own network response while this
+        // recovery runs (see `TerminalViewerTakeoverAttemptState.confirmationPendingAfterRecoveryClearedBusy`'s
+        // doc comment, which names this call site): `isAwaitingTakeoverConfirmation` is left untouched
+        // here, so the derivation below reads whatever that other attempt's flag currently holds and
+        // maps the pair exactly, rather than assuming either flag's value.
+        takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
         isConnecting = true
+        connectionState = .connecting
         let refreshedState = await refreshLatestState(
             timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason, lifecycle: lifecycle, clientID: clientID)
-        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else {
+            assertShadowConsistency()
+            return false
+        }
         isConnecting = false
-        guard let refreshedState else { return false }
+        connectionState = .idle
+        guard let refreshedState else {
+            assertShadowConsistency()
+            return false
+        }
         if refreshedState.reasonKind == .terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
+            // A fresh `takeOver()` may have started during this recovery's own await above, passing its
+            // `guard !isBusy` while `isBusy` read `false` here (see
+            // `TerminalViewerTakeoverAttemptState.sendingAfterRecoveryClearedConfirmation`'s doc comment,
+            // which names this call site); clearing only `isAwaitingTakeoverConfirmation` and deriving
+            // from both current flags exactly (rather than assuming `isBusy` is still this recovery's own)
+            // is what makes that interleaving representable instead of approximated away.
             isAwaitingTakeoverConfirmation = false
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             errorMessage = nil
+            assertShadowConsistency()
             return true
         }
+        assertShadowConsistency()
         return false
     }
 
@@ -2041,10 +2148,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard Self.isStartingSessionLaunchNotReadyError(error), !isStopping, isStartingState else { return false }
         trace("starting_launch_not_ready_retry reason=\(reason)")
         isBusy = false
+        // Same reachable race as `recoverEndedStateIfLiveStreamIsMissing`'s `isBusy = false` above: see
+        // `TerminalViewerTakeoverAttemptState.confirmationPendingAfterRecoveryClearedBusy`'s doc comment.
+        takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
         isConnecting = false
+        connectionState = .idle
         isSessionUnavailable = false
         errorMessage = nil
         scheduleReconnect(after: Self.silentReconnectDelay)
+        assertShadowConsistency()
         return true
     }
 
@@ -2059,18 +2171,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let clientID = remoteClient.id
         trace("terminal_stopped_state_refresh reason=\(reason)")
         isBusy = false
+        // Same reachable race as `recoverEndedStateIfLiveStreamIsMissing`'s `isBusy = false` above: see
+        // `TerminalViewerTakeoverAttemptState.confirmationPendingAfterRecoveryClearedBusy`'s doc comment.
+        // This method is also reachable from `routeInputSendRecovery`'s failed-input path, which the
+        // enum's doc comment names as one of the three callers that can leave the race window open.
+        takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
         isConnecting = true
+        connectionState = .connecting
         let refreshedState = await refreshLatestState(
             timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason, lifecycle: lifecycle, clientID: clientID)
-        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else {
+            assertShadowConsistency()
+            return false
+        }
         isConnecting = false
-        guard let refreshedState else { return false }
+        connectionState = .idle
+        guard let refreshedState else {
+            assertShadowConsistency()
+            return false
+        }
         if refreshedState.reasonKind == .terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
+            // Same reachable race as `recoverEndedStateIfLiveStreamIsMissing`'s terminated branch above:
+            // see `TerminalViewerTakeoverAttemptState.sendingAfterRecoveryClearedConfirmation`'s doc comment.
             isAwaitingTakeoverConfirmation = false
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             errorMessage = nil
+            assertShadowConsistency()
             return true
         }
+        assertShadowConsistency()
         return false
     }
 
@@ -2110,6 +2240,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func finishForegroundStateEvaluation(resumeCycle: UInt64, acceptedState: GhosttyRemoteSessionStatePayload?) {
         guard foregroundResumeCycle == resumeCycle, isForegroundResumeEvaluationPending, isSceneActive else { return }
         isForegroundResumeEvaluationPending = false
+        // `isSceneActive` is guaranteed true by the guard above (nothing async runs between it and here).
+        sceneState = .active(resume: .none)
+        assertShadowConsistency()
         guard let acceptedState else {
             trace("foreground_resume_state_evaluation_finished_without_accepted_state cycle=\(resumeCycle)")
             return
@@ -2164,13 +2297,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    // Every caller — including `beginStop()`, which now completes its own Axis A transition
+    // (`isStopping`/`runState`) before reaching this call — invokes this with otherwise-settled shadow
+    // state, so the `defer` below holds at both exits (the early `guard let task` return and the full path).
     private func cancelAutomaticTakeover() {
+        defer { assertShadowConsistency() }
         automaticTakeoverGeneration &+= 1
         guard let task = automaticTakeoverTask else { return }
         automaticTakeoverTask = nil
         task.cancel()
         isBusy = false
         isAwaitingTakeoverConfirmation = false
+        takeoverAttemptState = .none
     }
 
     private func isCurrentAutomaticTakeover(_ context: AutomaticTakeoverContext) -> Bool {
@@ -2205,6 +2343,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func startOwnershipSynchronization() {
         guard isOwner else { return }
         isOwnershipSynchronizationScheduled = true
+        // `isSynchronizingOwnership` is guaranteed false here: `scheduleOwnershipSynchronization` only
+        // calls this when it is not already true.
+        ownershipSyncState = .scheduled
+        assertShadowConsistency()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = Task { [weak self] in
             guard let self else { return }
@@ -2252,6 +2394,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
             isOwnershipSynchronizationScheduled = false
+            ownershipSyncState = .idle
+            assertShadowConsistency()
             if shouldScheduleFollowUp {
                 needsOwnershipSynchronizationAfterCurrentRun = false
                 scheduleOwnershipSynchronization()
@@ -2259,6 +2403,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         guard isOwner else { return }
         isSynchronizingOwnership = true
+        ownershipSyncState = .running
         errorMessage = nil
         let targetViewportSize = await awaitViewportSizeIfNeeded()
         logPerformanceEvent(
@@ -2457,7 +2602,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) else { return false }
         cancelAutomaticTakeover()
         isStopping = true
+        // `hasSentStopDetach` is not touched here (unlike `beginStop()`): this tears the viewer down
+        // without going through `beginStop()`'s detach bookkeeping, which is exactly the
+        // `.stopped(detachSent: false)` case documented on `TerminalViewerRunState`.
+        runState = .stopped(detachSent: hasSentStopDetach)
         isAwaitingTakeoverConfirmation = false
+        // `isBusy` is not touched here, so if a `takeOver()` is in flight this derives
+        // `.sendingAfterRecoveryClearedConfirmation` rather than assuming the attempt is settled.
+        takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
         reconnectTask?.cancel()
         reconnectTask = nil
         streamHandle?.cancel()
@@ -2482,7 +2634,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         linkNotice = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
+        ownershipSyncState = .idle
         errorMessage = nil
+        assertShadowConsistency()
         onAuthenticationRequired(recoveryMessage)
         return true
     }
@@ -2746,6 +2900,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // reads through `latestState`, is the previous state untouched, so the refusal changes nothing.
         if !reduction.isRefusedOutOfBandPayload, payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
+            // `isBusy` is not touched here, so this derives whichever case a concurrently in-flight
+            // `takeOver()` currently holds instead of assuming the attempt is settled.
+            takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
         if isEndedState {
@@ -2772,10 +2929,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isBusy = false
             isConnecting = false
             isAwaitingTakeoverConfirmation = false
+            connectionState = .idle
+            takeoverAttemptState = .none
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             isOwnershipSynchronizationScheduled = false
             isSynchronizingOwnership = false
+            ownershipSyncState = .idle
         }
         let isOwnerAfterMerge = isOwner
         // Same rule for the screen: a refused payload's render snapshot belongs to a session generation
@@ -2797,6 +2957,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         if isOwnerAfterMerge, wasTakingOver {
             isAwaitingTakeoverConfirmation = false
             isBusy = false
+            takeoverAttemptState = .none
             trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
@@ -2826,10 +2987,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             reportedOwnerReadyEpochID = nil
             isOwnershipSynchronizationScheduled = false
             isSynchronizingOwnership = false
+            ownershipSyncState = .idle
         }
         isSessionUnavailable = false
         errorMessage = nil
         isConnecting = false
+        connectionState = .idle
         // ~20 string conversions per payload on a path that runs at the session's flush rate, so the
         // dictionary is built only when something is listening. `emittedAt` is parsed inside the same
         // gate for the same reason: it feeds nothing but these metrics.
@@ -2872,6 +3035,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         attemptAutomaticTakeoverIfNeeded()
         releaseOpenScreenHoldIfNoViewportFrameIsComing()
+        assertShadowConsistency()
     }
 
     /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
@@ -3012,6 +3176,90 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func trace(_ message: @autoclosure () -> String) { terminalViewerTrace(session.id, message()) }
 
+    /// Checked at the end of every method that writes one of the absorbed flags below, never after an
+    /// individual write: a method's own body can leave a flag and its shadow briefly disagreeing between
+    /// two of its own statements, and that window is not a bug. Each shadow enum is DEBUG-only ballast
+    /// until commit 3 makes it authoritative and deletes the flag it mirrors — nothing here is read by
+    /// product code yet.
+    private func assertShadowConsistency() {
+        #if DEBUG
+            switch runState {
+            case .running:
+                if isStopping || hasSentStopDetach {
+                    assertionFailure("runState=\(runState) but isStopping=\(isStopping) hasSentStopDetach=\(hasSentStopDetach)")
+                }
+            case .stopped(let detachSent):
+                if !isStopping || hasSentStopDetach != detachSent {
+                    assertionFailure("runState=\(runState) but isStopping=\(isStopping) hasSentStopDetach=\(hasSentStopDetach)")
+                }
+            }
+            switch connectionState {
+            case .idle: if isConnecting { assertionFailure("connectionState=\(connectionState) but isConnecting=\(isConnecting)") }
+            case .connecting: if !isConnecting { assertionFailure("connectionState=\(connectionState) but isConnecting=\(isConnecting)") }
+            }
+            switch takeoverAttemptState {
+            case .none:
+                if isBusy || isAwaitingTakeoverConfirmation {
+                    assertionFailure(
+                        "takeoverAttemptState=\(takeoverAttemptState) but isBusy=\(isBusy) isAwaitingTakeoverConfirmation=\(isAwaitingTakeoverConfirmation)"
+                    )
+                }
+            case .awaitingConfirmation:
+                if !isBusy || !isAwaitingTakeoverConfirmation {
+                    assertionFailure(
+                        "takeoverAttemptState=\(takeoverAttemptState) but isBusy=\(isBusy) isAwaitingTakeoverConfirmation=\(isAwaitingTakeoverConfirmation)"
+                    )
+                }
+            case .confirmationPendingAfterRecoveryClearedBusy:
+                if isBusy || !isAwaitingTakeoverConfirmation {
+                    assertionFailure(
+                        "takeoverAttemptState=\(takeoverAttemptState) but isBusy=\(isBusy) isAwaitingTakeoverConfirmation=\(isAwaitingTakeoverConfirmation)"
+                    )
+                }
+            case .sendingAfterRecoveryClearedConfirmation:
+                if !isBusy || isAwaitingTakeoverConfirmation {
+                    assertionFailure(
+                        "takeoverAttemptState=\(takeoverAttemptState) but isBusy=\(isBusy) isAwaitingTakeoverConfirmation=\(isAwaitingTakeoverConfirmation)"
+                    )
+                }
+            }
+            switch ownershipSyncState {
+            case .idle:
+                if isOwnershipSynchronizationScheduled || isSynchronizingOwnership {
+                    assertionFailure(
+                        "ownershipSyncState=\(ownershipSyncState) but isOwnershipSynchronizationScheduled=\(isOwnershipSynchronizationScheduled) isSynchronizingOwnership=\(isSynchronizingOwnership)"
+                    )
+                }
+            case .scheduled:
+                if !isOwnershipSynchronizationScheduled || isSynchronizingOwnership {
+                    assertionFailure(
+                        "ownershipSyncState=\(ownershipSyncState) but isOwnershipSynchronizationScheduled=\(isOwnershipSynchronizationScheduled) isSynchronizingOwnership=\(isSynchronizingOwnership)"
+                    )
+                }
+            case .running:
+                if !isOwnershipSynchronizationScheduled || !isSynchronizingOwnership {
+                    assertionFailure(
+                        "ownershipSyncState=\(ownershipSyncState) but isOwnershipSynchronizationScheduled=\(isOwnershipSynchronizationScheduled) isSynchronizingOwnership=\(isSynchronizingOwnership)"
+                    )
+                }
+            }
+            switch sceneState {
+            case .active(let resume):
+                if !isSceneActive || (resume == .pending) != isForegroundResumeEvaluationPending {
+                    assertionFailure(
+                        "sceneState=\(sceneState) but isSceneActive=\(isSceneActive) isForegroundResumeEvaluationPending=\(isForegroundResumeEvaluationPending)"
+                    )
+                }
+            case .backgrounded(let resume):
+                if isSceneActive || (resume == .pending) != isForegroundResumeEvaluationPending {
+                    assertionFailure(
+                        "sceneState=\(sceneState) but isSceneActive=\(isSceneActive) isForegroundResumeEvaluationPending=\(isForegroundResumeEvaluationPending)"
+                    )
+                }
+            }
+        #endif
+    }
+
     private func traceSize(columns: Int?, rows: Int?) -> String {
         guard let columns, let rows else { return "nil" }
         return "\(columns)x\(rows)"
@@ -3123,6 +3371,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         ownershipSynchronizationTask = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
+        ownershipSyncState = .idle
         needsOwnershipSynchronizationAfterCurrentRun = false
         // The payload above carries no render update, so the apply above never sets an owner render
         // epoch on its own; that piece is still injected directly, same as before.
@@ -3134,5 +3383,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasAttemptedAutomaticTakeover = true
         hasConfirmedOwnerInputReadiness = true
         isInputSurfaceReady = true
+        assertShadowConsistency()
     }
 }
