@@ -149,7 +149,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         case .none, .confirmationPendingAfterRecoveryClearedBusy: false
         }
     }
-    private var takeoverAttemptState = TerminalViewerTakeoverAttemptState.none
+    private var takeoverAttemptState = TerminalViewerTakeoverAttemptState.none {
+        didSet {
+            let wasAwaiting = oldValue == .awaitingConfirmation
+                || oldValue == .confirmationPendingAfterRecoveryClearedBusy
+            guard isAwaitingTakeoverConfirmation != wasAwaiting else { return }
+            trace("awaiting_takeover_confirmation value=\(isAwaitingTakeoverConfirmation ? 1 : 0)")
+        }
+    }
     var isSessionUnavailable = false
     /// True for the run body of an ownership-synchronization pass. Derived from `ownershipSyncState`,
     /// the stored state; see `TerminalViewerState.swift`.
@@ -162,7 +169,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         case .idle: false
         }
     }
-    private var ownershipSyncState = TerminalViewerOwnershipSyncState.idle
+    private var ownershipSyncState = TerminalViewerOwnershipSyncState.idle {
+        didSet {
+            if isSynchronizingOwnership != (oldValue == .running) {
+                trace("ownership_sync active=\(isSynchronizingOwnership ? 1 : 0)")
+            }
+            let wasScheduled = oldValue == .scheduled || oldValue == .running
+            if isOwnershipSynchronizationScheduled != wasScheduled {
+                trace("ownership_sync scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)")
+            }
+        }
+    }
     var isInputSurfaceReady = false {
         didSet {
             guard isInputSurfaceReady != oldValue else { return }
