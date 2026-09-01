@@ -23,8 +23,17 @@ final class CommandPalettePanel: NSPanel {
 /// into the host for shared window/hotkey/orchestration services via `host`.
 @MainActor final class CommandPaletteController {
     unowned let host: AppKitController
+    /// Injected directly rather than reached through `host` on every load: `loadCommandPaletteItemsSnapshot`
+    /// needs both to build an alert-aware snapshot, matching how `AlertsController`/`ShortcutsController`
+    /// own their dependencies directly instead of reaching back through `host` for them.
+    let deviceModel: DeviceModelStore
+    let alerts: AlertsController
 
-    init(host: AppKitController) { self.host = host }
+    init(host: AppKitController, deviceModel: DeviceModelStore, alerts: AlertsController) {
+        self.host = host
+        self.deviceModel = deviceModel
+        self.alerts = alerts
+    }
 
     var commandPalettePanel: NSPanel?
     var commandPaletteSearchField: NSSearchField?
@@ -679,7 +688,7 @@ final class CommandPalettePanel: NSPanel {
         host.logHotkeyDebug("reload_palette_items begin")
         commandPaletteLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await self.host.loadCommandPaletteItemsSnapshot()
+            let result = await self.loadCommandPaletteItemsSnapshot()
             guard !Task.isCancelled else { return }
             self.commandPaletteLoadTask = nil
             self.setCommandPaletteLoading(false)
@@ -711,8 +720,8 @@ final class CommandPalettePanel: NSPanel {
         let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         commandPaletteFilteredItems =
             sessionPickerContext != nil
-            ? AppKitController.visibleSessionPickerItems(allItems: commandPaletteItems, query: query)
-            : AppKitController.visibleCommandPaletteItems(
+            ? Self.visibleSessionPickerItems(allItems: commandPaletteItems, query: query)
+            : Self.visibleCommandPaletteItems(
                 allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
                 recentFocusIdentities: recentCommandPaletteFocusIdentities)
         commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0

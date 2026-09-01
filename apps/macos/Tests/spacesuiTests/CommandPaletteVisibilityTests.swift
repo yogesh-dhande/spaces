@@ -52,7 +52,7 @@ import workspacecore
             detail: "http://localhost:4000", focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"),
             workspaceTitle: "Workspace B", workspaceBranch: "release")
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [alertsItem, currentWorkspaceItem, otherWorkspaceItem], query: "", currentWorkspaceID: "workspace-a",
             recentFocusIdentities: [otherWorkspaceItem.recentFocusIdentity, currentWorkspaceItem.recentFocusIdentity])
 
@@ -69,7 +69,7 @@ import workspacecore
             focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-live"), workspaceTitle: "Workspace A",
             status: .process(.running))
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [alertsItem, workspaceItem], query: "", currentWorkspaceID: "workspace-a", recentFocusIdentities: [])
 
         #expect(visible.map(\.id) == ["alerts::frontend"])
@@ -83,7 +83,7 @@ import workspacecore
             id: "workspace-a::shell", source: .workspaceTarget, workspaceID: "workspace-a", kind: .window, label: "shell-1",
             detail: "foreground changed", focusRequest: .workspaceWindow(workspaceID: "workspace-a", index: 1))
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [alert, workspace], query: "", currentWorkspaceID: "workspace-a", recentFocusIdentities: [])
 
         #expect(visible.map(\.id) == ["alerts::bell"])
@@ -103,7 +103,7 @@ import workspacecore
             focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), workspaceTitle: "Workspace A",
             status: .process(.running))
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [alertsItem, workspaceItem], query: "", currentWorkspaceID: nil, recentFocusIdentities: [workspaceItem.recentFocusIdentity])
 
         #expect(visible.map(\.id) == ["alerts::attention", "workspace-a::0"])
@@ -121,7 +121,7 @@ import workspacecore
                 focusRequest: .workspaceBrowserSession(workspaceID: "workspace-\(index)", targetURL: "http://localhost:\(3000 + index)"))
         }
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [alertsItem] + workspaceItems, query: "", currentWorkspaceID: nil,
             recentFocusIdentities: workspaceItems.reversed().map(\.recentFocusIdentity))
 
@@ -137,7 +137,7 @@ import workspacecore
                 alertsAttentionID: "attention-\(index)")
         }
 
-        let visible = AppKitController.visibleCommandPaletteItems(allItems: alertItems, query: "", currentWorkspaceID: nil, recentFocusIdentities: [])
+        let visible = CommandPaletteController.visibleCommandPaletteItems(allItems: alertItems, query: "", currentWorkspaceID: nil, recentFocusIdentities: [])
 
         #expect(visible.count == 9)
         #expect(visible.map(\.id) == Array((1...9).map { "alerts::\($0)" }))
@@ -154,7 +154,7 @@ import workspacecore
                 focusRequest: .workspaceWindow(workspaceID: "workspace-a", index: 1))
         }
 
-        let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "")
+        let visible = CommandPaletteController.visibleSessionPickerItems(allItems: items, query: "")
 
         #expect(visible.map(\.id) == (0...9).map { "picker:\($0)" })
     }
@@ -166,7 +166,7 @@ import workspacecore
                 detail: nil, focusRequest: .workspaceWindow(workspaceID: "workspace-\(index)", index: 1), workspaceTitle: "Workspace \(index)")
         }
 
-        let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "session-15")
+        let visible = CommandPaletteController.visibleSessionPickerItems(allItems: items, query: "session-15")
 
         #expect(visible.first?.id == "picker:15")
     }
@@ -177,7 +177,7 @@ import workspacecore
             focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"), workspaceTitle: "Frontend",
             workspaceBranch: "feature/url")
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [workspaceItem], query: "fu", currentWorkspaceID: nil, recentFocusIdentities: [])
 
         #expect(visible.map(\.id) == ["workspace-b::0"])
@@ -189,7 +189,7 @@ import workspacecore
             detail: "http://localhost:4000", focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"),
             workspaceTitle: "main", workspaceBranch: "main", projectTitle: "Customer Portal")
 
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: [workspaceItem], query: "customer portal", currentWorkspaceID: nil, recentFocusIdentities: [])
 
         #expect(visible.map(\.id) == ["workspace-b::0"])
