@@ -118,7 +118,13 @@ extension TerminalSessionPaneViewController {
     func debugAwaitPendingClientControl() async { await clientControlQueue.drain() }
     public var clientID: String { client.id }
     var debugTakeoverPending: Bool { isTakeoverAttemptPending }
-    func debugSetTakeoverAttemptStartedAt(_ date: Date?) { takeoverAttemptStartedAt = date }
+    func debugSetTakeoverAttemptStartedAt(_ date: Date?) {
+        switch takeoverAttemptState {
+        case .none: break
+        case .queued(let id), .inFlight(let id, _):
+            takeoverAttemptState = date.map { .inFlight(id: id, startedAt: $0) } ?? .queued(id: id)
+        }
+    }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }

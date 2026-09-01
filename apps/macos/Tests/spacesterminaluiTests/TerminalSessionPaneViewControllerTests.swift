@@ -3376,6 +3376,77 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(closedForTermination, true)
     }
 
+    /// `closeEmbedded` guards its body with `guard !didCloseWindow else { return }`. A second call on an
+    /// already-closed pane (e.g. a duplicate teardown from two owners of the same lifecycle event) must be a
+    /// total no-op: no repeat detach send, no repeat close-hook invocation.
+    @MainActor func testCloseEmbeddedIsIdempotent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        var closeCallCount = 0
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-idempotent-close", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
+            onWindowClose: { _, _, _ in closeCallCount += 1 })
+
+        controller.showEmbedded(focus: false)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertNotNil(capture.attachedClientID)
+
+        capture.detachedClientID = nil
+        controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(closeCallCount, 1)
+        XCTAssertEqual(capture.detachedClientID, controller.clientID)
+        XCTAssertTrue(controller.debugDidCloseWindow)
+
+        capture.detachedClientID = nil
+        controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(closeCallCount, 1, "a second close on an already-closed pane must not re-fire the close hook")
+        XCTAssertNil(capture.detachedClientID, "a second close must not re-send a detach")
+    }
+
+    /// `showEmbedded` resets `didCloseWindow = false` unconditionally on entry, so a pane the app closed and
+    /// then re-shows (switching back to a dismissed tab) must come back to life: attach again, and be closable
+    /// again rather than staying latched from the earlier close.
+    @MainActor func testShowEmbeddedAfterCloseResetsDidCloseWindowAndReattaches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-close-reshow", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { client, mode in capture.attachedModes.append(mode) },
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, onWindowClose: { _, _, _ in })
+
+        controller.showEmbedded(focus: false)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(capture.attachedModes, [.owner])
+
+        controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertTrue(controller.debugDidCloseWindow)
+        XCTAssertEqual(capture.detachedClientID, controller.clientID)
+
+        capture.detachedClientID = nil
+        controller.showEmbedded(focus: false)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertFalse(controller.debugDidCloseWindow, "re-showing a closed pane must clear the close latch")
+        XCTAssertEqual(capture.attachedModes, [.owner, .owner], "re-showing a closed pane must attach the client again")
+
+        controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertTrue(controller.debugDidCloseWindow)
+        XCTAssertEqual(capture.detachedClientID, controller.clientID, "the revived pane must detach again on its second close")
+    }
+
     @MainActor func testGhosttyControllersRefreshOwnershipAfterTakeover() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -61,8 +61,7 @@ extension TerminalSessionPaneViewController {
             if !sessionIsTerminating { ghosttyRendererHost?.releaseRendererSurface() }
         }
         if sessionIsTerminating {
-            isClientAttached = false
-            lastRequestedAttachmentMode = nil
+            clearClientAttachFlagsForTerminatingClose()
         } else {
             // Ownership is read BEFORE the detach: the detach is what gives it up, so afterwards no pane
             // could ever report having been the owner. A pane whose session has already ended holds no
