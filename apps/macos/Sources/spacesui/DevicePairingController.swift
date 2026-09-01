@@ -17,14 +17,27 @@ import workspacecore
 /// and delegates these to it.
 ///
 /// The Devices section renders into the Settings window, so this controller reaches
-/// the host's `settings` controller for the window/section/content state. The `@objc`
-/// action handlers stay on the host (their buttons bind their target to the host) and
-/// forward here; the device-rename text field uses the host's shared `NSControl`
-/// delegate, which routes back into this controller.
-@MainActor final class DevicePairingController {
+/// the host's `settings` controller for the window/section/content state. Its own
+/// buttons and menu items bind their target to this controller; the device-rename
+/// text field uses the host's shared `NSControl` delegate, which routes back into
+/// this controller.
+@MainActor final class DevicePairingController: NSObject {
     unowned let host: AppKitController
+    /// Reads the Mac's paired remote/mobile devices (excluding this Mac). Injected rather than reaching
+    /// through `host.macPairedDevices()` so this controller owns its data dependency directly and a test
+    /// can substitute a fixed device list.
+    private let pairedDevices: () -> [SpacesPairedDeviceRecord]
+    /// Opens the per-client desktop-state database paired-device records are read from and persisted to.
+    /// Injected rather than reaching through `host.clientDatabase()` so this controller owns its
+    /// persistence dependency directly and a test can substitute a throwaway database.
+    private let database: () throws -> SpacesClientDatabase
 
-    init(host: AppKitController) { self.host = host }
+    init(host: AppKitController, pairedDevices: @escaping () -> [SpacesPairedDeviceRecord], database: @escaping () throws -> SpacesClientDatabase) {
+        self.host = host
+        self.pairedDevices = pairedDevices
+        self.database = database
+        super.init()
+    }
 
     /// Shown when the Device API control endpoint is disabled for this profile by an environment override.
     /// A relaunch inherits the same environment, so it cannot bring the socket up; the restart action is
@@ -124,7 +137,7 @@ import workspacecore
     var renamingClientDeviceID: String?
     weak var renamingClientDeviceField: NSTextField?
 
-    func showMobileConnection() {
+    @objc func showMobileConnection() {
         devicePanelStatusMessage = nil
         host.settings.openSettings(section: .devices)
     }
@@ -258,7 +271,7 @@ import workspacecore
             if Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon) {
                 let restartButton = actionButton(
                     title: "Restart Local Daemon", symbol: "arrow.clockwise", tooltip: "Relaunch the local spacesd daemon on this Mac",
-                    action: #selector(AppKitController.restartLocalDaemon), primary: true, target: host)
+                    action: #selector(DevicePairingController.restartLocalDaemon), primary: true, target: self)
                 rows.append(mobilePanelButtonRow([restartButton]))
             }
         }
@@ -302,7 +315,8 @@ import workspacecore
 
         let pairButton = host.sidebarRowIconButton(
             symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.displayName)",
-            action: #selector(AppKitController.pairIOSWithConnectedDevice(_:)))
+            action: #selector(DevicePairingController.pairIOSWithConnectedDevice(_:)))
+        pairButton.target = self
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
         pairButton.isEnabled = device.isAvailable
 
@@ -316,13 +330,14 @@ import workspacecore
         row.addArrangedSubview(pairButton)
         if !device.isLocal {
             let removeButton = host.sidebarRowIconButton(
-                symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(AppKitController.removeMacPairedDevice(_:)))
+                symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(DevicePairingController.removeMacPairedDevice(_:)))
+            removeButton.target = self
             removeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
             row.addArrangedSubview(removeButton)
 
             let menu = NSMenu()
-            let renameItem = NSMenuItem(title: "Rename", action: #selector(AppKitController.beginClientDeviceRename(_:)), keyEquivalent: "")
-            renameItem.target = host
+            let renameItem = NSMenuItem(title: "Rename", action: #selector(DevicePairingController.beginClientDeviceRename(_:)), keyEquivalent: "")
+            renameItem.target = self
             renameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
             renameItem.identifier = NSUserInterfaceItemIdentifier(device.id)
             menu.addItem(renameItem)
@@ -386,7 +401,7 @@ import workspacecore
 
         // Username and port are optional (they default to the SSH login and port 22), so they live
         // behind a collapsed "Advanced" disclosure to keep the common case a single host field.
-        let advancedToggle = NSButton(title: "Advanced", target: host, action: #selector(AppKitController.toggleRemoteDeviceAdvancedFields(_:)))
+        let advancedToggle = NSButton(title: "Advanced", target: self, action: #selector(DevicePairingController.toggleRemoteDeviceAdvancedFields(_:)))
         advancedToggle.isBordered = false
         advancedToggle.bezelStyle = .inline
         advancedToggle.setButtonType(.momentaryChange)
@@ -423,7 +438,7 @@ import workspacecore
 
         let connectButton = actionButton(
             title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
-            action: #selector(AppKitController.connectRemoteDeviceFromPairingPanel), primary: true, target: host)
+            action: #selector(DevicePairingController.connectRemoteDeviceFromPairingPanel), primary: true, target: self)
         connectButton.isEnabled = !isInstallingRemoteSpaces
         remoteDeviceConnectButton = connectButton
         rows.append(mobilePanelButtonRow([connectButton]))
@@ -456,7 +471,8 @@ import workspacecore
         remoteDeviceInstallCommandField = commandField
 
         let copyButton = host.sidebarRowIconButton(
-            symbol: "doc.on.doc", tooltip: "Copy install command", action: #selector(AppKitController.copyRemoteDeviceInstallCommand))
+            symbol: "doc.on.doc", tooltip: "Copy install command", action: #selector(DevicePairingController.copyRemoteDeviceInstallCommand))
+        copyButton.target = self
         copyButton.setAccessibilityIdentifier("remote-device-install-command-copy")
 
         let commandRow = NSStackView(views: [commandField, copyButton])
@@ -466,7 +482,7 @@ import workspacecore
 
         let installButton = actionButton(
             title: "Install Spaces over SSH", symbol: "arrow.down.circle", tooltip: "Run the installer on the remote device over SSH, then pair",
-            action: #selector(AppKitController.installSpacesOnRemoteDevice), primary: false, target: host)
+            action: #selector(DevicePairingController.installSpacesOnRemoteDevice), primary: false, target: self)
         installButton.isEnabled = !isInstallingRemoteSpaces
         installButton.setAccessibilityIdentifier("remote-device-install-ssh")
         remoteDeviceInstallButton = installButton
@@ -494,7 +510,7 @@ import workspacecore
     }
 
     /// Expands or collapses the optional username/port fields and rotates the disclosure chevron.
-    func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) {
+    @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) {
         guard let advancedRow = remoteDeviceAdvancedRow else { return }
         let willExpand = advancedRow.isHidden
         advancedRow.isHidden = !willExpand
@@ -597,7 +613,7 @@ import workspacecore
         return row
     }
 
-    func openDevicePairingWindow() {
+    @objc func openDevicePairingWindow() {
         do {
             let response = try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
             if let window = response.pairingWindow {
@@ -616,13 +632,13 @@ import workspacecore
         }
     }
 
-    func pairIOSWithConnectedDevice(_ sender: NSButton) {
+    @objc func pairIOSWithConnectedDevice(_ sender: NSButton) {
         guard let deviceID = sender.identifier?.rawValue else { return }
         if deviceID == SpacesPairedDeviceRecord.localDeviceID {
             openDevicePairingWindow()
             return
         }
-        guard let device = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
+        guard let device = pairedDevices().first(where: { $0.id == deviceID }) else { return }
         devicePanelStatusMessage = (message: "Opening pairing window on \(device.name)...", isError: false)
         refreshVisibleDeviceSettingsAfterClientDeviceChange()
         Task { [weak self] in
@@ -644,7 +660,7 @@ import workspacecore
         }
     }
 
-    func connectRemoteDeviceFromPairingPanel() {
+    @objc func connectRemoteDeviceFromPairingPanel() {
         // Each attempt starts from a clean recovery state: hide any install block left from a prior failure
         // so it only reappears if this attempt again finds Spaces missing.
         remoteDeviceLinuxInstallCommand = nil
@@ -686,7 +702,7 @@ import workspacecore
     /// Retries the SSH install after the automatic run that connecting starts failed, so the user is never
     /// left with only a copyable command. Reads the SSH fields again, since they stay editable while the
     /// install block is showing.
-    func installSpacesOnRemoteDevice() {
+    @objc func installSpacesOnRemoteDevice() {
         let request: SpacesRemoteDevicePairingRequest
         do { request = try remoteDevicePairingRequestFromPanelFields() } catch {
             setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
@@ -754,7 +770,7 @@ import workspacecore
 
     /// Copies the pinned install one-liner to the pasteboard. Inlined because `AppKitController.copyToPasteboard`
     /// is private and this is the only device-panel copy site.
-    func copyRemoteDeviceInstallCommand() {
+    @objc func copyRemoteDeviceInstallCommand() {
         guard let command = remoteDeviceLinuxInstallCommand else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
@@ -776,7 +792,7 @@ import workspacecore
     /// that protective path keys off; the Device API status is unreachable here, so the warning cannot
     /// give a precise breakdown. When nothing is live (the daemon is fully down) the relaunch proceeds
     /// with no prompt.
-    func restartLocalDaemon() {
+    @objc func restartLocalDaemon() {
         Task { @MainActor [weak self] in
             guard let self, !self.isRelaunchingLocalDaemon else { return }
             let hasLiveSessions = await Task.detached(priority: .userInitiated) { !((try? TerminalService.listSessions()) ?? []).isEmpty }.value
@@ -818,9 +834,9 @@ import workspacecore
         }
     }
 
-    func removeMacPairedDevice(_ sender: NSButton) {
+    @objc func removeMacPairedDevice(_ sender: NSButton) {
         guard let deviceID = sender.identifier?.rawValue else { return }
-        let deviceName = host.macPairedDevices().first(where: { $0.id == deviceID })?.name ?? "this device"
+        let deviceName = pairedDevices().first(where: { $0.id == deviceID })?.name ?? "this device"
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Remove \(deviceName)?"
@@ -829,7 +845,7 @@ import workspacecore
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            let database = try host.clientDatabase()
+            let database = try self.database()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
             host.forgetDaemonUpdateProgress(deviceID: deviceID)
@@ -838,7 +854,7 @@ import workspacecore
         } catch { host.showError(error) }
     }
 
-    func beginClientDeviceRename(_ sender: NSMenuItem) {
+    @objc func beginClientDeviceRename(_ sender: NSMenuItem) {
         guard let deviceID = sender.identifier?.rawValue else { return }
         renamingClientDeviceID = deviceID
         refreshVisibleDeviceSettingsAfterClientDeviceChange()
@@ -856,7 +872,7 @@ import workspacecore
         renamingClientDeviceID = nil
         renamingClientDeviceField = nil
         do {
-            let database = try host.clientDatabase()
+            let database = try self.database()
             if !trimmed.isEmpty, var record = try database.pairedDevices().first(where: { $0.id == deviceID }), record.name != trimmed {
                 record.name = trimmed
                 record.updatedAt = Self.iso8601Formatter.string(from: Date())
@@ -883,7 +899,7 @@ import workspacecore
         let local = ClientConnectedDevice(
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
             sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
-        let remote = host.macPairedDevices().map {
+        let remote = pairedDevices().map {
             let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
                 id: $0.id, name: $0.name, host: $0.dialHost, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort,

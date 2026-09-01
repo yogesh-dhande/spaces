@@ -262,7 +262,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
     lazy var settings = SettingsController(host: self)
-    lazy var devicePairing = DevicePairingController(host: self)
+    lazy var devicePairing = DevicePairingController(
+        host: self, pairedDevices: { [unowned self] in self.macPairedDevices() }, database: { [unowned self] in try self.clientDatabase() })
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
@@ -4316,8 +4317,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
             actions: [
-                (symbol: "line.3.horizontal.decrease.circle", tooltip: "Filter workspaces", action: #selector(showWorkspaceVisibilityDialog)),
-                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
+                (
+                    symbol: "line.3.horizontal.decrease.circle", tooltip: "Filter workspaces",
+                    action: #selector(WorkspaceVisibilityController.showWorkspaceVisibilityDialog), target: workspaceVisibility
+                ),
+                (symbol: "plus", tooltip: "New project", action: #selector(addProject), target: nil),
             ])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
 
@@ -4757,12 +4761,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
-
-    /// Hides a workspace from the sidebar (stopping it first if it is running), routed through the
-    /// workspace-visibility controller so the sidebar row's right-click menu and the visibility
-    /// dialog share one hide path. The sidebar refreshes from the mutation response, so no explicit
-    /// reload callback is needed here.
-    func hideWorkspace(id: String) { workspaceVisibility.hideWorkspace(workspaceID: id) }
 
     /// The device that owns the current selection, so mutations route to the
     /// daemon that actually hosts the selected workspace/project rather than
@@ -6751,13 +6749,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
     }
 
-    // MARK: - Workspace visibility forwarders
-    // The dialog-open (sidebar header) and window-close buttons bind their target
-    // to the host, so these stay as @objc host methods; the implementation lives
-    // on `workspaceVisibility` (WorkspaceVisibilityController).
-    @objc func showWorkspaceVisibilityDialog() { workspaceVisibility.showWorkspaceVisibilityDialog() }
-    @objc func closeWorkspaceVisibilityWindow() { workspaceVisibility.closeWorkspaceVisibilityWindow() }
-
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
 
     /// Header close buttons built by `buildFormWindowHeader` bind their target to the host (see
@@ -8140,7 +8131,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func sidebarSectionHeader(title: String, actions: [(symbol: String, tooltip: String, action: Selector)]) -> NSView {
+    private func sidebarSectionHeader(title: String, actions: [(symbol: String, tooltip: String, action: Selector, target: AnyObject?)]) -> NSView {
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -8154,7 +8145,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(NSView())
         for action in actions {
+            // `sidebarRowIconButton` always targets the host; an explicit `target` here overrides that for
+            // an action owned by a standalone controller (e.g. the workspace-visibility filter button).
             let button = sidebarRowIconButton(symbol: action.symbol, tooltip: action.tooltip, action: action.action)
+            if let target = action.target { button.target = target }
             stack.addArrangedSubview(button)
         }
 
@@ -8265,23 +8259,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // per-device freshness gate in loadRemoteDeviceSections.
         reloadData(forceRemoteRefresh: true)
     }
-
-    // MARK: - Device pairing forwarders
-    // The device-section @objc actions stay here because their buttons/menus bind
-    // their target to the host; they forward to `devicePairing`. `renderDeviceSettings`
-    // and `currentDeviceControlResponse` forward for the Settings Devices section.
-    @objc func showMobileConnection() { devicePairing.showMobileConnection() }
-    @objc func openDevicePairingWindow() { devicePairing.openDevicePairingWindow() }
-    @objc func pairIOSWithConnectedDevice(_ sender: NSButton) { devicePairing.pairIOSWithConnectedDevice(sender) }
-    @objc func connectRemoteDeviceFromPairingPanel() { devicePairing.connectRemoteDeviceFromPairingPanel() }
-    @objc func installSpacesOnRemoteDevice() { devicePairing.installSpacesOnRemoteDevice() }
-    @objc func copyRemoteDeviceInstallCommand() { devicePairing.copyRemoteDeviceInstallCommand() }
-    @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) { devicePairing.toggleRemoteDeviceAdvancedFields(sender) }
-    @objc func restartLocalDaemon() { devicePairing.restartLocalDaemon() }
-    @objc func removeMacPairedDevice(_ sender: NSButton) { devicePairing.removeMacPairedDevice(sender) }
-    @objc func beginClientDeviceRename(_ sender: NSMenuItem) { devicePairing.beginClientDeviceRename(sender) }
-    func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) { devicePairing.renderDeviceSettings(response: response) }
-    func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse { devicePairing.currentDeviceControlResponse() }
 
     func clientDatabase() throws -> SpacesClientDatabase { try SpacesClientDatabase.defaultDatabase() }
 

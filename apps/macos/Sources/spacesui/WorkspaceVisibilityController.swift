@@ -28,7 +28,7 @@ import workspacecore
     private weak var workspaceVisibilityOutlineView: NSOutlineView?
     private var workspaceVisibilityQuery = ""
 
-    func showWorkspaceVisibilityDialog() {
+    @objc func showWorkspaceVisibilityDialog() {
         host.clearActiveAddFormStateAndCloseWindows()
         workspaceVisibilityQuery = ""
 
@@ -100,8 +100,8 @@ import workspacecore
 
     private func presentWorkspaceVisibilityWindow(filterRow: NSView, tableScroll: NSView) {
         let header = buildFormWindowHeader(
-            symbol: "line.3.horizontal.decrease.circle", title: "Workspaces", closeAction: #selector(AppKitController.closeWorkspaceVisibilityWindow),
-            target: host)
+            symbol: "line.3.horizontal.decrease.circle", title: "Workspaces",
+            closeAction: #selector(WorkspaceVisibilityController.closeWorkspaceVisibilityWindow), target: self)
         let root = NSView()
         root.wantsLayer = true
         bindAppearanceReactiveLayer(root) { [unowned host] view in view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor }
@@ -147,7 +147,7 @@ import workspacecore
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
+    @objc func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
 
     /// Hides a workspace from the sidebar without the visibility dialog open — used by the sidebar
     /// workspace row's right-click menu. Reuses `setWorkspaceHidden` (stop-if-running prompt included);
