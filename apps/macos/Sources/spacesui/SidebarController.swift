@@ -2577,7 +2577,7 @@ private struct DeviceSyncState {
 
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
-        host.hideWorkspace(id: id)
+        host.workspaceVisibility.hideWorkspace(workspaceID: id)
     }
 
     @objc private func openWorkspaceInEditorMenuItem(_ sender: NSMenuItem) {
@@ -3272,7 +3272,8 @@ private struct DeviceSyncState {
         desktopControlStatusIcon = statusIcon
 
         let mobileButton = host.sidebarRowIconButton(
-            symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(AppKitController.showMobileConnection))
+            symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(DevicePairingController.showMobileConnection))
+        mobileButton.target = host.devicePairing
         mobileButton.setAccessibilityIdentifier("sidebar-device-pairing")
         let settingsButton = host.sidebarRowIconButton(
             symbol: "gearshape", tooltip: "User settings", action: #selector(AppKitController.showSettings))

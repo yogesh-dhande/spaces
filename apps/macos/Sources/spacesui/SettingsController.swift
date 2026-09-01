@@ -17,10 +17,10 @@ import workspacecore
 /// for shared form/colour helpers, the shortcut-capture machinery, and the device
 /// settings bridge via `host`.
 ///
-/// The Devices section's content (device pairing/management) stays on the host; the
-/// controller renders it by delegating to `host.renderDeviceSettings(...)`, and the
-/// host's device-pairing code drives the open settings window back through this
-/// controller's window/section state.
+/// The Devices section's content (device pairing/management) is owned by
+/// `host.devicePairing`; the controller renders it by delegating to
+/// `host.devicePairing.renderDeviceSettings(...)`, and the device-pairing controller
+/// drives the open settings window back through this controller's window/section state.
 @MainActor final class SettingsController: NSObject {
     unowned let host: AppKitController
 
@@ -243,7 +243,7 @@ import workspacecore
         switch selectedSettingsSection {
         case .general: renderSettingsCards(generalSettingsCards())
         case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
-        case .devices: host.renderDeviceSettings(response: host.currentDeviceControlResponse())
+        case .devices: host.devicePairing.renderDeviceSettings(response: host.devicePairing.currentDeviceControlResponse())
         case .codingAgents: renderCodingAgentsSection()
         case .mcp: renderSettingsCards(mcpSettingsCards())
         }
