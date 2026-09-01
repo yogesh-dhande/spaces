@@ -41,7 +41,7 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
 
     /// This row's undismissed alert entries (a process exit, an agent waiting/done, a session bell), by
     /// attention id — empty when the row carries no live alert. Computed once at build time from
-    /// `AppKitController.rowAlertsAttentionEntries` so the sidebar menu's Dismiss Alert visibility/action
+    /// `AlertsController.rowAlertsAttentionEntries` so the sidebar menu's Dismiss Alert visibility/action
     /// and the color downgrade below share one derivation instead of two.
     let undismissedAttentionIDs: [String]
     /// True once a process row's currently derived exit alert has been dismissed, which is what drops
@@ -168,7 +168,9 @@ extension AppKitController {
         // Undismissed attention ids this row owns, from the one alert-identity derivation
         // (`rowAlertsAttentionEntries`) the sidebar menu and the color downgrade below both read.
         func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
-            rowAlertsAttentionEntries(in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID).filter {
+            AlertsController.rowAlertsAttentionEntries(
+                in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID
+            ).filter {
                 !dismissedAttentionItemIDs.contains($0.attentionID)
             }.map(\.attentionID)
         }
@@ -185,7 +187,7 @@ extension AppKitController {
             }
             let isExitAcknowledged =
                 row.runState == .exited
-                && isProcessExitAcknowledged(
+                && AlertsController.isProcessExitAcknowledged(
                     processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs)
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,

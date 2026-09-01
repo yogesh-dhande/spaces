@@ -97,10 +97,10 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aRefreshThatChangesNothingLeavesTheSameCardsOnScreen() throws {
             let controller = makeController()
             controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
 
             let afterRefresh = renderedRows(controller)
             #expect(afterRefresh.count == 1)
@@ -112,12 +112,12 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aLiveTitleChangeUpdatesTheCardInPlace() throws {
             let controller = makeController()
             controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
             #expect(detailText(rendered) == "vim main.swift")
 
             controller.alertsGroups = [bellGroup(liveTitle: "vim other.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
 
             let afterRefresh = try #require(renderedRows(controller).first)
             #expect(afterRefresh === rendered, "a live-title change must not replace the alert card")
@@ -128,11 +128,11 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aNewAlertRebuildsThePane() throws {
             let controller = makeController()
             controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 
             controller.alertsGroups = [bellAndProcessGroup(liveTitle: "vim main.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
 
             let afterRefresh = renderedRows(controller)
             #expect(afterRefresh.count == 2)
@@ -144,12 +144,12 @@ extension ProcessProfileEnvironmentSuites {
         @Test func returningToThePaneBuildsItAgain() throws {
             let controller = makeController()
             controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 
             controller.showPlaceholder()
             #expect(renderedRows(controller).isEmpty)
-            controller.showAlertsDetail()
+            controller.alerts.showAlertsDetail()
 
             #expect(renderedRows(controller).first !== rendered)
         }
