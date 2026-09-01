@@ -336,7 +336,7 @@ import workspacecore
                     ])
             ], sessions: [])
 
-        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
 
         #expect(items.contains { $0.kind == .browser && $0.label == "web" && $0.detail == "http://localhost:3000" })
         #expect(items.contains { $0.kind == .process && $0.label == "web" && $0.detail == "npm run dev" })
@@ -359,7 +359,7 @@ import workspacecore
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig())
             ], sessions: [])
 
-        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
 
         let editorItems = items.filter { $0.workspaceID == "workspace-1" && $0.source == .editorAction }
         #expect(editorItems.count == 1)
@@ -396,7 +396,7 @@ import workspacecore
                 workspace(id: "ws-of-hidden-project", projectID: "project-hidden", isHidden: false),
             ], sessions: [])
 
-        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
 
         #expect(items.contains { $0.workspaceID == "ws-visible" })
         #expect(!items.contains { $0.workspaceID == "ws-hidden" })
@@ -417,7 +417,7 @@ import workspacecore
                 ])
         }
 
-        let items = AppKitController.buildCommandPaletteItems(
+        let items = CommandPaletteController.buildCommandPaletteItems(
             overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []),
             alertsGroups: [
                 group(workspaceID: "ws-visible", isFromHiddenWorkspace: false), group(workspaceID: "ws-hidden", isFromHiddenWorkspace: true),
@@ -451,7 +451,7 @@ import workspacecore
                 terminalSessionSummary(id: "session-busy", title: "shell-2", foregroundCommand: "ignored foreground"),
             ])
 
-        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
 
         #expect(try #require(items.first { $0.label == "shell-1" }).detail == "pnpm test --watch")
         #expect(try #require(items.first { $0.label == "shell-2" }).detail == "vim main.swift")
@@ -479,7 +479,7 @@ import workspacecore
                 terminalSessionSummary(id: "session-quiet", title: "Codex quiet", foregroundCommand: "codex --model gpt-5.6-sol"),
             ])
 
-        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
 
         #expect(try #require(items.first { $0.label == "Codex busy" }).detail == "reviewing PR 493")
         #expect(try #require(items.first { $0.label == "Codex quiet" }).detail == "codex --model gpt-5.6-sol")
@@ -509,8 +509,8 @@ import workspacecore
             ])
         let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
 
-        let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let items = CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: items, query: "", currentWorkspaceID: nil, recentFocusIdentities: [], maxEmptyQueryItems: 20)
 
         let busyRows = visible.filter { $0.label == "Codex busy" }
@@ -550,7 +550,7 @@ import workspacecore
         let exitAlertID = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.attentionID)
 
         let undismissedRow = try #require(
-            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first {
+            CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first {
                 $0.source == .workspaceTarget && $0.kind == .process
             })
         guard case .process(.exited) = undismissedRow.status else {
@@ -559,7 +559,7 @@ import workspacecore
         }
 
         let dismissedRow = try #require(
-            AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID]).first {
+            CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID]).first {
                 $0.source == .workspaceTarget && $0.kind == .process
             })
         guard case .idle = dismissedRow.status else {
@@ -592,7 +592,7 @@ import workspacecore
             ])
         let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
 
-        let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
+        let items = CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
         let alert = try #require(items.first { $0.source == .alertsAttention && $0.label == "shell-1" })
 
         #expect(alert.detail == "make test")
@@ -615,7 +615,7 @@ import workspacecore
                 ])
         ]
 
-        let items = AppKitController.buildCommandPaletteItems(
+        let items = CommandPaletteController.buildCommandPaletteItems(
             overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []), alertsGroups: alerts)
         let alert = try #require(items.first { $0.source == .alertsAttention })
 
@@ -635,7 +635,7 @@ import workspacecore
                 ])
         ]
 
-        let items = AppKitController.buildCommandPaletteItems(
+        let items = CommandPaletteController.buildCommandPaletteItems(
             overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []), alertsGroups: alerts)
         let alert = try #require(items.first { $0.source == .alertsAttention })
 
@@ -670,8 +670,8 @@ import workspacecore
         let mergedAlerts = AlertsController.buildOverviewAlertsGroups(from: remoteOverview, deviceID: "remote-device")
         let localOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
 
-        let items = AppKitController.buildCommandPaletteItems(overview: localOverview, alertsGroups: mergedAlerts)
-        let visible = AppKitController.visibleCommandPaletteItems(
+        let items = CommandPaletteController.buildCommandPaletteItems(overview: localOverview, alertsGroups: mergedAlerts)
+        let visible = CommandPaletteController.visibleCommandPaletteItems(
             allItems: items, query: "", currentWorkspaceID: nil, recentFocusIdentities: [], maxEmptyQueryItems: 20)
 
         let agentRows = visible.filter { $0.label == "Remote Codex" }

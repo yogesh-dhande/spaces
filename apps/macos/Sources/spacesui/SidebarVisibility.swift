@@ -6,7 +6,7 @@ import workspacecore
 /// Every surface that renders the sidebar's model — the outline itself, arrow navigation, the
 /// window cycle order, the automation editor's workspace picker — reads through
 /// `SidebarController.deviceProjects` / `visibleWorkspaces`. The command palette's workspace walk
-/// (`AppKitController.deviceCommandPaletteWorkspaceItems`) and the terminal pane's session picker
+/// (`CommandPaletteController.deviceCommandPaletteWorkspaceItems`) and the terminal pane's session picker
 /// (`orderedSessionPickerWorkspaceContexts`) list the same rows in the same order and call these
 /// rules directly. Keeping the rules here (pure, host-free) is what stops "is this row shown?" from
 /// being re-answered slightly differently at each of those sites.
