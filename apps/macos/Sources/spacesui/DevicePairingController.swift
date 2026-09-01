@@ -848,7 +848,7 @@ import workspacecore
             let database = try self.database()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
-            host.forgetDaemonUpdateProgress(deviceID: deviceID)
+            host.daemonUpdate.forgetDaemonUpdateProgress(deviceID: deviceID)
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
