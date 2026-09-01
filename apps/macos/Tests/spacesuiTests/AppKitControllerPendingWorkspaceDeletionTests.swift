@@ -265,7 +265,7 @@ import workspacecore
     /// nothing, so the entry keeps waiting rather than resolving on absence-of-evidence. Generation is
     /// unmoved here (0 == 0), matching "nothing has installed since the defer."
     @Test func noOverviewYetLeavesTheEntryAwaiting() {
-        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+        let verdict = WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
             overview: nil, overviewInstallGeneration: 0, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
             branchDeletionRequested: false)
         #expect(verdict == .stillAwaiting)
@@ -276,7 +276,7 @@ import workspacecore
     /// i.e. this is a fresh install for the owning device, not a stale rebuild rereading old data.
     @Test func anOverviewThatStillListsTheWorkspaceResolvesToPresent() {
         let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
-        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+        let verdict = WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
             overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
             branchDeletionRequested: false)
         #expect(verdict == .present)
@@ -290,11 +290,11 @@ import workspacecore
     @Test func anOverviewWithoutTheWorkspaceResolvesToGoneAndCarriesTheBranchNoticeFlag() {
         let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
                 branchDeletionRequested: false) == .gone(showsBranchOutcomeNotice: false))
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
                 branchDeletionRequested: true) == .gone(showsBranchOutcomeNotice: true))
     }
@@ -331,12 +331,12 @@ import workspacecore
 
         // And that is what lets the deferred delete settle instead of staying inert for the rest of the run.
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: retainedRebuild.overview, overviewInstallGeneration: retainedRebuild.overviewInstallGeneration,
                 overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false)
                 == .stillAwaiting)
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: identicalFreshRebuild.overview, overviewInstallGeneration: identicalFreshRebuild.overviewInstallGeneration,
                 overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false) == .present
         )
@@ -362,20 +362,20 @@ import workspacecore
         let tearingDown = SpacesDeviceOverviewPayload(
             workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [], workspaceIDsWithTeardownInFlight: ["ws-deleting"])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: tearingDown, overviewInstallGeneration: 2, overviewInstallGenerationAtDefer: 1, workspaceID: "ws-deleting",
                 branchDeletionRequested: false) == .stillAwaiting)
 
         let noLongerTearingDown = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: noLongerTearingDown, overviewInstallGeneration: 2, overviewInstallGenerationAtDefer: 1, workspaceID: "ws-deleting",
                 branchDeletionRequested: false) == .present)
     }
 
     @Test func aRebuildWithNoFreshInstallForTheOwningDeviceStaysAwaitingEvenWithStaleOverviewListingIt() {
         let staleOverview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
-        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+        let verdict = WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
             overview: staleOverview, overviewInstallGeneration: 0, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
             branchDeletionRequested: false)
         #expect(verdict == .stillAwaiting)
@@ -387,13 +387,13 @@ import workspacecore
     @Test func aFreshInstallForTheOwningDeviceSettlesTheDeferralInBothDirections() {
         let overviewWithoutWorkspace = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: overviewWithoutWorkspace, overviewInstallGeneration: 3, overviewInstallGenerationAtDefer: 2, workspaceID: "ws-deleting",
                 branchDeletionRequested: true) == .gone(showsBranchOutcomeNotice: true))
 
         let overviewWithWorkspace = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(
+            WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletion(
                 overview: overviewWithWorkspace, overviewInstallGeneration: 3, overviewInstallGenerationAtDefer: 2, workspaceID: "ws-deleting",
                 branchDeletionRequested: false) == .present)
     }
