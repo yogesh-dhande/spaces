@@ -319,16 +319,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // reached the mailbox, and releasing here would risk the mailbox draining an older held frame
         // first.
         //
-        // Two narrow races on this seam are accepted rather than closed. A viewport report can land in
-        // the gap between the post-submit release and the released frame's main-actor apply, so the
-        // first paint can be at a grid the surface just moved past; and because this pipeline spans
-        // `beginStop()`/`start()`, a payload still draining from the previous lifecycle can match a
-        // freshly re-armed hold whose apply then rejects it as stale, leaving the new lifecycle's first
-        // frame unheld. Both windows are milliseconds wide against events that occur once per open,
-        // both cost at most one transient reflow that the ordinary viewport-report → resize path
-        // corrects in the next round trip, and neither can strand the hold; closing them would need a
-        // revocable release re-validated at apply time, which puts bookkeeping on the apply hot path
-        // for a race the bounded timeout already caps.
+        // The post-submit release and the frame's own main-actor apply are unordered: the mailbox
+        // schedules its drain inside `submit`, before `didSubmit` runs, so for a barrier payload the
+        // apply can reach `applyReducedState` before the release does. The apply completes the release
+        // itself when the frame it is applying matches the latest reported grid
+        // (`releaseForApplyingMatchingFrame`, called from `applyReducedState`), so the first paint never
+        // depends on which side wins.
+        //
+        // One narrow race on this seam is accepted rather than closed. Because this pipeline spans
+        // `beginStop()`/`start()`, a payload still draining from the previous lifecycle can mark and
+        // release a freshly re-armed hold from the post-submit hook while its apply is rejected as stale,
+        // leaving the new lifecycle's first frame unheld. That window is milliseconds wide against an
+        // event that occurs once per open, costs at most one transient reflow that the ordinary
+        // viewport-report → resize path corrects in the next round trip, and cannot strand the hold.
         shouldUseFrame: { [openScreenHold] frame, _ in
             openScreenHold.noteReducedFrame(frame)
             return true
@@ -2874,6 +2877,27 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // hold exists to remove. A barrier still
         // applies while the pipeline holds, so this is where such a payload's screen is kept off the
         // surface; everything else on it lands as usual.
+        // The post-submit release runs on the pipeline's consumer thread with nothing ordering it against
+        // this apply: the mailbox schedules its drain inside `submit`, before `didSubmit` runs, so for a
+        // barrier payload this apply can outrun the release. If the gate below then read the hold as still
+        // armed it would refuse the one paint the hold was waiting for, and the frame would be consumed
+        // with nothing queued to repaint it until the bounded timeout. So the matching frame completes the
+        // release itself, here, before the gate reads it — the same one-shot the post-submit hook runs,
+        // whichever side gets there first. Evaluated against the viewport as it is at apply time, which is
+        // also what keeps a frame the surface has already moved past from releasing anything. The
+        // stale-lifecycle drop above keeps a previous lifecycle's payload from ever reaching this.
+        //
+        // `payload.renderSnapshot != nil` mirrors the paint gate below: while the mailbox holds, a
+        // frameless screen-only output can inherit a coalesced-away entry's `frameToApply` and then
+        // absorb a barrier, draining while the hold is still armed — an apply that carries a matching
+        // frame it cannot paint. Releasing on it would end the hold with no paint and cancel the bounded
+        // timers, so such an apply leaves the hold alone and the viewport-report and timeout paths keep
+        // covering it (both paint the stored frame when they release).
+        if !reduction.isRefusedOutOfBandPayload, payload.renderSnapshot != nil, let frame = reduction.frameToApply,
+            openScreenHold.releaseForApplyingMatchingFrame(columns: frame.columns, rows: frame.rows)
+        {
+            trace("open_screen_hold_release reason=apply_matching_frame")
+        }
         let holdsFirstPaint = openScreenHold.isHolding && ownerRenderEpochState == nil
         if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {
             if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }

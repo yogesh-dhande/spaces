@@ -3183,7 +3183,7 @@
         private func withWorkspaceFixture(
             workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient(),
             _ body: (
-                _ workspaceID: String, _ repo: URL, _ server: SpacesDeviceAPIServer, _ requestClient: SpacesDeviceAPIRequestSessionClient,
+                _ workspaceID: String, _ repo: URL, _ server: SpacesDeviceAPIServer, _ requestClient: WorkspaceGitRequestClient,
                 _ clientApp: SpacesDeviceClientApp, _ authToken: String
             ) throws -> Void
         ) throws {
@@ -3222,7 +3222,7 @@
         /// needs (`workspaceDiff` requires a repo; `workspaceFileRead`/`Write` do not).
         private func withNonGitWorkspaceFixture(
             _ body: (
-                _ workspaceID: String, _ dir: URL, _ server: SpacesDeviceAPIServer, _ requestClient: SpacesDeviceAPIRequestSessionClient,
+                _ workspaceID: String, _ dir: URL, _ server: SpacesDeviceAPIServer, _ requestClient: WorkspaceGitRequestClient,
                 _ clientApp: SpacesDeviceClientApp, _ authToken: String
             ) throws -> Void
         ) throws {
@@ -3256,7 +3256,7 @@
         /// hits before its first commit.
         private func withUnbornWorkspaceFixture(
             _ body: (
-                _ workspaceID: String, _ repo: URL, _ requestClient: SpacesDeviceAPIRequestSessionClient, _ clientApp: SpacesDeviceClientApp,
+                _ workspaceID: String, _ repo: URL, _ requestClient: WorkspaceGitRequestClient, _ clientApp: SpacesDeviceClientApp,
                 _ authToken: String
             ) throws -> Void
         ) throws {
@@ -3287,17 +3287,36 @@
             }
         }
 
+        /// Sends every request with a deadline far above the production default (10s). That default
+        /// exists for a live network; here the transport is loopback TLS and the only real wall-clock
+        /// cost is git chewing through multi-megabyte fixtures, which the heavy diff-transfer tests
+        /// push to ~8s even on a quiet machine — inside the default's margin under parallel test load.
+        /// No test in this suite asserts the client-side deadline, so the generous budget removes
+        /// machine load from what these tests measure; a genuine server hang still fails, just slower.
+        private final class WorkspaceGitRequestClient: @unchecked Sendable {
+            private let underlying: SpacesDeviceAPIRequestSessionClient
+
+            init(_ underlying: SpacesDeviceAPIRequestSessionClient) { self.underlying = underlying }
+
+            func send(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+                try underlying.send(request, timeoutSeconds: 120)
+            }
+
+            func cancel() { underlying.cancel() }
+        }
+
         private func makeServerAndClient(
             workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
-        ) throws -> (SpacesDeviceAPIServer, SpacesDeviceAPIRequestSessionClient, SpacesDeviceClientApp, String) {
+        ) throws -> (SpacesDeviceAPIServer, WorkspaceGitRequestClient, SpacesDeviceClientApp, String) {
             let identity = try workspaceGitTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedWorkspaceGitPairingStore()
             let server = SpacesDeviceAPIServer(
                 host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, workspaceGitClient: workspaceGitClient)
             try server.start()
-            let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                resolver: SpacesDeviceEndpointResolver(
-                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
+            let requestClient = WorkspaceGitRequestClient(
+                try SpacesDeviceAPIRequestSessionClient(
+                    resolver: SpacesDeviceEndpointResolver(
+                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)))
             let clientApp = SpacesDeviceClientApp(
                 installationID: "workspace-git-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
                 appVersion: "1.0")

@@ -30,7 +30,8 @@ import spacesterminalcore
 /// matching a frame at the latest reported grid, and `releasePendingAfterSubmit` completes it once that
 /// frame's output is queued; the main actor ends it directly when the surface reports a grid the screen
 /// already matches, when the handshake produced no frame at all, when no matching frame can arrive (the
-/// session ended, another client owns it), or when the bounded wait expires. Whichever path gets there
+/// session ended, another client owns it), when the bounded wait expires, or when the main actor applies
+/// a frame at the latest reported grid (`releaseForApplyingMatchingFrame`). Whichever path gets there
 /// first runs `release` exactly once: `takeRelease` under the lock is what makes a pending-submit mark
 /// unable to resurrect a hold something else already ended.
 final class TerminalViewerOpenScreenHold: @unchecked Sendable {
@@ -121,6 +122,27 @@ final class TerminalViewerOpenScreenHold: @unchecked Sendable {
         let pending = takeRelease()
         lock.unlock()
         pending?()
+    }
+
+    /// Called from the main actor while it applies a frame, with that frame's grid. Ends the hold only
+    /// when the hold is armed and the frame is at the latest reported grid — the same predicate
+    /// `noteReducedFrame` matches at reduce time, re-evaluated here at apply time so the apply that paints
+    /// this frame can never observe a hold its own frame already satisfied: the post-submit release runs
+    /// on the pipeline's consumer thread with nothing ordering it against this apply, so either side may
+    /// get there first, and `takeRelease` is what keeps ending the hold one-shot regardless of which one
+    /// does. True when this call is what ended the hold.
+    @discardableResult func releaseForApplyingMatchingFrame(columns: Int, rows: Int) -> Bool {
+        lock.lock()
+        guard release != nil, let viewport, viewport.columns == columns, viewport.rows == rows else {
+            lock.unlock()
+            return false
+        }
+        hasFrameForViewport = true
+        isReleasePendingSubmit = false
+        let pending = takeRelease()
+        lock.unlock()
+        pending?()
+        return pending != nil
     }
 
     /// Ends the hold when no frame at the current grid has reduced. The ownership handshake calls this
