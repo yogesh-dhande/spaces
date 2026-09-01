@@ -271,7 +271,7 @@ import workspacecore
         // `.builtin` is always first and always available: it opens the app's own Editor window and
         // needs nothing installed, so `options` is never empty.
         let options = host.installedEditorOptions()
-        let currentEditor = host.configCache?.editor ?? .builtin
+        let currentEditor = host.deviceModel.configCache?.editor ?? .builtin
         let editorPopUp = NSPopUpButton()
         editorPopUp.translatesAutoresizingMaskIntoConstraints = false
         editorPopUp.autoenablesItems = false
@@ -385,10 +385,10 @@ import workspacecore
 
     @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
-        if (host.configCache?.editor ?? .builtin) == preference { return }
+        if (host.deviceModel.configCache?.editor ?? .builtin) == preference { return }
         do {
             try host.clientDatabase().setSetting(key: ClientSettingsKey.appEditor, value: preference.rawValue)
-            host.configCache = try AppKitController.clientAppConfig()
+            host.deviceModel.configCache = try AppKitController.clientAppConfig()
         } catch { host.showError(error) }
     }
 

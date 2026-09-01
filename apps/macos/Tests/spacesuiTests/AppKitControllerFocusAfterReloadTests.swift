@@ -111,8 +111,8 @@ extension ProcessProfileEnvironmentSuites {
         /// waits for the reload it triggers and resolves against the running row that reload brings.
         @Test func aProcessFocusThatMissesTheCurrentSnapshotResolvesAgainstTheNextOne() async throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(overview: overview(processIsRunning: false), deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(overview: overview(processIsRunning: false), deviceID: deviceID)]
             controller.sidebar.applySidebarDataChange()
 
             let staleTargets = try #require(controller.focusableWindowContext(workspaceID: Self.workspaceID)?.targets)
@@ -135,8 +135,8 @@ extension ProcessProfileEnvironmentSuites {
         /// the focus still refuses instead of hanging on reload after reload.
         @Test func aProcessThatIsStillNotRunningAfterTheFreshSnapshotStaysUnresolved() async throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(overview: overview(processIsRunning: false), deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(overview: overview(processIsRunning: false), deviceID: deviceID)]
             controller.sidebar.applySidebarDataChange()
 
             let stoppedSnapshot = snapshot(overview: overview(processIsRunning: false), deviceID: deviceID)
@@ -171,12 +171,12 @@ extension ProcessProfileEnvironmentSuites {
         /// gate must not fire when `workspaceScope(forWorkspaceID:)` is already present.
         @Test func anOpenRefusedWithTheWorkspaceScopeAlreadyKnownDoesNotReload() async throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             // The workspace is in the sidebar's own index (scope present), but its device section is
             // offline, so `mayActOnTerminalPane` refuses the open: a real refusal, not a stale snapshot.
             var offlineSection = section(overview: overview(processIsRunning: false), deviceID: deviceID)
             offlineSection.loadState = .offline("test")
-            controller.deviceSections = [offlineSection]
+            controller.deviceModel.deviceSections = [offlineSection]
             controller.sidebar.applySidebarDataChange()
             #expect(controller.panelCoordinator.workspaceScope(forWorkspaceID: Self.workspaceID) != nil, "precondition: scope is already known")
 
@@ -199,7 +199,7 @@ extension ProcessProfileEnvironmentSuites {
         /// same as before this gate existed.
         @Test func anOpenRefusedWithTheWorkspaceScopeNotYetKnownRetriesOnce() async throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             // No `deviceSections`/sidebar index at all: `workspaceScope(forWorkspaceID:)` is nil, the
             // just-created-workspace case. The pinned `deviceID` alone is enough for `mayActOnTerminalPane`
             // to allow the local device before any section exists.

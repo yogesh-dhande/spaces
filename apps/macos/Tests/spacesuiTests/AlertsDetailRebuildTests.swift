@@ -96,7 +96,7 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func aRefreshThatChangesNothingLeavesTheSameCardsOnScreen() throws {
             let controller = makeController()
-            controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
+            controller.deviceModel.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
             controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 
@@ -111,12 +111,12 @@ extension ProcessProfileEnvironmentSuites {
         /// nothing else, so it is written into the field the row already has.
         @Test func aLiveTitleChangeUpdatesTheCardInPlace() throws {
             let controller = makeController()
-            controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
+            controller.deviceModel.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
             controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
             #expect(detailText(rendered) == "vim main.swift")
 
-            controller.alertsGroups = [bellGroup(liveTitle: "vim other.swift")]
+            controller.deviceModel.alertsGroups = [bellGroup(liveTitle: "vim other.swift")]
             controller.alerts.showAlertsDetail()
 
             let afterRefresh = try #require(renderedRows(controller).first)
@@ -127,11 +127,11 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func aNewAlertRebuildsThePane() throws {
             let controller = makeController()
-            controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
+            controller.deviceModel.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
             controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 
-            controller.alertsGroups = [bellAndProcessGroup(liveTitle: "vim main.swift")]
+            controller.deviceModel.alertsGroups = [bellAndProcessGroup(liveTitle: "vim main.swift")]
             controller.alerts.showAlertsDetail()
 
             let afterRefresh = renderedRows(controller)
@@ -143,7 +143,7 @@ extension ProcessProfileEnvironmentSuites {
         /// though the content never changed.
         @Test func returningToThePaneBuildsItAgain() throws {
             let controller = makeController()
-            controller.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
+            controller.deviceModel.alertsGroups = [bellGroup(liveTitle: "vim main.swift")]
             controller.alerts.showAlertsDetail()
             let rendered = try #require(renderedRows(controller).first)
 

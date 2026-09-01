@@ -227,7 +227,7 @@ extension AppKitController {
     func sidebarRuntimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
         return Self.sidebarRuntimeTargetItems(
-            detail: context.detail, browserSessions: context.browserSessions, alertsGroups: alertsGroups,
+            detail: context.detail, browserSessions: context.browserSessions, alertsGroups: deviceModel.alertsGroups,
             dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 

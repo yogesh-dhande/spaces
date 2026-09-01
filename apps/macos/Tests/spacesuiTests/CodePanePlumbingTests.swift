@@ -86,7 +86,7 @@ extension ProcessProfileEnvironmentSuites {
         /// an exited agent must never be offered as a destination for review text.
         @Test func codePaneRunningAgentsExcludesExitedAgentsWithInteractiveSessions() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let rows = [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:live", workspaceID: "workspace-1", name: "Live", command: "codex", agentID: "live", sessionID: "session-live",
@@ -95,7 +95,7 @@ extension ProcessProfileEnvironmentSuites {
                     id: "agent:exited", workspaceID: "workspace-1", name: "Exited", command: "codex", agentID: "exited", sessionID: "session-exited",
                     runState: .running, activityState: .exited, canStop: true),
             ]
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "session-live", codingAgentRows: rows)]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "session-live", codingAgentRows: rows)]
             controller.rebuildFlatSidebarData()
 
             let agents = controller.codePaneRunningAgents(workspaceID: "workspace-1")
@@ -169,12 +169,12 @@ extension ProcessProfileEnvironmentSuites {
         /// scopes differ because a code pane's only legitimate placement is the global singleton window.
         @Test func aTerminalPaneAndACodePaneKeyToDistinctControllers() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let terminalLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(terminalLayout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             controller.panelCoordinator.restoreLayoutIfNeeded(
                 scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
@@ -193,12 +193,12 @@ extension ProcessProfileEnvironmentSuites {
         /// its controller being torn down must not disturb it. Covers "lookup survives session churn".
         @Test func codePaneLookupSurvivesTerminalSessionChurn() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let terminalLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "term", content: .terminalSession(deviceID: deviceID, sessionID: "sess-1")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(terminalLayout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             controller.panelCoordinator.restoreLayoutIfNeeded(
                 scope: .workspace(deviceID: deviceID, workspaceID: "workspace-1"), focusIntent: .withoutFocus)
@@ -224,7 +224,7 @@ extension ProcessProfileEnvironmentSuites {
         /// rebuilding a placement that can no longer exist in this scope.
         @Test func restoringAWorkspacePanelPrunesALegacyPersistedCodePane() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "code", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
@@ -246,8 +246,8 @@ extension ProcessProfileEnvironmentSuites {
         /// code-pane counterpart of `closeTerminalPanes` called from the workspace-teardown chokepoint.
         @Test func closeCodePanesClosesOnlyTheGivenWorkspacesScopedPaneAndLeavesAGlobalEditorPaneOnItUntouched() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
@@ -286,8 +286,8 @@ extension ProcessProfileEnvironmentSuites {
         /// Editor's pane on the transitioning workspace untouched.
         @Test func closeCodePanesByDeviceAndWorkspaceClosesOnlyTheMatchingScopedPaneAndLeavesAGlobalEditorPaneUntouched() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other")]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other")]
             controller.rebuildFlatSidebarData()
             let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
@@ -333,8 +333,8 @@ extension ProcessProfileEnvironmentSuites {
         /// the same set. Returns `nil` when no `.globalWindow` pane is orphaned by this prune.
         @Test func pruneOpenCodePanesClosesOnlyWorkspaceScopedPanesForGoneWorkspacesOnTheGivenDevice() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [
                 twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other", workspaceID: "workspace-2"),
             ]
             controller.rebuildFlatSidebarData()
@@ -371,7 +371,7 @@ extension ProcessProfileEnvironmentSuites {
         /// by a different device, reports no orphan.
         @Test func pruneOpenCodePanesReportsAnOrphanedGlobalWindowPaneInsteadOfClosingIt() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let globalScope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-gone")), to: PanelLayout())
@@ -402,10 +402,10 @@ extension ProcessProfileEnvironmentSuites {
         /// id is not knowable ahead of time, so the test recovers it from `onLayoutChanged`.
         @Test func openOrFocusGlobalEditorWindowOpensAFreshSingletonWindowWhenNoneExistsAndFocusesOnASecondCall() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let recovered = recoveredEditorWorkspaceState()
             try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-1")
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             var openedGlobalScopes: [PanelScope] = []
             controller.panelCoordinator.onLayoutChanged = { scope, _ in if case .globalWindow = scope { openedGlobalScopes.append(scope) } }
@@ -436,9 +436,9 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func openOrFocusGlobalEditorWindowUsesDiffWhenTheWorkspaceHasNoSavedState() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let workspaceID = "workspace-without-saved-code-pane-state"
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-no-state", workspaceID: workspaceID)]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-no-state", workspaceID: workspaceID)]
             controller.rebuildFlatSidebarData()
             var openedGlobalScopes: [PanelScope] = []
             controller.panelCoordinator.onLayoutChanged = { scope, _ in
@@ -465,8 +465,8 @@ extension ProcessProfileEnvironmentSuites {
         /// refusal's pure decision logic instead.
         @Test func openOrFocusGlobalEditorWindowFocusesAnExistingWindowEvenWhileItsDeviceIsOffline() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1", loadState: .offline("Connection refused"))]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1", loadState: .offline("Connection refused"))]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
@@ -488,7 +488,7 @@ extension ProcessProfileEnvironmentSuites {
         /// open anywhere.
         @Test func focusPaneForCodePaneIDFocusesAnExistingPaneAndMissesAnUnknownOne() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             var layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "code-1", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
@@ -517,8 +517,8 @@ extension ProcessProfileEnvironmentSuites {
         /// terminal pane and a code pane can legitimately sit side by side there.
         @Test func panelLeavingTheWindowHibernatesItsCodePaneButLeavesItsTerminalPaneAlone() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-1")]
             controller.rebuildFlatSidebarData()
             // Pre-populates "sess-1"'s controller through the same `.withoutFocus` restore path
             // `aTerminalPaneAndACodePaneKeyToDistinctControllers` uses, before the `.globalWindow` restore
@@ -585,10 +585,10 @@ extension ProcessProfileEnvironmentSuites {
         /// it is a no-op before exercising the real change.
         @Test func showWorkspaceDetailRetargetsAGlobalPanelWindowsCodePaneToTheNewlySelectedWorkspace() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let recovered = recoveredEditorWorkspaceState()
             try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-2")
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
@@ -646,8 +646,8 @@ extension ProcessProfileEnvironmentSuites {
         /// entry point the sidebar's Alerts row and its keyboard shortcut both call.
         @Test func alertsDetourBetweenTwoWorkspacePresentationsStillRetargetsOnReturn() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
@@ -685,8 +685,8 @@ extension ProcessProfileEnvironmentSuites {
         /// retarget without making an unrelated case (A → Alerts → A) start retargeting instead.
         @Test func sameWorkspaceReselectionAcrossAnAlertsDetourDoesNotRetarget() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
@@ -709,8 +709,8 @@ extension ProcessProfileEnvironmentSuites {
         /// a monitor: no retarget, no new controller instance.
         @Test func overviewTickRepresentingTheSameWorkspaceDoesNotChurnTheMonitor() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
@@ -732,10 +732,10 @@ extension ProcessProfileEnvironmentSuites {
         /// shared with `retargetGlobalWindowCodePanes`) — and restores the target workspace's saved mode.
         @Test func openOrFocusGlobalEditorWindowRetargetsAnExistingSingletonAndRestoresSavedMode() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let recovered = recoveredEditorWorkspaceState()
             try persistEditorWorkspaceState(recovered, controller: controller, deviceID: deviceID, workspaceID: "workspace-1")
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
@@ -773,8 +773,8 @@ extension ProcessProfileEnvironmentSuites {
         /// a headless test process cannot control), excluding the workspace that just left.
         @Test func deletingTheMonitorsWorkspaceRetargetsItToTheFallbackWorkspaceAndLeavesTheWindowOpen() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
@@ -800,14 +800,14 @@ extension ProcessProfileEnvironmentSuites {
         /// lifecycle close left once stop/restart/delete-with-a-survivor are exempted.
         @Test func deletingTheLastRemainingWorkspaceClosesTheMonitorsWindow() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
             controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
             // No workspace anywhere: matches how the overview-apply call sites update `deviceSections`
             // before pruning, so the fallback chain's device-wide sweep has nothing left to find.
-            controller.deviceSections = []
+            controller.deviceModel.deviceSections = []
 
             let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: [])
             let unwrappedOrphan = try #require(orphan, "workspace-1 dropped out of the live set, so the monitor is reported orphaned")
@@ -824,8 +824,8 @@ extension ProcessProfileEnvironmentSuites {
         /// must not retarget, full stop) and only moves once a genuine subsequent selection change fires.
         @Test func restoreLeavesAMonitorOnItsSavedWorkspaceUntilARealSelectionChange() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
             // Restored monitor is already on workspace-1, matching what its persisted layout says.
@@ -862,8 +862,8 @@ extension ProcessProfileEnvironmentSuites {
         /// retargeting them to a loaded fallback, and makes that target durable for the next launch.
         @Test func persistedEditorWhoseWorkspaceWasDeletedOfflineRestoresOnAFallbackWorkspace() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [section(deviceID: deviceID, sessionID: "unused", workspaceID: "workspace-2")]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "unused", workspaceID: "workspace-2")]
             controller.rebuildFlatSidebarData()
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "editor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-gone")), to: PanelLayout())
@@ -889,8 +889,8 @@ extension ProcessProfileEnvironmentSuites {
         /// tab. The split result is persisted immediately so this is a one-time migration.
         @Test func reopenPersistedPanelWindowsSplitsALegacyMultiTabWindowIntoOneWindowPerTab() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
-            controller.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
             controller.rebuildFlatSidebarData()
             var legacyLayout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "code-1", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())

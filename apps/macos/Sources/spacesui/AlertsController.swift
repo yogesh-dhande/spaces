@@ -264,7 +264,7 @@ import workspacecore
     // MARK: - Alerts content
 
     private func buildAlertsGroups() -> [AlertsGroup] {
-        Self.visibleAlertsGroups(in: host.alertsGroups, dismissedAttentionItemIDs: dismissedAlertsAttentionItemIDs)
+        Self.visibleAlertsGroups(in: host.deviceModel.alertsGroups, dismissedAttentionItemIDs: dismissedAlertsAttentionItemIDs)
     }
 
     /// The groups the user sees: everything derived from the overviews minus what has been dismissed —
@@ -425,7 +425,7 @@ import workspacecore
     func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = loadDismissedAlertsAttentionItemIDs() }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
-        let prunedIDs = Self.retainedDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs, in: host.alertsGroups)
+        let prunedIDs = Self.retainedDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs, in: host.deviceModel.alertsGroups)
         guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
         dismissedAlertsAttentionItemIDs = prunedIDs
         do { try storeDismissedAlertsAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
@@ -465,7 +465,7 @@ import workspacecore
     func consumeFocusedSessionBellAlerts() {
         focusedBellWatch = Self.updatedFocusedBellWatch(focusedBellWatch, focusedSessionID: host.panelCoordinator.focusedSessionID(), now: Date())
         guard let focusedBellWatch else { return }
-        let consumed = Self.bellAttentionIDs(in: host.alertsGroups, watch: focusedBellWatch).subtracting(dismissedAlertsAttentionItemIDs)
+        let consumed = Self.bellAttentionIDs(in: host.deviceModel.alertsGroups, watch: focusedBellWatch).subtracting(dismissedAlertsAttentionItemIDs)
         guard !consumed.isEmpty else { return }
         dismissedAlertsAttentionItemIDs.formUnion(consumed)
         do { try storeDismissedAlertsAttentionItemIDs(dismissedAlertsAttentionItemIDs) } catch { host.showError(error) }

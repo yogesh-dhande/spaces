@@ -214,15 +214,15 @@ extension ProcessProfileEnvironmentSuites {
         /// panel: the paths under test are the ones that never resolve a workspace, so the pane's
         /// identity is all they read.
         private func showWorkspacePane(_ controller: AppKitController) {
-            controller.deviceSections = [populatedSection(deviceID: controller.localDeviceID)]
+            controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]
             controller.rebuildFlatSidebarData()
-            controller.presentDetailPane(.workspace(id: Self.workspaceID, deviceID: controller.localDeviceID), presentation: .userNavigation)
+            controller.presentDetailPane(.workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID), presentation: .userNavigation)
             controller.selectedProjectID = Self.projectID
             controller.selectedWorkspaceID = Self.workspaceID
         }
 
         private func applyReload(_ controller: AppKitController, section: AppKitController.DeviceSection) {
-            controller.deviceSections = [section]
+            controller.deviceModel.deviceSections = [section]
             controller.rebuildFlatSidebarData()
             controller.refreshSelection()
         }
@@ -232,9 +232,9 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: emptySection(deviceID: controller.localDeviceID, loadState: .offline("unreachable"), compatibility: nil))
+            applyReload(controller, section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .offline("unreachable"), compatibility: nil))
 
-            #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.localDeviceID))
+            #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID))
             #expect(controller.selectedWorkspaceID == Self.workspaceID, "the selection is what restores the pane when the daemon returns")
         }
 
@@ -244,7 +244,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: emptySection(deviceID: controller.localDeviceID, loadState: .loaded, compatibility: .compatible))
+            applyReload(controller, section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible))
 
             #expect(controller.detailPane == DetailPane.none)
             #expect(controller.selectedWorkspaceID == nil, "a selection nothing lists would re-enter this branch on every later reload")
@@ -257,7 +257,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: populatedSection(deviceID: controller.localDeviceID, projectHidden: true))
+            applyReload(controller, section: populatedSection(deviceID: controller.deviceModel.localDeviceID, projectHidden: true))
 
             #expect(controller.detailPane == DetailPane.none)
             #expect(controller.selectedWorkspaceID == nil)
@@ -268,7 +268,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: populatedSection(deviceID: controller.localDeviceID, workspaceHidden: true))
+            applyReload(controller, section: populatedSection(deviceID: controller.deviceModel.localDeviceID, workspaceHidden: true))
 
             #expect(controller.detailPane == DetailPane.none)
             #expect(controller.selectedWorkspaceID == nil)
@@ -278,7 +278,7 @@ extension ProcessProfileEnvironmentSuites {
         /// in Alerts, which is what pulled users out of a focused terminal.
         @Test func aReloadWithNothingSelectedLeavesThePaneAlone() {
             let controller = makeController()
-            controller.deviceSections = [populatedSection(deviceID: controller.localDeviceID)]
+            controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]
             controller.rebuildFlatSidebarData()
 
             controller.refreshSelection()
@@ -291,18 +291,18 @@ extension ProcessProfileEnvironmentSuites {
         @Test func summonWithNoFocusedWorkspaceNeverChangesThePane() {
             let controller = makeController()
             showWorkspacePane(controller)
-            controller.deviceSections = [emptySection(deviceID: controller.localDeviceID, loadState: .loaded, compatibility: .compatible)]
+            controller.deviceModel.deviceSections = [emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible)]
             controller.rebuildFlatSidebarData()
 
             controller.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)
 
-            #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.localDeviceID))
+            #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID))
         }
 
         /// The same summon from the placeholder: it stays on the placeholder rather than landing on Alerts.
         @Test func summonFromThePlaceholderStaysOnThePlaceholder() {
             let controller = makeController()
-            controller.deviceSections = [populatedSection(deviceID: controller.localDeviceID)]
+            controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]
             controller.rebuildFlatSidebarData()
 
             controller.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)

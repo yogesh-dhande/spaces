@@ -217,7 +217,7 @@ extension AppKitController {
     func reopenPersistedPanelWindowsIfPossible() {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }
-        let readySections = deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
+        let readySections = deviceModel.deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
@@ -391,7 +391,7 @@ extension AppKitController {
     /// them, through the same `SidebarVisibility` rules.
     private func orderedSessionPickerWorkspaceContexts() -> [SessionPickerWorkspaceContext] {
         var contexts: [SessionPickerWorkspaceContext] = []
-        for section in deviceSections where section.loadState == .loaded {
+        for section in deviceModel.deviceSections where section.loadState == .loaded {
             guard let overview = section.overview else { continue }
             let mapped = Self.deviceSidebarData(from: overview, deviceID: section.deviceID)
             for project in SidebarVisibility.deviceProjects(
