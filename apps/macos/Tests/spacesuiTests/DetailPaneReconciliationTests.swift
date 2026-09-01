@@ -81,12 +81,12 @@ import spacesterminalcore
 @Suite struct ShortcutSpecReadFailureTests {
     private struct ClientDatabaseUnavailable: Error {}
 
-    private func storedResolver(_ values: [String: String]) -> AppKitController.ShortcutSettingResolver {
-        AppKitController.ShortcutSettingResolver { key in values[key] }
+    private func storedResolver(_ values: [String: String]) -> ShortcutsController.ShortcutSettingResolver {
+        ShortcutsController.ShortcutSettingResolver { key in values[key] }
     }
 
-    private func failingResolver() -> AppKitController.ShortcutSettingResolver {
-        AppKitController.ShortcutSettingResolver { _ in throw ClientDatabaseUnavailable() }
+    private func failingResolver() -> ShortcutsController.ShortcutSettingResolver {
+        ShortcutsController.ShortcutSettingResolver { _ in throw ClientDatabaseUnavailable() }
     }
 
     private static let leader: Set<HotkeyModifier> = [.cmd, .alt]
@@ -94,7 +94,7 @@ import spacesterminalcore
     /// The unset setting is not a failure: it resolves to the default chord with the leader applied.
     @Test func anUnsetShortcutResolvesToTheLeaderBackedDefault() throws {
         let resolved = try #require(
-            AppKitController.resolvedShortcutSpec(storedResolver([:]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
+            ShortcutsController.resolvedShortcutSpec(storedResolver([:]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
         #expect(resolved.modifiers == [.cmd, .alt], "the alerts shortcut is only ever the leader plus a letter")
         #expect(resolved.key == "a")
     }
@@ -103,10 +103,10 @@ import spacesterminalcore
     /// degrading it to the leaderless letter the default is stored as.
     @Test func aFailedReadKeepsTheChordAlreadyInEffect() throws {
         let inEffect = try #require(
-            AppKitController.resolvedShortcutSpec(
+            ShortcutsController.resolvedShortcutSpec(
                 storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
 
-        let afterFailedRead = AppKitController.resolvedShortcutSpec(
+        let afterFailedRead = ShortcutsController.resolvedShortcutSpec(
             failingResolver(), setting: .guiAlertsShortcut, current: inEffect, leaderModifiers: Self.leader)
 
         #expect(afterFailedRead == inEffect)
@@ -117,7 +117,7 @@ import spacesterminalcore
     @Test func aFailedReadKeepsACustomChord() throws {
         let custom = HotkeySpec(key: "j", modifiers: [.ctrl, .shift])
         #expect(
-            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiSidebarNextShortcut, current: custom, leaderModifiers: Self.leader)
+            ShortcutsController.resolvedShortcutSpec(failingResolver(), setting: .guiSidebarNextShortcut, current: custom, leaderModifiers: Self.leader)
                 == custom)
     }
 
@@ -126,12 +126,12 @@ import spacesterminalcore
     /// would unregister the shortcut for the life of the outage, and never the bare stored letter.
     @Test func aFailedFirstReadInstallsTheSafeDefault() throws {
         let alerts = try #require(
-            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
+            ShortcutsController.resolvedShortcutSpec(failingResolver(), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
         #expect(alerts.modifiers == Self.leader, "a leader-backed default installed on a failed first read carries the leader")
         #expect(alerts.key == "a")
 
         let summon = try #require(
-            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiHotkey, current: nil, leaderModifiers: Self.leader))
+            ShortcutsController.resolvedShortcutSpec(failingResolver(), setting: .guiHotkey, current: nil, leaderModifiers: Self.leader))
         #expect(summon.modifiers.isEmpty == false, "the global summon hotkey stays registered on a failed first read")
     }
 }

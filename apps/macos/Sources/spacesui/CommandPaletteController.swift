@@ -113,7 +113,7 @@ final class CommandPalettePanel: NSPanel {
             row.addArrangedSubview(group)
         }
 
-        let jumpKey = host.footerShortcutHint(for: .guiWindowShortcut)
+        let jumpKey = host.shortcuts.footerShortcutHint(for: .guiWindowShortcut)
         addSegment(keys: ["↑", "↓"], label: "Move")
         addSep()
         addSegment(keys: ["↵"], label: "Open")
@@ -229,7 +229,7 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex)
             && commandPaletteFilteredItems[commandPaletteSelectedIndex].alertsAttentionID != nil
         return AppKitController.commandPaletteDismissShortcutMatches(
-            charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: host.shortcutModifiers(from: flags),
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: host.shortcuts.shortcutModifiers(from: flags),
             selectedItemIsAlert: selectedItemIsAlert, searchEditorCanCutSelectedText: commandPaletteSearchEditorCanCutSelectedText())
     }
 

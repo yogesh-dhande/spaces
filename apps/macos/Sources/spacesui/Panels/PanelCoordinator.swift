@@ -1665,7 +1665,7 @@ import spacesterminalcore
             let identity = globalWindowIdentity(scope: scope, layout: state.layout)
             view.apply(
                 layout: state.layout, titlesByTabID: titles, identity: identity,
-                newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+                newTabShortcutHint: host.shortcuts.footerShortcutHint(for: .guiOpenTerminalShortcut))
             syncPaneAccessibilityTitles(scope: scope)
             syncPanelWindowTitle(scope: scope)
             syncFocusedPaneFooter(scope: scope)

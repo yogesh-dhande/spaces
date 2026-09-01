@@ -777,7 +777,7 @@ import workspacecore
     }
 
     func handleAlertsShortcut(event: NSEvent) -> Bool {
-        guard let alertsShortcutSpec, host.matches(event: event, spec: alertsShortcutSpec) else { return false }
+        guard let alertsShortcutSpec, host.shortcuts.matches(event: event, spec: alertsShortcutSpec) else { return false }
         showAlertsDetail(presentation: .userNavigation)
         return true
     }

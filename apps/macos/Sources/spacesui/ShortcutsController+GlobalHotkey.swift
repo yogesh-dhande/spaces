@@ -1,6 +1,6 @@
 import Foundation
 
-extension AppKitController {
+extension ShortcutsController {
     enum GlobalHotkey: UInt32 {
         case toggle = 1
         case next = 2

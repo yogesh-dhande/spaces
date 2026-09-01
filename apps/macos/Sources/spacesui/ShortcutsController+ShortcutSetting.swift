@@ -2,7 +2,7 @@ import Foundation
 import spacesclientcore
 import workspacecore
 
-extension AppKitController {
+extension ShortcutsController {
     enum ShortcutSetting: CaseIterable {
         case guiHotkey
         case guiCommandPaletteHotkey

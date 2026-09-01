@@ -238,8 +238,8 @@ import workspacecore
     }
 
     private func renderSelectedSettingsSection() {
-        host.activeShortcutCaptureSetting = nil
-        host.shortcutButtonsBySetting.removeAll()
+        host.shortcuts.activeShortcutCaptureSetting = nil
+        host.shortcuts.shortcutButtonsBySetting.removeAll()
         switch selectedSettingsSection {
         case .general: renderSettingsCards(generalSettingsCards())
         case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
