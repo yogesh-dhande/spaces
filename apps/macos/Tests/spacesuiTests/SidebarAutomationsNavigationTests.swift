@@ -99,14 +99,14 @@ extension ProcessProfileEnvironmentSuites {
         private func loadedController() -> AppKitController {
             let controller = makeController()
             attachOutline(controller)
-            controller.deviceSections = [section(deviceID: controller.localDeviceID)]
+            controller.deviceModel.deviceSections = [section(deviceID: controller.deviceModel.localDeviceID)]
             controller.sidebar.applySidebarDataChange()
             return controller
         }
 
         @Test func upArrowFromTheFirstWorkspaceLeavesAutomationsShowing() throws {
             let controller = loadedController()
-            let first = try #require(controller.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
+            let first = try #require(controller.deviceModel.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
             controller.sidebar.selectWorkspace(first)
             #expect(controller.selectedWorkspaceID == Self.firstWorkspaceID)
 
@@ -118,7 +118,7 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func arrowNavigationKeepsMovingAfterLandingOnAutomations() throws {
             let controller = loadedController()
-            let first = try #require(controller.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
+            let first = try #require(controller.deviceModel.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
             controller.sidebar.selectWorkspace(first)
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1))
 

@@ -108,8 +108,8 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             let before = overview(liveTitle: nil)
             let after = overview(liveTitle: "vim main.swift")
-            controller.deviceSections = [section(overview: before)]
-            controller.localPairedDevice = localDevice()
+            controller.deviceModel.deviceSections = [section(overview: before)]
+            controller.deviceModel.localPairedDevice = localDevice()
             controller.sidebar.applySidebarDataSnapshot(fullSnapshot(overview: before))
 
             var fullSnapshotLoads = 0
@@ -123,8 +123,8 @@ extension ProcessProfileEnvironmentSuites {
             await controller.sidebar.drainSidebarRefreshForTesting()
 
             #expect(fullSnapshotLoads == 0, "A terminal-only change must not read config or rebuild the full snapshot.")
-            #expect(controller.deviceSections.first?.overview == after)
-            let row = try #require(controller.deviceSections.first?.overview?.workspaces.first?.terminalRows.first)
+            #expect(controller.deviceModel.deviceSections.first?.overview == after)
+            let row = try #require(controller.deviceModel.deviceSections.first?.overview?.workspaces.first?.terminalRows.first)
             #expect(row.liveTitle == "vim main.swift")
         }
 
@@ -147,14 +147,14 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(fullSnapshotLoads == 1)
             #expect(localOverviewLoads == 0)
-            #expect(controller.deviceSections.first?.overview == after)
+            #expect(controller.deviceModel.deviceSections.first?.overview == after)
         }
 
         @Test func staleLocalReloadCannotDeleteRecoveryStateForWorkspaceInstalledByMutation() async throws {
             let controller = makeController()
             let staleOverview = overview(liveTitle: nil)
-            controller.deviceSections = [section(overview: staleOverview)]
-            controller.localPairedDevice = localDevice()
+            controller.deviceModel.deviceSections = [section(overview: staleOverview)]
+            controller.deviceModel.localPairedDevice = localDevice()
 
             let createdWorkspaceID = "workspace-created"
             let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: SpacesPairedDeviceRecord.localDeviceID)

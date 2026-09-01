@@ -726,7 +726,7 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
@@ -780,7 +780,7 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
@@ -817,7 +817,7 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() throws {
             let controller = makeController()
-            controller.deviceSections = [section(processSessionID: "predecessor")]
+            controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
             try controller.clientDatabase().writeCodePaneWorkspaceState(
                 deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
 
@@ -872,7 +872,7 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-unrelated", pane: Pane(id: "u", content: .terminalSession(deviceID: deviceID, sessionID: "unrelated-old")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(processSessionID: "predecessorB", extraRowSessionID: "unrelated-old")]
+            controller.deviceModel.deviceSections = [section(processSessionID: "predecessorB", extraRowSessionID: "unrelated-old")]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)

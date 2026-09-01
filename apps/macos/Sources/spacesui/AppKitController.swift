@@ -66,6 +66,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     typealias AlertsAttentionEntry = AlertsController.AlertsAttentionEntry
     typealias AlertsGroup = AlertsController.AlertsGroup
 
+    /// Transitional aliases for nested-type namespacing during the decomposition: these nested types
+    /// moved onto `DeviceModelStore`, but existing `AppKitController.<Type>`-qualified references and
+    /// same-file unqualified uses keep compiling unchanged.
+    typealias DeviceSection = DeviceModelStore.DeviceSection
+    typealias SidebarDataSnapshot = DeviceModelStore.SidebarDataSnapshot
+    typealias SidebarDeviceLoadState = DeviceModelStore.SidebarDeviceLoadState
+
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
         case automations
@@ -117,37 +124,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private weak var workspaceNotesEditorTextView: NSTextView?
     private var workspaceNotesEditorWorkspaceID: String?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
-    var projects: [ProjectSummary] = []
-    var workspacesByProject: [String: [WorkspaceSummary]] = [:] {
-        didSet {
-            sidebar.invalidateVisibleWorkspacesCache()
-            // Flat id -> (projectID, workspace) index, rebuilt alongside workspacesByProject so it can
-            // never go stale. Lets findWorkspace(id:) resolve in O(1) instead of scanning every
-            // project's workspace list, which matters since it's called from ~26 sites including
-            // selection/reload hot paths.
-            workspaceIndex = workspacesByProject.reduce(into: [:]) { index, entry in
-                for workspace in entry.value { index[workspace.id] = (projectID: entry.key, workspace: workspace) }
-            }
-            // `SidebarController.rebuildFlatSidebarData()` — the single point every overview-install
-            // path (the local snapshot, a remote pull/subscription, a mutation response) funnels
-            // through — assigns this property on every call, so it is the nearest reachable proxy for
-            // that funnel from this type. See `resolveAwaitingWorkspaceDeletions`.
-            resolveAwaitingWorkspaceDeletions()
-        }
-    }
-    private(set) var workspaceIndex: [String: (projectID: String, workspace: WorkspaceSummary)] = [:]
-    var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
-    // The macOS app always loads its own local daemon first; these hold that local
-    // device and act as the default target when no row is selected. Per-row device
-    // context is resolved via deviceID(for…) helpers and the device sections.
-    var localDeviceID = SpacesPairedDeviceRecord.localDeviceID
-    /// Advances whenever an authoritative local overview is installed, including a mutation response.
-    /// Sidebar reloads capture this before their off-main read; a response that lands while that read
-    /// is in flight therefore fences the stale snapshot before it can reconcile missing workspaces.
-    var localOverviewInstallGeneration = 0
-    var localDeviceName = "This Mac"
-    var localPairedDevice: SpacesPairedDeviceRecord?
-    var deviceSections: [DeviceSection] = []
+    lazy var deviceModel = DeviceModelStore(
+        invalidateVisibleWorkspacesCache: { [unowned self] in self.sidebar.invalidateVisibleWorkspacesCache() },
+        resolveAwaitingWorkspaceDeletions: { [unowned self] in self.resolveAwaitingWorkspaceDeletions() })
     /// One device's attempt to apply one staged build. Every piece of staged-apply state is keyed by
     /// this pair rather than by device alone, so a device that later stages a different build gets a
     /// fresh request and a fresh verdict instead of inheriting the previous build's.
@@ -175,7 +154,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// for the device stops calling for `.installUpdateOnDevice`, so a finished run can never pin a
     /// spinner permanently.
     private var daemonSSHUpdateInProgressDeviceIDs: Set<String> = []
-    var alertsGroups: [AlertsGroup] = []
     /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
     /// one content replaces the previous one. Written only through `presentDetailPane`.
     var detailPane: DetailPane = .none
@@ -314,7 +292,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var passiveDesktopControlOwner: SpacesProcessLeaseOwner?
     private let ipcNotificationObject: String
 
-    var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
     private let shortcutLabelColumnWidth: CGFloat = 250
     private var isApplyingSplitViewWidth = false
@@ -1719,7 +1696,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The overview session summary for a session and the device that owns it,
     /// when the session is currently surfaced in a loaded device overview.
     private func terminalSessionSummaryMatch(sessionID: String) -> TerminalSessionSummaryMatch? {
-        for section in deviceSections {
+        for section in deviceModel.deviceSections {
             guard let summary = section.overview?.sessions.first(where: { $0.id == sessionID }) else { continue }
             guard let device = deviceForMutation(deviceID: section.deviceID) else { continue }
             return TerminalSessionSummaryMatch(device: device, summary: summary)
@@ -1737,7 +1714,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let workspaceID = clientWorkspaceID(forTerminalSession: sessionID), let deviceID = deviceID(forWorkspaceID: workspaceID) {
             return deviceOwning(deviceID: deviceID)
         }
-        return localPairedDevice
+        return deviceModel.localPairedDevice
     }
 
     nonisolated private static func terminalSessionLaunchConfiguration(sessionID: String, summary: SpacesDeviceTerminalSessionSummary)
@@ -1771,7 +1748,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// shell/command/title, matching the launch configuration the old DB-backed path read directly.
     private func resolveSessionSummaryMatch(sessionID: String) async -> TerminalSessionSummaryMatch? {
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        if localPairedDevice == nil {
+        if deviceModel.localPairedDevice == nil {
             let bootstrapStartedAt = Date()
             let device = await Task.detached(
                 priority: .userInitiated, operation: { try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) }
@@ -1780,8 +1757,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 "terminal_session_resolve_bootstrap", target: "session=\(sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: bootstrapStartedAt), success: device != nil)
             guard let device else { return nil }
-            localPairedDevice = device
-            localDeviceID = device.id
+            deviceModel.localPairedDevice = device
+            deviceModel.localDeviceID = device.id
         }
         guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return nil }
         let overviewStartedAt = Date()
@@ -2591,25 +2568,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localOfflineMessage: String?
     }
 
-    struct SidebarDataSnapshot: Sendable {
-        let config: AppConfig
-        let local: LocalDeviceSidebarSnapshot
-    }
-
     enum SidebarReloadPayload: Sendable {
         case terminalOverview(LocalDeviceSidebarSnapshot)
         case fullSnapshot(SidebarDataSnapshot)
-    }
-
-    enum SidebarDeviceLoadState: Sendable, Hashable {
-        case loading
-        case offline(String)
-        case loaded
-
-        var isOffline: Bool {
-            if case .offline = self { return true }
-            return false
-        }
     }
 
     /// The sidebar groups projects under per-device header rows when more than one device is paired, or
@@ -2634,64 +2595,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview invariant. Pure so that invariant is directly testable.
     nonisolated static func localSnapshotAuthorizesPanePrune(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
         loadState == .loaded && compatibility?.isCompatible != false
-    }
-
-    /// One paired device's slice of the sidebar. The sidebar shows every paired
-    /// device at once; each section loads independently so a slow or unreachable
-    /// device does not block the others.
-    struct DeviceSection: Sendable {
-        let deviceID: String
-        let deviceName: String
-        let isLocal: Bool
-        var loadState: SidebarDeviceLoadState
-        var device: SpacesPairedDeviceRecord?
-        var projects: [ProjectSummary] = []
-        var workspacesByProject: [String: [WorkspaceSummary]] = [:]
-        var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
-        var alertsGroups: [AlertsGroup] = []
-        /// Bumped by `overview`'s `didSet` on every reassignment after this section already exists —
-        /// once per overview-install event for this device, from whichever path installs it (a local
-        /// snapshot refresh, a remote pull/subscription in `SidebarController`, or a mutation response
-        /// in this file). A struct's own memberwise init never routes through property observers, so a
-        /// section's initial construction leaves this at its default rather than counting as an install.
-        ///
-        /// `resolveAwaitingWorkspaceDeletions` uses this to tell "fresh evidence for the owning device
-        /// arrived" apart from "some other device's refresh re-ran the `workspacesByProject` didSet,
-        /// which reread this device's untouched, possibly stale, cached overview" — the bug this guards
-        /// against: an offline owning device keeps its last-known overview, and a rebuild triggered by
-        /// any other device would otherwise draw a delete verdict from evidence that predates the
-        /// delete.
-        ///
-        /// The local device's section is not mutated in place on an ordinary refresh — it is rebuilt and
-        /// assigned whole (`SidebarController.rebuildFlatSidebarData()`), which bypasses `didSet` — so that
-        /// path carries the counter forward explicitly via `adoptingOverviewInstallGeneration(from:)`.
-        /// Without that, the local counter would reset to zero on every refresh and a deferred delete for a
-        /// local workspace would never see fresh evidence at all.
-        private(set) var overviewInstallGeneration = 0
-        var overview: SpacesDeviceOverviewPayload? { didSet { overviewInstallGeneration += 1 } }
-
-        /// Carries `previous`'s install generation into this freshly built section, counting one new install
-        /// when `carriesFreshInstall` says this rebuild is carrying an overview the daemon actually just
-        /// returned.
-        ///
-        /// The caller states that fact rather than letting this infer it from payload equality. A fresh
-        /// fetch that happens to be byte-identical to the cached one is real evidence — it is exactly what
-        /// a delete that never reached the daemon looks like — and treating it as "nothing happened" would
-        /// leave that deferred delete unresolvable for the rest of the run. Conversely an outage rebuild
-        /// re-renders the retained overview without asking the daemon anything, and must not count.
-        func adoptingOverviewInstallGeneration(from previous: DeviceSection?, carriesFreshInstall: Bool) -> DeviceSection {
-            var section = self
-            section.overviewInstallGeneration = (previous?.overviewInstallGeneration ?? 0) + (carriesFreshInstall ? 1 : 0)
-            return section
-        }
-        /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
-        /// the first successful handshake; drives the per-device compatibility banner and gating.
-        var daemonStatus: TerminalServiceDaemonStatus?
-        var compatibility: SpacesWireCompatibility?
-
-        /// The label shown for this device everywhere in the UI. The local device always renders as
-        /// "Local" regardless of its stored machine name; remote devices show their stored name.
-        var displayName: String { isLocal ? "Local" : deviceName }
     }
 
     /// The flat, id-keyed sidebar data: the union of every device section's rows, whatever each device's
@@ -4380,7 +4283,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview's automations/runs, with unreachable sections marked (never dropped) so the pane can surface
     /// them. Local daemon and paired devices are treated identically.
     func automationDeviceInputs() -> [AutomationDeviceInput] {
-        deviceSections.map { section in
+        deviceModel.deviceSections.map { section in
             let isReachable = section.loadState == .loaded
             let offlineMessage: String? = if case .offline(let message) = section.loadState { message } else { nil }
             return AutomationDeviceInput(
@@ -4393,10 +4296,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The paired-device record to send an automation Device API command to. Mirrors `deviceForMutation`:
     /// the local id resolves to the local record, any other to its loaded section record.
     func automationDeviceRecord(deviceID: String) -> SpacesPairedDeviceRecord? {
-        deviceID == localDeviceID ? localPairedDevice : deviceRecord(forDeviceID: deviceID)
+        deviceID == deviceModel.localDeviceID ? deviceModel.localPairedDevice : deviceRecord(forDeviceID: deviceID)
     }
 
-    func isRemoteAutomationDevice(deviceID: String) -> Bool { deviceID != localDeviceID }
+    func isRemoteAutomationDevice(deviceID: String) -> Bool { deviceID != deviceModel.localDeviceID }
 
     /// The summary for one automation on one device, read from that device's loaded overview.
     func automationSummary(deviceID: String, automationID: String) -> TerminalServiceAutomationSummary? {
@@ -4606,7 +4509,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func reconcileRemoteBrowserForwards(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload) {
-        guard device.id != localDeviceID else { return }
+        guard device.id != deviceModel.localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
         Task.detached(priority: .utility) { [weak self] in
@@ -4616,7 +4519,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func stopRemoteBrowserForwards(deviceID: String) {
-        guard deviceID != localDeviceID else { return }
+        guard deviceID != deviceModel.localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
         Task.detached(priority: .utility) { [weak self] in
@@ -4716,7 +4619,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// row that lives on another machine.
     func deviceID(forWorkspaceID workspaceID: String) -> String? { findWorkspace(id: workspaceID)?.0.deviceID }
 
-    private func deviceID(forProjectID projectID: String) -> String? { projects.first(where: { $0.id == projectID })?.deviceID }
+    private func deviceID(forProjectID projectID: String) -> String? { deviceModel.projects.first(where: { $0.id == projectID })?.deviceID }
 
     private func isRemoteDeviceID(_ deviceID: String) -> Bool {
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
@@ -4729,7 +4632,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// always defaulting to the local device.
     private func selectedRowDeviceID() -> String? {
         if let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID) { return project.deviceID }
-        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) { return project.deviceID }
+        if let selectedProjectID, let project = deviceModel.projects.first(where: { $0.id == selectedProjectID }) { return project.deviceID }
         return nil
     }
 
@@ -4743,7 +4646,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Read paths must resolve the true owner even during an outage: falling through to the
     /// local record would dial this Mac for another machine's rows.
     private func deviceOwning(deviceID: String) -> SpacesPairedDeviceRecord? {
-        if deviceID == SpacesPairedDeviceRecord.localDeviceID { return localPairedDevice }
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID { return deviceModel.localPairedDevice }
         return deviceRecord(forDeviceID: deviceID)
     }
 
@@ -5128,12 +5031,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func deviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
         // Search every device section's overview, not just the local one, so detail
         // and config flows resolve projects that live on a remote device.
-        for section in deviceSections { if let project = section.overview?.projects.first(where: { $0.id == projectID }) { return project } }
+        for section in deviceModel.deviceSections { if let project = section.overview?.projects.first(where: { $0.id == projectID }) { return project } }
         return nil
     }
 
     func deviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
-        for section in deviceSections { if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace } }
+        for section in deviceModel.deviceSections { if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace } }
         return nil
     }
 
@@ -5181,24 +5084,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane-prune keep-set — into the local section.
         // Captured before the section is overwritten: the pairing between an ended session and the one
         // that replaced it exists only in the difference between these two overviews.
-        if deviceID == SpacesPairedDeviceRecord.localDeviceID { localOverviewInstallGeneration += 1 }
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID { deviceModel.localOverviewInstallGeneration += 1 }
         let previousOverview = deviceSection(id: deviceID)?.overview
         let liveWorkspaceIDs = Set(overview.workspaces.map(\.id))
         removeCodePaneRecoveryStateForDeletedWorkspaces(
             deviceID: deviceID, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: Set(previousOverview?.workspaces.map(\.id) ?? []))
         let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
-        if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
+        if let index = deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             let content = DeviceSectionContent.derive(
-                from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName, projectCollapseStates: collapseStates)
-            deviceSections[index].projects = content.projects
-            deviceSections[index].workspacesByProject = content.workspacesByProject
-            deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
-            deviceSections[index].overview = overview
+                from: overview, deviceID: deviceID, deviceName: deviceModel.deviceSections[index].deviceName, projectCollapseStates: collapseStates)
+            deviceModel.deviceSections[index].projects = content.projects
+            deviceModel.deviceSections[index].workspacesByProject = content.workspacesByProject
+            deviceModel.deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
+            deviceModel.deviceSections[index].overview = overview
             // Rebuild for every section, not just local: this overview is authoritative for `deviceID`
             // regardless of origin, and alerts groups carry visibility (`isFromHiddenWorkspace`), so a
             // remote mutation response must refresh them too or the alerts pane/badge/palette show stale
             // visibility until the next remote push (which already rebuilds via `applyRemoteDeviceSection`).
-            deviceSections[index].alertsGroups = content.alertsGroups
+            deviceModel.deviceSections[index].alertsGroups = content.alertsGroups
         }
         // A mutation can change what the palette may list (a hide/unhide changes row visibility), and a
         // remote mutation never touches the local database, so no snapshot reload arrives to invalidate
@@ -5239,7 +5142,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Same overview this device's prune just consumed carries this device's agent rows too, so a
         // code pane's assigned-agent dropdown stays current with whatever just spawned/exited.
         panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: self)
-        if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
+        if deviceID != deviceModel.localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
         rebuildFlatSidebarData()
@@ -5247,7 +5150,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             selectedWorkspaceID = preferredWorkspaceID
             Self.setClientActiveWorkspaceID(preferredWorkspaceID)
             selectedProjectID = findWorkspace(id: preferredWorkspaceID)?.0.id ?? preferredProjectID
-        } else if let preferredProjectID, projects.contains(where: { $0.id == preferredProjectID }) {
+        } else if let preferredProjectID, deviceModel.projects.contains(where: { $0.id == preferredProjectID }) {
             selectedProjectID = preferredProjectID
             selectedWorkspaceID = nil
         }
@@ -5340,8 +5243,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: blockDeviceID, verdict: verdict)
             return
         }
-        if let verdict = deviceCompatibility(forDeviceID: localDeviceID), !verdict.isCompatible {
-            showCompatibilityBlock(deviceID: localDeviceID, verdict: verdict)
+        if let verdict = deviceCompatibility(forDeviceID: deviceModel.localDeviceID), !verdict.isCompatible {
+            showCompatibilityBlock(deviceID: deviceModel.localDeviceID, verdict: verdict)
             return
         }
         let paneDeviceID = detailPane.workspaceDeviceID
@@ -6342,7 +6245,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The New Project title, naming the target device only when there is a choice to disambiguate.
     private func addProjectFlowTitle(deviceID: String) -> String {
-        deviceSections.count > 1 ? "New Project · \(deviceDisplayName(id: deviceID))" : "New Project"
+        deviceModel.deviceSections.count > 1 ? "New Project · \(deviceDisplayName(id: deviceID))" : "New Project"
     }
 
     /// Step 2: choose the source — an existing folder or a repository to clone — and its location.
@@ -6617,7 +6520,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The default device for new projects: the local Mac.
     private func localProjectCreationDeviceID() -> String {
-        deviceSections.first(where: { $0.isLocal })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
+        deviceModel.deviceSections.first(where: { $0.isLocal })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
     }
 
     private func presentAddProjectWindow(hosting stack: NSStackView, title: String) {
@@ -7015,7 +6918,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func populateWorkspaceDetailFooter(workspace: WorkspaceSummary) {
         guard let footer = workspaceDetailFooterRow else { return }
         let runtimeStatus =
-            workspaceRuntimeStatusByID[workspace.id]
+            deviceModel.workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
                 workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
@@ -7316,7 +7219,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
 
-        let workspaceDeviceName = deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? localDeviceName
+        let workspaceDeviceName = deviceModel.deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? deviceModel.localDeviceName
         let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(workspaceDeviceName).")
         detail.font = Typography.rowDetail
         detail.textColor = .secondaryLabelColor
@@ -8122,7 +8025,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// skipped when the local Mac is the only device. Splitting device selection out fixes the device
     /// for the configuration step, so the project's source always targets one daemon.
     @objc private func addProject() {
-        if Self.addProjectRequiresDeviceSelection(deviceCount: deviceSections.count) {
+        if Self.addProjectRequiresDeviceSelection(deviceCount: deviceModel.deviceSections.count) {
             showAddProjectDeviceStep()
         } else {
             showAddProjectSourceStep(deviceID: localProjectCreationDeviceID())
@@ -8138,7 +8041,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func showAddProjectDeviceStep() {
         clearActiveAddProjectFormState()
 
-        let deviceRows = deviceSections.map { addProjectDeviceRow(section: $0) }
+        let deviceRows = deviceModel.deviceSections.map { addProjectDeviceRow(section: $0) }
         let deviceCard = formSectionCard(
             icon: "desktopcomputer", title: "Device", subtitle: "Choose where this project will live.", contentViews: deviceRows)
 
@@ -8226,7 +8129,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func addWorkspace(_ sender: NSButton) {
-        guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
+        guard let projectID = sender.identifier?.rawValue, let project = deviceModel.projects.first(where: { $0.id == projectID }) else { return }
         showAddWorkspaceForm(project: project)
     }
 
@@ -8238,7 +8141,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func currentProjectForNewWorkspace() -> ProjectSummary? {
-        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) { return project }
+        if let selectedProjectID, let project = deviceModel.projects.first(where: { $0.id == selectedProjectID }) { return project }
         if let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID) { return project }
         return nil
     }
@@ -8346,7 +8249,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Whether the project is a git repo (vs a non-git project standing in for its single
     /// workspace). Unknown project ids default to git so the workspace-sync prompt is preserved.
-    private func isGitProject(_ projectID: String) -> Bool { projects.first { $0.id == projectID }?.isGitRepo ?? true }
+    private func isGitProject(_ projectID: String) -> Bool { deviceModel.projects.first { $0.id == projectID }?.isGitRepo ?? true }
 
     private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
         guard refs.hasPendingImportedConfig else { return true }
@@ -8385,7 +8288,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func deleteProject(_ sender: NSButton) {
-        guard let projectID = sender.identifier?.rawValue, projects.contains(where: { $0.id == projectID }) else { return }
+        guard let projectID = sender.identifier?.rawValue, deviceModel.projects.contains(where: { $0.id == projectID }) else { return }
 
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -9099,7 +9002,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         self.workspaceIDsAwaitingDeletionResolution[id] = AwaitingWorkspaceDeletionResolution(
                             deviceID: device.id, error: error, branchDeletionRequested: deleteLocalBranch || deleteRemoteBranch,
                             browserSessionTargetURLs: browserSessionTargetURLs,
-                            overviewInstallGenerationAtDefer: self.deviceSections.first(where: { $0.deviceID == device.id })?
+                            overviewInstallGenerationAtDefer: self.deviceModel.deviceSections.first(where: { $0.deviceID == device.id })?
                                 .overviewInstallGeneration ?? 0)
                     case .present:
                         // An overview resolved and still lists the workspace: the row goes back to normal
@@ -9220,7 +9123,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func showWorkspaceOverflowMenu(_ sender: NSButton) {
-        guard let workspaceID = sender.identifier?.rawValue, let workspace = workspaceIndex[workspaceID]?.workspace else { return }
+        guard let workspaceID = sender.identifier?.rawValue, let workspace = deviceModel.workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
             daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID))
@@ -9263,26 +9166,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func showLocalDaemonCompatibilityBlock(_ incompatibility: TerminalServiceDaemonWireIncompatibility) {
-        let storedLocalDevice = localPairedDevice ?? (try? clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID))
+        let storedLocalDevice = deviceModel.localPairedDevice ?? (try? clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID))
         if let storedLocalDevice {
-            localPairedDevice = storedLocalDevice
-            localDeviceID = storedLocalDevice.id
-            localDeviceName = storedLocalDevice.name
+            deviceModel.localPairedDevice = storedLocalDevice
+            deviceModel.localDeviceID = storedLocalDevice.id
+            deviceModel.localDeviceName = storedLocalDevice.name
         }
-        if let index = deviceSections.firstIndex(where: { $0.deviceID == localDeviceID }) {
-            deviceSections[index].device = storedLocalDevice ?? deviceSections[index].device
-            deviceSections[index].daemonStatus = incompatibility.status
-            deviceSections[index].compatibility = incompatibility.verdict
-            deviceSections[index].projects = []
-            deviceSections[index].workspacesByProject = [:]
-            deviceSections[index].workspaceRuntimeStatusByID = [:]
-            deviceSections[index].alertsGroups = []
-            deviceSections[index].overview = nil
-            deviceSections[index].loadState = .loaded
+        if let index = deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceModel.localDeviceID }) {
+            deviceModel.deviceSections[index].device = storedLocalDevice ?? deviceModel.deviceSections[index].device
+            deviceModel.deviceSections[index].daemonStatus = incompatibility.status
+            deviceModel.deviceSections[index].compatibility = incompatibility.verdict
+            deviceModel.deviceSections[index].projects = []
+            deviceModel.deviceSections[index].workspacesByProject = [:]
+            deviceModel.deviceSections[index].workspaceRuntimeStatusByID = [:]
+            deviceModel.deviceSections[index].alertsGroups = []
+            deviceModel.deviceSections[index].overview = nil
+            deviceModel.deviceSections[index].loadState = .loaded
         } else {
-            deviceSections.insert(
+            deviceModel.deviceSections.insert(
                 DeviceSection(
-                    deviceID: localDeviceID, deviceName: localDeviceName, isLocal: true, loadState: .loaded, device: storedLocalDevice, overview: nil,
+                    deviceID: deviceModel.localDeviceID, deviceName: deviceModel.localDeviceName, isLocal: true, loadState: .loaded, device: storedLocalDevice, overview: nil,
                     daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
         }
         rebuildFlatSidebarData()
@@ -9294,8 +9197,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // app must itself request the apply here, or `shouldRenderCompatibilityBlock` withholds
         // the block for `.applyStagedUpdate` on the premise that a handoff is already under way
         // while nothing has asked for one, leaving the loading placeholder up indefinitely.
-        maybeRequestSilentDaemonHandoff(deviceID: localDeviceID, status: incompatibility.status)
-        showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
+        maybeRequestSilentDaemonHandoff(deviceID: deviceModel.localDeviceID, status: incompatibility.status)
+        showCompatibilityBlock(deviceID: deviceModel.localDeviceID, verdict: incompatibility.verdict)
         if let window { revealTargetedHotkeyWindow(window) }
     }
 
@@ -9325,7 +9228,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } else {
             targetDeviceID = selectedRowDeviceID()
         }
-        guard let targetDeviceID, let section = deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
+        guard let targetDeviceID, let section = deviceModel.deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
         showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
     }
@@ -9681,7 +9584,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for (workspaceID, pending) in workspaceIDsAwaitingDeletionResolution {
             // A missing section (device unpaired mid-defer) falls back to comparing the captured
             // generation against itself, i.e. `.stillAwaiting` — there is no fresher evidence to read.
-            let section = deviceSections.first(where: { $0.deviceID == pending.deviceID })
+            let section = deviceModel.deviceSections.first(where: { $0.deviceID == pending.deviceID })
             switch Self.resolveAwaitingWorkspaceDeletion(
                 overview: section?.overview,
                 overviewInstallGeneration: section?.overviewInstallGeneration ?? pending.overviewInstallGenerationAtDefer,
@@ -9968,7 +9871,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     )? {
         func candidate(_ workspaceID: String?) -> (deviceID: String, workspaceID: String)? {
             guard let workspaceID, workspaceID != goneWorkspaceID else { return nil }
-            guard let section = deviceSections.first(where: { $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } } })
+            guard let section = deviceModel.deviceSections.first(where: { $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } } })
             else { return nil }
             if let allowedWorkspaceKeys, !allowedWorkspaceKeys.contains(.init(deviceID: section.deviceID, workspaceID: workspaceID)) { return nil }
             return (section.deviceID, workspaceID)
@@ -9976,7 +9879,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let match = candidate(clientWorkspaceIDForFocusedWindow()) { return match }
         if NSApp.isActive, let match = candidate(selectedWorkspaceID) { return match }
         if let match = candidate(clientActiveWorkspaceID()) { return match }
-        for section in deviceSections {
+        for section in deviceModel.deviceSections {
             for workspaces in section.workspacesByProject.values {
                 if let workspace = workspaces.first(where: { workspace in
                     workspace.id != goneWorkspaceID
@@ -10647,7 +10550,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// replacing the orchestrator's daemon-DB lookup. Searches every paired device's
     /// overview so mirrored remote sessions resolve too.
     func clientWorkspaceID(forTerminalSession sessionID: String) -> String? {
-        for overview in deviceSections.compactMap({ $0.overview }) {
+        for overview in deviceModel.deviceSections.compactMap({ $0.overview }) {
             if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return workspaceID }
             for workspace in overview.workspaces
             where workspace.processRows.contains(where: { $0.sessionID == sessionID })
@@ -10664,7 +10567,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clientWorkspaceIDForFocusedWindow() -> String? {
         let chrome = ChromeAdapter()
         guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
-        return Self.workspaceIDForObservedBrowserURL(activeURL, in: deviceSections.compactMap(\.overview))
+        return Self.workspaceIDForObservedBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
     }
 
     nonisolated static func workspaceIDForObservedBrowserURL(_ activeURL: String, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
@@ -10962,7 +10865,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func showProjectSettings(_ sender: NSButton) {
-        guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
+        guard let projectID = sender.identifier?.rawValue, let project = deviceModel.projects.first(where: { $0.id == projectID }) else { return }
         showProjectSettingsDialog(project: project)
     }
 
@@ -11755,7 +11658,7 @@ extension AppKitController {
     }
 
     func loadCommandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
-        await Self.commandPaletteItemsSnapshot(alertsGroups: alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
+        await Self.commandPaletteItemsSnapshot(alertsGroups: deviceModel.alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 
     nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>) async -> Result<

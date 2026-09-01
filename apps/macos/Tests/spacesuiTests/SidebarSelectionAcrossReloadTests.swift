@@ -108,8 +108,8 @@ extension ProcessProfileEnvironmentSuites {
         private func selectedController() throws -> AppKitController {
             let controller = makeController()
             attachOutline(controller)
-            controller.deviceSections = [
-                section(deviceID: controller.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")])
+            controller.deviceModel.deviceSections = [
+                section(deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")])
             ]
             controller.sidebar.applySidebarDataChange()
             let summary = try #require(controller.sidebar.findWorkspace(id: Self.workspaceID)?.1)
@@ -124,9 +124,9 @@ extension ProcessProfileEnvironmentSuites {
         @Test func selectionSurvivesAStructuralReloadFromASessionStarting() throws {
             let controller = try selectedController()
 
-            controller.deviceSections = [
+            controller.deviceModel.deviceSections = [
                 section(
-                    deviceID: controller.localDeviceID, isLocal: true, loadState: .loaded,
+                    deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded,
                     terminalRows: [terminalRow(id: "terminal-1"), terminalRow(id: "terminal-2")])
             ]
             controller.sidebar.applySidebarDataChange()
@@ -144,8 +144,8 @@ extension ProcessProfileEnvironmentSuites {
         @Test func selectionSurvivesTheDeviceHeaderStructureFlip() throws {
             let controller = try selectedController()
 
-            controller.deviceSections = [
-                section(deviceID: controller.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")]),
+            controller.deviceModel.deviceSections = [
+                section(deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")]),
                 section(deviceID: "remote-device", isLocal: false, loadState: .loading, terminalRows: []),
             ]
             controller.sidebar.applySidebarDataChange()

@@ -72,7 +72,7 @@ private struct DeviceSyncState {
                 // one load at a time and applies before starting the next, so a plain instance field
                 // carries this safely from here to the apply site.
                 self?.capturedLocalReloadEpoch = self?.host.panelCoordinator.paneReplacementEpoch ?? 0
-                self?.capturedLocalOverviewInstallGeneration = self?.host.localOverviewInstallGeneration
+                self?.capturedLocalOverviewInstallGeneration = self?.host.deviceModel.localOverviewInstallGeneration
                 switch scope {
                 case .terminalOverview:
                     let result =
@@ -122,25 +122,26 @@ private struct DeviceSyncState {
     /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
     /// is on the NSOutlineView data-source hot path (queried per row); caching keeps
     /// it from re-filtering and re-sorting on every query, and it is invalidated
-    /// whenever the host's `workspacesByProject` changes.
+    /// whenever `host.deviceModel.workspacesByProject` changes.
     private var visibleWorkspacesCache: [String: [WorkspaceSummary]] = [:]
     /// Memoized per-workspace runtime-target rows, on the same data-source hot path
     /// and invalidated together with `visibleWorkspacesCache` (every overview change
-    /// reassigns the host's `workspacesByProject`, which invalidates both).
+    /// reassigns `host.deviceModel.workspacesByProject`, which invalidates both).
     private var runtimeTargetItemsCache: [String: [SidebarRuntimeTargetItem]] = [:]
-    /// Memoized project-id -> index into `host.projects`, on the same NSOutlineView data-source/cell
-    /// hot path as `visibleWorkspacesCache`. Deliberately caches a *position*, not a `ProjectSummary`
-    /// value: `updateProjectCollapsedStateInMemory` flips a project's `isCollapsed` by replacing
-    /// `host.projects[index]` in place, without reassigning the array or going through the invalidation
-    /// point below, so a cached value copy would go stale on exactly the change callers most need to
-    /// see. A cached position stays correct through that mutation, because it changes a field, not the
-    /// array's length or order. `nil` means "needs rebuilding"; `rebuildFlatSidebarData` is the only
-    /// place `host.projects` is reassigned wholesale, so setting this to `nil` there is exact.
+    /// Memoized project-id -> index into `host.deviceModel.projects`, on the same NSOutlineView
+    /// data-source/cell hot path as `visibleWorkspacesCache`. Deliberately caches a *position*, not a
+    /// `ProjectSummary` value: `updateProjectCollapsedStateInMemory` flips a project's `isCollapsed` by
+    /// replacing `host.deviceModel.projects[index]` in place, without reassigning the array or going
+    /// through the invalidation point below, so a cached value copy would go stale on exactly the change
+    /// callers most need to see. A cached position stays correct through that mutation, because it
+    /// changes a field, not the array's length or order. `nil` means "needs rebuilding";
+    /// `rebuildFlatSidebarData` is the only place `host.deviceModel.projects` is reassigned wholesale,
+    /// so setting this to `nil` there is exact.
     private var projectsByID: [String: Int]?
-    /// Memoized device-id -> index into `host.deviceSections`, same hot path and same position-not-
-    /// value reasoning as `projectsByID`: a section's fields (loadState, compatibility, overview, ...)
-    /// are mutated in place at many call sites that never touch this cache. A cached position stays
-    /// correct through those, because `host.deviceSections` only ever grows — an `insert(at: 0)` for
+    /// Memoized device-id -> index into `host.deviceModel.deviceSections`, same hot path and same
+    /// position-not-value reasoning as `projectsByID`: a section's fields (loadState, compatibility,
+    /// overview, ...) are mutated in place at many call sites that never touch this cache. A cached
+    /// position stays correct through those, because `host.deviceModel.deviceSections` only ever grows — an `insert(at: 0)` for
     /// the local device's first snapshot, or an `append` for a newly discovered remote — and each of
     /// those sites either reaches `rebuildFlatSidebarData` synchronously before anything reads a device
     /// row again, or (the local-insert site, whose same apply pass reads the inserted record for the
@@ -335,7 +336,7 @@ private struct DeviceSyncState {
             guard let (project, workspace) = findWorkspace(id: selectedWorkspaceID) else { return false }
             return SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
         }
-        if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden }) }
+        if let selectedProjectID = host.selectedProjectID { return host.deviceModel.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden }) }
         if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
             return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
         }
@@ -424,7 +425,7 @@ private struct DeviceSyncState {
         _ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool = false
     ) {
         host.logStartupProfile("apply_snapshot_start")
-        host.configCache = snapshot.config
+        host.deviceModel.configCache = snapshot.config
         host.shortcuts.loadShortcutSpecs()
         applyLocalDeviceSidebarSnapshot(snapshot.local, preserveDetailPane: preserveDetailPane)
         performOwedLaunchLandingIfNeeded()
@@ -434,16 +435,16 @@ private struct DeviceSyncState {
 
     func applyLocalDeviceSidebarSnapshot(_ snapshot: LocalDeviceSidebarSnapshot, preserveDetailPane: Bool = false) {
         if let capturedGeneration = capturedLocalOverviewInstallGeneration,
-            capturedGeneration != host.localOverviewInstallGeneration
+            capturedGeneration != host.deviceModel.localOverviewInstallGeneration
         {
             DeviceLinkTrace.log(
                 deviceID: snapshot.localDeviceID, event: "local_snapshot_superseded",
-                detail: "captured_generation=\(capturedGeneration) current_generation=\(host.localOverviewInstallGeneration)")
+                detail: "captured_generation=\(capturedGeneration) current_generation=\(host.deviceModel.localOverviewInstallGeneration)")
             capturedLocalOverviewInstallGeneration = nil
             return
         }
         capturedLocalOverviewInstallGeneration = nil
-        host.localOverviewInstallGeneration += 1
+        host.deviceModel.localOverviewInstallGeneration += 1
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         host.commandPalette.invalidateCommandPaletteCache()
         // Update the local device's section in place and keep already-loaded remote
@@ -453,7 +454,7 @@ private struct DeviceSyncState {
         // Include the daemon status/compatibility in the unchanged check: when only those change (a
         // restart resolving a block, or an update-pending state clearing), the caption must still
         // reload or it keeps showing stale Resolve/update-pending UI.
-        let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
+        let previousLocalSection = host.deviceModel.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
         // An unreachable local daemon renders as offline (red caption), exactly like a remote device that
         // fails to load; otherwise the device is loaded. Fold loadState into the unchanged check so a
         // loaded→offline transition still reloads the caption even when both overviews are empty.
@@ -489,25 +490,25 @@ private struct DeviceSyncState {
         let localOutlineUnchanged =
             previousLocalSection?.overview == localSection.overview && previousLocalSection?.compatibility == localSection.compatibility
             && previousLocalSection?.daemonStatus == localSection.daemonStatus && previousLocalSection?.loadState == localSection.loadState
-        if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
+        if let localIndex = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
             // Whole-struct assignment bypasses `overview`'s `didSet`, so the install generation is carried
             // over explicitly — otherwise it would reset to zero here on every local refresh and a deferred
             // workspace delete would never observe fresh evidence for the local device. `retainedContent`
             // is exactly the offline case where this re-renders the cached overview without the daemon
             // having answered; every other rebuild is carrying a freshly read one, identical payload or not.
-            host.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(
+            host.deviceModel.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(
                 from: previousLocalSection, carriesFreshInstall: retainedContent == nil)
         } else {
-            host.deviceSections.insert(localSection, at: 0)
+            host.deviceModel.deviceSections.insert(localSection, at: 0)
             // The insert shifts every remote section's position, and the handoff check on the next
             // line reads the just-inserted local record through `deviceSection(id:)` — before this
             // apply reaches `rebuildFlatSidebarData`, whose invalidation would come too late for it.
             deviceSectionsByID = nil
         }
         host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
-        host.localDeviceID = snapshot.localDeviceID
-        host.localDeviceName = snapshot.localDeviceName
-        host.localPairedDevice = snapshot.localPairedDevice
+        host.deviceModel.localDeviceID = snapshot.localDeviceID
+        host.deviceModel.localDeviceName = snapshot.localDeviceName
+        host.deviceModel.localPairedDevice = snapshot.localPairedDevice
         // If the local block was showing, reconcile it against the fresh verdict/status: drop it if the
         // daemon is now compatible, re-render it if the remedy changed (e.g. a staged update appeared),
         // otherwise leave it (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale
@@ -645,7 +646,7 @@ private struct DeviceSyncState {
             host.refreshSelection()
         }
         updateAlertsSidebarBadge()
-        host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
+        host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.deviceModel.alertsGroups.count)")
         if host.showingAlerts { host.alerts.showAlertsDetail() }
         host.reopenPersistedPanelWindowsIfPossible()
     }
@@ -696,8 +697,8 @@ private struct DeviceSyncState {
     func loadRemoteDeviceSections(forceRefresh: Bool = false, bypassesBackoff: Bool = false) {
         let remotes = host.macPairedDevices()
         var addedSection = false
-        for record in remotes where !host.deviceSections.contains(where: { $0.deviceID == record.id }) {
-            host.deviceSections.append(
+        for record in remotes where !host.deviceModel.deviceSections.contains(where: { $0.deviceID == record.id }) {
+            host.deviceModel.deviceSections.append(
                 DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
             addedSection = true
         }
@@ -709,8 +710,8 @@ private struct DeviceSyncState {
         var rebuildWorkspaceDetail = false
         for record in remotes {
             guard AppKitController.pairedDeviceHasRequiredCredentials(device: record) else {
-                if let index = host.deviceSections.firstIndex(where: { $0.deviceID == record.id }) {
-                    let previousLoadState = host.deviceSections[index].loadState
+                if let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == record.id }) {
+                    let previousLoadState = host.deviceModel.deviceSections[index].loadState
                     let newLoadState = SidebarDeviceLoadState.offline("Reconnect required")
                     // This is a load-state transition like any other, so it owes the same detail-pane
                     // reconciliation `applyRemoteDeviceSection` does: a retained selected workspace under
@@ -725,9 +726,9 @@ private struct DeviceSyncState {
                             || AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
                                 visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: record.id,
                                 previousLoadState: previousLoadState, newLoadState: newLoadState)
-                        host.deviceSections[index].loadState = newLoadState
+                        host.deviceModel.deviceSections[index].loadState = newLoadState
                     }
-                    host.deviceSections[index].device = record
+                    host.deviceModel.deviceSections[index].device = record
                 }
                 continue
             }
@@ -899,9 +900,9 @@ private struct DeviceSyncState {
     /// be left there — a subscription push already applied newer data while this pull was in flight, so
     /// flipping the state here without touching the section's data cannot strand the user on stale content.
     private func settleSupersededPullSuccess(deviceID: String) {
-        guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
-        guard host.deviceSections[index].loadState == .loading else { return }
-        host.deviceSections[index].loadState = .loaded
+        guard let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        guard host.deviceModel.deviceSections[index].loadState == .loading else { return }
+        host.deviceModel.deviceSections[index].loadState = .loaded
         applySidebarDataChange()
     }
 
@@ -969,7 +970,7 @@ private struct DeviceSyncState {
             // eligible section either holds no data worth protecting or holds a verdict that is exactly
             // what this tick exists to re-check. The pull's own failure backoff still paces a device that
             // has stopped answering.
-            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }),
+            guard let section = host.deviceModel.deviceSections.first(where: { $0.deviceID == record.id }),
                 Self.watchdogShouldPullSection(loadState: section.loadState, compatibility: section.compatibility)
             else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
@@ -979,7 +980,7 @@ private struct DeviceSyncState {
         // to be offline re-runs the snapshot that bootstraps and reads the local daemon — the same path
         // the Reload command uses. One that still claims to be loaded has to be checked against the
         // daemon before there is anything to recover from.
-        guard let localSection = host.deviceSections.first(where: { $0.isLocal }) else { return }
+        guard let localSection = host.deviceModel.deviceSections.first(where: { $0.isLocal }) else { return }
         guard localSection.loadState == .loaded else {
             DeviceLinkTrace.log(deviceID: localSection.deviceID, event: "watchdog_local_reload")
             requestSidebarReload()
@@ -1006,7 +1007,7 @@ private struct DeviceSyncState {
         SpacesDeviceEndpointRegistry.resetAllForNetworkChange()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
-            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }
+            guard let section = host.deviceModel.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "network_path_changed")
             // Anything already dialing was dialing the old network, so its answer is retired before this
             // pass starts attempts of its own.
@@ -1089,7 +1090,7 @@ private struct DeviceSyncState {
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptions.isEnabled else { return }
         let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(device: $0) }
-        let desiredIDs = Self.overviewSubscriptionDesiredIDs(credentialedRemoteIDs: remotes.map(\.id), sections: host.deviceSections)
+        let desiredIDs = Self.overviewSubscriptionDesiredIDs(credentialedRemoteIDs: remotes.map(\.id), sections: host.deviceModel.deviceSections)
         let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: desiredIDs)
         for removal in outcome.removed {
             removal.client.stop()
@@ -1260,11 +1261,11 @@ private struct DeviceSyncState {
     }
 
     func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>, epoch: Int) {
-        guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        guard let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
-        let previousLoadState = host.deviceSections[index].loadState
+        let previousLoadState = host.deviceModel.deviceSections[index].loadState
         let wasLoaded = previousLoadState == .loaded
         switch result {
         case .success(let load):
@@ -1277,9 +1278,9 @@ private struct DeviceSyncState {
             // updates a remote daemon), so the unchanged-check must include them or the badge/block
             // would keep showing the stale verdict until an unrelated overview change.
             let statusUnchanged =
-                host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
-            host.deviceSections[index].daemonStatus = load.daemonStatus
-            host.deviceSections[index].compatibility = load.compatibility
+                host.deviceModel.deviceSections[index].compatibility == load.compatibility && host.deviceModel.deviceSections[index].daemonStatus == load.daemonStatus
+            host.deviceModel.deviceSections[index].daemonStatus = load.daemonStatus
+            host.deviceModel.deviceSections[index].compatibility = load.compatibility
             host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
             // If this device's block was showing, reconcile it against the fresh verdict/status — drop it
             // if now compatible, re-render it if the remedy changed (e.g. a staged update appeared while
@@ -1292,16 +1293,16 @@ private struct DeviceSyncState {
                 // its detail controls are about to become stale and must switch to the block.
                 let selectedWorkspaceUnderThisDevice =
                     host.selectedWorkspaceID.map { wsID in
-                        host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
+                        host.deviceModel.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
                     } ?? false
                 let changed = Self.blockedSectionRebuildsOutline(
-                    wasLoaded: wasLoaded, statusUnchanged: statusUnchanged, hadOverview: host.deviceSections[index].overview != nil)
-                host.deviceSections[index].projects = []
-                host.deviceSections[index].workspacesByProject = [:]
-                host.deviceSections[index].workspaceRuntimeStatusByID = [:]
-                host.deviceSections[index].alertsGroups = []
-                host.deviceSections[index].overview = nil
-                host.deviceSections[index].loadState = .loaded
+                    wasLoaded: wasLoaded, statusUnchanged: statusUnchanged, hadOverview: host.deviceModel.deviceSections[index].overview != nil)
+                host.deviceModel.deviceSections[index].projects = []
+                host.deviceModel.deviceSections[index].workspacesByProject = [:]
+                host.deviceModel.deviceSections[index].workspaceRuntimeStatusByID = [:]
+                host.deviceModel.deviceSections[index].alertsGroups = []
+                host.deviceModel.deviceSections[index].overview = nil
+                host.deviceModel.deviceSections[index].loadState = .loaded
                 if changed { applySidebarDataChange() }
                 if selectedWorkspaceUnderThisDevice, let verdict = load.compatibility {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
@@ -1315,12 +1316,12 @@ private struct DeviceSyncState {
             // overview identical to the one already shown, and this is the record every later action and
             // resolver lookup for this device is taken from. Dropping it there would hand the endpoint
             // resolver a narrower candidate list than the one just learned.
-            host.deviceSections[index].device = overview.device
+            host.deviceModel.deviceSections[index].device = overview.device
             host.removeCodePaneRecoveryStateForDeletedWorkspaces(
                 deviceID: deviceID,
                 liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)),
-                previousWorkspaceIDs: Set(host.deviceSections[index].overview?.workspaces.map(\.id) ?? []))
-            if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
+                previousWorkspaceIDs: Set(host.deviceModel.deviceSections[index].overview?.workspaces.map(\.id) ?? []))
+            if wasLoaded, statusUnchanged, host.deviceModel.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
             }
@@ -1328,26 +1329,26 @@ private struct DeviceSyncState {
             // Captured before the section is overwritten: a remote daemon posts no pane close at all, so
             // the difference between these two overviews is the only thing that names a session's
             // replacement on this client.
-            let previousOverview = host.deviceSections[index].overview
+            let previousOverview = host.deviceModel.deviceSections[index].overview
             // Same capture-before-overwrite as `previousOverview` above, for the code-pane close diff
             // below: `workspaceRuntimeStatusByID` defaults to empty for a device section's first load (or
             // one recovered from the reachable-but-incompatible placeholder, which clears it), so diffing
             // against it seeds with no false transitions without needing a separate first-load guard.
-            let previousWorkspaceRuntimeStatusByID = host.deviceSections[index].workspaceRuntimeStatusByID
+            let previousWorkspaceRuntimeStatusByID = host.deviceModel.deviceSections[index].workspaceRuntimeStatusByID
             let content = DeviceSectionContent.derive(
-                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName,
+                from: overview.overview, deviceID: deviceID, deviceName: host.deviceModel.deviceSections[index].deviceName,
                 projectCollapseStates: collapseStates)
-            host.deviceSections[index].projects = content.projects
-            host.deviceSections[index].workspacesByProject = content.workspacesByProject
-            host.deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = content.alertsGroups
-            host.deviceSections[index].overview = overview.overview
+            host.deviceModel.deviceSections[index].projects = content.projects
+            host.deviceModel.deviceSections[index].workspacesByProject = content.workspacesByProject
+            host.deviceModel.deviceSections[index].workspaceRuntimeStatusByID = content.workspaceRuntimeStatusByID
+            host.deviceModel.deviceSections[index].alertsGroups = content.alertsGroups
+            host.deviceModel.deviceSections[index].overview = overview.overview
             // A pushed remote overview can change what the palette may list (another client hiding a
             // workspace changes row visibility) without any local database write, so no snapshot reload
             // arrives to invalidate the palette's cached items. The unchanged-overview branch above
             // returns early, so this only fires when the remote section actually changed.
             host.commandPalette.invalidateCommandPaletteCache()
-            host.deviceSections[index].loadState = .loaded
+            host.deviceModel.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
             // longer retains so the pane cannot outlive the remote daemon's transcript garbage-collection.
@@ -1409,7 +1410,7 @@ private struct DeviceSyncState {
                         previous: previousWorkspaceRuntimeStatusByID, current: content.workspaceRuntimeStatusByID)))
         case .failure(let error):
             let reason = error.localizedDescription
-            let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)
+            let update = Self.offlineSectionUpdate(loadState: host.deviceModel.deviceSections[index].loadState, reason: reason)
             // Trace the transition and any later change of reason. An unchanged repeat — every watchdog
             // probe of a device that stays down — says nothing new and would grow without bound.
             if update != .unchanged { DeviceLinkTrace.log(deviceID: deviceID, event: "section_offline", detail: "reason=\(reason)") }
@@ -1421,7 +1422,7 @@ private struct DeviceSyncState {
                 // whole outage. The caption's tooltip is copied out of the load state when the row's cell
                 // is built, so the new reason only reaches the user by rebuilding that row — and only
                 // that row, because the outline's contents are unchanged.
-                host.deviceSections[index].loadState = .offline(reason)
+                host.deviceModel.deviceSections[index].loadState = .offline(reason)
                 host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID)))
                 return
             case .transition: break
@@ -1438,9 +1439,9 @@ private struct DeviceSyncState {
             // pull reaches this for an incompatible device — its stream's disconnects are filtered out
             // by `streamDisconnectReportsAnOutage` — so the verdict is dropped on evidence the device
             // stopped answering at all, never on the stream dying the way an old daemon's always does.
-            host.deviceSections[index].compatibility = nil
-            host.deviceSections[index].daemonStatus = nil
-            host.deviceSections[index].loadState = .offline(reason)
+            host.deviceModel.deviceSections[index].compatibility = nil
+            host.deviceModel.deviceSections[index].daemonStatus = nil
+            host.deviceModel.deviceSections[index].loadState = .offline(reason)
             host.reconcileCompatibilityBlock(deviceID: deviceID)
             host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
@@ -1461,7 +1462,7 @@ private struct DeviceSyncState {
             host.showAutomationsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
-            newLoadState: host.deviceSections[index].loadState)
+            newLoadState: host.deviceModel.deviceSections[index].loadState)
         {
             host.refreshSelection()
         } else if host.visibleWorkspaceDetailDeviceID() == deviceID, let visibleWorkspaceID = host.detailPane.workspaceID,
@@ -1488,18 +1489,18 @@ private struct DeviceSyncState {
     /// surface: a rename reaches this client only in an overview, and no overview update re-renders a
     /// global panel window (see `PanelCoordinator.refreshGlobalPanelTitles`).
     func rebuildFlatSidebarData() {
-        // `host.projects` is about to be reassigned wholesale (the only place that happens), and
-        // `host.deviceSections`'s structural changes — the only kind that move an entry's position —
+        // `host.deviceModel.projects` is about to be reassigned wholesale (the only place that happens),
+        // and `host.deviceModel.deviceSections`'s structural changes — the only kind that move an entry's position —
         // are always already committed by the time this runs (every insert/append site reaches this
         // function synchronously before anything reads a row again); see `projectsByID`/
         // `deviceSectionsByID`'s doc comments. Clearing both here is exact for both.
         projectsByID = nil
         deviceSectionsByID = nil
-        let merged = AppKitController.mergedSidebarData(sections: host.deviceSections)
-        host.projects = merged.projects
-        host.workspacesByProject = merged.workspacesByProject
-        host.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
-        host.alertsGroups = merged.alertsGroups
+        let merged = AppKitController.mergedSidebarData(sections: host.deviceModel.deviceSections)
+        host.deviceModel.projects = merged.projects
+        host.deviceModel.workspacesByProject = merged.workspacesByProject
+        host.deviceModel.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
+        host.deviceModel.alertsGroups = merged.alertsGroups
         // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
         // is typing in gets consumed — before anything reads the groups for the badge or the list.
         host.alerts.consumeFocusedSessionBellAlerts()
@@ -1592,7 +1593,7 @@ private struct DeviceSyncState {
             itemsByCacheKey[cacheKey] = item
         }
 
-        let treatments = host.deviceSections.reduce(into: [String: SidebarRowDeviceTreatment]()) { treatments, section in
+        let treatments = host.deviceModel.deviceSections.reduce(into: [String: SidebarRowDeviceTreatment]()) { treatments, section in
             treatments[section.deviceID] = SidebarRowDeviceTreatment(loadState: section.loadState, displayName: section.displayName)
         }
         func treatment(deviceID: String) -> SidebarRowDeviceTreatment {
@@ -1630,7 +1631,7 @@ private struct DeviceSyncState {
         }
 
         if showsDeviceHeaders {
-            for section in host.deviceSections {
+            for section in host.deviceModel.deviceSections {
                 append(.device(section.deviceID), deviceRowSignature(section: section))
                 appendProjects(deviceID: section.deviceID)
             }
@@ -1658,7 +1659,7 @@ private struct DeviceSyncState {
         return .project(
             SidebarProjectRowSignature(
                 device: device, project: project, standInWorkspace: standInWorkspace,
-                standInRuntimeStatus: standInWorkspace.flatMap { host.workspaceRuntimeStatusByID[$0.id] },
+                standInRuntimeStatus: standInWorkspace.flatMap { host.deviceModel.workspaceRuntimeStatusByID[$0.id] },
                 standInAttentionStatus: standInWorkspace.map { workspaceAttentionStatus(workspaceID: $0.id) },
                 standInIsPendingDeletion: standInWorkspace.map { host.isWorkspaceMarkedDeleting($0.id) } ?? false,
                 isExpandable: project.isGitRepo || !nonGitProjectRuntimeTargetChildren(project).isEmpty))
@@ -1667,7 +1668,7 @@ private struct DeviceSyncState {
     private func workspaceRowSignature(workspace: WorkspaceSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
         .workspace(
             SidebarWorkspaceRowSignature(
-                device: device, workspace: workspace, runtimeStatus: host.workspaceRuntimeStatusByID[workspace.id],
+                device: device, workspace: workspace, runtimeStatus: host.deviceModel.workspaceRuntimeStatusByID[workspace.id],
                 attentionStatus: workspaceAttentionStatus(workspaceID: workspace.id), isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id),
                 isExpanded: isWorkspaceExpanded(workspace.id), hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
     }
@@ -1687,10 +1688,10 @@ private struct DeviceSyncState {
     /// instead of one per row queried.
     private func project(id projectID: String) -> ProjectSummary? {
         if projectsByID == nil {
-            projectsByID = host.projects.enumerated().reduce(into: [:]) { index, entry in index[entry.element.id] = entry.offset }
+            projectsByID = host.deviceModel.projects.enumerated().reduce(into: [:]) { index, entry in index[entry.element.id] = entry.offset }
         }
         guard let index = projectsByID?[projectID] else { return nil }
-        return host.projects[index]
+        return host.deviceModel.projects[index]
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
@@ -1702,25 +1703,25 @@ private struct DeviceSyncState {
     /// file now goes through.
     func deviceSection(id deviceID: String) -> DeviceSection? {
         if deviceSectionsByID == nil {
-            deviceSectionsByID = host.deviceSections.enumerated().reduce(into: [:]) { index, entry in index[entry.element.deviceID] = entry.offset }
+            deviceSectionsByID = host.deviceModel.deviceSections.enumerated().reduce(into: [:]) { index, entry in index[entry.element.deviceID] = entry.offset }
         }
         guard let index = deviceSectionsByID?[deviceID] else { return nil }
-        return host.deviceSections[index]
+        return host.deviceModel.deviceSections[index]
     }
 
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
-        // host.workspaceIndex is a flat id -> (projectID, workspace) map rebuilt alongside
+        // host.deviceModel.workspaceIndex is a flat id -> (projectID, workspace) map rebuilt alongside
         // workspacesByProject (see its didSet), so this is O(1) plus one linear scan over
         // projects (typically far smaller than projects x workspaces) instead of a nested scan.
         // `project(id:)` turns that linear scan into an O(1) lookup too, via `projectsByID`.
-        guard let entry = host.workspaceIndex[id], let project = project(id: entry.projectID) else { return nil }
+        guard let entry = host.deviceModel.workspaceIndex[id], let project = project(id: entry.projectID) else { return nil }
         return (project, entry.workspace)
     }
 
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
         let project = project(id: projectID)
-        let result = (host.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
+        let result = (host.deviceModel.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
             lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
             return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
@@ -1736,17 +1737,17 @@ private struct DeviceSyncState {
     /// lose the header the button it was clicked in lives on). A single loaded device stays a flat list.
     var showsDeviceHeaders: Bool {
         AppKitController.sidebarShowsDeviceHeaders(
-            deviceCount: host.deviceSections.count, hasUnloadedSection: host.deviceSections.contains { $0.loadState != .loaded })
+            deviceCount: host.deviceModel.deviceSections.count, hasUnloadedSection: host.deviceModel.deviceSections.contains { $0.loadState != .loaded })
     }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
-        SidebarVisibility.deviceProjects(host.projects, deviceID: deviceID, workspacesByProject: host.workspacesByProject)
+        SidebarVisibility.deviceProjects(host.deviceModel.projects, deviceID: deviceID, workspacesByProject: host.deviceModel.workspacesByProject)
     }
 
     func navigateSidebarSelection(direction: Int) -> Bool {
         guard
             let target = AppKitController.sidebarArrowSelectionTarget(
-                visibleWorkspaceIDsByProject: host.projects.map { project in
+                visibleWorkspaceIDsByProject: host.deviceModel.projects.map { project in
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
                 }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
@@ -1780,13 +1781,13 @@ private struct DeviceSyncState {
         }
     }
 
-    func orderedSidebarWorkspaces() -> [WorkspaceSummary] { host.projects.flatMap { visibleWorkspaces(projectID: $0.id) } }
+    func orderedSidebarWorkspaces() -> [WorkspaceSummary] { host.deviceModel.projects.flatMap { visibleWorkspaces(projectID: $0.id) } }
 
-    private var singleDeviceID: String { host.deviceSections.first?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID }
+    private var singleDeviceID: String { host.deviceModel.deviceSections.first?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID }
 
     private func rootChildRef(index: Int) -> OutlineItemRef {
         if showsDeviceHeaders {
-            let deviceID = (index >= 0 && index < host.deviceSections.count) ? host.deviceSections[index].deviceID : singleDeviceID
+            let deviceID = (index >= 0 && index < host.deviceModel.deviceSections.count) ? host.deviceModel.deviceSections[index].deviceID : singleDeviceID
             return outlineItemRef(for: .device(deviceID))
         }
         let deviceProjects = deviceProjects(deviceID: singleDeviceID)
@@ -1837,7 +1838,7 @@ private struct DeviceSyncState {
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return showsDeviceHeaders ? host.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
+        if item == nil { return showsDeviceHeaders ? host.deviceModel.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             // Non-git projects own exactly one workspace (the project directory) and render
@@ -1909,7 +1910,7 @@ private struct DeviceSyncState {
             let items = workspaceRuntimeTargetChildren(workspace)
             if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
         }
-        return outlineItemRef(for: .project(host.projects.first ?? Self.placeholderProject))
+        return outlineItemRef(for: .project(host.deviceModel.projects.first ?? Self.placeholderProject))
     }
 
     private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
@@ -2254,7 +2255,7 @@ private struct DeviceSyncState {
 
         titleRow.addArrangedSubview(statusIndicator)
         titleRow.addArrangedSubview(nameLabel)
-        if let warningSummary = host.workspaceRuntimeStatusByID[workspace.id]?.warningSummary {
+        if let warningSummary = host.deviceModel.workspaceRuntimeStatusByID[workspace.id]?.warningSummary {
             let warningIcon = NSImageView()
             warningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
             warningIcon.contentTintColor = sidebarFailedIndicatorColor()
@@ -2514,7 +2515,7 @@ private struct DeviceSyncState {
         // `isRunning` alone hides Start exactly when ad hoc or agent runtime made it true but a configured
         // process is still missing (see `workspaceLifecycleControlsOfferStart`); Start is offered
         // alongside Restart/Stop in that state instead of being replaced by them.
-        let missingConfiguredProcessCount = host.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
+        let missingConfiguredProcessCount = host.deviceModel.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
         if AppKitController.workspaceLifecycleControlsOfferStart(
             isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount)
         {
@@ -2809,10 +2810,10 @@ private struct DeviceSyncState {
     /// section returns to `.loading` so the click has visible feedback, and the attempt moves it on to
     /// loaded, or back to offline carrying the reason it failed with this time.
     private func retryDeviceConnection(deviceID: String) {
-        guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else {
+        guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else {
             return
         }
-        if host.deviceSections[index].isLocal {
+        if host.deviceModel.deviceSections[index].isLocal {
             markDeviceSectionRetrying(deviceID: deviceID, index: index)
             // The local device has no subscription to reopen. Re-running the snapshot is what re-probes
             // the local daemon — the same path the Reload command uses.
@@ -2837,7 +2838,7 @@ private struct DeviceSyncState {
         // Reuses the load state a device starts in rather than adding a retrying-specific one: the
         // section genuinely is loading, and a failure arriving from `.loading` re-runs the full offline
         // transition, so the caption picks up the new reason instead of being dropped as a repeat.
-        host.deviceSections[index].loadState = .loading
+        host.deviceModel.deviceSections[index].loadState = .loading
         applySidebarDataChange()
     }
 
@@ -3004,7 +3005,7 @@ private struct DeviceSyncState {
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
         do {
-            let deviceID = project(id: projectID)?.deviceID ?? host.localDeviceID
+            let deviceID = project(id: projectID)?.deviceID ?? host.deviceModel.localDeviceID
             try host.clientDatabase().setProjectCollapsed(deviceID: deviceID, projectID: projectID, isCollapsed: isCollapsed)
             updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
         } catch {
@@ -3039,16 +3040,16 @@ private struct DeviceSyncState {
 
     func applySidebarProjectExpansionState() {
         if showsDeviceHeaders {
-            for section in host.deviceSections {
+            for section in host.deviceModel.deviceSections {
                 guard let row = rowIndex(forDeviceID: section.deviceID), let item = host.outlineView.item(atRow: row) else { continue }
                 host.outlineView.expandItem(item)
             }
         }
         // Drop expansion state for workspaces that no longer exist.
-        let visibleWorkspaceIDs = Set(host.projects.flatMap { visibleWorkspaces(projectID: $0.id).map(\.id) })
+        let visibleWorkspaceIDs = Set(host.deviceModel.projects.flatMap { visibleWorkspaces(projectID: $0.id).map(\.id) })
         pinnedWorkspaceIDs.formIntersection(visibleWorkspaceIDs)
         if let transient = transientlyExpandedWorkspaceID, !visibleWorkspaceIDs.contains(transient) { transientlyExpandedWorkspaceID = nil }
-        for project in host.projects {
+        for project in host.deviceModel.projects {
             guard let row = rowIndex(forProjectID: project.id), let item = host.outlineView.item(atRow: row) else { continue }
             guard !project.isCollapsed else {
                 host.outlineView.collapseItem(item)
@@ -3134,9 +3135,9 @@ private struct DeviceSyncState {
     }
 
     private func updateProjectCollapsedStateInMemory(projectID: String, isCollapsed: Bool) {
-        guard let index = host.projects.firstIndex(where: { $0.id == projectID }) else { return }
-        let project = host.projects[index]
-        host.projects[index] = ProjectSummary(
+        guard let index = host.deviceModel.projects.firstIndex(where: { $0.id == projectID }) else { return }
+        let project = host.deviceModel.projects[index]
+        host.deviceModel.projects[index] = ProjectSummary(
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
             isHidden: project.isHidden, isCollapsed: isCollapsed, deviceID: project.deviceID)
     }

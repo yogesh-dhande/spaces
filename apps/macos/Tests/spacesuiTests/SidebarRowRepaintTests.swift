@@ -140,7 +140,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             attachOutline(controller)
 
-            controller.deviceSections = [section(deviceID: controller.localDeviceID, workspace: workspaceWithLiveTitle(nil))]
+            controller.deviceModel.deviceSections = [section(deviceID: controller.deviceModel.localDeviceID, workspace: workspaceWithLiveTitle(nil))]
             controller.sidebar.applySidebarDataChange()
             // Target rows hang off a collapsed workspace until the user opens it, so without this there
             // would be no painted row for the live title to reach.
@@ -150,7 +150,7 @@ extension ProcessProfileEnvironmentSuites {
             let row = try #require(runtimeTargetRow(controller, key: targetKey), "the expanded workspace must list the target row")
             let before = labels(in: try #require(paintedCell(controller, row: row), "the outline must have materialized the target row's cell"))
 
-            controller.deviceSections = [section(deviceID: controller.localDeviceID, workspace: workspaceWithLiveTitle(liveTitle))]
+            controller.deviceModel.deviceSections = [section(deviceID: controller.deviceModel.localDeviceID, workspace: workspaceWithLiveTitle(liveTitle))]
             controller.sidebar.applySidebarDataChange()
 
             let after = labels(in: try #require(paintedCell(controller, row: row), "the repaint must leave a cell on screen for the row"))

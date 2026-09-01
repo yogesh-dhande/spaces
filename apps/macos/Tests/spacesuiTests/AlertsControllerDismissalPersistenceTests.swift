@@ -85,7 +85,7 @@ extension ProcessProfileEnvironmentSuites {
             // `host.alertsGroups` is empty (no overview was ever loaded), so neither dismissed id is still
             // derived and pruning drops both, exercising `storeDismissedAlertsAttentionItemIDs`'s
             // empty-set path.
-            #expect(host.alertsGroups.isEmpty)
+            #expect(host.deviceModel.alertsGroups.isEmpty)
             alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded()
             #expect(alerts.dismissedAlertsAttentionItemIDs.isEmpty)
             #expect(try database.setting(key: ClientSettingsKey.alertsDismissedAttentionItems) == nil)

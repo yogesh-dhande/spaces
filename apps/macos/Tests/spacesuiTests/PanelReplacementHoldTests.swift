@@ -223,14 +223,14 @@ extension ProcessProfileEnvironmentSuites {
         /// from the layout, so nothing keeps a dead session's pane, and the hold is settled.
         @Test func aHeldPersistedPaneIsHandedToTheReplacementInPlace() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             var layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
             controller.rebuildFlatSidebarData()
             controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
@@ -255,20 +255,20 @@ extension ProcessProfileEnvironmentSuites {
         /// the overview, retarget against the previous one, then prune.
         @Test func aPlacedPaneIsHandedOverWithNoCloseEverArriving() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             let layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             let before = section(deviceID: deviceID, processSessionID: "predecessor", retained: ["predecessor"])
-            controller.deviceSections = [before]
+            controller.deviceModel.deviceSections = [before]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the pane is placed and unheld")
 
             let after = section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement"], createdAt: "2026-01-01T00:01:00Z")
-            controller.deviceSections = [after]
+            controller.deviceModel.deviceSections = [after]
             controller.rebuildFlatSidebarData()
             controller.retargetReplacedTerminalPanes(previousOverview: before.overview, overview: try #require(after.overview), deviceID: deviceID)
             controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["replacement"])
@@ -285,14 +285,14 @@ extension ProcessProfileEnvironmentSuites {
         /// on a hold, so the pane is still found and handed over in place.
         @Test func aPersistedPaneWithNoHoldIsHandedToTheReplacementInPlace() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             var layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
             controller.rebuildFlatSidebarData()
             #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.isEmpty, "precondition: no close ever recorded a hold")
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") == nil, "precondition: nothing is materialized yet")
@@ -328,14 +328,14 @@ extension ProcessProfileEnvironmentSuites {
         /// scenario that reaches a claim.
         @Test func aSuccessfulRetargetBumpsTheReplacementEpoch() throws {
             let controller = makeController()
-            let deviceID = controller.localDeviceID
+            let deviceID = controller.deviceModel.localDeviceID
             var layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
             layout = PanelLayoutEngine.appendTab(
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
             controller.rebuildFlatSidebarData()
             let epochBeforeRetarget = controller.panelCoordinator.paneReplacementEpoch
 
