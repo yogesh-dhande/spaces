@@ -176,6 +176,39 @@
             }
         }
 
+        private actor HeldResizeResponder {
+            private var resizeCount = 0
+            private var didStart = false
+            private var isReleased = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            /// Holds only the first resize request open; a later one (the coalesced follow-up's own
+            /// resize, in particular) answers immediately, matching a daemon that is free to serve it.
+            func waitForFirstResizeThenRelease() async {
+                resizeCount += 1
+                guard resizeCount == 1 else { return }
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func waitForFirstResizeStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
         private actor HeldFirstAttachResponder {
             private var attachCount = 0
             private var didStart = false
@@ -2301,6 +2334,144 @@
             try await Task.sleep(for: .milliseconds(500))
             let stateRequestCount = await recorder.countStateRequests()
             XCTAssertEqual(stateRequestCount, 2, "a frame that covers the failure retires the retry")
+        }
+
+        /// A viewport report that arrives while an earlier one's ownership-synchronization round trip is
+        /// still running does not start a second resize; `scheduleOwnershipSynchronization`'s coalescing
+        /// branch records it in `needsOwnershipSynchronizationAfterCurrentRun` instead, and the round trip
+        /// reruns once the in-flight one settles, carrying the size the surface most recently reported
+        /// rather than the one already in flight. No other test in this file drives this branch: every
+        /// other ownership-sync test resizes exactly once per model.
+        func testOwnershipSynchronizationCoalescesAViewportReportThatArrivesWhileOneIsAlreadyRunning() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resize = HeldResizeResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .resize {
+                    await resize.waitForFirstResizeThenRelease()
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            defer { model.stop() }
+
+            model.updateViewportSize(columns: 80, rows: 24)
+            await resize.waitForFirstResizeStart()
+            let didSendFirstResize = try await waitForTerminalControlAction(.resize, count: 1, recorder: recorder)
+            XCTAssertTrue(didSendFirstResize, "the first viewport report must start the round trip")
+            XCTAssertTrue(model.isSynchronizingOwnership, "the round trip already on the wire must be this run's own body")
+
+            // Arrives while the first round trip's resize is held open, i.e. while `isSynchronizingOwnership`
+            // is true: the coalescing branch must record this size rather than start a second round trip
+            // on top of the one still running. `updateViewportSize` is synchronous, so both flags below are
+            // read at the exact moment the coalescing decision was made rather than after some later settling.
+            model.updateViewportSize(columns: 100, rows: 30)
+            XCTAssertTrue(
+                model.isSynchronizingOwnership,
+                "the first run's own body must still be the one in flight; coalescing must not replace it with a second one")
+            XCTAssertTrue(
+                model.isOwnershipSynchronizationScheduled,
+                "the coalesced report must still read as one schedule outstanding, not a second schedule stacked on top")
+
+            // A held resize masks a broken coalescing decision here: the model's single
+            // `SpacesDeviceAPICommandChannel` gates one round trip on the wire at a time, so a second,
+            // uncoalesced resize attempt would queue behind this held one rather than reach the recorder —
+            // a request count taken while held cannot tell "coalesced" apart from "queued behind the gate".
+            // This is a sanity check on the one round trip already running, not the coalescing proof itself.
+            try await Task.sleep(for: .milliseconds(150))
+            let requestsWhileHeld = await recorder.countTerminalControlAction(.resize)
+            XCTAssertEqual(requestsWhileHeld, 1, "a resize round trip already running must not start a second one")
+
+            await resize.release()
+
+            let didRerun = try await waitForTerminalControlAction(.resize, count: 2, recorder: recorder)
+            XCTAssertTrue(didRerun, "the coalesced report must rerun the round trip once the running one settles")
+            // The coalescing proof: releasing the gate lets anything that was queued behind it through. A
+            // second, uncoalesced resize attempt started during the hold above would have been sitting right
+            // behind this one, and would surface here as a third round trip once the gate frees — which the
+            // request count taken while held could not have shown. The window must exceed that third round
+            // trip's worst-case arrival: the follow-up run's 6×50 ms stream-settle loop plus the 120 ms
+            // schedule debounce (~420 ms after the second request), or a broken second run slips past it.
+            //
+            // What this pins is the `isSynchronizingOwnership` coalescing guard itself. Deleting only the
+            // `needsOwnershipSynchronizationAfterCurrentRun` write behind it is behaviorally masked here by
+            // design: `shouldResynchronizeOwnership`'s viewport-mismatch fallback reruns to the same
+            // [80, 100] sequence, so no request-level seam can tell the two apart in this scenario.
+            try await Task.sleep(for: .milliseconds(900))
+            let settledRequestCount = await recorder.countTerminalControlAction(.resize)
+            XCTAssertEqual(
+                settledRequestCount, 2, "the coalesced report must produce exactly one rerun, not an additional uncoalesced round trip")
+            let requests = await recorder.snapshot()
+            let resizedColumns = requests.compactMap { request -> Int? in
+                guard case .terminalControl(let payload) = request.command, payload.action == .resize else { return nil }
+                return payload.columns
+            }
+            XCTAssertEqual(
+                resizedColumns, [80, 100], "the rerun must resize to the size reported while the first run was held, not the one already sent")
+        }
+
+        /// A stream payload naming this client owner can land before the takeover request it raced ever
+        /// gets an answer: that response is only the acknowledgment of a mutation this client already
+        /// made, and `applyReducedState`'s `takeover_confirmed_by_stream` branch reads ownership from the
+        /// stream the instant it says so. The "taking over" affordance must clear right there rather than
+        /// wait for the response, since a slow or dropped acknowledgment must not leave the pane reading as
+        /// still-taking-over after the daemon has already handed this client the terminal.
+        func testAStreamPayloadThatConfirmsOwnershipClearsTakingOverBeforeItsOwnTakeoverResponseReturns() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let takeover = HeldTakeoverResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .takeover {
+                    await takeover.waitForReleaseAfterStarting()
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            // A starting session, so the viewer never auto-takes-over and the takeover below is the only
+            // attempt: an automatic one would otherwise already be in flight and turn this into a no-op.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            let takeoverTask = Task { await model.takeOver() }
+            await takeover.waitForStart()
+            // Not `isTakingOver`: `phase` checks `isStartingState` before the takeover flags, so a
+            // session still reading `.starting` shows `.starting`, not `.takingOver`, even with the
+            // attempt in flight. `isBusy` is set synchronously before the network call and is the
+            // flag that actually reflects the attempt's in-flight state here.
+            XCTAssertTrue(model.isBusy, "the attempt must read as busy once it is in flight")
+
+            let ownerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: model.remoteClientForTesting.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let confirmingState = try Self.framedState(
+                text: "owned", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:26:00Z",
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [model.remoteClientForTesting], attachments: [ownerAttachment]))
+            await model.applyLatestState(confirmingState, isOutOfBand: false)
+
+            XCTAssertTrue(model.isOwner, "the stream payload naming this client owner must be applied")
+            // `phase` checks `isOwner` before the takeover flags, so `isTakingOver` (== phase == .takingOver)
+            // and `keepsTerminalInputSurfaceActive` both read the same way here whether or not `isBusy` was
+            // actually cleared: an owner is never `.takingOver`, and every owner phase (`.ownerBusy`,
+            // `.ownerSynchronizing`, `.ownerInteractive`) keeps the input surface active. Neither assertion
+            // would fail if the stream-confirmation clearing branch were deleted, so `isBusy` itself — the
+            // flag that branch actually clears, and the one `takeOver()`'s own defer would otherwise leave
+            // held until the still-open takeover response returns — is what pins the behavior below.
+            XCTAssertFalse(model.isTakingOver, "ownership confirmed by the stream must clear the takeover affordance on its own")
+            XCTAssertTrue(
+                model.keepsTerminalInputSurfaceActive, "an owner past its takeover must keep the input surface active while still settling")
+            XCTAssertFalse(
+                model.isBusy,
+                "the stream confirmation must clear the busy takeover presentation on its own, before its own takeover response returns")
+
+            await takeover.release()
+            await takeoverTask.value
+            XCTAssertTrue(model.isOwner)
+            XCTAssertFalse(model.isTakingOver)
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "one manual takeover must send exactly one request even though the stream confirmed ownership first")
         }
 
         /// A revoked pairing tears the viewer down and sends the user to re-pair. A trailing resync armed
