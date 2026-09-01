@@ -178,8 +178,8 @@ import workspacecore
     }
 
     func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
-        host.activeShortcutCaptureSetting = nil
-        host.shortcutButtonsBySetting.removeAll()
+        host.shortcuts.activeShortcutCaptureSetting = nil
+        host.shortcuts.shortcutButtonsBySetting.removeAll()
         host.settings.renderSettingsCards(deviceSettingsCards(response: response))
     }
 

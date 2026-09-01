@@ -6,37 +6,37 @@ import workspacecore
 
 @Suite struct ShortcutMonitorDispositionTests {
     @Test func nonTerminalFocusAlwaysRunsAppShortcuts() {
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [], firstResponderIsTerminalPane: false) == .runAppShortcuts)
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.command], firstResponderIsTerminalPane: false) == .runAppShortcuts)
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.control], firstResponderIsTerminalPane: false) == .runAppShortcuts)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [], firstResponderIsTerminalPane: false) == .runAppShortcuts)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.command], firstResponderIsTerminalPane: false) == .runAppShortcuts)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.control], firstResponderIsTerminalPane: false) == .runAppShortcuts)
     }
 
     @Test func focusedTerminalOwnsEveryNonCommandKey() {
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [], firstResponderIsTerminalPane: true) == .passEventToTerminal)
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.control], firstResponderIsTerminalPane: true) == .passEventToTerminal)
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.option], firstResponderIsTerminalPane: true) == .passEventToTerminal)
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.shift], firstResponderIsTerminalPane: true) == .passEventToTerminal)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [], firstResponderIsTerminalPane: true) == .passEventToTerminal)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.control], firstResponderIsTerminalPane: true) == .passEventToTerminal)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.option], firstResponderIsTerminalPane: true) == .passEventToTerminal)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.shift], firstResponderIsTerminalPane: true) == .passEventToTerminal)
     }
 
     @Test func focusedTerminalRunsAppShortcutsThenPaneHandlingForConfiguredNonCommandLeader() {
         let leaderModifiers: Set<HotkeyModifier> = [.ctrl, .alt]
         #expect(
-            AppKitController.shortcutMonitorDisposition(
+            ShortcutsController.shortcutMonitorDisposition(
                 eventModifiers: [.control, .option], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
                 == .runAppShortcutsThenTerminal)
         #expect(
-            AppKitController.shortcutMonitorDisposition(
+            ShortcutsController.shortcutMonitorDisposition(
                 eventModifiers: [.control, .option, .shift], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
                 == .runAppShortcutsThenTerminal)
         #expect(
-            AppKitController.shortcutMonitorDisposition(
+            ShortcutsController.shortcutMonitorDisposition(
                 eventModifiers: [.control], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers) == .passEventToTerminal)
     }
 
     @Test func commandChordsRunAppShortcutsEvenWithTerminalFocus() {
-        #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.command], firstResponderIsTerminalPane: true) == .runAppShortcuts)
+        #expect(ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.command], firstResponderIsTerminalPane: true) == .runAppShortcuts)
         #expect(
-            AppKitController.shortcutMonitorDisposition(eventModifiers: [.command, .option], firstResponderIsTerminalPane: true) == .runAppShortcuts)
+            ShortcutsController.shortcutMonitorDisposition(eventModifiers: [.command, .option], firstResponderIsTerminalPane: true) == .runAppShortcuts)
     }
 
     @Test func closePaneShortcutMatchesPlainCommandWOnly() {

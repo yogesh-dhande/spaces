@@ -425,7 +425,7 @@ private struct DeviceSyncState {
     ) {
         host.logStartupProfile("apply_snapshot_start")
         host.configCache = snapshot.config
-        host.loadShortcutSpecs()
+        host.shortcuts.loadShortcutSpecs()
         applyLocalDeviceSidebarSnapshot(snapshot.local, preserveDetailPane: preserveDetailPane)
         performOwedLaunchLandingIfNeeded()
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
@@ -3315,7 +3315,7 @@ private struct DeviceSyncState {
         titleLabel.font = Typography.controlLabel
         titleLabel.textColor = .labelColor
 
-        let hintLabel = NSTextField(labelWithString: host.footerShortcutHint(for: .guiAlertsShortcut))
+        let hintLabel = NSTextField(labelWithString: host.shortcuts.footerShortcutHint(for: .guiAlertsShortcut))
         hintLabel.font = Typography.caption
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.setContentHuggingPriority(.required, for: .horizontal)

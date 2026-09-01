@@ -5,13 +5,13 @@ import spacesclientcore
 
 @Suite struct CommandPaletteShortcutSettingTests {
     @Test func commandPaletteShortcutSettingMapsToClientSettingsKey() {
-        #expect(AppKitController.ShortcutSetting(settingKey: ClientSettingsKey.guiCommandPaletteHotkey) == .guiCommandPaletteHotkey)
-        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.settingKey == ClientSettingsKey.guiCommandPaletteHotkey)
-        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.defaultSpec == ClientSettingsKey.defaultGUICommandPaletteHotkey)
+        #expect(ShortcutsController.ShortcutSetting(settingKey: ClientSettingsKey.guiCommandPaletteHotkey) == .guiCommandPaletteHotkey)
+        #expect(ShortcutsController.ShortcutSetting.guiCommandPaletteHotkey.settingKey == ClientSettingsKey.guiCommandPaletteHotkey)
+        #expect(ShortcutsController.ShortcutSetting.guiCommandPaletteHotkey.defaultSpec == ClientSettingsKey.defaultGUICommandPaletteHotkey)
     }
 
     @Test func commandPaletteShortcutAppearsInSettingsPanel() {
-        let cases = AppKitController.ShortcutSetting.settingsPanelCases
+        let cases = ShortcutsController.ShortcutSetting.settingsPanelCases
         let hotkeyIndex = cases.firstIndex(of: .guiHotkey)
         let commandPaletteIndex = cases.firstIndex(of: .guiCommandPaletteHotkey)
 
@@ -23,7 +23,7 @@ import spacesclientcore
     @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
         // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
         // from the settings panel rather than hidden functional-only bindings.
-        let cases = AppKitController.ShortcutSetting.settingsPanelCases
+        let cases = ShortcutsController.ShortcutSetting.settingsPanelCases
         #expect(cases.contains(.guiSidebarNextShortcut))
         #expect(cases.contains(.guiSidebarPreviousShortcut))
     }
@@ -52,7 +52,7 @@ import spacesclientcore
     }
 
     @Test func shortcutLeaderSettingRequiresAtLeastTwoModifiers() throws {
-        let resolver = AppKitController.ShortcutSettingResolver { key in key == ClientSettingsKey.guiLeaderHotkey ? "ctrl" : nil }
+        let resolver = ShortcutsController.ShortcutSettingResolver { key in key == ClientSettingsKey.guiLeaderHotkey ? "ctrl" : nil }
         do {
             _ = try resolver.normalizedValue(for: .guiLeaderHotkey, rawValue: "ctrl")
             Issue.record("expected single-modifier leader to be rejected")
@@ -60,7 +60,7 @@ import spacesclientcore
     }
 
     @Test func shortcutLeaderSettingNormalizesModifierOrder() throws {
-        let resolver = AppKitController.ShortcutSettingResolver { _ in nil }
+        let resolver = ShortcutsController.ShortcutSettingResolver { _ in nil }
         let normalized = try resolver.normalizedValue(for: .guiLeaderHotkey, rawValue: "control option")
         #expect(normalized == "alt+ctrl")
     }
