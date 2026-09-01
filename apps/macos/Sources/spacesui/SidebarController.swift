@@ -505,7 +505,7 @@ private struct DeviceSyncState {
             // apply reaches `rebuildFlatSidebarData`, whose invalidation would come too late for it.
             deviceSectionsByID = nil
         }
-        host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
+        host.daemonUpdate.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
         host.deviceModel.localDeviceID = snapshot.localDeviceID
         host.deviceModel.localDeviceName = snapshot.localDeviceName
         host.deviceModel.localPairedDevice = snapshot.localPairedDevice
@@ -513,7 +513,7 @@ private struct DeviceSyncState {
         // daemon is now compatible, re-render it if the remedy changed (e.g. a staged update appeared),
         // otherwise leave it (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale
         // pre-reload verdict).
-        host.reconcileCompatibilityBlock(deviceID: snapshot.localDeviceID)
+        host.daemonUpdate.reconcileCompatibilityBlock(deviceID: snapshot.localDeviceID)
         // Authoritative local overview: close any open local pane whose session the local daemon no
         // longer retains (its product row was removed by the CLI or another paired client), so the pane
         // cannot outlive the local daemon's transcript garbage-collection. The keep-set is the daemon's
@@ -1281,11 +1281,11 @@ private struct DeviceSyncState {
                 host.deviceModel.deviceSections[index].compatibility == load.compatibility && host.deviceModel.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceModel.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceModel.deviceSections[index].compatibility = load.compatibility
-            host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
+            host.daemonUpdate.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
             // If this device's block was showing, reconcile it against the fresh verdict/status — drop it
             // if now compatible, re-render it if the remedy changed (e.g. a staged update appeared while
             // still incompatible), otherwise leave it.
-            host.reconcileCompatibilityBlock(deviceID: deviceID)
+            host.daemonUpdate.reconcileCompatibilityBlock(deviceID: deviceID)
             guard let overview = load.overview else {
                 // Reachable but wire-incompatible: present an empty loaded section so the sidebar shows
                 // the compatibility badge instead of a generic offline error.
@@ -1442,7 +1442,7 @@ private struct DeviceSyncState {
             host.deviceModel.deviceSections[index].compatibility = nil
             host.deviceModel.deviceSections[index].daemonStatus = nil
             host.deviceModel.deviceSections[index].loadState = .offline(reason)
-            host.reconcileCompatibilityBlock(deviceID: deviceID)
+            host.daemonUpdate.reconcileCompatibilityBlock(deviceID: deviceID)
             host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
         applySidebarDataChange()

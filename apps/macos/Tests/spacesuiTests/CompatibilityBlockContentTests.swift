@@ -69,7 +69,7 @@ import spacesterminalcore
         // staged. Spaces applies that itself, so the stale install-it-yourself guidance must go and
         // nothing must replace it.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
             stagedApplyDidNotLand: false)
         #expect(action == .clear)
@@ -77,7 +77,7 @@ import spacesterminalcore
 
     @Test func staleInstallGuidanceRerendersAsTryAgainOnceTheStagedApplyDidNotLand() {
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
             stagedApplyDidNotLand: true)
         #expect(action == .rerender(.applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0")))
@@ -88,7 +88,7 @@ import spacesterminalcore
         // yet, so the remedy is identical — the block must still come down, or the user would be left
         // reading a failure report about a request that is in flight again.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), verdict: .daemonTooOld,
             status: staged, stagedApplyDidNotLand: false)
         #expect(action == .clear)
@@ -96,7 +96,7 @@ import spacesterminalcore
 
     @Test func stagedUpdateBlockClearsOnceTheDeviceReportsCompatible() {
         let compatible = makeStatus(version: "0.2.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), verdict: .compatible,
             status: compatible, stagedApplyDidNotLand: true)
         #expect(action == .clear)
@@ -106,7 +106,7 @@ import spacesterminalcore
         // Rebuilding the card on every sidebar tick would be wasteful and would fight anything transient
         // in the pane (e.g. focus), so an identical remedy must not trigger a re-render.
         let nothingStaged = makeStatus(version: "0.1.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version - 1)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: nothingStaged,
             stagedApplyDidNotLand: false)
         #expect(action == .leaveAlone)
@@ -117,7 +117,7 @@ import spacesterminalcore
         // a different device, even when that other device's own facts would otherwise call for a
         // re-render.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: false, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
             stagedApplyDidNotLand: true)
         #expect(action == .leaveAlone)
@@ -149,7 +149,7 @@ import spacesterminalcore
         // Reached through the reconcile path too, not only through the render gate: a compatible device
         // that stages an update the app then fails to apply must not have a block pushed into its pane.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version)
-        let action = AppKitController.reconcileCompatibilityBlockAction(
+        let action = DaemonUpdateController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .compatible, status: staged,
             stagedApplyDidNotLand: true)
         #expect(action == .clear)
