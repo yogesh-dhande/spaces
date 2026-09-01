@@ -507,7 +507,7 @@ import workspacecore
                 terminalSessionSummary(id: "session-busy", title: "Codex busy", foregroundCommand: "ignored foreground"),
                 terminalSessionSummary(id: "session-quiet", title: "Codex quiet", foregroundCommand: "codex --model gpt-5.6-sol"),
             ])
-        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
 
         let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
         let visible = AppKitController.visibleCommandPaletteItems(
@@ -546,7 +546,7 @@ import workspacecore
                             canStop: false, canRestart: true)
                     ])
             ], sessions: [])
-        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
         let exitAlertID = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.attentionID)
 
         let undismissedRow = try #require(
@@ -590,7 +590,7 @@ import workspacecore
                     createdAt: "2026-08-14T09:00:00Z", updatedAt: "2026-08-14T09:00:00Z", isControlAvailable: true, isSubscriptionAvailable: true,
                     attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundCommand: "make test", bellAt: "2026-08-14T09:02:00Z")
             ])
-        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
 
         let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
         let alert = try #require(items.first { $0.source == .alertsAttention && $0.label == "shell-1" })
@@ -667,7 +667,7 @@ import workspacecore
                     id: "remote-bell-session", title: "remote-shell", foregroundCommand: "make remote-test", workspaceID: "remote-workspace",
                     bellAt: "2026-08-14T09:01:00Z"),
             ])
-        let mergedAlerts = AppKitController.buildOverviewAlertsGroups(from: remoteOverview, deviceID: "remote-device")
+        let mergedAlerts = AlertsController.buildOverviewAlertsGroups(from: remoteOverview, deviceID: "remote-device")
         let localOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
 
         let items = AppKitController.buildCommandPaletteItems(overview: localOverview, alertsGroups: mergedAlerts)
@@ -872,7 +872,7 @@ import workspacecore
                     ])
             ], sessions: [])
 
-        let groups = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let groups = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
         guard let focusRequest = groups.first?.items.first?.focusRequest else {
             Issue.record("expected an agent attention alert with a focus request")
             return

@@ -58,63 +58,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case done
     }
 
-    struct AlertsAttentionEntry: Sendable {
-        let attentionID: String
-        let icon: String
-        let iconTint: AlertsIconTint
-        let label: String
-        let detail: String?
-        let shortcut: String
-        let processStatus: RunningProcessState?
-        let agentStatus: AgentWindowStatus?
-        let countsTowardBadge: Bool
-        let eventDate: Date?
-        let focusRequest: WindowFocusRequest?
-        /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab rather than
-        /// focusing the workspace runtime target, which may already be detached, so `focusRequest` stays nil.
-        let automationRunTarget: AutomationRunAlertTarget?
-
-        init(
-            attentionID: String, icon: String, iconTint: AlertsIconTint, label: String, detail: String?, shortcut: String,
-            processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil, countsTowardBadge: Bool, eventDate: Date?,
-            focusRequest: WindowFocusRequest? = nil, automationRunTarget: AutomationRunAlertTarget? = nil
-        ) {
-            self.attentionID = attentionID
-            self.icon = icon
-            self.iconTint = iconTint
-            self.label = label
-            self.detail = detail
-            self.shortcut = shortcut
-            self.processStatus = processStatus
-            self.agentStatus = agentStatus
-            self.countsTowardBadge = countsTowardBadge
-            self.eventDate = eventDate
-            self.focusRequest = focusRequest
-            self.automationRunTarget = automationRunTarget
-        }
-    }
-
-    /// Names the automation run an alert card deep-links to (its device and run id).
-    struct AutomationRunAlertTarget: Sendable, Equatable {
-        let deviceID: String
-        let runID: String
-    }
-
-    struct AlertsGroup: Sendable {
-        let projectName: String
-        let workspaceID: String
-        let workspaceName: String
-        let workspaceBranch: String?
-        /// Whether the workspace this group was derived from is hidden, or belongs to a hidden project.
-        ///
-        /// Hidden workspaces still get their groups built, because the persisted dismissal set is pruned
-        /// against the derived identities (`AlertsController.retainedDismissedAttentionItemIDs`) — dropping
-        /// the group would forget the dismissals and resurrect cleared alerts on unhide. The display
-        /// surfaces (the alerts pane, its badge, the command palette) filter on this flag instead.
-        let isFromHiddenWorkspace: Bool
-        let items: [AlertsAttentionEntry]
-        var latestDate: Date? { items.compactMap(\.eventDate).max() }
-    }
+    /// Transitional aliases: the alerts model types are owned by `AlertsController`, but a wide set of
+    /// consumers (tests, `DeviceSectionContent.swift`, `SidebarRuntimeTargetItem.swift`) still spell them
+    /// `AppKitController.AlertsGroup`/`AppKitController.AlertsAttentionEntry`. Kept rather than rewritten
+    /// everywhere to avoid disproportionate churn across files that only reference the types, not the
+    /// alerts derivation itself.
+    typealias AlertsAttentionEntry = AlertsController.AlertsAttentionEntry
+    typealias AlertsGroup = AlertsController.AlertsGroup
 
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
@@ -306,7 +256,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// read). A row stays pending until every device its panes reference has a loaded
     /// overview, so an offline remote's windows return when the device does.
     var pendingPanelWindowRestores: [SpacesClientDatabase.PanelWindowRecord]?
-    lazy var alerts = AlertsController(host: self)
+    lazy var alerts = AlertsController(host: self) { [unowned self] in try self.clientDatabase() }
     lazy var automations = AutomationsController(host: self)
     lazy var automationEditor = AutomationEditorController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
@@ -3216,153 +3166,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
     // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
-    // overview-mapping helpers below (buildOverviewAlertsGroups, agentWindows,
-    // deviceTerminalWindows), which run off the main actor. ISO8601DateFormatter is documented
-    // thread-safe, so a single nonisolated instance is safe to reuse instead of allocating a
-    // fresh formatter per call. Kept separate from the instance-scoped `iso8601Formatter` lazy
-    // var above, which isn't reachable from these static/nonisolated contexts.
+    // overview-mapping helpers below (agentWindows, deviceTerminalWindows), which run off the main
+    // actor. ISO8601DateFormatter is documented thread-safe, so a single nonisolated instance is
+    // safe to reuse instead of allocating a fresh formatter per call. Kept separate from the
+    // instance-scoped `iso8601Formatter` lazy var above, which isn't reachable from these
+    // static/nonisolated contexts. `AlertsController` keeps its own identical instance for its
+    // overview-mapping helper (`buildOverviewAlertsGroups`) rather than reaching back into this one.
     nonisolated(unsafe) private static let staticISO8601Formatter = ISO8601DateFormatter()
-
-    /// Builds attention alerts for a device from its overview payload — used for both the local and
-    /// remote devices so alerts aggregate identically across the sidebar without the client ever
-    /// opening `spaces.db`. Window-role styling (browser/editor icons, per-window focus) is
-    /// intentionally absent: desktop windows are client-local and not part of the daemon overview,
-    /// so an exited process shows as a process alert and clicking it focuses the process. Recency
-    /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
-    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String, deviceName: String = "")
-        -> [AlertsGroup]
-    {
-        let iso8601Formatter = staticISO8601Formatter
-        // First-wins matches the `first(where:)` scan this replaces.
-        let sessionsByID = Dictionary(overview.sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let sessionsByWorkspace = Dictionary(grouping: overview.sessions, by: \.workspaceID)
-        var groups: [AlertsGroup] = []
-        for workspace in overview.workspaces {
-            var items: [AlertsAttentionEntry] = []
-            if workspace.isRunning {
-                for process in workspace.processRows where process.runState == .exited {
-                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                    items.append(
-                        AlertsAttentionEntry(
-                            attentionID: "alert:\(deviceID):process:\(process.processID ?? process.id):\(process.exitedAt ?? "unknown")",
-                            icon: "terminal", iconTint: .terminal, label: process.name, detail: process.command, shortcut: "", processStatus: .exited,
-                            agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
-                            focusRequest: process.processID.map { .workspaceProcess(workspaceID: workspace.id, processID: $0) }))
-                }
-            }
-            for agent in workspace.codingAgentRows where agent.activityState == .waiting || agent.activityState == .done {
-                let eventDate = agent.updatedAt.flatMap { iso8601Formatter.date(from: $0) }
-                // Both states keep the cpu.fill agent identity; the tint alone carries the state —
-                // `waiting` (blocked on the user) is amber and `done` is blue, the same colors the row wears
-                // in the sidebar — so a finished agent doesn't read as still needing attention.
-                let iconTint: AlertsIconTint = agent.activityState == .done ? .done : .warning
-                items.append(
-                    AlertsAttentionEntry(
-                        attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
-                        icon: "cpu.fill", iconTint: iconTint, label: agent.name,
-                        detail: terminalPaletteSecondaryLabel(liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessionsByID: sessionsByID),
-                        shortcut: "", processStatus: nil, agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue),
-                        countsTowardBadge: true, eventDate: eventDate,
-                        // Mirror `agentWindows(from:)` so the `.agentWindow` resolution finds the row by
-                        // `agentID`/`id` and opens its session.
-                        focusRequest: .agentWindow(
-                            AgentWindowRecord(
-                                id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
-                                terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) },
-                                status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
-            }
-            // Every session with a bell gets an entry, including one the user is looking at right now:
-            // suppressing the focused session's bell is a consumption, not a filter (see
-            // `AlertsController.consumeFocusedSessionBellAlerts`), and consumption needs the entry to
-            // exist so its identity can be recorded and kept alive by the dismissal pruning rule.
-            for session in sessionsByWorkspace[workspace.id] ?? [] {
-                guard let bellAt = session.bellAt else { continue }
-                // Not `iso8601Formatter`: a Linux daemon stamps runtime state with fractional seconds,
-                // which the framework's default format rejects, and the age is the only recency this row
-                // carries.
-                let eventDate = GhosttyRemoteSessionStateTimestamp.date(from: bellAt)
-                items.append(
-                    AlertsAttentionEntry(
-                        attentionID: "alert:\(deviceID):session:\(session.id):bell:\(bellAt)", icon: "terminal", iconTint: .terminal,
-                        // The row reads exactly as the session's sidebar row does — name, then what the
-                        // program is doing — because its presence under Alerts is what says the bell rang.
-                        label: session.title,
-                        detail: terminalPaletteSecondaryLabel(liveTitle: session.liveTitle, sessionID: session.id, sessionsByID: sessionsByID),
-                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
-                        focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
-            }
-            guard !items.isEmpty else { continue }
-            items.sort {
-                switch ($0.eventDate, $1.eventDate) {
-                case (let a?, let b?): return a > b
-                case (nil, _): return false
-                case (_, nil): return true
-                }
-            }
-            groups.append(
-                AlertsGroup(
-                    projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                    workspaceBranch: workspace.branch, isFromHiddenWorkspace: !overview.isWorkspaceVisible(workspace), items: items))
-        }
-        // Failed/timed-out automation runs form their own synthetic group ("Automations / <device>") whose
-        // cards deep-link to the Runs tab instead of focusing a live workspace target that may be detached.
-        let automationEntries = AutomationsViewModel.alertEntries(deviceID: deviceID, deviceName: deviceName, runs: overview.automationRuns)
-        if !automationEntries.isEmpty {
-            let items = automationEntries.map { entry in
-                AlertsAttentionEntry(
-                    attentionID: entry.attentionID, icon: entry.status == "timed_out" ? "clock.badge.exclamationmark.fill" : "xmark.octagon.fill",
-                    iconTint: .warning, label: entry.text, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: entry.eventDate,
-                    automationRunTarget: AutomationRunAlertTarget(deviceID: entry.deviceID, runID: entry.runID))
-            }
-            groups.append(
-                AlertsGroup(
-                    projectName: "Automations", workspaceID: "automations:\(deviceID)",
-                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, isFromHiddenWorkspace: false, items: items))
-        }
-        groups.sort {
-            switch ($0.latestDate, $1.latestDate) {
-            case (let a?, let b?): return a > b
-            case (nil, _): return false
-            case (_, nil): return true
-            }
-        }
-        return groups
-    }
-
-    /// Alert entries `groups` carries for one runtime-target row, matched by focus-request identity: a
-    /// process row's exit alert via `.workspaceProcess`, an agent row's waiting/done alert via
-    /// `.agentWindow`, and a bell alert via `.terminalSession` for any row carrying a live session (a
-    /// process or agent row's own session, or an ad hoc terminal's). This is the single derivation for
-    /// "which alerts does this row own": the sidebar's Dismiss Alert menu and the exited-process color
-    /// downgrade (`isProcessExitAcknowledged`) both consume it instead of re-deriving alert identity —
-    /// the `alert:...` id format built in `buildOverviewAlertsGroups` — at a second site.
-    nonisolated static func rowAlertsAttentionEntries(
-        in groups: [AlertsGroup], workspaceID: String, processID: String? = nil, agentID: String? = nil, sessionID: String? = nil
-    ) -> [AlertsAttentionEntry] {
-        guard processID != nil || agentID != nil || sessionID != nil, let group = groups.first(where: { $0.workspaceID == workspaceID }) else {
-            return []
-        }
-        return group.items.filter { entry in
-            switch entry.focusRequest {
-            case .workspaceProcess(_, let entryProcessID): return entryProcessID == processID
-            case .agentWindow(let record): return record.id == agentID
-            case .terminalSession(_, let entrySessionID): return entrySessionID == sessionID
-            default: return false
-            }
-        }
-    }
-
-    /// Whether a process's currently derived exit alert — if it has one — is in the dismissed set. This
-    /// is the one fact that downgrades a row's color from failed (red) back to inactive everywhere it
-    /// renders (sidebar row, workspace roll-up, command palette, workspace-detail Processes row); agent
-    /// and bell dismissals never touch color. A later exit carries a new `exitedAt`, hence a new alert
-    /// identity, so the process reads as failed again until its new alert is dismissed too.
-    nonisolated static func isProcessExitAcknowledged(
-        processID: String, workspaceID: String, alertsGroups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>
-    ) -> Bool {
-        guard let entry = rowAlertsAttentionEntries(in: alertsGroups, workspaceID: workspaceID, processID: processID).first else { return false }
-        return dismissedAttentionItemIDs.contains(entry.attentionID)
-    }
 
     private enum LocalDeviceSnapshotPurpose: Sendable {
         case launch
@@ -3476,7 +3286,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logStartupSnapshotProfile(
             "sidebar_snapshot_local_device_ready",
             details: "device=\(resolvedDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-        let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
+        let alertsGroups = AlertsController.buildOverviewAlertsGroups(from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
         logStartupSnapshotProfile(
             "sidebar_snapshot_alerts_ready", details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })"
         )
@@ -3626,7 +3436,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func agentStatus(from state: SpacesDeviceCodingAgentActivityState) -> AgentWindowStatus {
+    // Not private: `AlertsController.buildOverviewAlertsGroups` calls this from a different file in
+    // the same module (cross-file `private` isn't visible), mirroring `agentWindows(from:)` below.
+    nonisolated static func agentStatus(from state: SpacesDeviceCodingAgentActivityState) -> AgentWindowStatus {
         switch state {
         case .idle: return .idle
         case .spinning: return .spinning
@@ -4592,15 +4404,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail(presentation: .userNavigation) }
 
-    // MARK: - Alerts forwarders
-    // Thin pass-throughs that keep widely-used alerts entry points callable from
-    // host and sidebar code. The implementations live on `alerts` (AlertsController).
-    func alertsAttentionCount() -> Int { alerts.alertsAttentionCount() }
-    func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
-    func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
-    func consumeFocusedSessionBellAlerts() { alerts.consumeFocusedSessionBellAlerts() }
-    func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) { alerts.showAlertsDetail(presentation: presentation) }
-
     // MARK: - Automations
 
     @objc func automationsRowClicked() { automations.showAutomationsDetail() }
@@ -5491,7 +5294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         fullReloadSidebarOutline()
         if !shouldPreserveDetailPane { refreshSelection() }
         updateAlertsSidebarBadge()
-        if showingAlerts { showAlertsDetail() }
+        if showingAlerts { alerts.showAlertsDetail() }
         if showingAutomations { showAutomationsDetail() }
     }
 
@@ -5549,7 +5352,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// which is why it is presented here only when it is already the pane on screen.
     func refreshSelection() {
         if showingAlerts {
-            showAlertsDetail()
+            alerts.showAlertsDetail()
             return
         }
         if showingAutomations {
@@ -8481,24 +8284,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse { devicePairing.currentDeviceControlResponse() }
 
     func clientDatabase() throws -> SpacesClientDatabase { try SpacesClientDatabase.defaultDatabase() }
-
-    /// Attention-item dismissals are per-client desktop state, so they live in the client
-    /// database rather than the daemon's settings.
-    func loadDismissedAlertsAttentionItemIDs() -> Set<String> {
-        guard let raw = (try? clientDatabase().setting(key: ClientSettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
-            let data = raw.data(using: .utf8), let decoded = try? JSONDecoder().decode([String].self, from: data)
-        else { return [] }
-        return Set(decoded)
-    }
-
-    func storeDismissedAlertsAttentionItemIDs(_ ids: Set<String>) throws {
-        guard !ids.isEmpty else {
-            try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: nil)
-            return
-        }
-        let encoded = try JSONEncoder().encode(ids.sorted())
-        try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
-    }
 
     func macPairedDevices() -> [SpacesPairedDeviceRecord] {
         guard let database = try? clientDatabase() else { return [] }
@@ -11802,7 +11587,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func rerenderVisibleDetailPane() {
         switch detailPane {
         case .none: return
-        case .alerts: showAlertsDetail()
+        case .alerts: alerts.showAlertsDetail()
         case .automations: showAutomationsDetail()
         case .workspace(let workspaceID, _):
             guard let (project, workspace) = findWorkspace(id: workspaceID) else { return }
@@ -12535,7 +12320,7 @@ extension AppKitController {
                         guard let processID = target.processID, let process = processesByID[processID] else { continue }
                         // Same downgrade the sidebar row applies: an acknowledged exit reads as idle here
                         // rather than exited, until the process exits again with a new alert identity.
-                        let isAcknowledged = isProcessExitAcknowledged(
+                        let isAcknowledged = AlertsController.isProcessExitAcknowledged(
                             processID: processID, workspaceID: workspace.id, alertsGroups: alertsGroups,
                             dismissedAttentionItemIDs: dismissedAttentionItemIDs)
                         let status: CommandPaletteItem.Status = isAcknowledged ? .idle : .process(process.status)

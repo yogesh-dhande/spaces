@@ -666,7 +666,7 @@ extension ProcessProfileEnvironmentSuites {
 
             // A detour through Alerts: nils out `visibleDetailWorkspaceID`, but must not disturb which
             // workspace was last presented.
-            controller.showAlertsDetail(presentation: .userNavigation)
+            controller.alerts.showAlertsDetail(presentation: .userNavigation)
 
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
 
@@ -696,7 +696,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
             let contentAfterFirstPresentation = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
 
-            controller.showAlertsDetail(presentation: .userNavigation)
+            controller.alerts.showAlertsDetail(presentation: .userNavigation)
             controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
 
             #expect(

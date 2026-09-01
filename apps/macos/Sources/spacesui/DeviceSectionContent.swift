@@ -18,6 +18,6 @@ struct DeviceSectionContent {
         return DeviceSectionContent(
             projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
             workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID,
-            alertsGroups: AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: deviceID, deviceName: deviceName))
+            alertsGroups: AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: deviceID, deviceName: deviceName))
     }
 }

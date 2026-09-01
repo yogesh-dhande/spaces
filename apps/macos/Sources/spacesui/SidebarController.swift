@@ -357,7 +357,7 @@ private struct DeviceSyncState {
             // presentation on purpose: nothing has rendered an alerts pane yet, so the render cannot be
             // skipped as an unchanged repaint, and a landing that raced a New Project / New Workspace
             // form opened during loading must not dismiss it the way `.userNavigation` would.
-            if host.detailPane == .none { host.showAlertsDetail() }
+            if host.detailPane == .none { host.alerts.showAlertsDetail() }
             host.logStartupProfile("sidebar_snapshot_applied")
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
@@ -387,7 +387,7 @@ private struct DeviceSyncState {
     func performOwedLaunchLandingIfNeeded() {
         guard launchLandingOwed else { return }
         launchLandingOwed = false
-        if host.detailPane == .none { host.showAlertsDetail() }
+        if host.detailPane == .none { host.alerts.showAlertsDetail() }
     }
 
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh"), so an
@@ -601,7 +601,7 @@ private struct DeviceSyncState {
         // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
         // session's bell into that same set and writes it back, so a consume that ran against a not-yet
         // loaded (empty) set would persist itself over everything the user had dismissed.
-        host.loadAlertsDismissedAttentionItemIDs()
+        host.alerts.loadAlertsDismissedAttentionItemIDs()
         if localOutlineUnchanged {
             // The merge still has to run for its side effects — the focused pane's bell is consumed here,
             // and global panel titles are refreshed here — but an unchanged local overview cannot have
@@ -610,7 +610,7 @@ private struct DeviceSyncState {
         } else {
             applySidebarDataChange()
         }
-        host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
+        host.alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         host.logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             host.refreshSelection()
@@ -646,7 +646,7 @@ private struct DeviceSyncState {
         }
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
-        if host.showingAlerts { host.showAlertsDetail() }
+        if host.showingAlerts { host.alerts.showAlertsDetail() }
         host.reopenPersistedPanelWindowsIfPossible()
     }
 
@@ -1456,7 +1456,7 @@ private struct DeviceSyncState {
         // have to be rebuilt, and only when this device crossed into or out of being actionable — every
         // earlier branch of the switch returned for a report that changed nothing.
         if host.showingAlerts {
-            host.showAlertsDetail()
+            host.alerts.showAlertsDetail()
         } else if host.showingAutomations {
             host.showAutomationsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
@@ -1502,7 +1502,7 @@ private struct DeviceSyncState {
         host.alertsGroups = merged.alertsGroups
         // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
         // is typing in gets consumed — before anything reads the groups for the badge or the list.
-        host.consumeFocusedSessionBellAlerts()
+        host.alerts.consumeFocusedSessionBellAlerts()
         host.panelCoordinator.refreshGlobalPanelTitles()
     }
 
@@ -1753,7 +1753,7 @@ private struct DeviceSyncState {
                 showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
         else { return false }
         switch target {
-        case .alerts: host.showAlertsDetail(presentation: .userNavigation)
+        case .alerts: host.alerts.showAlertsDetail(presentation: .userNavigation)
         case .automations: host.showAutomationsDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
@@ -3143,7 +3143,7 @@ private struct DeviceSyncState {
 
     /// Update the Alerts sidebar row badge with the current attention item count.
     func updateAlertsSidebarBadge() {
-        let totalCount = host.alertsAttentionCount()
+        let totalCount = host.alerts.alertsAttentionCount()
         if let badge = alertsRowBadge {
             badge.stringValue = "\(totalCount)"
             badge.isHidden = totalCount == 0
