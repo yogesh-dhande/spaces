@@ -14,35 +14,6 @@ import workspacecore
 
 private let startupProfileBaselineUptime = ProcessInfo.processInfo.systemUptime
 
-private final class InlineWorkspaceEditorTextView: NSTextView {
-    var onSave: (() -> Void)?
-    var onCancel: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        switch Int(event.keyCode) {
-        case kVK_Escape:
-            onCancel?()
-            return
-        case kVK_Return, kVK_ANSI_KeypadEnter:
-            if flags == .command {
-                onSave?()
-                return
-            }
-        default: break
-        }
-        super.keyDown(with: event)
-    }
-
-    override func doCommand(by selector: Selector) {
-        if selector == #selector(NSResponder.cancelOperation(_:)) {
-            onCancel?()
-            return
-        }
-        super.doCommand(by: selector)
-    }
-}
-
 protocol ProcessLifecyclePolicyController {
     func disableAutomaticTermination(_ reason: String)
     func disableSuddenTermination()
@@ -4465,7 +4436,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // titlebar's own event handling wins), so content stays below it.
         window.titleVisibility = .hidden
         window.setAccessibilityIdentifier("spaces-main-window")
-        window.backgroundColor = sidebarPanelBackgroundColor()
+        window.backgroundColor = sidebar.sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
@@ -4525,7 +4496,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
@@ -4779,11 +4750,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
 
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
 
         // The right panel's own footer strip: workspace details for the selected
         // workspace (populated by the detail paths), empty otherwise.
@@ -4859,19 +4830,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             previousProjectID: previousProjectID, currentProjectID: currentProjectID, previousWorkspaceID: previousWorkspaceID,
             currentWorkspaceID: currentWorkspaceID)
     }
-    func sidebarPanelBackgroundColor() -> NSColor { sidebar.sidebarPanelBackgroundColor() }
-    func sidebarCardBackgroundColor() -> NSColor { sidebar.sidebarCardBackgroundColor() }
-    func sidebarSelectedCardBackgroundColor() -> NSColor { sidebar.sidebarSelectedCardBackgroundColor() }
-    func sidebarCardBorderColor(isSelected: Bool) -> NSColor { sidebar.sidebarCardBorderColor(isSelected: isSelected) }
-    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarPrimaryTextColor(isSelected: isSelected) }
-    func sidebarMetadataTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarMetadataTextColor(isSelected: isSelected) }
-    func sidebarRunningIndicatorColor() -> NSColor { sidebar.sidebarRunningIndicatorColor() }
-    func sidebarFailedIndicatorColor() -> NSColor { sidebar.sidebarFailedIndicatorColor() }
-    func sidebarIdleIndicatorColor() -> NSColor { sidebar.sidebarIdleIndicatorColor() }
-    func sidebarThemeColor(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1) -> NSColor {
-        sidebar.sidebarThemeColor(light: light, dark: dark, alpha: alpha)
-    }
-
     func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
@@ -6342,7 +6300,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
         bindAppearanceReactiveLayer(divider) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+            view.layer?.backgroundColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
         return divider
     }
@@ -6405,32 +6363,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         updateVisibleWorkspacePanelTabStripPresentation()
     }
 
-    func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
-        let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = Typography.rowLabel
-
-        control.translatesAutoresizingMaskIntoConstraints = false
-        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.addArrangedSubview(nameLabel)
-        if !hint.isEmpty {
-            let hintLabel = NSTextField(labelWithString: hint)
-            hintLabel.font = Typography.metadata
-            hintLabel.textColor = .secondaryLabelColor
-            hintLabel.lineBreakMode = .byWordWrapping
-            hintLabel.maximumNumberOfLines = 2
-            hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            stack.addArrangedSubview(hintLabel)
-        }
-        stack.addArrangedSubview(control)
-        control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        return stack
-    }
-
     func buildShortcutRowsContainer() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -6438,7 +6370,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.layer?.cornerRadius = UIRadius.compact
         container.layer?.borderWidth = 1
         container.layer?.masksToBounds = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
 
         let captureWidth: CGFloat = 140
@@ -6453,7 +6385,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sep.translatesAutoresizingMaskIntoConstraints = false
                 sep.wantsLayer = true
                 bindAppearanceReactiveLayer(sep) { [weak self] view in
-                    view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                    view.layer?.backgroundColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
                 }
                 container.addSubview(sep)
                 NSLayoutConstraint.activate([
@@ -6480,7 +6412,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             shortcutButtonsBySetting[setting.settingKey] = captureButton
 
             let resetButton = actionButton(
-                title: "Reset", symbol: nil, tooltip: "Reset to default shortcut", action: #selector(resetShortcutSetting(_:)), primary: false)
+                title: "Reset", symbol: nil, tooltip: "Reset to default shortcut", action: #selector(resetShortcutSetting(_:)), primary: false,
+                target: self)
             resetButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
             resetButton.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -6578,26 +6511,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         // --- Buttons ---
-        let saveButton = actionButton(title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
+        let saveButton = actionButton(
+            title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true, target: self)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.setAccessibilityIdentifier("project-settings-save")
         saveButton.keyEquivalent = "\r"
 
         let importButton = actionButton(
             title: "Import spaces.yaml", symbol: nil, tooltip: "Load spaces.yaml into project settings",
-            action: #selector(importProjectSpacesYAML(_:)), primary: false)
+            action: #selector(importProjectSpacesYAML(_:)), primary: false, target: self)
         importButton.setAccessibilityIdentifier("project-settings-import-spaces-yaml")
         Theme.applySecondaryStyle(to: importButton)
 
         let exportButton = actionButton(
             title: "Export spaces.yaml", symbol: nil, tooltip: "Export this project to spaces.yaml", action: #selector(exportProjectSpacesYAML(_:)),
-            primary: false)
+            primary: false, target: self)
         exportButton.setAccessibilityIdentifier("project-settings-export-spaces-yaml")
         Theme.applySecondaryStyle(to: exportButton)
 
         let discardImportButton = actionButton(
             title: "Discard Import", symbol: nil, tooltip: "Discard imported config changes and reload the saved project settings",
-            action: #selector(discardProjectConfigChanges(_:)), primary: false)
+            action: #selector(discardProjectConfigChanges(_:)), primary: false, target: self)
         discardImportButton.setAccessibilityIdentifier("project-settings-discard-import")
         discardImportButton.isHidden = true
         Theme.applySecondaryStyle(to: discardImportButton)
@@ -6636,95 +6570,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func presentProjectSettingsWindow(hosting stack: NSStackView, project: ProjectSummary) {
         projectSettingsProjectID = project.id
-        let header = buildFormWindowHeader(symbol: "gearshape", title: project.name, closeAction: #selector(closeProjectSettingsWindow))
+        let header = buildFormWindowHeader(
+            symbol: "gearshape", title: project.name, closeAction: #selector(closeProjectSettingsWindow), target: self)
         projectSettingsWindow = presentFormWindow(existing: projectSettingsWindow, header: header, hosting: stack)
     }
 
     @objc private func closeProjectSettingsWindow() { projectSettingsWindow?.performClose(nil) }
-
-    func formSectionCard(
-        icon: String?, title: String, subtitle: String = "", iconColor: NSColor? = nil, trailingView: NSView? = nil, contentViews: [NSView]
-    ) -> NSView {
-        let section = NSView()
-        section.translatesAutoresizingMaskIntoConstraints = false
-        section.setContentHuggingPriority(.required, for: .vertical)
-
-        let accentColor = iconColor ?? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = Typography.cardTitle
-        titleLabel.textColor = .labelColor
-
-        let subtitleLabel = NSTextField(labelWithString: subtitle)
-        subtitleLabel.font = Typography.rowDetail
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.lineBreakMode = .byWordWrapping
-        subtitleLabel.maximumNumberOfLines = 2
-        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let titleStack = NSStackView()
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 2
-        titleStack.addArrangedSubview(titleLabel)
-        if !subtitle.isEmpty { titleStack.addArrangedSubview(subtitleLabel) }
-        titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .top
-        headerRow.spacing = 10
-        if let icon {
-            let iconView = NSImageView()
-            if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
-                let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
-                iconView.image = img.withSymbolConfiguration(config)
-            }
-            iconView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 20), iconView.heightAnchor.constraint(equalToConstant: 20)])
-            headerRow.addArrangedSubview(iconView)
-        }
-        headerRow.addArrangedSubview(titleStack)
-        if let trailing = trailingView {
-            trailing.setContentHuggingPriority(.required, for: .horizontal)
-            headerRow.addArrangedSubview(trailing)
-        }
-
-        let innerStack = NSStackView()
-        innerStack.orientation = .vertical
-        innerStack.alignment = .leading
-        innerStack.spacing = 12
-        innerStack.translatesAutoresizingMaskIntoConstraints = false
-        innerStack.addArrangedSubview(headerRow)
-        for view in contentViews { innerStack.addArrangedSubview(view) }
-
-        let divider = NSView()
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.wantsLayer = true
-        bindAppearanceReactiveLayer(divider) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
-        }
-
-        section.addSubview(innerStack)
-        section.addSubview(divider)
-        NSLayoutConstraint.activate([
-            innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-            innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-            innerStack.topAnchor.constraint(equalTo: section.topAnchor, constant: 4),
-
-            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor), divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor, constant: 18), divider.heightAnchor.constraint(equalToConstant: 1),
-            divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
-        ])
-        headerRow.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
-        for view in contentViews {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
-        }
-
-        return section
-    }
 
     /// The New Project title, naming the target device only when there is a choice to disambiguate.
     private func addProjectFlowTitle(deviceID: String) -> String {
@@ -6760,7 +6611,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         // Config-step controls are built now and shown after Continue loads the config.
         let (setup, stop, ports, processes, browsers) = makeAddProjectConfigSections()
-        let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
+        let createButton = actionButton(
+            title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true, target: self)
         let spacesYAMLMissingLabel = NSTextField(
             wrappingLabelWithString: "No spaces.yaml found in this repository. Set up the configuration below as needed.")
         spacesYAMLMissingLabel.font = Typography.rowDetail
@@ -6768,7 +6620,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         spacesYAMLMissingLabel.setAccessibilityIdentifier("add-project-spaces-yaml-missing")
 
         let continueButton = actionButton(
-            title: "Continue", symbol: nil, tooltip: "Load the project configuration", action: #selector(continueFromSourceStep(_:)), primary: true)
+            title: "Continue", symbol: nil, tooltip: "Load the project configuration", action: #selector(continueFromSourceStep(_:)), primary: true,
+            target: self)
         continueButton.isEnabled = false
         continueButton.setAccessibilityIdentifier("add-project-source-continue")
 
@@ -6793,7 +6646,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             icon: "folder.badge.plus", title: "Source", subtitle: "Where does your project live?",
             contentViews: [refs.folderRow, refs.gitRow, refs.folderInputRow, refs.gitInputRow])
 
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        let cancelButton = actionButton(
+            title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false, target: self)
         Theme.applySecondaryStyle(to: cancelButton)
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -6834,7 +6688,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let card = formSectionCard(icon: "square.and.arrow.down", title: "Loading project settings", subtitle: "", contentViews: [row])
 
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        let cancelButton = actionButton(
+            title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false, target: self)
         Theme.applySecondaryStyle(to: cancelButton)
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -6852,7 +6707,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Step 3: review and edit the configuration (loaded from the source on entry) and create.
     private func showAddProjectConfigStep(_ refs: AddProjectFieldRefs) {
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        let cancelButton = actionButton(
+            title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false, target: self)
         Theme.applySecondaryStyle(to: cancelButton)
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -6905,7 +6761,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func addProjectSourceRow(icon: String, title: String, subtitle: String, accessibilityID: String) -> ClickableRowView {
         let container = ClickableRowView(isInteractive: true)
         container.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
@@ -6914,7 +6770,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        iconView.contentTintColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        iconView.contentTintColor = sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         iconView.setContentHuggingPriority(.required, for: .horizontal)
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
@@ -6992,7 +6848,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         bindAppearanceReactiveLayer(row) { [weak self] view in
             view.layer?.borderColor =
                 selected
-                ? self?.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : self?.sidebarCardBorderColor(isSelected: false).cgColor
+                ? self?.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
     }
 
@@ -7002,7 +6858,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func presentAddProjectWindow(hosting stack: NSStackView, title: String) {
-        let header = buildFormWindowHeader(symbol: "square.and.pencil", title: title, closeAction: #selector(closeAddProjectWindow))
+        let header = buildFormWindowHeader(
+            symbol: "square.and.pencil", title: title, closeAction: #selector(closeAddProjectWindow), target: self)
         addProjectWindow = presentFormWindow(existing: addProjectWindow, header: header, hosting: stack)
     }
 
@@ -7019,7 +6876,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
         let root = NSView()
         root.wantsLayer = true
-        bindAppearanceReactiveLayer(root) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(root) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
 
         let headerDivider = settingsHairlineDivider()
         let body = NSView()
@@ -7085,40 +6942,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return window
     }
 
-    func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
-        let header = NSView()
-
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        iconView.contentTintColor = .secondaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = Typography.sheetTitle
-        titleLabel.textColor = .labelColor
-
-        let closeButton = iconButton(symbol: "xmark", tooltip: "Close", action: closeAction)
-        closeButton.keyEquivalent = "\u{1b}"
-
-        let stack = NSStackView(views: [iconView, titleLabel, NSView(), closeButton])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 14)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        header.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: header.leadingAnchor), stack.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: header.topAnchor), stack.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-        ])
-        return header
-    }
-
     private func presentAddWorkspaceWindow(hosting stack: NSStackView) {
         let header = buildFormWindowHeader(
-            symbol: "plus.rectangle.on.folder", title: "New Workspace", closeAction: #selector(closeAddWorkspaceWindow))
+            symbol: "plus.rectangle.on.folder", title: "New Workspace", closeAction: #selector(closeAddWorkspaceWindow), target: self)
         addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
     }
 
@@ -7228,9 +7054,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
+            title: "Create", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true, target: self)
         createButton.setAccessibilityIdentifier("add-workspace-create")
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(closeAddWorkspaceWindow), primary: false)
+        let cancelButton = actionButton(
+            title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(closeAddWorkspaceWindow), primary: false, target: self)
         cancelButton.setAccessibilityIdentifier("add-workspace-cancel")
         Theme.applySecondaryStyle(to: cancelButton)
 
@@ -7301,7 +7128,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hideWorkspacePanelTabStrip()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
         // Every workspace-detail surface (panel, loading, setup) shares the footer
         // strip with the workspace's identity and actions.
         if let (_, workspace) = findWorkspace(id: workspaceID) {
@@ -7458,7 +7285,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         clearWorkspaceDetailFooter()
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let accentColor = sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
 
         let statusDot = NSImageView()
         statusDot.image = NSImage(
@@ -7471,7 +7298,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
         titleLabel.font = Typography.compactTitle
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
+        titleLabel.textColor = sidebar.sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
         footer.addArrangedSubview(titleLabel)
@@ -7654,7 +7481,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self?.workspaceNotesPopover?.close()
             self?.workspaceNotesPopover = nil
         }
-        let scrollView = scrollableTextView(textView, height: 88)
+        let scrollView = scrollableTextView(
+            textView, height: 88, inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            borderColor: sidebar.sidebarCardBorderColor(isSelected: false))
 
         let saveButton = NSButton(title: "Save (⌘↩)", target: self, action: #selector(saveWorkspaceNotesFromPopover(_:)))
         saveButton.controlSize = .small
@@ -7760,7 +7589,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
         titleLabel.font = Typography.pageTitle
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
+        titleLabel.textColor = sidebar.sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
 
@@ -7802,7 +7631,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let runButton = actionButton(
             title: setupState.status == .failed ? "Retry Setup" : "Run Setup", symbol: setupState.status == .failed ? "arrow.clockwise" : "play",
-            tooltip: "Run workspace setup", action: #selector(runWorkspaceSetupFromDetail(_:)), primary: setupState.status != .running)
+            tooltip: "Run workspace setup", action: #selector(runWorkspaceSetupFromDetail(_:)), primary: setupState.status != .running, target: self)
         runButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         runButton.isEnabled = setupState.status != .running
         runButton.setAccessibilityIdentifier("workspace-setup-run")
@@ -7811,13 +7640,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         disableWhenDeviceCannotAct(runButton, workspaceID: workspace.id)
 
         let terminalButton = actionButton(
-            title: "Terminal", symbol: "terminal", tooltip: "Open a workspace terminal", action: #selector(openWorkspaceTerminal(_:)), primary: false)
+            title: "Terminal", symbol: "terminal", tooltip: "Open a workspace terminal", action: #selector(openWorkspaceTerminal(_:)), primary: false,
+            target: self)
         terminalButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         terminalButton.setAccessibilityIdentifier("workspace-setup-terminal")
         disableWhenDeviceCannotAct(terminalButton, workspaceID: workspace.id)
 
         let revealButton = actionButton(
-            title: "Reveal", symbol: "folder", tooltip: "Reveal workspace in Finder", action: #selector(revealDirectoryInFinder(_:)), primary: false)
+            title: "Reveal", symbol: "folder", tooltip: "Reveal workspace in Finder", action: #selector(revealDirectoryInFinder(_:)), primary: false,
+            target: self)
         revealButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
         revealButton.isEnabled = isLocalWorkspace(workspace)
         revealButton.setAccessibilityIdentifier("workspace-setup-reveal")
@@ -7828,13 +7659,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Copy reflects the displayed log content so it works for remote workspaces too; Open opens
         // the log file on disk, which is only reachable for a local workspace.
         let copyLogButton = actionButton(
-            title: "Copy Log", symbol: "doc.on.doc", tooltip: "Copy setup log", action: #selector(copyWorkspaceSetupLog(_:)), primary: false)
+            title: "Copy Log", symbol: "doc.on.doc", tooltip: "Copy setup log", action: #selector(copyWorkspaceSetupLog(_:)), primary: false,
+            target: self)
         copyLogButton.isEnabled = hasLogTail
         copyLogButton.setAccessibilityIdentifier("workspace-setup-copy-log")
 
         let openLogButton = actionButton(
             title: "Open Log", symbol: "doc.text.magnifyingglass", tooltip: "Open setup log", action: #selector(openWorkspaceSetupLog(_:)),
-            primary: false)
+            primary: false, target: self)
         openLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
         openLogButton.isEnabled = hasLocalLogFile
         openLogButton.setAccessibilityIdentifier("workspace-setup-open-log")
@@ -7890,7 +7722,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             constrainFormFieldToFillWidth(setupScriptSection.view, in: stack)
         }
 
-        showScrollableDetailStack(stack)
+        showScrollableDetailStack(stack, in: detailContainer)
         detailContainer.layoutSubtreeIfNeeded()
     }
 
@@ -7949,7 +7781,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         textView.string = text.isEmpty ? "No setup log output." : text
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
         workspaceSetupLogTextView = textView
-        let scrollView = scrollableTextView(textView, height: 240)
+        let scrollView = scrollableTextView(
+            textView, height: 240, inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            borderColor: sidebar.sidebarCardBorderColor(isSelected: false))
         Task { @MainActor [weak textView] in textView?.scrollToEndOfDocument(nil) }
         return scrollView
     }
@@ -7984,7 +7818,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func workspaceSetupStatusColor(_ status: WorkspaceSetupStatus) -> NSColor {
         switch status {
         case .pending: return .secondaryLabelColor
-        case .running: return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        case .running: return sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         case .succeeded: return .systemGreen
         case .failed: return .systemRed
         }
@@ -8116,19 +7950,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let label = NSTextField(labelWithString: text)
         label.font = Typography.compactTitle
         label.textColor = .secondaryLabelColor
-        return label
-    }
-
-    func helpTextLabel(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.font = Typography.metadata
-        label.textColor = .tertiaryLabelColor
-        label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        // Without lowered horizontal compression resistance the label's intrinsic width becomes a hard
-        // floor, so a long unbreakable token (e.g. a file path in an error message) forces the whole
-        // container — and the resizable settings window — wider. Let it shrink and wrap instead.
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
     }
 
@@ -8329,45 +8150,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func logWindowRowClickProfile(_ message: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
         fputs("spaces: window_row_click \(message)\n", stderr)
-    }
-
-    private func sectionHeader(icon: String, title: String) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 6
-
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let iconView = NSImageView()
-        if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
-            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
-            iconView.image = img.withSymbolConfiguration(config)
-        }
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 16), iconView.heightAnchor.constraint(equalToConstant: 16)])
-
-        let label = NSTextField(labelWithString: title)
-        label.font = Typography.compactTitle
-        label.textColor = .secondaryLabelColor
-
-        row.addArrangedSubview(iconView)
-        row.addArrangedSubview(label)
-        return row
-    }
-
-    private func statusRow(isRunning: Bool) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        let label = NSTextField(labelWithString: "Status:")
-        label.font = Typography.compactTitle
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        icon.contentTintColor = isRunning ? .systemGreen : .tertiaryLabelColor
-        icon.toolTip = isRunning ? "Running" : "Stopped"
-        stack.addArrangedSubview(label)
-        stack.addArrangedSubview(icon)
-        return stack
     }
 
     /// Editors offered in settings: the built-in Editor first (always available, needs nothing
@@ -8622,136 +8404,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.toggleWorkspaceExpanded(workspaceID: workspaceID)
     }
 
-    func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
-        let button = NSButton(title: "", target: self, action: action)
-        button.bezelStyle = .texturedRounded
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
-        button.toolTip = tooltip
-        return button
-    }
-
-    func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = primary ? .rounded : .texturedRounded
-        if let symbol {
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
-            button.imagePosition = .imageLeading
-            button.imageHugsTitle = true
-        }
-        button.toolTip = tooltip
-        if primary { stylePrimaryActionButton(button, title: title) }
-        return button
-    }
-
-    private func stylePrimaryActionButton(_ button: NSButton, title: String) {
-        Theme.applyPrimaryStyle(to: button)
-        if let image = button.image { button.image = image.withSymbolConfiguration(.init(paletteColors: [Theme.primaryButtonText])) }
-    }
-
-    func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-    }
-
-    private func labeledInputRow(label text: String, input: NSView, labelWidth: CGFloat = 108) -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 12
-        let labelField = NSTextField(labelWithString: text)
-        labelField.font = Typography.compactTitle
-        labelField.textColor = .secondaryLabelColor
-        labelField.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([labelField.widthAnchor.constraint(equalToConstant: labelWidth)])
-        labelField.setContentHuggingPriority(.required, for: .horizontal)
-        labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        input.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        input.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        row.addArrangedSubview(labelField)
-        row.addArrangedSubview(input)
-        return row
-    }
-
-    func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
-        let container = host ?? detailContainer
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.contentView.drawsBackground = false
-
-        let contentView = NSView()
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = contentView
-        contentView.addSubview(stack)
-
-        container.addSubview(scroll)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: container.topAnchor), scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
-            contentView.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            contentView.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            contentView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
-
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -20),
-        ])
-    }
-
-    func scrollableTextView(_ textView: NSTextView, height: CGFloat) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        let inputBg = sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17))
-        scroll.drawsBackground = true
-        scroll.backgroundColor = inputBg
-        scroll.contentView.drawsBackground = true
-        scroll.contentView.backgroundColor = inputBg
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = UIRadius.compact
-        scroll.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(scroll) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor }
-        textView.drawsBackground = true
-        textView.backgroundColor = inputBg
-        textView.textColor = .textColor
-        textView.textContainerInset = NSSize(width: 6, height: 6)
-        textView.minSize = NSSize(width: 0, height: height)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
-        scroll.documentView = textView
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
-        return scroll
-    }
-
-    private func makeEditableTextView() -> InlineWorkspaceEditorTextView {
-        let textView = InlineWorkspaceEditorTextView()
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.font = Typography.monoBody
-        textView.textContainerInset = NSSize(width: 6, height: 6)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        return textView
-    }
-
     /// Resolves the live field references for a control's action, rejecting stale controls. A control
     /// carries the generation tag of the form it was built for; if that no longer matches the live
     /// form's `formTag` (the form was rebuilt or closed, or `liveRefs` is already nil), the action is
@@ -8961,7 +8613,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let selectable = Self.addProjectDeviceIsSelectable(loadState: section.loadState)
         let container = ClickableRowView(isInteractive: selectable)
         container.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
         container.alphaValue = selectable ? 1 : Self.unreachableDeviceAlpha
         container.setAccessibilityElement(true)
@@ -8972,7 +8624,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: section.isLocal ? "desktopcomputer" : "server.rack", accessibilityDescription: nil)
-        iconView.contentTintColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        iconView.contentTintColor = sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         iconView.setContentHuggingPriority(.required, for: .horizontal)
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 

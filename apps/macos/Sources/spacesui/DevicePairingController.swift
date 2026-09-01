@@ -229,7 +229,7 @@ import workspacecore
         guard hosts.contains(where: { SpacesDeviceHostAddressKind(host: $0) == .tailscale }) else {
             return host.helpTextLabel("Reaching this Mac from outside its local network needs Tailscale (or another VPN) running on both devices.")
         }
-        let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let accentColor = host.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let labels = hosts.map { candidate -> NSTextField in
             let label = host.helpTextLabel("\(SpacesDeviceHostAddressKind(host: candidate).label) · \(candidate)")
             label.textColor = accentColor
@@ -256,9 +256,9 @@ import workspacecore
             // local daemon restart lives; restartLocalDaemon warns before killing if the daemon still reports
             // live sessions (the Device API can be down while the terminal service is not).
             if Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon) {
-                let restartButton = host.actionButton(
+                let restartButton = actionButton(
                     title: "Restart Local Daemon", symbol: "arrow.clockwise", tooltip: "Relaunch the local spacesd daemon on this Mac",
-                    action: #selector(AppKitController.restartLocalDaemon), primary: true)
+                    action: #selector(AppKitController.restartLocalDaemon), primary: true, target: host)
                 rows.append(mobilePanelButtonRow([restartButton]))
             }
         }
@@ -421,9 +421,9 @@ import workspacecore
         remoteDeviceAdvancedRow = advancedRow
         rows.append(advancedRow)
 
-        let connectButton = host.actionButton(
+        let connectButton = actionButton(
             title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
-            action: #selector(AppKitController.connectRemoteDeviceFromPairingPanel), primary: true)
+            action: #selector(AppKitController.connectRemoteDeviceFromPairingPanel), primary: true, target: host)
         connectButton.isEnabled = !isInstallingRemoteSpaces
         remoteDeviceConnectButton = connectButton
         rows.append(mobilePanelButtonRow([connectButton]))
@@ -464,9 +464,9 @@ import workspacecore
         commandRow.alignment = .top
         commandRow.spacing = 8
 
-        let installButton = host.actionButton(
+        let installButton = actionButton(
             title: "Install Spaces over SSH", symbol: "arrow.down.circle", tooltip: "Run the installer on the remote device over SSH, then pair",
-            action: #selector(AppKitController.installSpacesOnRemoteDevice), primary: false)
+            action: #selector(AppKitController.installSpacesOnRemoteDevice), primary: false, target: host)
         installButton.isEnabled = !isInstallingRemoteSpaces
         installButton.setAccessibilityIdentifier("remote-device-install-ssh")
         remoteDeviceInstallButton = installButton
@@ -507,7 +507,7 @@ import workspacecore
         section.translatesAutoresizingMaskIntoConstraints = false
         section.setContentHuggingPriority(.required, for: .vertical)
 
-        let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let accentColor = host.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let iconView = NSImageView()
         if let image = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
             iconView.image = image.withSymbolConfiguration(.init(paletteColors: [accentColor]))

@@ -17,7 +17,26 @@ import spacesterminalcore
     func macPairedDevices() -> [SpacesPairedDeviceRecord]
 }
 
-extension AppKitController: CodingAgentsHost {}
+extension AppKitController: CodingAgentsHost {
+    // These three forward to the free functions in FormControls.swift, resolving the sidebar's
+    // theme-reactive colors that formSectionCard needs. The module-qualified `spacesui.` prefix
+    // is required here: an unqualified call would resolve to this very method (matching name and
+    // signature) and recurse forever.
+    func formSectionCard(
+        icon: String?, title: String, subtitle: String = "", iconColor: NSColor? = nil, trailingView: NSView? = nil, contentViews: [NSView]
+    ) -> NSView {
+        spacesui.formSectionCard(
+            icon: icon, title: title, subtitle: subtitle, iconColor: iconColor, trailingView: trailingView, contentViews: contentViews,
+            defaultAccentColor: sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)),
+            dividerColor: sidebar.sidebarCardBorderColor(isSelected: false))
+    }
+
+    func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
+        spacesui.settingsLabeledField(name: name, hint: hint, control: control)
+    }
+
+    func helpTextLabel(_ text: String) -> NSTextField { spacesui.helpTextLabel(text) }
+}
 
 /// Lists supported coding agents for a selected device (This Mac or a paired remote), showing whether
 /// each agent's CLI is detected and how completely its Spaces hooks are installed, with a per-agent

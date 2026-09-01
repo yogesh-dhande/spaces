@@ -361,7 +361,7 @@ import workspacecore
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
         bindAppearanceReactiveLayer(host.detailContainer) { [unowned host] view in
-            view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+            view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor
         }
 
         var rowsByAttentionID: [String: ClickableRowView] = [:]
@@ -372,10 +372,10 @@ import workspacecore
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // Header
-        let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let accentColor = host.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = Typography.pageTitle
-        headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false)
+        headerTitle.textColor = host.sidebar.sidebarPrimaryTextColor(isSelected: false)
 
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
@@ -384,22 +384,22 @@ import workspacecore
         headerRow.addArrangedSubview(headerTitle)
 
         stack.addArrangedSubview(headerRow)
-        host.constrainFormFieldToFillWidth(headerRow, in: stack)
+        constrainFormFieldToFillWidth(headerRow, in: stack)
 
         if plan.groups.isEmpty {
             let sep = NSView()
             sep.translatesAutoresizingMaskIntoConstraints = false
             sep.wantsLayer = true
             bindAppearanceReactiveLayer(sep) { [unowned host] view in
-                view.layer?.backgroundColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+                view.layer?.backgroundColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
             }
             sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
             stack.addArrangedSubview(sep)
-            host.constrainFormFieldToFillWidth(sep, in: stack)
+            constrainFormFieldToFillWidth(sep, in: stack)
 
             let icon = NSImageView()
             icon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "All clear")
-            icon.contentTintColor = host.sidebarRunningIndicatorColor()
+            icon.contentTintColor = host.sidebar.sidebarRunningIndicatorColor()
             icon.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
             let emptyTitle = NSTextField(labelWithString: "No attention required")
@@ -417,7 +417,7 @@ import workspacecore
             emptyStack.addArrangedSubview(emptyTitle)
             emptyStack.addArrangedSubview(emptyDetail)
             stack.addArrangedSubview(emptyStack)
-            host.constrainFormFieldToFillWidth(emptyStack, in: stack)
+            constrainFormFieldToFillWidth(emptyStack, in: stack)
         } else {
             for group in plan.groups {
                 let offlineDeviceName = group.offlineDeviceName
@@ -453,7 +453,7 @@ import workspacecore
                     groupHeaderStack.toolTip = "\(offlineDeviceName) is offline"
                 }
                 stack.addArrangedSubview(groupHeaderStack)
-                host.constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
+                constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
 
                 let itemsStack = NSStackView()
                 itemsStack.orientation = .vertical
@@ -485,15 +485,15 @@ import workspacecore
                     }
                     rowsByAttentionID[entry.attentionID] = card.row
                     itemsStack.addArrangedSubview(card.container)
-                    host.constrainFormFieldToFillWidth(card.container, in: itemsStack)
+                    constrainFormFieldToFillWidth(card.container, in: itemsStack)
                 }
 
                 stack.addArrangedSubview(itemsStack)
-                host.constrainFormFieldToFillWidth(itemsStack, in: stack)
+                constrainFormFieldToFillWidth(itemsStack, in: stack)
             }
         }
 
-        host.showScrollableDetailStack(stack)
+        showScrollableDetailStack(stack, in: host.detailContainer)
         renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: rowsByAttentionID)
     }
 
@@ -537,7 +537,7 @@ import workspacecore
         container.translatesAutoresizingMaskIntoConstraints = false
 
         container.addArrangedSubview(mainRow)
-        host.constrainFormFieldToFillWidth(mainRow, in: container)
+        constrainFormFieldToFillWidth(mainRow, in: container)
 
         return (container: container, row: mainRow)
     }

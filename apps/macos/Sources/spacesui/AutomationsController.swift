@@ -106,7 +106,7 @@ import workspacecore
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
         bindAppearanceReactiveLayer(host.detailContainer) { [unowned host] view in
-            view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+            view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor
         }
 
         let overviewInputs = host.automationDeviceInputs()
@@ -124,7 +124,7 @@ import workspacecore
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         stack.addArrangedSubview(makeHeaderRow(inputs: inputs))
-        host.constrainFormFieldToFillWidth(stack.arrangedSubviews[0], in: stack)
+        constrainFormFieldToFillWidth(stack.arrangedSubviews[0], in: stack)
 
         let tabControl = makeTabControl()
         stack.addArrangedSubview(tabControl)
@@ -132,7 +132,7 @@ import workspacecore
         for device in AutomationsViewModel.unreachableDevices(from: inputs) {
             let marker = makeUnreachableMarker(device)
             stack.addArrangedSubview(marker)
-            host.constrainFormFieldToFillWidth(marker, in: stack)
+            constrainFormFieldToFillWidth(marker, in: stack)
         }
 
         relativeTimeLabelRefreshers = []
@@ -141,7 +141,7 @@ import workspacecore
         case .runs: appendRunsTab(to: stack, inputs: inputs)
         }
 
-        host.showScrollableDetailStack(stack)
+        showScrollableDetailStack(stack, in: host.detailContainer)
         armRelativeTimeRefresh()
         return overviewInputs
     }
@@ -232,8 +232,9 @@ import workspacecore
         devicePopUp.action = #selector(deviceFilterChanged(_:))
         devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
 
-        let newButton = host.actionButton(
-            title: "New automation", symbol: "plus", tooltip: "Create an automation", action: #selector(newAutomationTapped), primary: true)
+        let newButton = actionButton(
+            title: "New automation", symbol: "plus", tooltip: "Create an automation", action: #selector(newAutomationTapped), primary: true,
+            target: host)
         newButton.target = self
 
         let row = NSStackView(views: [NSView(), devicePopUp, newButton])
@@ -255,7 +256,7 @@ import workspacecore
     private func makeUnreachableMarker(_ device: AutomationUnreachableDevice) -> NSView {
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Unreachable")
-        icon.contentTintColor = host.sidebarThemeColor(light: (180, 120, 0), dark: (230, 170, 40))
+        icon.contentTintColor = host.sidebar.sidebarThemeColor(light: (180, 120, 0), dark: (230, 170, 40))
         icon.setContentHuggingPriority(.required, for: .horizontal)
         let label = NSTextField(labelWithString: "\(device.deviceName) is unreachable\(device.message.map { " — \($0)" } ?? "")")
         label.font = Typography.metadata
@@ -268,7 +269,7 @@ import workspacecore
         row.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         row.wantsLayer = true
         row.layer?.cornerRadius = 8
-        bindAppearanceReactiveLayer(row) { [unowned host] view in view.layer?.backgroundColor = host.sidebarCardBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(row) { [unowned host] view in view.layer?.backgroundColor = host.sidebar.sidebarCardBackgroundColor().cgColor }
         return row
     }
 
@@ -310,7 +311,7 @@ import workspacecore
         // Every line now shares the table's view hierarchy, so the rows can be tied to the header's columns.
         grid.activateColumnAlignment()
         stack.addArrangedSubview(card)
-        host.constrainFormFieldToFillWidth(card, in: stack)
+        constrainFormFieldToFillWidth(card, in: stack)
     }
 
     private func makeAutomationHeaderLine(grid: AutomationTableGrid, showDevice: Bool) -> NSView {
@@ -468,10 +469,10 @@ import workspacecore
 
     private func compactStatusDot(for row: AutomationTableRow) -> CompactStatusDotView {
         switch AutomationsViewModel.rowStatus(for: row) {
-        case .running: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebarRunningIndicatorColor(), tooltip: "Running")
-        case .failed: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebarFailedIndicatorColor(), tooltip: "Failed")
-        case .ready: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebarRunningIndicatorColor(), tooltip: "Enabled")
-        case .disabled: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebarIdleIndicatorColor(), tooltip: "Disabled")
+        case .running: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebar.sidebarRunningIndicatorColor(), tooltip: "Running")
+        case .failed: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebar.sidebarFailedIndicatorColor(), tooltip: "Failed")
+        case .ready: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebar.sidebarRunningIndicatorColor(), tooltip: "Enabled")
+        case .disabled: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebar.sidebarIdleIndicatorColor(), tooltip: "Disabled")
         }
     }
 
@@ -501,7 +502,7 @@ import workspacecore
         for row in rows {
             let card = makeRunCard(row)
             stack.addArrangedSubview(card)
-            host.constrainFormFieldToFillWidth(card, in: stack)
+            constrainFormFieldToFillWidth(card, in: stack)
         }
     }
 
@@ -512,7 +513,7 @@ import workspacecore
 
         let name = NSTextField(labelWithString: run.automationName ?? "Automation")
         name.font = Typography.rowLabel
-        name.textColor = host.sidebarPrimaryTextColor(isSelected: false)
+        name.textColor = host.sidebar.sidebarPrimaryTextColor(isSelected: false)
         name.lineBreakMode = .byTruncatingTail
 
         var metaParts = [row.deviceName, runTriggerDescription(run), startedDescription(run), durationDescription(run)]
@@ -550,16 +551,16 @@ import workspacecore
 
         var trailing: [NSView] = []
         if status == .running {
-            let cancelButton = host.iconButton(symbol: "stop.fill", tooltip: "Cancel run", action: #selector(cancelRunTapped(_:)))
+            let cancelButton = iconButton(symbol: "stop.fill", tooltip: "Cancel run", action: #selector(cancelRunTapped(_:)), target: host)
             cancelButton.target = self
             cancelButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(run.id)")
             trailing.append(cancelButton)
         } else if AutomationsViewModel.endAgentsAvailable(for: run) {
             // A terminal-status run with a live attributed agent still lingering: offer to reap it. "End
             // agents" is a text label — ending someone's agent is not an obvious icon action.
-            let endButton = host.actionButton(
+            let endButton = actionButton(
                 title: "End agents", symbol: nil, tooltip: "End this run's still-running coding agents", action: #selector(endAgentsTapped(_:)),
-                primary: false)
+                primary: false, target: host)
             endButton.target = self
             endButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(run.id)")
             trailing.append(endButton)
@@ -613,7 +614,7 @@ import workspacecore
         let title = agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent"
         let label = NSTextField(labelWithString: title)
         label.font = Typography.metadata
-        label.textColor = host.sidebarPrimaryTextColor(isSelected: false)
+        label.textColor = host.sidebar.sidebarPrimaryTextColor(isSelected: false)
         label.lineBreakMode = .byTruncatingTail
 
         let row = NSStackView(views: [dot, label])
@@ -625,7 +626,7 @@ import workspacecore
 
         let chip = ColoredBackgroundView()
         chip.cornerRadius = 6
-        chip.fillColor = host.sidebarSelectedCardBackgroundColor()
+        chip.fillColor = host.sidebar.sidebarSelectedCardBackgroundColor()
         chip.translatesAutoresizingMaskIntoConstraints = false
         chip.toolTip = "Open agent terminal"
         chip.addSubview(row)
@@ -641,13 +642,13 @@ import workspacecore
         content.translatesAutoresizingMaskIntoConstraints = false
         let card = ColoredBackgroundView()
         card.cornerRadius = 10
-        card.fillColor = host.sidebarCardBackgroundColor()
+        card.fillColor = host.sidebar.sidebarCardBackgroundColor()
         card.translatesAutoresizingMaskIntoConstraints = false
         // ColoredBackgroundView tracks appearance for its fill; the border color still needs a per-appearance
         // cgColor snapshot, so bind it reactively.
         bindAppearanceReactiveLayer(card) { [unowned host] view in
             view.layer?.borderWidth = 1
-            view.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            view.layer?.borderColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
         card.addSubview(content)
         NSLayoutConstraint.activate([
@@ -675,7 +676,7 @@ import workspacecore
         empty.spacing = 6
         empty.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(empty)
-        host.constrainFormFieldToFillWidth(empty, in: stack)
+        constrainFormFieldToFillWidth(empty, in: stack)
     }
 
     /// The run's leading status indicator. A run in flight gets a live spinner rather than a glyph: a static
@@ -706,14 +707,14 @@ import workspacecore
         switch rawStatus.flatMap(AutomationRunStatus.init(rawValue:)) {
         // A run in flight is drawn as a spinner by `statusIndicator` and never asks for a glyph; the case
         // exists to keep the mapping total.
-        case .running: ("play.circle.fill", host.sidebarRunningIndicatorColor())
-        case .queued: ("clock", host.sidebarIdleIndicatorColor())
-        case .succeeded: ("checkmark.circle.fill", host.sidebarRunningIndicatorColor())
-        case .failed: ("xmark.octagon.fill", host.sidebarFailedIndicatorColor())
-        case .timedOut: ("clock.badge.exclamationmark.fill", host.sidebarFailedIndicatorColor())
-        case .canceled: ("stop.circle", host.sidebarIdleIndicatorColor())
-        case .skipped: ("minus.circle", host.sidebarIdleIndicatorColor())
-        case nil: ("circle.dashed", host.sidebarIdleIndicatorColor())
+        case .running: ("play.circle.fill", host.sidebar.sidebarRunningIndicatorColor())
+        case .queued: ("clock", host.sidebar.sidebarIdleIndicatorColor())
+        case .succeeded: ("checkmark.circle.fill", host.sidebar.sidebarRunningIndicatorColor())
+        case .failed: ("xmark.octagon.fill", host.sidebar.sidebarFailedIndicatorColor())
+        case .timedOut: ("clock.badge.exclamationmark.fill", host.sidebar.sidebarFailedIndicatorColor())
+        case .canceled: ("stop.circle", host.sidebar.sidebarIdleIndicatorColor())
+        case .skipped: ("minus.circle", host.sidebar.sidebarIdleIndicatorColor())
+        case nil: ("circle.dashed", host.sidebar.sidebarIdleIndicatorColor())
         }
     }
 

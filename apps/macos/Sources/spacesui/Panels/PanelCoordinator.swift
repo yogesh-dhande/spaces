@@ -872,7 +872,7 @@ import spacesterminalcore
         if let existing = panelWindows[panelWindowID] { return existing }
         let scope = PanelScope.globalWindow(panelWindowID: panelWindowID)
         let controller = PanelWindowController(panelWindowID: panelWindowID, panelView: panelView(for: scope), frame: frame)
-        controller.window.backgroundColor = host.sidebarPanelBackgroundColor()
+        controller.window.backgroundColor = host.sidebar.sidebarPanelBackgroundColor()
         controller.onUserClose = { [weak self] in self?.closePanelWindow(panelWindowID: panelWindowID) }
         controller.onFrameChanged = { [weak self] in
             guard let self else { return }
