@@ -108,7 +108,8 @@ extension AppKitController {
         // save: it just dismisses the window. Labeled Done — not Save — so it doesn't imply the edits
         // were unsaved until now. Matches the project dialog closing on its Save.
         let doneButton = actionButton(
-            title: "Done", symbol: nil, tooltip: "Close workspace settings (⌘S)", action: #selector(closeWorkspaceSettingsWindow), primary: true)
+            title: "Done", symbol: nil, tooltip: "Close workspace settings (⌘S)", action: #selector(closeWorkspaceSettingsWindow), primary: true,
+            target: self)
         doneButton.setAccessibilityIdentifier("workspace-settings-done")
         doneButton.keyEquivalent = "\r"
         let doneRow = NSStackView()
@@ -121,7 +122,8 @@ extension AppKitController {
 
         workspaceSettingsWorkspaceID = workspace.id
         let title = project.isGitRepo ? "\(project.name) / \(workspace.displayName)" : workspace.displayName
-        let header = buildFormWindowHeader(symbol: "gearshape", title: title, closeAction: #selector(closeWorkspaceSettingsWindow))
+        let header = buildFormWindowHeader(
+            symbol: "gearshape", title: title, closeAction: #selector(closeWorkspaceSettingsWindow), target: self)
         workspaceSettingsWindow = presentFormWindow(existing: workspaceSettingsWindow, header: header, hosting: stack)
     }
 

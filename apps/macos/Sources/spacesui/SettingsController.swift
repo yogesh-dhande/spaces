@@ -97,7 +97,7 @@ import workspacecore
     private func buildSettingsWindowContent() -> NSView {
         let root = NSView()
         root.wantsLayer = true
-        bindAppearanceReactiveLayer(root) { [unowned host] view in view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(root) { [unowned host] view in view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor }
 
         let headerBar = buildSettingsWindowHeader()
         let headerDivider = host.settingsHairlineDivider()
@@ -148,7 +148,8 @@ import workspacecore
         title.font = Typography.sheetTitle
         title.textColor = .labelColor
 
-        let closeButton = host.iconButton(symbol: "xmark", tooltip: "Close settings", action: #selector(AppKitController.closeSettingsWindow))
+        let closeButton = iconButton(
+            symbol: "xmark", tooltip: "Close settings", action: #selector(AppKitController.closeSettingsWindow), target: host)
         closeButton.keyEquivalent = "\u{1b}"
 
         let stack = NSStackView(views: [iconView, title, NSView(), closeButton])
@@ -196,7 +197,7 @@ import workspacecore
         let row = SettingsSidebarRowView()
         row.identifier = NSUserInterfaceItemIdentifier(section.rawValue)
         row.setAccessibilityIdentifier("settings-section-\(section.rawValue)")
-        row.selectedBackgroundColor = host.sidebarSelectedCardBackgroundColor()
+        row.selectedBackgroundColor = host.sidebar.sidebarSelectedCardBackgroundColor()
         row.isSelected = section == selectedSettingsSection
 
         let iconView = NSImageView()
@@ -260,10 +261,10 @@ import workspacecore
 
         for card in cards {
             stack.addArrangedSubview(card)
-            host.constrainFormFieldToFillWidth(card, in: stack)
+            constrainFormFieldToFillWidth(card, in: stack)
         }
 
-        host.showScrollableDetailStack(stack, in: container)
+        showScrollableDetailStack(stack, in: container)
     }
 
     private func generalSettingsCards() -> [NSView] {
@@ -361,7 +362,9 @@ import workspacecore
         textView.string = selectedMCPClient.mcpConfigSnippet(cliPath: cliPath)
         textView.setAccessibilityIdentifier("settings-mcp-config")
         mcpConfigTextView = textView
-        let configScroll = host.scrollableTextView(textView, height: 90)
+        let configScroll = scrollableTextView(
+            textView, height: 90, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
 
         let hint = host.helpTextLabel(selectedMCPClient.mcpConfigHint)
         mcpConfigHintLabel = hint

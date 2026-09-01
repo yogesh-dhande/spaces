@@ -187,15 +187,15 @@ import workspacecore
 
         // The header close button targets the host (see `iconButton`), so the action must be a host
         // selector; `cancelTapped` here would silently never fire.
-        let header = host.buildFormWindowHeader(
-            symbol: "clock.arrow.circlepath", title: title, closeAction: #selector(AppKitController.closeAutomationEditorWindow))
+        let header = buildFormWindowHeader(
+            symbol: "clock.arrow.circlepath", title: title, closeAction: #selector(AppKitController.closeAutomationEditorWindow), target: host)
         window = host.presentFormWindow(existing: window, header: header, hosting: stack)
         window?.delegate = self
     }
 
     private func addRow(_ view: NSView, to stack: NSStackView) {
         stack.addArrangedSubview(view)
-        host.constrainFormFieldToFillWidth(view, in: stack)
+        constrainFormFieldToFillWidth(view, in: stack)
     }
 
     // MARK: - Field builders
@@ -267,7 +267,9 @@ import workspacecore
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         agentPromptTextView = textView
-        return host.scrollableTextView(textView, height: 72)
+        return scrollableTextView(
+            textView, height: 72, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
     }
 
     private func makeScriptEditor(seed: TerminalServiceAutomationSummary?) -> NSView {
@@ -281,7 +283,9 @@ import workspacecore
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         scriptTextView = textView
-        return host.scrollableTextView(textView, height: 72)
+        return scrollableTextView(
+            textView, height: 72, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
     }
 
     private func makeTriggerControl(seed: TerminalServiceAutomationSummary?) -> NSView {
@@ -495,10 +499,10 @@ import workspacecore
     }
 
     private func makeFooter() -> NSView {
-        let cancel = host.actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelTapped), primary: false)
+        let cancel = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelTapped), primary: false, target: host)
         cancel.target = self
         cancel.keyEquivalent = "\u{1b}"
-        let save = host.actionButton(title: "Save", symbol: nil, tooltip: "Save", action: #selector(saveTapped), primary: true)
+        let save = actionButton(title: "Save", symbol: nil, tooltip: "Save", action: #selector(saveTapped), primary: true, target: host)
         save.target = self
         save.keyEquivalent = "\r"
         save.isEnabled = !isSaving

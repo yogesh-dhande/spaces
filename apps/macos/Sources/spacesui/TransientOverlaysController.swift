@@ -61,7 +61,7 @@ import workspacecore
             overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
             bindAppearanceReactiveLayer(overlay) { [unowned host] view in
-                view.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+                view.layer?.borderColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
             }
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
