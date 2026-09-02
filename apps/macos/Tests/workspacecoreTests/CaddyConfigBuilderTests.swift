@@ -118,6 +118,25 @@ final class CaddyConfigBuilderTests: XCTestCase {
             ])
     }
 
+    func testRouteRegistryReplaceSkipsRewriteWhenUpsertingUnchangedSubset() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        let path = root.appendingPathComponent("routes.json").path
+        let entryA = CaddyRouteRegistryEntry(key: "remote:a:web", route: CaddyRoute(host: "web.a.localhost", upstream: "127.0.0.1:31001"))
+        let entryB = CaddyRouteRegistryEntry(key: "remote:b:api", route: CaddyRoute(host: "api.b.localhost", upstream: "127.0.0.1:31002"))
+
+        XCTAssertTrue(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: [entryA, entryB]))
+        let written = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        // Two callers each publish only their own workspace's subset of the shared registry (as
+        // BrowserSSHForwardManager.publishCaddyRoutes does per workspace). Re-publishing an unchanged
+        // subset must not rewrite the file even though the other workspace's entry sits ahead of it.
+        XCTAssertFalse(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: [entryA]))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), written)
+
+        XCTAssertFalse(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: [entryB]))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), written)
+    }
+
     func testRouteRegistryRemovesEntriesByKey() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
         let path = root.appendingPathComponent("routes.json").path
