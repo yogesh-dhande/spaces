@@ -46,7 +46,9 @@ jobs:
           # Code means anything that is not documentation and not website-only. Workflow files
           # count as code: a CI change should be validated by the suite it changes.
           if printf '%s\n' "$files" | grep -qvE '^(docs/|apps/web/)|\.md$'; then code=true; else code=false; fi
-          if printf '%s\n' "$files" | grep -qE '^apps/web/'; then web=true; else web=false; fi
+          # The website's prebuild stages both Sparkle feeds, so a change to that script changes
+          # what the site build produces even though it lives outside apps/web.
+          if printf '%s\n' "$files" | grep -qE '^(apps/web/|scripts/stage-web-releases\.sh$)'; then web=true; else web=false; fi
           echo "code=$code" >>"$GITHUB_OUTPUT"
           echo "web=$web" >>"$GITHUB_OUTPUT"
           echo "code=$code web=$web"
@@ -208,6 +210,10 @@ jobs:
 
       - name: Build static website
         working-directory: apps/web
+        # The prebuild stages both Sparkle feeds from GitHub release state with `gh`, so the build
+        # needs a token even though it only reads public releases.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
   linux-spacesd-artifact:

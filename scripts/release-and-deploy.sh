@@ -2,7 +2,11 @@
 set -euo pipefail
 
 # Complete release workflow: build, package, and publish a GitHub release plus
-# a Sparkle appcast/update archive for the stable channel.
+# a Sparkle appcast/update archive.
+#
+# The release is created as a prerelease, exactly like the tag-push workflow: a
+# release reaches the stable Sparkle feed only when it is promoted by unticking
+# "This is a pre-release" on the GitHub release.
 #
 # Usage:
 #   scripts/release-and-deploy.sh <version> [build-number]
@@ -216,14 +220,14 @@ fi
 "$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH"
 echo ""
 
-# Step 9: Generate and publish the stable-channel Sparkle appcast. This must
+# Step 9: Generate and publish the Sparkle appcast. This must
 # happen before the GitHub release is created below: the release upload
 # includes the appcast, and the website build (after the release) fetches its
 # copy of the appcast and zip back from that same release, so the release has
 # to exist and carry both assets first.
 echo "🛰️  Step 9/11: Publishing Sparkle appcast..."
-"$SCRIPTS_DIR/publish-sparkle-appcast.sh" stable "$VERSION"
-STABLE_APPCAST_PATH="$REPO_ROOT/dist/updates/stable/appcast.xml"
+"$SCRIPTS_DIR/publish-sparkle-appcast.sh" "$VERSION"
+APPCAST_PATH="$REPO_ROOT/dist/updates/appcast.xml"
 echo "✓ Sparkle appcast updated"
 echo ""
 
@@ -233,7 +237,7 @@ cd "$REPO_ROOT"
 release_assets=(
   "$DMG_PATH"
   "$ZIP_PATH"
-  "$STABLE_APPCAST_PATH"
+  "$APPCAST_PATH"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz"
@@ -241,11 +245,12 @@ release_assets=(
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json"
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json.sig"
 )
-# --latest keeps releases/latest/download (the install.sh no-version path) pointed at
-# the newest Spaces release even if another non-prerelease release is created later.
+# Created as a prerelease and never marked latest: releases/latest/download (the
+# install.sh no-version path and the stable Sparkle feed) keeps pointing at the
+# newest promoted release until this one is promoted in the GitHub releases UI.
 gh release create "$TAG" "${release_assets[@]}" \
   --title "Spaces $VERSION" \
-  --latest \
+  --prerelease \
   --generate-notes
 echo "✓ GitHub release created"
 echo ""

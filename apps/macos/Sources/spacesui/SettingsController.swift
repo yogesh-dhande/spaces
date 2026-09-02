@@ -302,7 +302,33 @@ import workspacecore
         ]
         let editorCard = host.formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
 
-        return [appearanceSettingsCard(), editorCard]
+        return [appearanceSettingsCard(), editorCard, updatesSettingsCard()]
+    }
+
+    private func updatesSettingsCard() -> NSView {
+        let checkbox = NSButton(
+            checkboxWithTitle: "Receive pre-release updates", target: self, action: #selector(prereleaseUpdatesChanged(_:)))
+        checkbox.translatesAutoresizingMaskIntoConstraints = false
+        checkbox.state = SpacesUpdaterDelegate.prereleaseUpdatesEnabled() ? .on : .off
+        checkbox.setAccessibilityIdentifier("settings-prerelease-updates")
+
+        let hint = host.helpTextLabel("Update to each tagged release as soon as it is published, before it is promoted to everyone.")
+        let stack = NSStackView(views: [checkbox, hint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return host.formSectionCard(icon: "arrow.down.circle", title: "Updates", contentViews: [stack])
+    }
+
+    @objc private func prereleaseUpdatesChanged(_ sender: NSButton) {
+        do {
+            try host.clientDatabase().setSetting(key: ClientSettingsKey.appPrereleaseUpdates, value: sender.state == .on ? "1" : "0")
+        } catch {
+            // Leave the checkbox showing what is actually stored, not what the click asked for.
+            sender.state = SpacesUpdaterDelegate.prereleaseUpdatesEnabled() ? .on : .off
+            host.showError(error)
+        }
     }
 
     private func appearanceSettingsCard() -> NSView {

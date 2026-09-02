@@ -1,12 +1,12 @@
-# Build, sign, package, and publish a Spaces release for one channel.
+# Build, sign, package, and publish a Spaces release.
 #
-# This is a reusable `workflow_call` workflow, not a trigger entry point. release.yml (tag push,
-# channel: stable) and nightly.yml (schedule/dispatch, channel: nightly) are both thin callers
-# that resolve their own version/build/tag and hand them in as inputs. Keeping the actual build
-# body here means both channels run the identical signing, packaging, notarization, and
-# verification pipeline; the only place they diverge is the small set of channel knobs resolved
-# by the "Derive channel config" steps below (feed URL, download prefix, appcast host, Firebase
-# entryPoint).
+# This is a reusable `workflow_call` workflow, not a trigger entry point. release.yml (tag push)
+# is its caller and resolves the version/build/tag it hands in as inputs.
+#
+# Every release it publishes is a GitHub prerelease, served on the pre-release update feed at
+# https://usespaces.dev/releases/prerelease/appcast.xml. A maintainer promotes one by editing the
+# GitHub release and selecting "Latest", which runs release-promote.yml; that is the only thing
+# that moves a build onto the stable feed. Nothing here ever claims `latest`.
 #
 # Required secrets:
 #   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
@@ -28,25 +28,27 @@ name: Release Build
 on:
   workflow_call:
     inputs:
-      channel:
-        description: "Release channel: stable or nightly"
-        required: true
-        type: string
       version:
-        description: "Spaces version, e.g. 0.5.2 (stable) or 0.5.1.202607250900 (nightly)"
+        description: "Spaces version, e.g. 0.5.2"
         required: true
         type: string
       build:
-        description: "CFBundleVersion for this build, e.g. the run number (stable) or YYYYMMDDHHMM (nightly)"
+        description: "CFBundleVersion for this build (the caller's run number)"
         required: true
         type: string
       release-tag:
-        description: "GitHub release tag to create/update, e.g. v0.5.2 or v0.5.1.202607250900"
+        description: "GitHub release tag to create, e.g. v0.5.2"
         required: true
         type: string
 
 permissions:
   contents: write
+
+env:
+  # The one Sparkle feed URL baked into every Spaces build. It is the stable feed; a Mac opts into
+  # the pre-release feed at runtime through the "Receive pre-release updates" setting, which
+  # overrides this URL in the app rather than requiring a differently built binary.
+  SPARKLE_FEED_URL: https://usespaces.dev/releases/appcast.xml
 
 jobs:
   linux-spacesd-artifact:
@@ -68,25 +70,6 @@ jobs:
         with:
           submodules: recursive
 
-      # This job only needs the feed URL that sync-app-version.sh bakes into the app bundle; the
-      # rest of the channel config (download prefix, appcast host, Firebase entryPoint) is only
-      # used later in the release job, so it isn't worth deriving here too.
-      - name: Derive channel feed URL
-        id: channel
-        run: |
-          case "${{ inputs.channel }}" in
-            stable)
-              echo "feed-url=https://usespaces.dev/releases/appcast.xml" >> "$GITHUB_OUTPUT"
-              ;;
-            nightly)
-              echo "feed-url=https://spaces-nightly.web.app/releases/appcast.xml" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::Unknown channel '${{ inputs.channel }}'; expected stable or nightly." >&2
-              exit 1
-              ;;
-          esac
-
       - name: Sync release metadata
         env:
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
@@ -95,7 +78,7 @@ jobs:
           scripts/sync-app-version.sh \
             --short "${{ inputs.version }}" \
             --build "${{ inputs.build }}" \
-            --feed-url "${{ steps.channel.outputs.feed-url }}" \
+            --feed-url "$SPARKLE_FEED_URL" \
             --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
             --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
 
@@ -125,34 +108,6 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
-
-      # Every channel-specific value the rest of this job needs (feed URL for the app bundle,
-      # download prefix for the appcast, the Hosting host the final curl checks, and which
-      # Firebase Hosting site config to deploy) comes from this one case statement. Fail loudly on
-      # an unrecognized channel instead of silently falling through to stable's URLs, since that
-      # would publish nightly builds under the stable update feed. Kept first so that failure
-      # costs seconds rather than landing after the Ghostty and SwiftPM setup below.
-      - name: Derive channel config
-        id: channel
-        run: |
-          case "${{ inputs.channel }}" in
-            stable)
-              echo "feed-url=https://usespaces.dev/releases/appcast.xml" >> "$GITHUB_OUTPUT"
-              echo "download-url-prefix=https://usespaces.dev/releases" >> "$GITHUB_OUTPUT"
-              echo "appcast-host=https://usespaces.dev" >> "$GITHUB_OUTPUT"
-              echo "firebase-entry-point=." >> "$GITHUB_OUTPUT"
-              ;;
-            nightly)
-              echo "feed-url=https://spaces-nightly.web.app/releases/appcast.xml" >> "$GITHUB_OUTPUT"
-              echo "download-url-prefix=https://spaces-nightly.web.app/releases" >> "$GITHUB_OUTPUT"
-              echo "appcast-host=https://spaces-nightly.web.app" >> "$GITHUB_OUTPUT"
-              echo "firebase-entry-point=deploy/nightly" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::Unknown channel '${{ inputs.channel }}'; expected stable or nightly." >&2
-              exit 1
-              ;;
-          esac
 
       - name: Select Xcode
         uses: ./.github/actions/select-xcode
@@ -237,7 +192,7 @@ jobs:
           scripts/sync-app-version.sh \
             --short "${{ inputs.version }}" \
             --build "${{ inputs.build }}" \
-            --feed-url "${{ steps.channel.outputs.feed-url }}" \
+            --feed-url "$SPARKLE_FEED_URL" \
             --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
             --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
 
@@ -324,15 +279,13 @@ jobs:
           REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
         run: scripts/create-remote-artifact-manifest.sh "${{ inputs.version }}" "${{ inputs.release-tag }}" dist/remote
 
-      # Generate the appcast before creating the GitHub Release: the stable site build downloads
-      # appcast.xml and the Sparkle zip from the release it is about to publish, so the release
-      # (and the appcast asset on it) must exist first. This step itself only needs the local zip
-      # and dist/remote artifacts, so it can run ahead of the release regardless of channel.
+      # Generate the appcast before creating the GitHub Release: the site build downloads
+      # appcast.xml and the Sparkle zip back out of the release it is about to publish, so the
+      # release (and the appcast asset on it) must exist first.
       - name: Generate Sparkle appcast
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
-          SPARKLE_DOWNLOAD_URL_PREFIX: ${{ steps.channel.outputs.download-url-prefix }}
-        run: scripts/publish-sparkle-appcast.sh ${{ inputs.channel }} ${{ inputs.version }}
+        run: scripts/publish-sparkle-appcast.sh ${{ inputs.version }}
 
       - name: Create GitHub Release
         env:
@@ -341,6 +294,8 @@ jobs:
           release_title="Spaces ${{ inputs.version }}"
           release_assets=(
             "$DMG_PATH"
+            "$ZIP_PATH"
+            "dist/updates/appcast.xml"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
             "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
@@ -348,53 +303,19 @@ jobs:
             "dist/remote/spaces-remote-artifacts.json"
             "dist/remote/spaces-remote-artifacts.json.sig"
           )
-          if [[ "${{ inputs.channel }}" == "stable" ]]; then
-            # Stable ships the Sparkle zip and appcast.xml as release assets too: the Sparkle feed
-            # points updaters at this release's download URLs, and install.sh's no-version path
-            # resolves through releases/latest, so both need to live on the release itself.
-            release_assets+=(
-              "$ZIP_PATH"
-              "dist/updates/stable/appcast.xml"
-            )
-            # --latest keeps releases/latest/download (the install.sh no-version path) pointed at
-            # the newest Spaces release even if another non-prerelease release is created later.
-            if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
-              gh release edit "${{ inputs.release-tag }}" --title "$release_title" --latest
-              gh release upload "${{ inputs.release-tag }}" "${release_assets[@]}" --clobber
-            else
-              gh release create "${{ inputs.release-tag }}" "${release_assets[@]}" \
-                --title "$release_title" \
-                --latest \
-                --generate-notes
-            fi
+          # Every tagged build is published as a prerelease, and `--latest` is never passed: the
+          # `latest` release, which `releases/latest/download` and therefore the stable Sparkle
+          # feed resolve through, must keep pointing at the last promoted build until a maintainer
+          # promotes this one by selecting "Latest" on it (`gh release edit <tag> --prerelease=false
+          # --latest`), at which point release-promote.yml redeploys the site from it.
+          #
+          # --target pins the tag to the commit this run built rather than the default branch tip.
+          if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
+            # Re-running a run that failed after creating the release: refresh the assets in place.
+            # The prerelease flag is deliberately not touched here, so a re-run cannot push an
+            # already-promoted release back onto the pre-release feed.
+            gh release upload "${{ inputs.release-tag }}" "${release_assets[@]}" --clobber
           else
-            # Nightly never ships the appcast or zip as GitHub release assets: nightly's Sparkle
-            # feed and download prefix point at Firebase Hosting (spaces-nightly.web.app), not at
-            # this release, so those two files would just be dead weight on the release page.
-            # Nightly must also never pass --latest: that flag would make releases/latest/download
-            # (install.sh's no-version path, and Sparkle's own "latest stable" notion) resolve to
-            # an unstable prerelease instead of the newest tagged stable build.
-            if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
-              # A second workflow_dispatch on the same UTC day reuses this tag. Recreate instead of
-              # editing in place so the tag always points at the commit that was just built, not a
-              # mix of two commits' assets. Guard the deletion to a tag with exactly four dotted
-              # numeric components AND a release already marked prerelease, so this path can never
-              # reach (and delete) a stable release even if inputs were ever wrong.
-              if [[ ! "${{ inputs.release-tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo "::error::Refusing to delete release '${{ inputs.release-tag }}': tag is not a 4-component nightly version." >&2
-                exit 1
-              fi
-              is_prerelease="$(gh release view "${{ inputs.release-tag }}" --json isPrerelease --jq .isPrerelease)"
-              if [[ "$is_prerelease" != "true" ]]; then
-                echo "::error::Refusing to delete release '${{ inputs.release-tag }}': it is not marked prerelease." >&2
-                exit 1
-              fi
-              gh release delete "${{ inputs.release-tag }}" --cleanup-tag --yes
-            fi
-            # --target pins the new tag to the commit this run actually built. Without it GitHub
-            # creates the tag at the default branch's tip, which drifts from the built commit
-            # whenever main moves during the ~20 minutes this job takes, and points somewhere else
-            # entirely for a workflow_dispatch run from a branch.
             gh release create "${{ inputs.release-tag }}" "${release_assets[@]}" \
               --title "$release_title" \
               --target "$GITHUB_SHA" \
@@ -402,19 +323,19 @@ jobs:
               --generate-notes
           fi
 
-      - name: Build website with staged Sparkle artifacts
-        if: ${{ inputs.channel == 'stable' }}
+      # The site build's prebuild restages both Sparkle feeds from GitHub release state, so this
+      # deploy is what puts the release just published onto the live pre-release feed.
+      - name: Build website with staged Sparkle feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd apps/web
           npm ci
           npm run build
 
-      - name: Stage nightly site
-        if: ${{ inputs.channel == 'nightly' }}
-        run: scripts/stage-nightly-site.sh ${{ inputs.version }} ${{ inputs.release-tag }}
-
       - name: Deploy Firebase Hosting
-        id: firebase_deploy
+        # The verification step below is the gate: a live-channel deploy of an unchanged site
+        # answers HTTP 400 "is the current active version", which is a no-op rather than a failure.
         continue-on-error: true
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
@@ -422,27 +343,6 @@ jobs:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           channelId: live
           projectId: spaces-a1814
-          entryPoint: ${{ steps.channel.outputs.firebase-entry-point }}
 
-      - name: Confirm Hosting serves this release
-        if: ${{ steps.firebase_deploy.outcome != 'success' }}
-        env:
-          VERSION: ${{ inputs.version }}
-          APPCAST_HOST: ${{ steps.channel.outputs.appcast-host }}
-        run: |
-          # When the built site is unchanged, `firebase deploy` to the live channel returns
-          # HTTP 400 "is the current active version" — a no-op, not a real failure. Tolerate that
-          # case only when the live appcast already serves this release; any other deploy failure
-          # (auth, build, quota) leaves the new version absent and still fails the job.
-          set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
-            appcast="$(curl -fsSL "${APPCAST_HOST}/releases/appcast.xml?cb=${GITHUB_RUN_ID}-${attempt}" || true)"
-            if printf '%s' "$appcast" | grep -q "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"; then
-              echo "Live appcast already serves ${VERSION}; treating the unchanged deploy as success."
-              exit 0
-            fi
-            echo "Attempt ${attempt}: live appcast not yet serving ${VERSION}; retrying in 10s…"
-            sleep 10
-          done
-          echo "Firebase Hosting deploy failed and ${VERSION} is not live." >&2
-          exit 1
+      - name: Confirm the pre-release feed serves this release
+        run: scripts/verify-live-appcast.sh https://usespaces.dev/releases/prerelease/appcast.xml "${{ inputs.version }}"
