@@ -10,14 +10,14 @@ import Testing
         comboBox.stringValue = "feature/a"
         comboBox.selectItem(at: 1)
 
-        #expect(AppKitController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "feature/b")
+        #expect(ProjectFormsController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "feature/b")
     }
 
     @Test func existingWorkspaceBranchValueFallsBackToTypedComboBoxStringWhenNothingIsSelected() {
         let comboBox = NSComboBox()
         comboBox.stringValue = "release/candidate"
 
-        #expect(AppKitController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "release/candidate")
+        #expect(ProjectFormsController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "release/candidate")
     }
 
     @Test func syncExistingWorkspaceBranchSelectionClearsStaleSelectedItemAfterEditingText() {
@@ -25,9 +25,9 @@ import Testing
         comboBox.addItems(withObjectValues: ["feature/a", "feature/b"])
         comboBox.selectItem(at: 0)
         comboBox.stringValue = "release/candidate"
-        AppKitController.syncExistingWorkspaceBranchSelection(existingBranchField: comboBox)
+        ProjectFormsController.syncExistingWorkspaceBranchSelection(existingBranchField: comboBox)
 
-        #expect(AppKitController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "release/candidate")
+        #expect(ProjectFormsController.resolvedExistingWorkspaceBranchValue(existingBranchField: comboBox) == "release/candidate")
         #expect(comboBox.indexOfSelectedItem == -1)
     }
 }

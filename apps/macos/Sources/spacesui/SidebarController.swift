@@ -324,8 +324,8 @@ private struct DeviceSyncState {
     }
 
     func canPreserveDetailPaneAfterSidebarReload() -> Bool {
-        if host.activeAddWorkspaceFormTag != nil || host.activeAddProjectFormTag != nil { return true }
-        if host.projectSettingsProjectID != nil { return true }
+        if host.projectForms.activeAddWorkspaceFormTag != nil || host.projectForms.activeAddProjectFormTag != nil { return true }
+        if host.projectForms.projectSettingsProjectID != nil { return true }
         if host.workspaceSettingsWorkspaceID != nil { return true }
         if host.showingAlerts || host.showingSettings { return true }
         // Effective visibility, not mere existence: `findWorkspace` resolves hidden rows on purpose, but
