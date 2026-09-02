@@ -698,7 +698,7 @@ import workspacecore
                     if let focusRequest = entry.focusRequest {
                         cardAction = { [weak self] in
                             guard let self else { return }
-                            await self.host.performWindowFocus(focusRequest)
+                            await self.host.windowFocus.performWindowFocus(focusRequest)
                         }
                     } else if let automationRunTarget = entry.automationRunTarget {
                         cardAction = { [weak self] in

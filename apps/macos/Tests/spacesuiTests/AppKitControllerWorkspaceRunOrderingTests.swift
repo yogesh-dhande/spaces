@@ -346,17 +346,17 @@ import workspacecore
     @Test func cycleTargetsIncludeOnlyOpenBrowserWindowsAndOpenTerminalPanes() {
         let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: cycleFilteringWorkspace())
 
-        let withoutOpenBrowser = AppKitController.cycleWindowTargets(
+        let withoutOpenBrowser = WindowFocusController.cycleWindowTargets(
             detail: detail, browserSessions: [], openTerminalSessionIDs: ["session-web", "session-agent"])
         #expect(withoutOpenBrowser.map(\.kind) == [.process, .agent])
-        #expect(withoutOpenBrowser.map { AppKitController.cycleCursorKey(for: $0, detail: detail) } == ["process:process-web", "agent:agent-1"])
+        #expect(withoutOpenBrowser.map { WindowFocusController.cycleCursorKey(for: $0, detail: detail) } == ["process:process-web", "agent:agent-1"])
 
-        let withOpenBrowserAndShell = AppKitController.cycleWindowTargets(
+        let withOpenBrowserAndShell = WindowFocusController.cycleWindowTargets(
             detail: detail, browserSessions: [BrowserSession(name: "docs", url: "http://localhost:3000")],
             openTerminalSessionIDs: ["session-web", "session-shell", "session-agent"])
         #expect(withOpenBrowserAndShell.map(\.kind) == [.browser, .process, .agent, .window])
         #expect(
-            withOpenBrowserAndShell.map { AppKitController.cycleCursorKey(for: $0, detail: detail) } == [
+            withOpenBrowserAndShell.map { WindowFocusController.cycleCursorKey(for: $0, detail: detail) } == [
                 "browser:http://localhost:3000", "process:process-web", "agent:agent-1", "terminal:session-shell",
             ])
     }

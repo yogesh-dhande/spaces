@@ -163,8 +163,8 @@ extension AppKitController {
         target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession],
         alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>
     ) -> SidebarRuntimeTargetItem? {
-        let key = cycleCursorKey(for: target, detail: detail)
-        let title = focusableWindowName(for: target, detail: detail, browserSessions: browserSessions)
+        let key = WindowFocusController.cycleCursorKey(for: target, detail: detail)
+        let title = WindowFocusController.focusableWindowName(for: target, detail: detail, browserSessions: browserSessions)
         // Undismissed attention ids this row owns, from the one alert-identity derivation
         // (`rowAlertsAttentionEntries`) the sidebar menu and the color downgrade below both read.
         func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
@@ -213,7 +213,9 @@ extension AppKitController {
                 undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
-            let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
+            let templateID = detail.config.processes.first {
+                AppKitController.normalizedRunRowName($0.name ?? "") == AppKitController.normalizedRunRowName(processKey)
+            }?.id
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? processKey, detail: nil, kind: .missingConfiguredProcess, runState: .notStarted,
                 shortcutIndex: shortcutIndex, sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: processKey,
@@ -225,7 +227,7 @@ extension AppKitController {
 extension AppKitController {
     /// The sidebar's runtime-target rows for a workspace, from the owning device's overview.
     func sidebarRuntimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
-        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
+        guard let context = windowFocus.focusableWindowContext(workspaceID: workspaceID) else { return [] }
         return Self.sidebarRuntimeTargetItems(
             detail: context.detail, browserSessions: context.browserSessions, alertsGroups: deviceModel.alertsGroups,
             dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
@@ -257,12 +259,12 @@ extension AppKitController {
     /// focuses. The same reasoning covers `openWorkspaceFinder`.
     func focusSidebarRuntimeTarget(workspaceID: String, key: String) {
         Task { @MainActor [weak self] in
-            guard let self, let context = self.focusableWindowContext(workspaceID: workspaceID),
-                let target = context.targets.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == key })
+            guard let self, let context = self.windowFocus.focusableWindowContext(workspaceID: workspaceID),
+                let target = context.targets.first(where: { WindowFocusController.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
             let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
             // The outcome is unused: a failed focus already showed its own error.
-            _ = await self.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail)
+            _ = await self.windowFocus.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail)
         }
     }
 

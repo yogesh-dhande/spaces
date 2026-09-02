@@ -273,7 +273,7 @@ import workspacecore
         }
 
         if let window = host.window {
-            host.prepareWindowForActiveSpaceSummon(window)
+            host.windowFocus.prepareWindowForActiveSpaceSummon(window)
             NSApp.unhide(nil)
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
@@ -281,7 +281,7 @@ import workspacecore
         Task { @MainActor in
             await Task.yield()
             if let window = host.window {
-                host.prepareWindowForActiveSpaceSummon(window)
+                host.windowFocus.prepareWindowForActiveSpaceSummon(window)
                 NSApp.activate(ignoringOtherApps: true)
                 window.makeKeyAndOrderFront(nil)
                 window.orderFrontRegardless()

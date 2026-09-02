@@ -138,11 +138,11 @@ final class CommandPalettePanel: NSPanel {
 
     func completePendingCommandPalettePresentationIfNeeded() {
         guard let pending = pendingCommandPalettePresentation, let panel = commandPalettePanel else { return }
-        guard AppKitController.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else { return }
+        guard WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else { return }
         pendingCommandPalettePresentation = nil
         commandPaletteMainWindowVisibility = pending.mainWindowWasVisible
         host.logHotkeyDebug("present_palette end \(host.hotkeyWindowStateSummary())")
-        if let perfContext = pending.perfContext { host.logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
+        if let perfContext = pending.perfContext { host.windowFocus.logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
     }
 
     func dismissCommandPaletteForBuiltInWindowNavigation() {
@@ -221,7 +221,7 @@ final class CommandPalettePanel: NSPanel {
 
     func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
         guard commandPalettePanel?.isVisible == true else { return false }
-        if let windowIndex = host.windowShortcutIndex(for: event) {
+        if let windowIndex = host.windowFocus.windowShortcutIndex(for: event) {
             executeCommandPaletteShortcut(index: windowIndex)
             return true
         }
@@ -278,18 +278,18 @@ final class CommandPalettePanel: NSPanel {
     }
 
     func toggleCommandPaletteFromHotkey() {
-        let perfContext = host.captureHotkeyPerfContext()
+        let perfContext = host.windowFocus.captureHotkeyPerfContext()
         host.logHotkeyDebug("toggle_palette begin \(host.hotkeyWindowStateSummary())")
         // The launch setup flow occupies the main window; the command palette must not surface
         // workspace actions behind it, so the palette hotkey only shows/hides the window until the
         // flow completes.
         guard host.setupFlowController == nil else {
             host.logHotkeyDebug("toggle_palette reroute_permission_setup")
-            host.toggleWindowFromHotkey()
+            host.windowFocus.toggleWindowFromHotkey()
             return
         }
         if let panel = commandPalettePanel,
-            AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: panel.isVisible, panelIsFocused: panel.isKeyWindow)
+            WindowFocusController.shouldDismissCommandPaletteForToggle(panelIsVisible: panel.isVisible, panelIsFocused: panel.isKeyWindow)
         {
             host.logHotkeyDebug("toggle_palette dismiss_visible_panel")
             dismissCommandPalette(perfContext: perfContext)
@@ -297,7 +297,7 @@ final class CommandPalettePanel: NSPanel {
         }
         if let panel = commandPalettePanel, panel.isVisible {
             host.logHotkeyDebug("toggle_palette refocus_visible_panel")
-            host.revealTargetedHotkeyWindow(panel)
+            host.windowFocus.revealTargetedHotkeyWindow(panel)
             if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
             pendingCommandPalettePresentation = AppKitController.PendingCommandPalettePresentation(
                 perfContext: perfContext, mainWindowWasVisible: host.rawMainWindowVisibility())
@@ -321,7 +321,7 @@ final class CommandPalettePanel: NSPanel {
         // A focused code pane has no session id, so it needs its own capture; only checked when no
         // terminal session was focused, mirroring the precedence the restore side gives terminal focus.
         let focusedCodePaneID = focusedTerminalSessionID == nil ? host.panelCoordinator.focusedCodePaneID() : nil
-        let returnApplicationProcessID = AppKitController.returnApplicationProcessIDForAppToggle(
+        let returnApplicationProcessID = WindowFocusController.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
         commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
@@ -334,7 +334,7 @@ final class CommandPalettePanel: NSPanel {
             elapsedMS: host.windowShortcutElapsedMS(since: contextLookupStartedAt), success: true)
         panel.center()
         let revealStartedAt = Date()
-        host.revealTargetedHotkeyWindow(panel)
+        host.windowFocus.revealTargetedHotkeyWindow(panel)
         host.logPerfMetric(
             "toggle_palette_reveal_target", target: "palette", elapsedMS: host.windowShortcutElapsedMS(since: revealStartedAt), success: true)
         commandPaletteSearchField?.stringValue = ""
@@ -380,7 +380,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteReturnTerminalSessionID = nil
         commandPaletteReturnCodePaneID = nil
         commandPaletteReturnApplicationProcessID = nil
-        if let perfContext { host.logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
+        if let perfContext { host.windowFocus.logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
         // Dismissing while picking (esc, click-away) resolves the picker as cancelled;
         // Enter takes the context before dismissing, so this only fires for real cancels.
         takeSessionPickerContext()?.completion(nil)
@@ -403,7 +403,7 @@ final class CommandPalettePanel: NSPanel {
         {
             host.activateReturnApplication(processIdentifier: applicationProcessID)
         } else if host.rawMainWindowVisibility(), let window = host.window {
-            host.revealTargetedHotkeyWindow(window)
+            host.windowFocus.revealTargetedHotkeyWindow(window)
         }
     }
 
@@ -662,7 +662,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteReturnApplicationProcessID = nil
         setCommandPaletteLoading(false)
         panel.center()
-        host.revealTargetedHotkeyWindow(panel)
+        host.windowFocus.revealTargetedHotkeyWindow(panel)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
@@ -813,7 +813,7 @@ final class CommandPalettePanel: NSPanel {
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let focused = await self.host.executeWindowFocus(focusRequest)
+            let focused = await self.host.windowFocus.executeWindowFocus(focusRequest)
             guard self.pendingSelectionExecution?.id == execution.id else { return }
             self.pendingSelectionExecution = nil
             guard focused else {

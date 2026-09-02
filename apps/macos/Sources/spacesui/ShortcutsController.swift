@@ -47,8 +47,8 @@ import workspacecore
     private var previousShortcutSpec: HotkeySpec?
     private var sidebarNextShortcutSpec: HotkeySpec?
     private var sidebarPreviousShortcutSpec: HotkeySpec?
-    // Not private: `AppKitController.windowShortcutIndex`/`windowShortcutBadgeText` read this from a
-    // different file in the same module (cross-file `private` isn't visible).
+    // Not private: `WindowFocusController.windowShortcutIndex`/`windowShortcutBadgeText` read this from
+    // a different file in the same module (cross-file `private` isn't visible).
     var windowShortcutSpec: HotkeySpec?
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
@@ -179,14 +179,14 @@ import workspacecore
                 if let workspaceID = self.host.selectedWorkspaceID { self.host.openWorkspaceFinder(workspaceID: workspaceID) }
                 return nil
             }
-            if let windowIndex = self.host.windowShortcutIndex(for: event) {
-                self.host.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
+            if let windowIndex = self.host.windowFocus.windowShortcutIndex(for: event) {
+                self.host.windowFocus.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
                 let startedAt = Date()
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.host.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
-                    await self.host.runWindowShortcut(index: windowIndex, startedAt: startedAt)
-                    self.host.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
+                    self.host.windowFocus.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
+                    await self.host.windowFocus.runWindowShortcut(index: windowIndex, startedAt: startedAt)
+                    self.host.windowFocus.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
                 }
                 return nil
             }
@@ -210,10 +210,10 @@ import workspacecore
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
         host.logHotkeyDebug("handle id=\(id) hotkey=\(hotkey) \(host.hotkeyWindowStateSummary())")
         switch hotkey {
-        case .toggle: host.toggleWindowFromHotkey()
+        case .toggle: host.windowFocus.toggleWindowFromHotkey()
         case .openCommandPalette: host.commandPalette.toggleCommandPaletteFromHotkey()
-        case .next: host.focusGlobalWindowNavigation(direction: 1)
-        case .previous: host.focusGlobalWindowNavigation(direction: -1)
+        case .next: host.windowFocus.focusGlobalWindowNavigation(direction: 1)
+        case .previous: host.windowFocus.focusGlobalWindowNavigation(direction: -1)
         case .openEditor: host.openGlobalEditorFromHotkey()
         }
     }
@@ -245,7 +245,7 @@ import workspacecore
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
         guard let addWorkspaceShortcutSpec, matches(event: event, spec: addWorkspaceShortcutSpec) else { return false }
-        if host.showingAlerts, host.windowShortcutIndex(for: event) != nil { return false }
+        if host.showingAlerts, host.windowFocus.windowShortcutIndex(for: event) != nil { return false }
         if host.projectForms.activeAddWorkspaceFormTag != nil { return true }
         host.projectForms.addWorkspaceFromShortcut()
         return true
@@ -551,8 +551,8 @@ import workspacecore
 
     private func displayShortcut(_ spec: HotkeySpec) -> String { displayShortcut(spec, separator: "") }
 
-    // Not private: `AppKitController.windowShortcutBadgeText` calls this from a different file in the
-    // same module (cross-file `private` isn't visible).
+    // Not private: `WindowFocusController.windowShortcutBadgeText` calls this from a different file in
+    // the same module (cross-file `private` isn't visible).
     func displayShortcut(_ spec: HotkeySpec, keyText: String) -> String { displayShortcut(spec, separator: "", keyText: keyText) }
 
     private func displayShortcut(_ spec: HotkeySpec, separator: String) -> String {

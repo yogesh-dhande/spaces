@@ -294,7 +294,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.deviceModel.deviceSections = [emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible)]
             controller.rebuildFlatSidebarData()
 
-            controller.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)
+            controller.windowFocus.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)
 
             #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID))
         }
@@ -305,7 +305,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]
             controller.rebuildFlatSidebarData()
 
-            controller.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)
+            controller.windowFocus.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)
 
             #expect(controller.detailPane == DetailPane.none)
         }

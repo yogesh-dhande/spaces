@@ -15,8 +15,8 @@ import workspacecore
 /// (`SidebarController`, `WorkspaceDeletionCoordinator`, `AppKitController+WorkspaceSettingsDialog`,
 /// `AppKitController+StopAllQuit`, `CommandPaletteItems`) that reconcile forwards, read the
 /// Services display, or close a workspace's browser windows. The window-cycle and numbered-shortcut
-/// focus dispatch (`cycleWorkspaceWindow`, `executeWindowFocusResolution`, `cycleCurrentIndex`) stay
-/// on `AppKitController`, routing their browser-session-specific work through this type's instance
+/// focus dispatch (`cycleWorkspaceWindow`, `executeWindowFocusResolution`, `cycleCurrentIndex`) live
+/// on `WindowFocusController`, routing their browser-session-specific work through this type's instance
 /// methods and pure static helpers.
 @MainActor final class BrowserSessionCoordinator {
     unowned let host: AppKitController
@@ -44,7 +44,7 @@ import workspacecore
     /// Stops every live SSH forward. Called from `AppKitController.applicationWillTerminate`.
     func stopAllForwards() { browserSSHForwardManager.stopAll() }
 
-    /// Internal rather than `private`: `AppKitController.cycleWorkspaceWindow` reads this result of
+    /// Internal rather than `private`: `WindowFocusController.cycleWorkspaceWindow` reads this result of
     /// `trackedBrowserCycleState` to resolve the window-cycle target and log its metric.
     struct BrowserCycleState: Sendable {
         let openBrowserSessions: [BrowserSession]
@@ -108,7 +108,7 @@ import workspacecore
     /// for `deviceID` starts or stops. Reloads the section in place (preserving open editors); when
     /// no workspace settings dialog is open the weak section reference is nil and this is a no-op.
     ///
-    /// Internal rather than `private`: `AppKitController.executeWindowFocusResolution` also calls this
+    /// Internal rather than `private`: `WindowFocusController.executeWindowFocusResolution` also calls this
     /// after routing a remote browser session's URL through a freshly reconciled forward, so the open
     /// dialog's port text is current the moment the user focuses that session.
     func refreshVisibleServicePortDisplays(deviceID: String) {
@@ -253,7 +253,7 @@ import workspacecore
     /// Reports a browser-session focus that Chrome refused. The permission is read at
     /// failure time so the message matches the current grant.
     ///
-    /// Internal rather than `private`: `AppKitController.executeWindowFocusResolution` calls this
+    /// Internal rather than `private`: `WindowFocusController.executeWindowFocusResolution` calls this
     /// when a local or (post-routing) remote Chrome focus attempt fails.
     func showBrowserSessionFocusFailureError() {
         host.showError(
@@ -287,7 +287,7 @@ import workspacecore
     /// redirected to another browser. Remote service sessions use this after their URL has been
     /// routed through the Mac Caddy router.
     ///
-    /// Internal rather than `private`: `AppKitController.executeWindowFocusResolution` calls this for
+    /// Internal rather than `private`: `WindowFocusController.executeWindowFocusResolution` calls this for
     /// both the local and (post-routing) remote focus paths.
     func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String]) async -> Bool {
         let startedAt = Date()
@@ -387,12 +387,12 @@ import workspacecore
         return best?.workspaceID
     }
 
-    /// Builds the tracked-window/frontmost-tab snapshot `AppKitController.cycleWorkspaceWindow` needs
+    /// Builds the tracked-window/frontmost-tab snapshot `WindowFocusController.cycleWorkspaceWindow` needs
     /// to decide which of a workspace's configured browser sessions count as open for the cycle: a
     /// session counts only when both a tracked Chrome window and an open tab still match its target
     /// URL, so a session whose window the user closed by hand drops out of the cycle order.
     ///
-    /// Internal rather than `private`: `AppKitController.cycleWorkspaceWindow` calls this before
+    /// Internal rather than `private`: `WindowFocusController.cycleWorkspaceWindow` calls this before
     /// building the cycle's target list.
     func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
         let resolvedSessions = detail.config.resolvedBrowserSessions
@@ -503,7 +503,7 @@ import workspacecore
         browserObservedURLMatchLength(observedURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: assignedPorts) != nil
     }
 
-    /// Internal rather than `private`: `AppKitController.cycleCurrentIndex` also needs the match
+    /// Internal rather than `private`: `WindowFocusController.cycleCurrentIndex` also needs the match
     /// length (not just whether it matched) to prefer the longest-matching browser target when more
     /// than one configured session's prefix matches the frontmost tab.
     nonisolated static func browserObservedURLMatchLength(
