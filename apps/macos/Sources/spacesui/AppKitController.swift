@@ -73,6 +73,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
 
     var window: NSWindow!
+    /// Test-only override that replaces `showPanelScope`'s real window-activation body. `showPanelScope`
+    /// always calls `NSApp.activate(ignoringOtherApps:)`, a real AppKit call a unit test process must
+    /// never trigger (see `MainWindowCloseBehaviorTests`'s reasoning for the same restriction). Nil in
+    /// production, so this changes nothing there.
+    var showPanelScopeOverrideForTesting: ((PanelScope) -> Void)?
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)
@@ -1081,6 +1086,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // skips resolving the request: resolution only exists to install or re-target a pane. A
         // non-focusing open has nothing to foreground, so it never takes this shortcut.
         if focusIntent == .focus, reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
+            // This shortcut skips the rest of the open path, including the owner-reclaim call below, so
+            // an owner-mode open has to reclaim here too: without it, refocusing a pane already the
+            // focused pane in its selected tab would silently stay a viewer even when a different client
+            // has since taken owner attachment over.
+            if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "\(modeDetail) reused=1 route=pane refocus=1\(requestDetail)")

@@ -291,6 +291,7 @@ let executableTargets: [Target] = [
                 "spacesclientcore",
                 "spacesdeviceapi",
                 "spacestestsupport",
+                "workspacecore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )

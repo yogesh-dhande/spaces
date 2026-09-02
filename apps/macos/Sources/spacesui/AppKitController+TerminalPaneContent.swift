@@ -27,6 +27,10 @@ extension AppKitController {
     /// Brings the panel's scope on screen: selects the workspace in the main window for
     /// a workspace scope, or fronts the global panel's own window.
     func showPanelScope(_ scope: PanelScope) {
+        if let showPanelScopeOverrideForTesting {
+            showPanelScopeOverrideForTesting(scope)
+            return
+        }
         switch scope {
         case .workspace(_, let workspaceID):
             if selectedWorkspaceID != workspaceID, let (_, workspace) = findWorkspace(id: workspaceID) { selectWorkspace(workspace) }
