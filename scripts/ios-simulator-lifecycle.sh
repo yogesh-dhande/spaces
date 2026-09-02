@@ -42,27 +42,41 @@ SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT=""
 # ownership bookkeeping there already mutated that shell's SPACES_OWNED_IOS_SIMULATOR_UDIDS so
 # the caller's EXIT trap (spaces_ios_simulator_shutdown_owned) can shut this simulator down; a
 # subshell here would sever that and risk leaking the simulator on timeout.
-# `SECONDS` (bash's builtin elapsed-time counter) tracks the deadline rather than an
-# accumulate-by-poll-interval counter, so the poll interval below can stay short (fast
-# simulators/tests finish in well under a second) without needing fractional-second bash
-# integer arithmetic.
+# The deadline is enforced by counting completed poll sleeps rather than reading elapsed
+# wall-clock time. bash's builtin `SECONDS` looks like the obvious elapsed-time primitive, but it
+# is only whole-second-accurate: reading it twice captures a *floor* of true elapsed time at each
+# read, so two reads a few milliseconds apart can differ by 1 if a wall-clock second boundary
+# falls between them. For a short deadline (this function is called with 1s in
+# apps/macos/Tests/ios_simulator_lifecycle.sh) that error is the entire budget: a `SECONDS`-based
+# 1s deadline can fire within tens of milliseconds of starting, SIGKILLing the mocked bootstatus
+# hang before it writes its single-shot marker file and failing the wedge-recovery test. Sub-
+# second-accurate wall-clock alternatives aren't available here either: macOS ships BSD `date`
+# (no `%N`) and bash 3.2 (no `EPOCHREALTIME`, added in bash 5), and this function must stay in the
+# caller's shell (see below) so it can't shell out to a subshell-based timer. Counting completed
+# `sleep` calls sidesteps wall-clock reads entirely: each `sleep` blocks for at least its argument
+# (modulo signal interruption), so N completed sleeps of the poll interval always represent at
+# least N * interval seconds of real elapsed time -- the deadline can only fire late, never early.
 spaces_ios_simulator_wait_for_boot() {
   local udid="$1"
   local boot_status_deadline="$2"
-  local boot_status_start_seconds="$SECONDS"
+  local -r boot_status_poll_interval="0.2"
+  local -r boot_status_polls_per_second=5
+  local boot_status_max_polls=$(( boot_status_deadline * boot_status_polls_per_second ))
+  local boot_status_polls=0
   local boot_status_pid
 
   xcrun simctl bootstatus "$udid" -b >&2 &
   boot_status_pid=$!
 
   while kill -0 "$boot_status_pid" 2>/dev/null; do
-    if (( SECONDS - boot_status_start_seconds >= boot_status_deadline )); then
+    if (( boot_status_polls >= boot_status_max_polls )); then
       echo "xcrun simctl bootstatus $udid exceeded ${boot_status_deadline}s; killing it as hung." >&2
       kill -KILL "$boot_status_pid" 2>/dev/null || true
       wait "$boot_status_pid" 2>/dev/null || true
       return 1
     fi
-    sleep 0.2
+    sleep "$boot_status_poll_interval"
+    boot_status_polls=$(( boot_status_polls + 1 ))
   done
 
   wait "$boot_status_pid"
