@@ -1333,24 +1333,66 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// load state is. An unreachable device keeps everything it last reported listed for the whole
     /// outage — no grace period — so the user can keep browsing it, and so the id-based lookups that read
     /// this merged data (which device owns a workspace, which overview a row belongs to) keep resolving
-    /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
-    /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
+    /// its rows instead of treating them as unknown. Pure so the "an offline device is still merged" rule
+    /// is directly testable.
     ///
     /// A workspace whose delete is in flight stays in this data: it keeps its sidebar row, which renders
     /// marked as deleting (see `sidebarWorkspaceRowState`) until the mutation resolves, rather than
     /// disappearing and — because the owning daemon still reports it — coming back on the next refresh.
+    ///
+    /// Project ids are per-daemon UUIDs, so two sections normally never share one; normal pairing cannot
+    /// produce the collision. A profile database copied or restored across devices can, though (#532),
+    /// and every collection here resolves that collision the same way: first-wins by id, so `projects`
+    /// keeps exactly one record per duplicated id, and it is the same section whose entries survive in
+    /// `workspacesByProject` and `workspaceRuntimeStatusByID` below. Appending `projects` unconditionally
+    /// while dict-merging the other two first-wins used to let a later section's project row outlive the
+    /// very workspaces the dictionaries had already decided lost the collision, so `findWorkspace(id:)`
+    /// could then pair a surviving workspace with the other device's `ProjectSummary`, whose unrelated
+    /// `isHidden` silently decided the workspace's visibility. `workspacesByProject` is claimed from the
+    /// winning section at the moment it wins the project id, empty array included when that section has
+    /// no entry for the project: a shadowed section can then never supply workspaces for a project it
+    /// lost, even if the winning section's own copy of that project currently has none. (A whole-dict
+    /// `merge` here would have let a later section's entry fill a key the winning section's dict simply
+    /// omitted, pairing that later section's workspaces with the winning section's project row — the same
+    /// cross-device mispairing bug one level down.) `workspaceRuntimeStatusByID` stays a plain first-wins
+    /// dict merge: it needs no equivalent binding because it is built in the same section-ordered loop as
+    /// the project claim, so whichever section's workspace ids reach the dict first are, by construction,
+    /// the winning section's — a shadowed section's entries for the same workspace ids can only arrive
+    /// later and are dropped by the existing first-wins merge. `alertsGroups` stays an unconditional
+    /// append: its rows carry per-device `attentionID`s (`"alert:\(deviceID):..."`), so a duplicated
+    /// project id never collides two alert rows into one identity the way it does for projects and
+    /// workspaces.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
         projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
         alertsGroups: [AlertsGroup]
     ) {
         var mergedProjects: [ProjectSummary] = []
+        var mergedProjectIDs: Set<String> = []
         var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
         var mergedRuntime: [String: WorkspaceRuntimeStatus] = [:]
         var mergedAlerts: [AlertsGroup] = []
         for section in sections {
-            mergedProjects.append(contentsOf: section.projects)
-            mergedWorkspaces.merge(section.workspacesByProject) { current, _ in current }
+            for project in section.projects where mergedProjectIDs.insert(project.id).inserted {
+                mergedProjects.append(project)
+                // Claim this project's workspaces from the SAME section that just won the project id,
+                // not from whichever section's dict happens to carry the key. A project with zero
+                // workspaces in the winning section still gets an explicit empty entry here, so no later
+                // (shadowed) section's `merge` can backfill it with a sibling device's workspace list.
+                mergedWorkspaces[project.id] = section.workspacesByProject[project.id] ?? []
+            }
+            // Ids reach this dict in section order alongside the project claim above, so whichever
+            // section's workspace ids arrive first are already the winning section's; a shadowed
+            // section's entries for the same (duplicated) ids arrive later and lose to first-wins.
             mergedRuntime.merge(section.workspaceRuntimeStatusByID) { current, _ in current }
+            // Accepted risk (#532): an alert from a shadowed device still shows, correctly, with that
+            // device's content, but its click carries only a bare workspace id in `WindowFocusRequest`,
+            // not a device id. Resolving that id (`deviceID(forWorkspaceID:)`) walks `findWorkspace`,
+            // which now always lands on the winning section for a duplicated project, so the click opens
+            // the winning device's copy of the workspace, not the shadowed device the alert came from.
+            // This only happens in the same rare copied-profile collision this file already documents,
+            // the alert's own text stays correct, and threading device identity through every focus
+            // request just to route this one click correctly is disproportionate, so it is left as is
+            // rather than deduping or rewriting alert rows to carry a device id.
             mergedAlerts.append(contentsOf: section.alertsGroups)
         }
         return (mergedProjects, mergedWorkspaces, mergedRuntime, mergedAlerts)
