@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'apps/web/**'
+      - 'scripts/stage-web-releases.sh'
       - '.github/workflows/firebase-hosting-merge.yml'
       - '.github/workflows/firebase-hosting-pull-request.yml'
 permissions:
@@ -18,7 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # The website prebuild stages both Sparkle feeds from GitHub release state with `gh`,
+      # so the build needs a token even though it only reads public releases.
       - run: cd apps/web && npm ci && npm run build
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}

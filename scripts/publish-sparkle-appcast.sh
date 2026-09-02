@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
-  echo "Usage: $0 <channel> <version>" >&2
-  echo "  channel: stable | nightly" >&2
+# Generates and EdDSA-signs the Sparkle appcast for one Spaces release. Every release publishes
+# exactly one appcast, carrying one enclosure prefix baked in at signing time; the website serves
+# that same file as both the stable and the pre-release feed (see scripts/stage-web-releases.sh),
+# so promotion never has to rewrite or re-sign it.
+
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <version>" >&2
   exit 1
 fi
 
-CHANNEL="$1"
-VERSION="$2"
-
-if [[ "$CHANNEL" != "stable" && "$CHANNEL" != "nightly" ]]; then
-  echo "Error: channel must be 'stable' or 'nightly', got '$CHANNEL'" >&2
-  exit 1
-fi
+VERSION="$1"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHIVE_PATH="$REPO_ROOT/dist/releases/$VERSION/Spaces-${VERSION}.zip"
-UPDATES_DIR="$REPO_ROOT/dist/updates/$CHANNEL"
+UPDATES_DIR="$REPO_ROOT/dist/updates"
 APPCAST_TOOL="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
 APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 

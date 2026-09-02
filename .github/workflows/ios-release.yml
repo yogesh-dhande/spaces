@@ -5,11 +5,9 @@
 #     also uploads a matching iOS build.
 #   - workflow_dispatch with a required `version` input: cut a TestFlight-only build
 #     from a branch without tagging a public macOS release.
-#   - workflow_call from nightly.yml, which passes the latest stable marketing
-#     version plus the nightly timestamp as the build number.
-#
-# The build number is GITHUB_RUN_NUMBER only when no `build` input is supplied (tag
-# push and workflow_dispatch); a workflow_call supplies it.
+# TestFlight is the iOS pre-release tier, so nothing here changes when a macOS release is
+# promoted from prerelease to stable; App Store submission stays manual. The build number
+# is always GITHUB_RUN_NUMBER.
 #
 # Signing imports two long-lived certificates from secrets into a temporary keychain,
 # the same shape release-build.yml uses for the macOS Developer ID certificate.
@@ -56,29 +54,10 @@ on:
   push:
     tags:
       - "v*"
-      # Nightlies get their TestFlight build through nightly.yml calling this workflow
-      # directly with an App-Store-Connect-compatible version, so the 4-component
-      # nightly tag must stay out of the tag path — its 4-component marketing version
-      # would be rejected at upload.
-      - "!v*.*.*.*"
   workflow_dispatch:
     inputs:
       version:
         description: "Marketing version to stamp and upload (e.g. 1.0.0)"
-        required: true
-        type: string
-  workflow_call:
-    inputs:
-      version:
-        description: >-
-          Marketing version to stamp (e.g. 0.5.1). App Store Connect caps
-          CFBundleShortVersionString at three numeric components, which is why the
-          nightly caller passes the latest stable version rather than the
-          4-component nightly version.
-        required: true
-        type: string
-      build:
-        description: "CFBundleVersion for the build (e.g. the nightly's UTC YYYYMMDDHHMM stamp)."
         required: true
         type: string
 
@@ -111,21 +90,15 @@ jobs:
         id: version
         env:
           VERSION_INPUT: ${{ inputs.version }}
-          BUILD_INPUT: ${{ inputs.build }}
         run: |
-          # `inputs` carries the workflow_call or workflow_dispatch values; both are empty on a
-          # tag push. github.event_name cannot distinguish these cases here: inside a reusable
-          # workflow it reports the caller's event (e.g. schedule), not workflow_call.
+          # `inputs.version` carries the workflow_dispatch value and is empty on a tag push,
+          # where the tag itself names the version.
           if [[ -n "$VERSION_INPUT" ]]; then
             version="$VERSION_INPUT"
           else
             version="${GITHUB_REF_NAME#v}"
           fi
-          if [[ -n "$BUILD_INPUT" ]]; then
-            build="$BUILD_INPUT"
-          else
-            build="${GITHUB_RUN_NUMBER}"
-          fi
+          build="${GITHUB_RUN_NUMBER}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "build=${build}" >> "$GITHUB_OUTPUT"
 

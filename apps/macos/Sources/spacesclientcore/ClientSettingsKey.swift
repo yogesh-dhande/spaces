@@ -45,6 +45,9 @@ public enum ClientSettingsKey {
     /// App-wide terminal text size in points (a `TerminalTextSize` persisted raw value), moved by the
     /// terminal zoom keys. An unset value resolves to the 12 pt default.
     public static let terminalTextSize = "terminal_text_size"
+    /// Whether the app updates from the pre-release Sparkle feed ("1") instead of the stable feed.
+    /// An unset value resolves to off, so an install only sees promoted releases until the user opts in.
+    public static let appPrereleaseUpdates = "app_prerelease_updates"
     /// The `AgentHookCommand.hookVersion` the user last dismissed the launch coding-agents setup step
     /// for, as a decimal string. The step reappears only when a Spaces release bumps the hook version,
     /// so skipping it is respected until the hooks Spaces wants to write actually change.

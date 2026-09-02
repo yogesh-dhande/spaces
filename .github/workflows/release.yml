@@ -1,13 +1,11 @@
-# Cut a stable Spaces release when a version tag is pushed.
+# Cut a Spaces release when a version tag is pushed.
 #
-# Trigger: push a tag matching v* (e.g. v0.3.0), excluding the 4-component tags nightly.yml cuts
-# (e.g. v0.5.1.202607250900). A stable tag like v0.5.1 has two dots and never matches a pattern that
-# requires three, so a nightly release/tag can never re-enter the stable pipeline through this
-# trigger.
+# Trigger: push a tag matching v* (e.g. v0.3.0). Every tagged release is published as a GitHub
+# prerelease and served on the pre-release update feed; it becomes the stable release when a
+# maintainer unticks "Set as a pre-release" on it, which runs release-promote.yml.
 #
 # The actual build (signing, packaging, notarization, GitHub Release, Sparkle appcast, website
-# deploy) lives in release-build.yml, a reusable workflow shared with nightly.yml so both channels
-# run byte-for-byte the same body. See release-build.yml for the required/optional secrets list.
+# deploy) lives in release-build.yml. See it for the required/optional secrets list.
 
 name: Release
 
@@ -15,7 +13,6 @@ on:
   push:
     tags:
       - "v*"
-      - "!v*.*.*.*"
 
 permissions:
   contents: write
@@ -39,9 +36,9 @@ jobs:
     uses: ./.github/workflows/release-build.yml
     secrets: inherit
     with:
-      channel: stable
       version: ${{ needs.plan.outputs.version }}
-      # run_number is the stable channel's monotonic build counter: this workflow is the caller,
-      # so github.run_number here is this run's own number, not the reusable workflow's.
+      # run_number is the release pipeline's monotonic build counter, and Sparkle compares it to
+      # decide whether an update is newer. This workflow is the caller, so github.run_number here
+      # is this run's own number, not the reusable workflow's.
       build: ${{ github.run_number }}
       release-tag: ${{ github.ref_name }}

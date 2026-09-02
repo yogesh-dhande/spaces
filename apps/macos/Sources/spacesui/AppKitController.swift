@@ -168,9 +168,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func windowShortcutBadgeText(index: Int) -> String { windowFocus.windowShortcutBadgeText(index: index) }
     var workspaceSettingsWindow: NSWindow?
     var workspaceSettingsWorkspaceID: String?
+    /// Sparkle holds its delegate weakly, so the object that answers "which feed?" has to be owned
+    /// here for as long as the updater lives.
+    private let updaterDelegate = SpacesUpdaterDelegate()
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard Self.isRunningFromAppBundle else { return nil }
-        return SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+        return SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: updaterDelegate, userDriverDelegate: nil)
     }()
     /// Distributed IPC notifications observed while the app is running, paired with their `@objc` handlers.
     /// `self` is the observer for every one, so registration and teardown are uniform loops.

@@ -27,9 +27,6 @@ apps/web/public/releases/*
 apps/macos/.local/
 apps/macos/.artifacts/
 
-# Nightly Sparkle-update hosting site - built from dist/updates/nightly, not committed
-deploy/nightly/site/
-
 .venv
 __pycache__
 *.egg-info
