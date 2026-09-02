@@ -1,13 +1,56 @@
 import AppKit
+import Darwin
 import Foundation
 import XCTest
 import spacesterminalcore
 import systembridge
 import workspacecore
 
+/// Tracks every directory `makeTempDirectory()` creates in this process and removes them all when the
+/// process exits (issue #520: these fixtures otherwise leak into the system temp directory without bound).
+///
+/// A process-exit sweep, not per-test `addTeardownBlock`, is the right hook here because `makeTempDirectory()`
+/// is a bare free function called from far more than XCTestCase test methods: `GitTestFixtures.swift`'s
+/// `GitTemplateRepoCache` caches one template repo per initial branch for the whole process (deliberately —
+/// rebuilding it per test would defeat the cache), and its `makeTempGitRepo`/`makeGitHangingInsideDirectory`
+/// are free functions with no `self`; `WorktreeDiscoveryServiceTests.swift` is a Swift Testing `struct`, which
+/// likewise has no `XCTestCase` to register teardown on. `atexit` is process-global, so it reaches every
+/// caller uniformly without needing call-site changes anywhere. Removing per-directory disk sooner (at each
+/// test's teardown, where that's available) is a nice-to-have, not what the leak report calls out — the
+/// problem is directories outliving the process indefinitely, which this backstop already closes.
+private final class TemporaryDirectoryTracker: @unchecked Sendable {
+    static let shared = TemporaryDirectoryTracker()
+
+    private let lock = NSLock()
+    private var directories: [URL] = []
+    private var registered = false
+
+    func track(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        directories.append(url)
+        guard !registered else { return }
+        registered = true
+        atexit {
+            TemporaryDirectoryTracker.shared.sweep()
+        }
+    }
+
+    private func sweep() {
+        lock.lock()
+        let toRemove = directories
+        directories = []
+        lock.unlock()
+        for url in toRemove {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
 func makeTempDirectory() throws -> URL {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    TemporaryDirectoryTracker.shared.track(base)
     return base
 }
 
@@ -50,6 +93,67 @@ extension XCTestCase {
 /// run one at a time and no other component in the test process takes holds.
 func clearPortReservationsForTest(_ ports: some Sequence<Int>) {
     PortReserver.shared.sync(desiredPorts: PortReserver.shared.reservedPorts().subtracting(ports))
+}
+
+/// Binds one placeholder-shaped probe socket with the exact options `PortReserver.bindSocket` uses
+/// (`SO_REUSEPORT`, `INADDR_ANY`, never listened on), so "bindable" here means the same thing it means
+/// for the real placeholder reservations these tests exercise. Returns the bound descriptor, or nil if
+/// the port is already taken.
+private func bindTestPlaceholderSocket(port: Int) -> Int32? {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    var opt: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, socklen_t(MemoryLayout<Int32>.size))
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = in_port_t(port).bigEndian
+    addr.sin_addr.s_addr = INADDR_ANY
+    let result = withUnsafePointer(to: &addr) { addrPtr in
+        addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    if result != 0 {
+        Darwin.close(fd)
+        return nil
+    }
+    return fd
+}
+
+/// Probes for `count` contiguous ports this test process can bind right now, so fixture stores that
+/// really bind their assigned ports (via `PortReservationReconciler`) can seed `appPortRangeStart`
+/// with a range this machine has just proven free, instead of inheriting `PortRange.default`
+/// (20000-30000) — the range real workspaces on this machine allocate from, and so may already hold.
+///
+/// Candidates start above `PortRange.default` and stay below the OS ephemeral range (49152+ on macOS)
+/// that outgoing connections draw from, so a probe here neither collides with a real daemon's
+/// reservations nor races the kernel handing the same port to an unrelated socket mid-probe.
+func probeBindablePortRange(count: Int = 4) throws -> PortRange {
+    var base = 31000
+    while base + count < 49000 {
+        var boundFDs: [Int32] = []
+        defer { for fd in boundFDs { Darwin.close(fd) } }
+        var allBound = true
+        for offset in 0..<count {
+            guard let fd = bindTestPlaceholderSocket(port: base + offset) else {
+                allBound = false
+                break
+            }
+            boundFDs.append(fd)
+        }
+        if allBound { return PortRange(start: base, end: base + count - 1) }
+        base += 100
+    }
+    throw XCTSkip("No contiguous bindable port range found for test fixtures.")
+}
+
+/// Seeds `store`'s port-allocation range with a contiguous range this test process has just verified it
+/// can bind, so a fixture workspace's assigned ports never land in `PortRange.default` (20000-30000) — the
+/// range real workspaces on this machine assign from, and a real daemon may already hold ports there.
+/// Must be called before any workspace's ports are assigned, since allocation reads the range at
+/// assignment time.
+func seedBindablePortRange(in store: SQLiteStore, count: Int = 4) throws {
+    let range = try probeBindablePortRange(count: count)
+    try store.setSetting(key: SettingsKey.appPortRangeStart, value: String(range.start))
+    try store.setSetting(key: SettingsKey.appPortRangeEnd, value: String(range.end))
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {

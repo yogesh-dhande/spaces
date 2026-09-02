@@ -7,6 +7,11 @@
     @testable import spacesterminalcore
 
     final class TerminalPasteImageServerTests: XCTestCase {
+        override class func tearDown() {
+            try? FileManager.default.removeItem(at: pasteImageTestTLSRoot)
+            super.tearDown()
+        }
+
         func testTerminalPasteImageWritesUserOnlyTempFileAndInjectsPath() throws {
             try withTemporaryProfile { _ in
                 let sessionID = "session-image-paste-\(UUID().uuidString)"

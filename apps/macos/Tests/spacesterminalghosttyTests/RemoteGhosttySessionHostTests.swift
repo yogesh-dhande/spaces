@@ -470,6 +470,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor private func makeClipboardFixture(sessionID: String) throws -> ClipboardFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // Registered right away so a throw from any of the calls below still cleans up `root`. Ownership
+        // moves to the returned fixture's `tearDown` once construction succeeds, so this does not also
+        // remove `root` out from under a fixture the caller is still using.
+        var ownsRootCleanup = true
+        defer { if ownsRootCleanup { try? FileManager.default.removeItem(at: root) } }
         let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
         let clientID = "mac-owner-\(sessionID)"
         // The daemon's payload says this client owns the session, which is what the host reads to decide
@@ -491,6 +496,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-clipboard-\(UUID().uuidString)"))
         pasteboard.clearContents()
         host.clipboardPasteboardOverrideForTesting = pasteboard
+        ownsRootCleanup = false
         return ClipboardFixture(
             host: host, recorder: recorder, pasteboard: pasteboard, clientID: clientID,
             tearDown: {

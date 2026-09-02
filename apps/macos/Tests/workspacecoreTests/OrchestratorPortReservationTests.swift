@@ -103,6 +103,10 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
+        // This fixture's assigned ports are really bound as placeholders below, so they must come from a
+        // range this test process has verified bindable rather than `PortRange.default`, which a real
+        // daemon on this machine may already hold (issue #533).
+        try seedBindablePortRange(in: store)
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _, _ in },
             builtInTerminalSessionLauncher: { configuration in

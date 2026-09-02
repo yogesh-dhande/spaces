@@ -8,6 +8,7 @@ public let sharedAppleScriptTestOptInEnvVar = "SPACES_ALLOW_TEST_APPLESCRIPT"
 public func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
     for (name, script) in commands {
         let file = directory.appendingPathComponent(name)
         try script.write(to: file, atomically: true, encoding: .utf8)

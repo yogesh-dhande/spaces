@@ -79,6 +79,7 @@
         ) {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             let enableModes = programEnables.isEmpty ? "" : "printf '\(programEnables)'; "
             let command = "stty raw -echo; \(enableModes)printf 'KEYS_READY'; cat -v"

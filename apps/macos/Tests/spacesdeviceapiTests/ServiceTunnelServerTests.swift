@@ -10,6 +10,11 @@
     @testable import workspacecore
 
     final class ServiceTunnelServerTests: XCTestCase {
+        override class func tearDown() {
+            try? FileManager.default.removeItem(at: serviceTunnelTestTLSRoot)
+            super.tearDown()
+        }
+
         func testEchoTunnelRelaysBinaryBytesInBothDirections() throws {
             try withTemporaryProfile { _ in
                 let echo = try TunnelEchoServer()

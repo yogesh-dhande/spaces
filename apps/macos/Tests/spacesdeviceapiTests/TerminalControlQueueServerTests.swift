@@ -13,6 +13,11 @@
     /// outstanding the daemon still has to answer everything else, because a client whose input send timed
     /// out asks exactly this daemon whether the link is alive before it tears its stream down.
     final class TerminalControlQueueServerTests: XCTestCase {
+        override class func tearDown() {
+            try? FileManager.default.removeItem(at: controlQueueTestTLSRoot)
+            super.tearDown()
+        }
+
         func testAStalledTerminalControlDoesNotDelayAPingOnAnotherConnection() throws {
             try withTemporaryProfile {
                 let sessionID = "session-control-queue-\(UUID().uuidString)"
@@ -808,6 +813,7 @@
         /// only needs it to exist as the script's working directory.
         private func seedBlockingWorkspaceSetup(workspaceID: String) throws -> String {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
             let projectDir = root.appendingPathComponent("project", isDirectory: true)
             let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
             try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
@@ -840,6 +846,7 @@
         /// poll (`workspaceSetupState` is setup-only), so the marker file stands in for it.
         private func seedWorkspaceWithBlockingStopScript(workspaceID: String) throws -> BlockingStopScript {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
             let projectDir = root.appendingPathComponent("project", isDirectory: true)
             let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
             try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
@@ -867,6 +874,7 @@
         /// git repo, never touches git itself.
         private func seedArchivableWorkspace(workspaceID: String) throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
             let projectDir = root.appendingPathComponent("project", isDirectory: true)
             let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
             try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)

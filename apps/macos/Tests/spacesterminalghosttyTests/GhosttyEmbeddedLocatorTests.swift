@@ -7,6 +7,7 @@ import spacesterminalcore
 final class GhosttyEmbeddedLocatorTests: XCTestCase {
     func testResolveFindsResourcesFromEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let resourcesRoot = root.appendingPathComponent("ghostty", isDirectory: true)
 
         try FileManager.default.createDirectory(at: resourcesRoot, withIntermediateDirectories: true)
@@ -25,6 +26,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
 
     func testResolveFindsResourcesBesideFrameworkEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let frameworkRoot = root.appendingPathComponent("GhosttyKit.xcframework", isDirectory: true)
         let resourcesRoot = root.appendingPathComponent("Resources/ghostty", isDirectory: true)
         try FileManager.default.createDirectory(at: resourcesRoot, withIntermediateDirectories: true)
@@ -42,6 +44,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
 
     func testResolveFindsResourcesInAppBundle() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let bundleResources = root.appendingPathComponent("Spaces.app/Contents/Resources", isDirectory: true)
         let resourcesRoot = bundleResources.appendingPathComponent("ghostty", isDirectory: true)
         try FileManager.default.createDirectory(at: resourcesRoot, withIntermediateDirectories: true)
@@ -58,6 +61,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
 
     func testResolveFindsResourcesBesideSymlinkedDaemonExecutable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let bundleResources = root.appendingPathComponent("Spaces.app/Contents/Resources", isDirectory: true)
         let resourcesRoot = bundleResources.appendingPathComponent("ghostty", isDirectory: true)
         let daemonURL = bundleResources.appendingPathComponent("spacesd")
@@ -83,6 +87,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
     /// anchoring the dev-tree search to the daemon binary's own location rather than the cwd (issue #188).
     func testResolveFindsBranchLocalGhosttykitFromExecutableWhenCwdIsUnrelated() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let packageDir = root.appendingPathComponent("apps/macos", isDirectory: true)
         let resourcesRoot = packageDir.appendingPathComponent(".local/ghosttykit/Resources/ghostty", isDirectory: true)
         let daemonURL = packageDir.appendingPathComponent(".build/arm64-apple-macosx/debug/spacesd")
@@ -92,6 +97,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
 
         // A cwd that resolves nothing on its own, proving the executable anchor carries resolution.
         let unrelatedCwd = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: unrelatedCwd) }
         try FileManager.default.createDirectory(at: unrelatedCwd, withIntermediateDirectories: true)
 
         let availability = GhosttyEmbeddedLocator.resolve(
@@ -130,6 +136,7 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
 
     func testResolveFindsBranchLocalGhosttykitLayout() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let resourcesRoot = root.appendingPathComponent("apps/macos/.local/ghosttykit/Resources/ghostty", isDirectory: true)
 
         try FileManager.default.createDirectory(at: resourcesRoot, withIntermediateDirectories: true)

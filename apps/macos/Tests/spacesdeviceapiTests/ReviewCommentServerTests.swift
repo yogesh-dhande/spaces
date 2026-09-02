@@ -13,6 +13,13 @@
     /// rejected), and the send+archive endpoint's validation gates (including the per-comment `revision`
     /// version echo) and its terminal-write/archive side effects.
     final class ReviewCommentServerTests: XCTestCase {
+        // `reviewCommentTestTLSRoot` below is an instance property (not file-scope), so XCTest constructs
+        // a fresh one per test method; clean it up per-instance rather than once for the class.
+        override func tearDown() {
+            try? FileManager.default.removeItem(at: reviewCommentTestTLSRoot)
+            super.tearDown()
+        }
+
         func testListReturnsOnlyThisWorkspacesDrafts() throws {
             try withTemporaryProfile { _ in
                 try seedWorkspace(id: "workspace-1")

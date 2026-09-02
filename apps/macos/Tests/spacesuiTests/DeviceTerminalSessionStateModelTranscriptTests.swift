@@ -109,6 +109,13 @@ final class DeviceTerminalSessionStateModelTranscriptTests: XCTestCase {
     /// only needs a stable certificate to pin. Mirrors `SpacesDeviceAPIServerTransportTests`.
     private static let tlsRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
         "device-terminal-session-state-model-transcript-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+    /// `tlsRoot` is process-lifetime, shared across every test method in this class, so it is cleaned up
+    /// once here rather than per-test in `tearDownWithError`.
+    override class func tearDown() {
+        try? FileManager.default.removeItem(at: tlsRoot)
+        super.tearDown()
+    }
 }
 
 /// A pairing store that authorizes any request carrying its fixed token. Mirrors the file-private

@@ -65,9 +65,12 @@
 
         /// `programEnables` is emitted by the child before it starts echoing, which is how a real program
         /// announces the mouse modes that decide whether a click is reported at all and in which format.
-        private func startEchoSession(programEnables: String = "") async throws -> (core: Box<GhosttyEmbeddedSessionCore>, outputPath: String) {
+        private func startEchoSession(programEnables: String = "") async throws -> (
+            core: Box<GhosttyEmbeddedSessionCore>, outputPath: String, cleanup: () -> Void
+        ) {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let cleanup: () -> Void = { try? FileManager.default.removeItem(at: root) }
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let enableModes = programEnables.isEmpty ? "" : "printf '\(programEnables)'; "
@@ -84,10 +87,19 @@
             }
             let outputPath = paths.outputPath
             try await waitUntil("the child must reach its echo loop") { Self.transcript(at: outputPath).contains("MOUSE_READY") }
-            return (coreBox, outputPath)
+            return (coreBox, outputPath, cleanup)
         }
 
         private func terminate(_ core: Box<GhosttyEmbeddedSessionCore>) { TerminalEngineActor.runSynchronously { core.value.terminate() } }
+
+        /// Terminates the core and waits for the writes terminate enqueues to commit before the deferred
+        /// `cleanup()` deletes this test's root — a delayed persistence queue would otherwise recreate the
+        /// runtime directory after teardown. The deferred `terminate()` + `cleanup()` backstop then no-ops
+        /// on the terminate (it is idempotent) and only covers early-throw exits.
+        private func shutDownAndDrain(_ core: Box<GhosttyEmbeddedSessionCore>) async {
+            terminate(core)
+            await core.value.drainPersistenceForShutdown()
+        }
 
         /// Clicks the top-left cell, which the normalized pointer (0, 0) always names whatever the session's
         /// grid size is, so the expected SGR coordinates are fixed at 1;1.
@@ -115,8 +127,11 @@
         /// `CSI ? 1000 h` turns on normal button tracking and `CSI ? 1006 h` selects SGR reports, which is
         /// what vim, htop, and tmux enable.
         @Test func clicksReachTheChildAsSGRReportsOnceTheProgramEnablesMouseTracking() async throws {
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             let press = sendTopLeftClick(pressed: true, to: core)
             #expect(press.ok, "a press must be accepted: \(press.message)")
@@ -125,12 +140,17 @@
             let release = sendTopLeftClick(pressed: false, to: core)
             #expect(release.ok, "a release must be accepted: \(release.message)")
             try await waitUntil("the release must arrive as an SGR report") { Self.transcript(at: outputPath).contains("^[[<0;1;1m") }
+
+            await shutDownAndDrain(core)
         }
 
         /// A program that never enabled tracking must not start receiving escape sequences it cannot parse.
         @Test func clicksSendNothingWhileTheProgramIsNotTrackingTheMouse() async throws {
-            let (core, outputPath) = try await startEchoSession()
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession()
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             let press = sendTopLeftClick(pressed: true, to: core)
             #expect(press.ok, "an unreported press is still a successful no-op: \(press.message)")
@@ -140,13 +160,18 @@
             try? await Task.sleep(for: .milliseconds(300))
             let output = Self.transcript(at: outputPath)
             #expect(!output.contains("^[[<"), "no mouse report may reach a program that is not tracking: \(output)")
+
+            await shutDownAndDrain(core)
         }
 
         /// While an application tracks the mouse the wheel belongs to it, not to the local viewport, and
         /// ghostty reports one button-four/five press per row of delta.
         @Test func wheelEventsAreReportedToTheChildWhileTheProgramTracksTheMouse() async throws {
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             let up = sendWheel(vertical: 1, to: core)
             #expect(up.ok, "a wheel event must be accepted: \(up.message)")
@@ -155,6 +180,8 @@
             let down = sendWheel(vertical: -1, to: core)
             #expect(down.ok, "a wheel event must be accepted: \(down.message)")
             try await waitUntil("scrolling down must report button five") { Self.transcript(at: outputPath).contains("^[[<65;1;1M") }
+
+            await shutDownAndDrain(core)
         }
 
         /// Horizontal wheel deltas belong to a tracking application too: ghostty reports one button-six
@@ -162,8 +189,11 @@
         /// horizontal-only gesture must not be dropped as a zero vertical delta. Exactly one report per
         /// notch — the x axis has no discrete multiplier, unlike the vertical axis.
         @Test func horizontalWheelEventsAreReportedToTheChildWhileTheProgramTracksTheMouse() async throws {
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             let right = sendWheel(vertical: 0, horizontal: 1, to: core)
             #expect(right.ok, "a horizontal wheel event must be accepted: \(right.message)")
@@ -179,17 +209,24 @@
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^[[<66;1;1M", in: output) == 1, "one right notch must produce exactly one report: \(output)")
             #expect(Self.occurrences(of: "^[[<67;1;1M", in: output) == 1, "one left notch must produce exactly one report: \(output)")
+
+            await shutDownAndDrain(core)
         }
 
         @Test func wheelEventsStayLocalWhileTheProgramIsNotTrackingTheMouse() async throws {
-            let (core, outputPath) = try await startEchoSession()
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession()
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             sendWheel(vertical: 1, to: core)
 
             try? await Task.sleep(for: .milliseconds(300))
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^[[<", in: output) == 0, "a local viewport scroll must write nothing to the child: \(output)")
+
+            await shutDownAndDrain(core)
         }
     }
 #endif

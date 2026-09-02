@@ -18,6 +18,11 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 }
 
 @MainActor final class SpacesDeviceAPISupervisorTests: XCTestCase {
+    override class func tearDown() {
+        try? FileManager.default.removeItem(at: supervisorTestTLSRoot)
+        super.tearDown()
+    }
+
     func testControlStatusWaitsForControlEndpointBeforeRelaunchingTerminalService() throws {
         var ensureCount = 0
         var relaunchCount = 0

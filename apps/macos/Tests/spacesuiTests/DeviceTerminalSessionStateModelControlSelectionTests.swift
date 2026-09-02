@@ -50,6 +50,10 @@ extension ProcessProfileEnvironmentSuites {
             if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
             if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: profileRoot)
+            // Swift Testing has no class-wide teardown hook (unlike XCTest's `override class func
+            // tearDown()`), so `tlsRoot` is cleaned up per-instance here. This suite has exactly one
+            // `@Test`, so exactly one instance ever loads it, making this equivalent to a one-time cleanup.
+            try? FileManager.default.removeItem(at: Self.tlsRoot)
         }
 
         @Test func controlRequestMapsSelectionTextFromTheDeviceAPIResponseOntoTheControlResponse() throws {

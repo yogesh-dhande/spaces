@@ -13,6 +13,10 @@ extension OrchestratorTests {
     // does. Otherwise PortReserver keeps the assigned port and the launched server dies with EADDRINUSE.
     func testRunConfiguredProcessReleasesPortReservationSoServerCanBind() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        // This fixture's assigned port is really bound as a placeholder below, so it must come from a
+        // range this test process has verified bindable rather than `PortRange.default`, which a real
+        // daemon on this machine may already hold (issue #533).
+        try seedBindablePortRange(in: store)
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.ports = [ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
@@ -42,6 +46,10 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
+        // This fixture's assigned port is really bound as a placeholder below, so it must come from a
+        // range this test process has verified bindable rather than `PortRange.default`, which a real
+        // daemon on this machine may already hold (issue #533).
+        try seedBindablePortRange(in: store)
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -75,6 +83,10 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
+        // This fixture's assigned port is really bound as a placeholder below, so it must come from a
+        // range this test process has verified bindable rather than `PortRange.default`, which a real
+        // daemon on this machine may already hold (issue #533).
+        try seedBindablePortRange(in: store)
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -129,6 +141,10 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
+        // This fixture's assigned port is really bound as a placeholder below, so it must come from a
+        // range this test process has verified bindable rather than `PortRange.default`, which a real
+        // daemon on this machine may already hold (issue #533).
+        try seedBindablePortRange(in: store)
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _, _ in },
             builtInTerminalSessionLauncher: { configuration in

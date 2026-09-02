@@ -45,6 +45,12 @@ extension ProcessProfileEnvironmentSuites {
             if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
             if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: profileRoot)
+            // Swift Testing has no class-wide teardown hook (unlike XCTest's `override class func
+            // tearDown()`), so `tlsRoot` is cleaned up per-instance here instead of once per file. This
+            // suite nests under `ProcessProfileEnvironmentSuites`, which is `.serialized`, so tests never
+            // overlap: each `withServer` call below simply regenerates the identity under the same
+            // `tlsRoot` path if a prior instance already tore it down.
+            try? FileManager.default.removeItem(at: Self.tlsRoot)
         }
 
         @Test func resolveTerminalLinkMapsExternalURLRequestAndUnwrapsMetadataIncludingArtifactKind() throws {

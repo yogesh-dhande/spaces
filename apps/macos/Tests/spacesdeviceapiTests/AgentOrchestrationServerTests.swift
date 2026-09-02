@@ -12,6 +12,13 @@
     /// spawn gate, the row shape carried over the wire, note sanitization, how a renamed row is named
     /// across overview builds, and the injected-killer routing for remote kill.
     final class AgentOrchestrationServerTests: XCTestCase {
+        // `agentOrchestrationTestTLSRoot` below is an instance property (not file-scope), so XCTest
+        // constructs a fresh one per test method; clean it up per-instance rather than once for the class.
+        override func tearDown() {
+            try? FileManager.default.removeItem(at: agentOrchestrationTestTLSRoot)
+            super.tearDown()
+        }
+
         /// Editor's Start Agent dialog accepts a command rather than a preset coding-agent kind. The
         /// daemon therefore creates an ordinary workspace terminal and lets the foreground reconciler
         /// promote it if the command actually runs a supported coding agent. This keeps arbitrary

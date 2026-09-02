@@ -40,6 +40,11 @@ final class TerminalEngineMainBlockedRegressionTests: XCTestCase {
         let box = try await TerminalEngineActor.run { () -> CoreBox in
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            // Registered right away so a throw from any of the calls below still cleans up `root`.
+            // Ownership moves to the outer test function's defer once construction succeeds, so this does
+            // not also remove `root` out from under a box the caller is still using.
+            var ownsRootCleanup = true
+            defer { if ownsRootCleanup { try? FileManager.default.removeItem(at: root) } }
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launch = TerminalSessionLaunchConfiguration(
@@ -48,6 +53,7 @@ final class TerminalEngineMainBlockedRegressionTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell)
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
+            ownsRootCleanup = false
             return CoreBox(core: core, outputPath: paths.outputPath, root: root)
         }
         defer {
