@@ -60,6 +60,12 @@ public enum CaddyRouteRegistry {
 
     public static func upsert(path: String, entry: CaddyRouteRegistryEntry) throws { try replace(path: path, removingKeys: [], upserting: [entry]) }
 
+    // Entries are compared and stored in canonical key order because callers (e.g.
+    // BrowserSSHForwardManager.publishCaddyRoutes) each publish only their own workspace's subset of
+    // the registry; an order-sensitive guard made 2+ forwarded workspaces rewrite and reload Caddy
+    // every second, since each publish moved its subset to the end of the array (#613).
+    private static func canonicalized(_ entries: [CaddyRouteRegistryEntry]) -> [CaddyRouteRegistryEntry] { entries.sorted { $0.key < $1.key } }
+
     /// Returns true when the stored entries changed and the file was rewritten; an identical
     /// result leaves the file untouched so callers can skip notifying the daemon.
     @discardableResult public static func replace(path: String, removingKeys: Set<String>, upserting newEntries: [CaddyRouteRegistryEntry]) throws
@@ -79,8 +85,9 @@ public enum CaddyRouteRegistry {
             entries.removeAll { $0.key == entry.key || $0.route.host == entry.route.host }
             entries.append(entry)
         }
-        guard entries != loaded else { return false }
-        try write(entries, path: path)
+        let canonicalEntries = canonicalized(entries)
+        guard canonicalEntries != canonicalized(loaded) else { return false }
+        try write(canonicalEntries, path: path)
         return true
     }
 
@@ -92,7 +99,7 @@ public enum CaddyRouteRegistry {
         let entries = try loadEntries(path: path)
         let kept = entries.filter { !shouldRemove($0) }
         guard kept.count != entries.count else { return false }
-        try write(kept, path: path)
+        try write(canonicalized(kept), path: path)
         return true
     }
 
