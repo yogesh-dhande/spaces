@@ -1469,10 +1469,16 @@ import workspacecore
         guard let output = filter?.outputImage else { return nil }
         let quietZone: CGFloat = 16
         let availableSize = max(size - (quietZone * 2), 1)
-        let scale = max(floor(availableSize / output.extent.width), 1)
-        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        // Fill availableSize regardless of module count (a fractional scale, not floor'd to an
+        // integer factor), so a long link with many modules doesn't shrink to a tiny square inside
+        // the quiet zone. samplingNearest() keeps module edges crisp under the fractional scale, and
+        // rendering at 2x pixel density (then letting NSImage's draw scale back down to point size)
+        // keeps it sharp on Retina.
+        let scale = availableSize / output.extent.width
+        let pixelScale = scale * 2
+        let transformed = output.samplingNearest().transformed(by: CGAffineTransform(scaleX: pixelScale, y: pixelScale))
         guard let cgImage = CIContext().createCGImage(transformed, from: transformed.extent) else { return nil }
-        let qrSize = transformed.extent.size
+        let qrSize = NSSize(width: availableSize, height: availableSize)
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
         NSColor.white.setFill()
