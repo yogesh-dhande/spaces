@@ -184,7 +184,8 @@ import workspacecore
                 // Same client cleanup an immediate `.gone` verdict performs in `deleteWorkspace` —
                 // otherwise a deferred-but-confirmed delete would leave this workspace's browser windows
                 // and terminal panes open indefinitely.
-                host.closeLocalBrowserSessionWindows(workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
+                host.browserSessions.closeLocalBrowserSessionWindows(
+                    workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
                 host.closeWorkspacePanes(workspaceID: workspaceID)
                 if showsBranchOutcomeNotice {
                     host.showInfoMessage(title: "Deleted workspace", message: AppKitController.workspaceDeletionBranchOutcomeUnknownMessage)

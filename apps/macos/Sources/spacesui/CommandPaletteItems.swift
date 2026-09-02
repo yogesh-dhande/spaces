@@ -307,7 +307,7 @@ extension CommandPaletteController {
                     switch target.kind {
                     case .browser:
                         guard let targetURL = target.targetURL else { continue }
-                        let label = AppKitController.browserSessionDisplayName(for: targetURL, sessions: browserSessions) ?? targetURL
+                        let label = BrowserSessionCoordinator.browserSessionDisplayName(for: targetURL, sessions: browserSessions) ?? targetURL
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,

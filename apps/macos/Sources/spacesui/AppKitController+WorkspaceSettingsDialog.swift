@@ -64,7 +64,7 @@ extension AppKitController {
 
         let browserSessionsSection = BrowserSessionsSection(
             sessions: config.browserSessions,
-            collapsedDisplayURLs: Self.browserSessionDisplayURLs(
+            collapsedDisplayURLs: BrowserSessionCoordinator.browserSessionDisplayURLs(
                 configuredSessions: config.browserSessions,
                 resolvedSessions: detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))),
             subtitle: "Named URLs that open in Chrome when you focus them.")
@@ -78,16 +78,17 @@ extension AppKitController {
 
         // Service rows show `remote:local` while a remote service has a live SSH forward, so the
         // section is tracked as the visible ports section: starting or stopping a forward while
-        // this dialog is open refreshes the port texts in place through refreshVisibleServicePortDisplays.
+        // this dialog is open refreshes the port texts in place through
+        // browserSessions.refreshVisibleServicePortDisplays.
         let portsSection = PortsSection(
             ports: config.ports,
-            collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
-                assignedPorts: detail.assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspace.id)),
+            collapsedDisplayPortTexts: BrowserSessionCoordinator.servicePortDisplayTexts(
+                assignedPorts: detail.assignedPorts, forwards: browserSessions.workspaceServiceForwards(workspaceID: workspace.id)),
             collapsedDisplayURLs: detail.assignedPorts.map { $0.url.isEmpty ? nil : $0.url },
             subtitle: "Per-workspace named ports, exposed as env vars.")
         portsSection.onCommit = { updated in commit { $0.ports = updated } }
-        visibleWorkspacePortsSection = portsSection
-        visiblePortsWorkspaceID = workspace.id
+        browserSessions.visibleWorkspacePortsSection = portsSection
+        browserSessions.visiblePortsWorkspaceID = workspace.id
 
         // Read-only reference: the authoritative env vars the daemon injects into this workspace's
         // processes and terminals (identity vars plus the per-service port/host/URL triple). Placed

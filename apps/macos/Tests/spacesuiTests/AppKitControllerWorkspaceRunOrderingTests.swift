@@ -366,7 +366,7 @@ import workspacecore
         let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
         let routedURL = "http://web.feature-123.localhost:7391/docs"
 
-        let openSessions = AppKitController.openBrowserSessionsForCycle(
+        let openSessions = BrowserSessionCoordinator.openBrowserSessionsForCycle(
             resolvedSessions: sessions, assignedPorts: assignedPorts, trackedTargetURLs: [routedURL], openTabURLs: [routedURL])
 
         #expect(openSessions.map(\.name) == ["docs"])
@@ -378,32 +378,32 @@ import workspacecore
         let adminURL = "http://localhost:32001/admin"
         let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
         let configuredTargetURLs = [rootURL, adminURL]
-        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
-        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
+        let rootSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
         let observedAdminURL = "http://web.feature-123.localhost:7391/admin/users"
 
         #expect(
-            !AppKitController.browserObservedURL(
+            !BrowserSessionCoordinator.browserObservedURL(
                 observedAdminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings, assignedPorts: assignedPorts))
         #expect(
-            AppKitController.browserObservedURL(
+            BrowserSessionCoordinator.browserObservedURL(
                 observedAdminURL, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings, assignedPorts: assignedPorts))
     }
 
     @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
         let targetURL = "http://localhost:3000"
-        let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(
+        let siblingTargetURLs = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(
             targetURL: targetURL, targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
 
         #expect(siblingTargetURLs == ["http://localhost:3000/admin"])
-        #expect(AppKitController.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(AppKitController.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(
-            !AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+            !BrowserSessionCoordinator.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(
-            !AppKitController.browserTabURL(
+            !BrowserSessionCoordinator.browserTabURL(
                 "http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
+        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
     }
 
     @Test func rootBrowserSessionDoesNotMatchOnlyOpenAdminSiblingTab() {
@@ -412,11 +412,11 @@ import workspacecore
         let configuredTargetURLs = [rootURL, adminURL]
         let openTabURLs = [adminURL]
 
-        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
-        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
+        let rootSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
 
-        #expect(!openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
-        #expect(openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
+        #expect(!openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
+        #expect(openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
     }
 
     @Test func focusRequestsUseConfiguredBrowserSessionSiblingsForPrefixExclusion() {
@@ -432,30 +432,30 @@ import workspacecore
             projects: [SpacesDeviceProjectSummary(id: "project", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
             workspaces: [workspace], sessions: [])
 
-        let targetURLs = AppKitController.browserSessionTargetURLs(workspaceID: "workspace", targetURL: rootURL, overview: overview)
-        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: targetURLs)
+        let targetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(workspaceID: "workspace", targetURL: rootURL, overview: overview)
+        let rootSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: targetURLs)
 
         #expect(targetURLs == [rootURL, adminURL])
         #expect(rootSiblings == [adminURL])
-        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+        #expect(!BrowserSessionCoordinator.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
     }
 
     @Test func trackedBrowserSessionTargetMatchingAcceptsTrailingSlashOnlyDifference() {
-        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000/", matches: "http://localhost:3000"))
-        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000", matches: "http://localhost:3000/"))
-        #expect(!AppKitController.browserSessionTargetURL("http://localhost:3000/admin", matches: "http://localhost:3000"))
+        #expect(BrowserSessionCoordinator.browserSessionTargetURL("http://localhost:3000/", matches: "http://localhost:3000"))
+        #expect(BrowserSessionCoordinator.browserSessionTargetURL("http://localhost:3000", matches: "http://localhost:3000/"))
+        #expect(!BrowserSessionCoordinator.browserSessionTargetURL("http://localhost:3000/admin", matches: "http://localhost:3000"))
     }
 
     @Test func teardownSiblingExclusionsIncludeConfiguredButUntrackedBrowserSessions() {
         let rootURL = "http://localhost:3000"
         let adminURL = "http://localhost:3000/admin"
-        let teardownTargetURLs = AppKitController.browserSessionTeardownTargetURLs(
+        let teardownTargetURLs = BrowserSessionCoordinator.browserSessionTeardownTargetURLs(
             configuredTargetURLs: [rootURL, adminURL], trackedTargetURLs: [rootURL])
-        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: teardownTargetURLs)
+        let rootSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: teardownTargetURLs)
 
         #expect(teardownTargetURLs == [rootURL, adminURL])
         #expect(rootSiblings == [adminURL])
-        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+        #expect(!BrowserSessionCoordinator.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
     }
 
     @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {

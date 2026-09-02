@@ -40,11 +40,6 @@ extension AppKitController {
         case cancelQuit
     }
 
-    struct BrowserSessionWindowTracking: Equatable, Sendable {
-        let targetURL: String
-        let windowID: Int
-    }
-
     nonisolated static func stopAllQuitWorkspaceSelection(
         runningWorkspaces: [WorkspaceRecord], liveSessions: [TerminalServiceSessionSummary],
         workspaceForLiveSession: (String) throws -> WorkspaceRecord?
@@ -174,37 +169,6 @@ extension AppKitController {
         return workspaces
     }
 
-    nonisolated static func closeLocalBrowserSessionWindowsSynchronously(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
-        let store = ClientBrowserWindowIDStore()
-        let chrome = ChromeAdapter()
-        closeLocalBrowserSessionWindowsSynchronously(
-            workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs,
-            trackedWindowIDs: {
-                try store.windowIDs(workspaceID: workspaceID).map { BrowserSessionWindowTracking(targetURL: $0.targetURL, windowID: $0.windowID) }
-            }, chromeIsRunning: { chrome.isRunning() },
-            closeMatchingTabsInWindow: { windowID, urlPrefix, excludedURLPrefixes in
-                try chrome.closeMatchingTabsInWindow(windowID: windowID, urlPrefix: urlPrefix, excludingURLPrefixes: excludedURLPrefixes)
-            }, clearTrackedWindowIDs: { try store.clearAll(workspaceID: workspaceID) })
-    }
-
-    nonisolated static func closeLocalBrowserSessionWindowsSynchronously(
-        workspaceID: String, configuredBrowserSessionTargetURLs: [String], trackedWindowIDs: () throws -> [BrowserSessionWindowTracking],
-        chromeIsRunning: () -> Bool, closeMatchingTabsInWindow: (Int, String, [String]) throws -> Bool, clearTrackedWindowIDs: () throws -> Void
-    ) {
-        guard let tracked = try? trackedWindowIDs(), !tracked.isEmpty else { return }
-        // This check avoids launching Chrome just to clean up tabs that disappeared when the user quit Chrome.
-        if chromeIsRunning() {
-            let teardownTargetURLs = browserSessionTeardownTargetURLs(
-                configuredTargetURLs: configuredBrowserSessionTargetURLs, trackedTargetURLs: tracked.map(\.targetURL))
-            for entry in tracked {
-                // The URL guard keeps a stale reused Chrome window id from closing an unrelated user tab.
-                _ = try? closeMatchingTabsInWindow(
-                    entry.windowID, entry.targetURL, browserSessionSiblingTargetURLs(targetURL: entry.targetURL, targetURLs: teardownTargetURLs))
-            }
-        }
-        try? clearTrackedWindowIDs()
-    }
-
     func performStopAllQuitCleanup(liveSessions: [TerminalServiceSessionSummary]) -> StopAllQuitCleanupResult {
         do {
             let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
@@ -223,7 +187,7 @@ extension AppKitController {
                     try Self.configuredBrowserSessionTargetURLsForStopAllQuit(workspaceID: workspaceID, orchestrator: orchestrator)
                 },
                 closeBrowserSessions: { workspaceID, configuredBrowserSessionTargetURLs in
-                    Self.closeLocalBrowserSessionWindowsSynchronously(
+                    BrowserSessionCoordinator.closeLocalBrowserSessionWindowsSynchronously(
                         workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
                 })
         } catch {
@@ -253,7 +217,7 @@ extension AppKitController {
         let reply = Self.stopAllQuitFailureTerminateReply(
             result: result, choice: choice, terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
             closeBrowserSessions: { workspaceID, configuredBrowserSessionTargetURLs in
-                Self.closeLocalBrowserSessionWindowsSynchronously(
+                BrowserSessionCoordinator.closeLocalBrowserSessionWindowsSynchronously(
                     workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
             })
         if choice == .forceQuit, reply == .terminateCancel {

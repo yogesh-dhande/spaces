@@ -37,7 +37,7 @@ import spacesdevicecore
                     ]))
             ], sessions: [])
 
-        let workspaceID = AppKitController.workspaceIDForObservedBrowserURL("http://web.feature-123.localhost:7391/docs", in: [overview])
+        let workspaceID = BrowserSessionCoordinator.workspaceIDForObservedBrowserURL("http://web.feature-123.localhost:7391/docs", in: [overview])
 
         #expect(workspaceID == "workspace")
     }
