@@ -102,7 +102,7 @@ import workspacecore
 
     @MainActor @Test func browserSessionShortcutMatchingFallsBackToResolvedURLForTemplatedSession() {
         var resolvedCursor = 0
-        let matchedURL = AppKitController.matchedBrowserSessionShortcutURL(
+        let matchedURL = BrowserSessionCoordinator.matchedBrowserSessionShortcutURL(
             configuredSession: BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT"),
             rawURL: "http://localhost:$FRONTEND_PORT", resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")],
             resolvedSessionCursor: &resolvedCursor, shortcutIndicesByURL: ["http://localhost:3000": 1])
@@ -112,7 +112,7 @@ import workspacecore
     }
 
     @MainActor @Test func browserSessionDisplayURLsPreferResolvedValues() {
-        let displayURLs = AppKitController.browserSessionDisplayURLs(
+        let displayURLs = BrowserSessionCoordinator.browserSessionDisplayURLs(
             configuredSessions: [BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT")],
             resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")])
 

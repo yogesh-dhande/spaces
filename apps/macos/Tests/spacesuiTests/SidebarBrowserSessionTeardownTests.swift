@@ -47,13 +47,13 @@ struct SidebarBrowserSessionTeardownTests {
 
     @Test func synchronousQuitBrowserCleanupClosesTrackedURLScopedTabsAndClearsTracking() {
         let tracked = [
-            AppKitController.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:3000", windowID: 101),
-            AppKitController.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:5173", windowID: 102),
+            BrowserSessionCoordinator.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:3000", windowID: 101),
+            BrowserSessionCoordinator.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:5173", windowID: 102),
         ]
         var closeRequests: [String] = []
         var didClearTracking = false
 
-        AppKitController.closeLocalBrowserSessionWindowsSynchronously(
+        BrowserSessionCoordinator.closeLocalBrowserSessionWindowsSynchronously(
             workspaceID: "workspace-1",
             configuredBrowserSessionTargetURLs: ["http://127.0.0.1:3000", "http://127.0.0.1:3000/admin", "http://127.0.0.1:5173"],
             trackedWindowIDs: { tracked }, chromeIsRunning: { true },

@@ -9,7 +9,7 @@ import systembridge
 /// specifically since it is the one cause the user can fix themselves.
 @Suite struct AppKitControllerBrowserFocusFailureTests {
     @Test func deniedPermissionNamesChromeAndSystemSettings() {
-        let message = AppKitController.browserSessionFocusFailureMessage(automationStatus: .denied)
+        let message = BrowserSessionCoordinator.browserSessionFocusFailureMessage(automationStatus: .denied)
         #expect(message.contains("Google Chrome"))
         #expect(message.contains("System Settings"))
         #expect(message.contains("Automation"))
@@ -17,7 +17,7 @@ import systembridge
 
     @Test func grantedNotDeterminedAndUnavailableShareThePlainMessageWithNoSystemSettingsMention() {
         for status: ChromeAutomationStatus in [.granted, .notDetermined, .unavailable] {
-            let message = AppKitController.browserSessionFocusFailureMessage(automationStatus: status)
+            let message = BrowserSessionCoordinator.browserSessionFocusFailureMessage(automationStatus: status)
             #expect(message.contains("Google Chrome"))
             #expect(!message.contains("System Settings"))
         }
@@ -33,7 +33,7 @@ import systembridge
 
     @Test func everyVariantNamesChromeAndNoOtherBrowser() {
         for status: ChromeAutomationStatus in [.denied, .granted, .notDetermined, .unavailable] {
-            let message = AppKitController.browserSessionFocusFailureMessage(automationStatus: status)
+            let message = BrowserSessionCoordinator.browserSessionFocusFailureMessage(automationStatus: status)
             #expect(message.contains("Google Chrome"))
             for otherBrowser in ["Safari", "Firefox", "Edge", "Arc"] { #expect(!message.contains(otherBrowser)) }
         }

@@ -664,9 +664,10 @@ private struct DeviceSyncState {
     ) {
         guard let previous else { return }
         for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
-            host.closeLocalBrowserSessionWindows(
+            host.browserSessions.closeLocalBrowserSessionWindows(
                 workspaceID: workspaceID,
-                configuredBrowserSessionTargetURLs: AppKitController.browserSessionTargetURLs(workspaceID: workspaceID, overview: previousOverview))
+                configuredBrowserSessionTargetURLs: BrowserSessionCoordinator.browserSessionTargetURLs(
+                    workspaceID: workspaceID, overview: previousOverview))
         }
     }
 
@@ -1094,7 +1095,7 @@ private struct DeviceSyncState {
         let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: desiredIDs)
         for removal in outcome.removed {
             removal.client.stop()
-            host.stopRemoteBrowserForwards(deviceID: removal.deviceID)
+            host.browserSessions.stopRemoteBrowserForwards(deviceID: removal.deviceID)
         }
         guard !outcome.devicesToOpen.isEmpty else { return }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
@@ -1308,7 +1309,7 @@ private struct DeviceSyncState {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
                 }
                 updateAlertsSidebarBadge()
-                host.stopRemoteBrowserForwards(deviceID: deviceID)
+                host.browserSessions.stopRemoteBrowserForwards(deviceID: deviceID)
                 return
             }
             // Adopted ahead of the unchanged-check below, because the record and the overview change
@@ -1349,7 +1350,7 @@ private struct DeviceSyncState {
             // returns early, so this only fires when the remote section actually changed.
             host.commandPalette.invalidateCommandPaletteCache()
             host.deviceModel.deviceSections[index].loadState = .loaded
-            host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
+            host.browserSessions.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
             // longer retains so the pane cannot outlive the remote daemon's transcript garbage-collection.
             // The keep-set is the remote daemon's own published retention rule
@@ -1443,7 +1444,7 @@ private struct DeviceSyncState {
             host.deviceModel.deviceSections[index].daemonStatus = nil
             host.deviceModel.deviceSections[index].loadState = .offline(reason)
             host.daemonUpdate.reconcileCompatibilityBlock(deviceID: deviceID)
-            host.stopRemoteBrowserForwards(deviceID: deviceID)
+            host.browserSessions.stopRemoteBrowserForwards(deviceID: deviceID)
         }
         applySidebarDataChange()
         updateAlertsSidebarBadge()

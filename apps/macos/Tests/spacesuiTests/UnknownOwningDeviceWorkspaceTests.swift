@@ -21,17 +21,17 @@ import spacesdevicecore
         // Stop/restart/archive close the workspace's configured browser tabs. An unknown overview
         // lists no configured sessions, so teardown closes no Chrome tabs — closing the ones the
         // local overview happens to configure would tear down another workspace's tabs.
-        #expect(AppKitController.browserSessionTargetURLs(workspaceID: "workspace", overview: nil).isEmpty)
+        #expect(BrowserSessionCoordinator.browserSessionTargetURLs(workspaceID: "workspace", overview: nil).isEmpty)
     }
 
     @Test func browserFocusForAnUnknownOverviewHasNoSiblingTabs() {
         // Focus dedupes a session's tab against its workspace's sibling URLs. With no overview the
         // only known URL is the one the focus request carried, so there are no siblings to exclude.
         let targetURL = "http://localhost:3000"
-        let targetURLs = AppKitController.browserSessionTargetURLs(workspaceID: "workspace", targetURL: targetURL, overview: nil)
+        let targetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(workspaceID: "workspace", targetURL: targetURL, overview: nil)
 
         #expect(targetURLs == [targetURL])
-        #expect(AppKitController.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: targetURLs).isEmpty)
+        #expect(BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: targetURLs).isEmpty)
     }
 
     @Test func sessionPickerForAnUnknownOverviewListsNoRuntimeTargets() {

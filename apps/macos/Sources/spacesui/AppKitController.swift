@@ -198,6 +198,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var daemonUpdate = DaemonUpdateController(
         host: self, requestSidebarReload: { [unowned self] in self.requestSidebarReload(forceRemoteRefresh: true) })
     lazy var workspaceDeletion = WorkspaceDeletionCoordinator(host: self)
+    lazy var browserSessions = BrowserSessionCoordinator(host: self)
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
@@ -247,15 +248,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var appEffectiveAppearanceObservation: NSKeyValueObservation?
     private var didStartBackgroundServices = false
-    private let browserSSHForwardManager = BrowserSSHForwardManager()
-    private var remoteBrowserForwardRevisions: [String: Int] = [:]
-    // The open workspace settings dialog's Services section, kept so an SSH forward start/stop can
-    // refresh the rows' port texts in place instead of rebuilding the section. The section object is
-    // owned by its view (RowSectionCard.retain), so the weak reference clears itself when the dialog
-    // closes. Set from the workspace settings dialog, which lives in a separate file, so these are
-    // module-internal rather than private.
-    weak var visibleWorkspacePortsSection: PortsSection?
-    var visiblePortsWorkspaceID: String?
     var setupFlowController: SetupFlowController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
@@ -296,27 +288,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var routeCompletedAt: Date?
     }
 
-    private struct BrowserCycleState: Sendable {
-        let openBrowserSessions: [BrowserSession]
-        let frontmostURL: String?
-        let clientDBLookupMS: Int
-        let chromeAppleScriptMS: Int
-        let trackedWindowCount: Int
-        let trackedTabCount: Int
-    }
-
-    private struct BrowserFocusResult: Sendable {
-        let focused: Bool
-        let path: String
-        let clientDBLookupMS: Int
-        let clientDBWriteMS: Int
-        let chromeAppleScriptMS: Int
-    }
-
-    private struct RoutedBrowserFocusTarget: Sendable {
-        let targetURL: URL
-        let siblingTargetURLs: [String]
-    }
 
     private struct TerminalSessionWindowStateDump: Codable {
         let sessionID: String
@@ -512,7 +483,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     public func applicationWillTerminate(_ notification: Notification) {
         deferredHotkeySelectionRefreshTask?.cancel()
-        browserSSHForwardManager.stopAll()
+        browserSessions.stopAllForwards()
         sidebar.cancelSidebarReloadTask()
         shortcuts.teardownGlobalHotkey()
         shortcuts.teardownShortcutMonitor()
@@ -699,7 +670,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession]
     ) -> String? {
         switch target.kind {
-        case .browser: return browserSessionDisplayName(for: target.targetURL, sessions: browserSessions)
+        case .browser: return BrowserSessionCoordinator.browserSessionDisplayName(for: target.targetURL, sessions: browserSessions)
         case .process: return target.processID.flatMap { id in detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name }
         case .window: return target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
         case .agent: return target.agentWindow?.label
@@ -876,7 +847,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let cycleSession = validCycleSession(workspaceID: workspaceID)
         let targetResolutionStartedAt = Date()
-        let browserCycleState = await trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
+        let browserCycleState = await browserSessions.trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
         let openTerminalSessionIDs = Set(panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
 
         // Cycle over the same base targets the numbered shortcuts use, limited to running
@@ -895,7 +866,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
         let cursor = windowNavigationCursorByWorkspace[workspaceID]
         let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : browserCycleState.frontmostURL
-        let configuredBrowserTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: detail.config.resolvedBrowserSessions)
+        let configuredBrowserTargetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(resolvedSessions: detail.config.resolvedBrowserSessions)
         let currentIndex = Self.cycleCurrentIndex(
             targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
             browserTargetURLs: configuredBrowserTargetURLs, cursorKeys: cursorKeys, cursor: cursor)
@@ -942,141 +913,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
             orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
         logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true, detail: resolutionDetail)
-    }
-
-    private func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
-        let resolvedSessions = detail.config.resolvedBrowserSessions
-        guard !resolvedSessions.isEmpty else {
-            return BrowserCycleState(
-                openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: 0, chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
-        }
-        return await Task.detached(priority: .userInitiated) {
-            let dbStartedAt = Date()
-            let trackedWindows = ((try? ClientBrowserWindowIDStore().windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
-            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbStartedAt)
-            guard !trackedWindows.isEmpty else {
-                return BrowserCycleState(
-                    openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: clientDBLookupMS, chromeAppleScriptMS: 0, trackedWindowCount: 0,
-                    trackedTabCount: 0)
-            }
-
-            let chrome = ChromeAdapter()
-            let chromeStartedAt = Date()
-            let snapshot =
-                (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
-            let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
-            let openBrowserSessions = Self.openBrowserSessionsForCycle(
-                resolvedSessions: resolvedSessions, assignedPorts: detail.assignedPorts, trackedTargetURLs: trackedWindows.map(\.targetURL),
-                openTabURLs: snapshot.tabs.map(\.url))
-            return BrowserCycleState(
-                openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
-                chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
-        }.value
-    }
-
-    nonisolated static func openBrowserSessionsForCycle(
-        resolvedSessions: [SpacesDeviceBrowserSession], assignedPorts: [SpacesDeviceAssignedPort], trackedTargetURLs: [String], openTabURLs: [String]
-    ) -> [BrowserSession] {
-        let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: resolvedSessions)
-        return resolvedSessions.compactMap { session -> BrowserSession? in
-            guard let url = session.url, !url.isEmpty else { return nil }
-            let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
-            guard
-                trackedTargetURLs.contains(where: {
-                    browserObservedURL($0, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs, assignedPorts: assignedPorts)
-                })
-            else { return nil }
-            guard
-                openTabURLs.contains(where: {
-                    browserObservedURL($0, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs, assignedPorts: assignedPorts)
-                })
-            else { return nil }
-            return localBrowserSession(from: session)
-        }
-    }
-
-    nonisolated static func browserSessionTargetURLs(resolvedSessions: [SpacesDeviceBrowserSession], including targetURL: String? = nil) -> [String] {
-        var values = resolvedSessions.compactMap(\.url)
-        if let targetURL { values.append(targetURL) }
-        return uniqueBrowserSessionTargetURLs(values)
-    }
-
-    nonisolated static func browserSessionTargetURLs(workspaceID: String, targetURL: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
-        browserSessionTargetURLs(
-            resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [], including: targetURL)
-    }
-
-    nonisolated static func browserSessionTargetURLs(workspaceID: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
-        browserSessionTargetURLs(resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [])
-    }
-
-    nonisolated static func browserSessionTeardownTargetURLs(configuredTargetURLs: [String], trackedTargetURLs: [String]) -> [String] {
-        uniqueBrowserSessionTargetURLs(configuredTargetURLs + trackedTargetURLs)
-    }
-
-    nonisolated private static func uniqueBrowserSessionTargetURLs(_ values: [String]) -> [String] {
-        var seen = Set<String>()
-        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
-    }
-
-    nonisolated static func browserSessionSiblingTargetURLs(targetURL: String, targetURLs: [String]) -> [String] {
-        guard !targetURL.isEmpty else { return [] }
-        var seen = Set<String>()
-        return targetURLs.filter { candidate in
-            guard !candidate.isEmpty, !browserSessionTargetURL(candidate, matches: targetURL), candidate.hasPrefix(targetURL),
-                seen.insert(candidate).inserted
-            else { return false }
-            return true
-        }
-    }
-
-    nonisolated static func browserSessionTargetURL(_ candidateURL: String, matches targetURL: String) -> Bool {
-        guard !candidateURL.isEmpty, !targetURL.isEmpty else { return false }
-        return browserTabURLIsExactTarget(candidateURL, targetURL: targetURL)
-    }
-
-    nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String])
-        -> Bool
-    {
-        guard !targetURL.isEmpty else { return false }
-        if browserTabURLIsExactTarget(tabURL, targetURL: targetURL) { return true }
-        guard tabURL.hasPrefix(targetURL) else { return false }
-        return !siblingTargetURLs.contains { siblingTargetURL in !siblingTargetURL.isEmpty && tabURL.hasPrefix(siblingTargetURL) }
-    }
-
-    nonisolated static func browserObservedURL(
-        _ observedURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String],
-        assignedPorts: [SpacesDeviceAssignedPort]
-    ) -> Bool {
-        browserObservedURLMatchLength(observedURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: assignedPorts) != nil
-    }
-
-    nonisolated private static func browserObservedURLMatchLength(
-        _ observedURL: String, targetURL: String, siblingTargetURLs: [String], assignedPorts: [SpacesDeviceAssignedPort]
-    ) -> Int? {
-        if browserTabURL(observedURL, matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs) { return targetURL.count }
-        guard let routedTargetURL = routedBrowserSessionTargetURL(targetURL: targetURL, observedURL: observedURL, assignedPorts: assignedPorts) else {
-            return nil
-        }
-        let routedSiblingTargetURLs = siblingTargetURLs.compactMap {
-            routedBrowserSessionTargetURL(targetURL: $0, observedURL: observedURL, assignedPorts: assignedPorts)
-        }
-        guard browserTabURL(observedURL, matchesBrowserSessionTargetURL: routedTargetURL, excluding: routedSiblingTargetURLs) else { return nil }
-        return routedTargetURL.count
-    }
-
-    nonisolated private static func routedBrowserSessionTargetURL(targetURL: String, observedURL: String, assignedPorts: [SpacesDeviceAssignedPort])
-        -> String?
-    {
-        BrowserSSHForwardManager.routePlan(
-            targetURL: targetURL, assignedPorts: assignedPorts, localRouterPort: URLComponents(string: observedURL)?.port)?.browserURL.absoluteString
-    }
-
-    nonisolated private static func browserTabURLIsExactTarget(_ tabURL: String, targetURL: String) -> Bool {
-        if tabURL == targetURL { return true }
-        guard !targetURL.contains("?"), !targetURL.contains("#") else { return false }
-        if targetURL.hasSuffix("/") { return tabURL == String(targetURL.dropLast()) }
-        return tabURL == targetURL + "/"
     }
 
     nonisolated static func cycleWindowTargets(
@@ -1261,9 +1097,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let frontmostBrowserURL, !frontmostBrowserURL.isEmpty {
             let matches = targets.indices.compactMap { index -> (offset: Int, matchLength: Int)? in
                 guard targets[index].kind == .browser, let targetURL = targets[index].targetURL, !targetURL.isEmpty else { return nil }
-                let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserTargetURLs)
+                let siblingTargetURLs = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserTargetURLs)
                 guard
-                    let matchLength = browserObservedURLMatchLength(
+                    let matchLength = BrowserSessionCoordinator.browserObservedURLMatchLength(
                         frontmostBrowserURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: detail.assignedPorts)
                 else { return nil }
                 return (index, matchLength)
@@ -3491,24 +3327,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         "\(action.title) requires a workspace path on this Mac. \(deviceName) workspaces live on the selected daemon; use an SSH-capable workflow for that remote path."
     }
 
-    /// Message for a browser-session focus that Chrome refused. Workspace browser sessions are a
-    /// Chrome feature (Spaces tracks and groups their tabs by Chrome window id), so a failure is
-    /// reported rather than redirected to another browser. A denied Automation permission is the
-    /// one failure the user can fix themselves, so it names the setting; every other cause
-    /// (Chrome missing, not running, or refusing the script) gets the plain message.
-    nonisolated static func browserSessionFocusFailureMessage(automationStatus: ChromeAutomationStatus) -> String {
-        switch automationStatus {
-        case .denied:
-            return
-                "Spaces could not open this browser session because it is not allowed to control Google Chrome. Allow Spaces to control Google Chrome in System Settings > Privacy & Security > Automation."
-        case .granted, .notDetermined, .unavailable:
-            return
-                // Not "installed and running": scripting a quit Chrome launches it, so a failure
-                // here means Chrome is missing or cannot be scripted, never merely closed.
-                "Spaces could not open this browser session in Google Chrome. Workspace browser sessions open in Google Chrome; make sure it is installed."
-        }
-    }
-
     static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
         switch response {
         case .alertFirstButtonReturn: return .updateAllWorkspaces
@@ -4404,32 +4222,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.startRemoteOverviewSubscriptions()
     }
 
-    func reconcileRemoteBrowserForwards(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload) {
-        guard device.id != deviceModel.localDeviceID else { return }
-        let manager = browserSSHForwardManager
-        let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
-        Task.detached(priority: .utility) { [weak self] in
-            manager.reconcile(device: device, overview: overview, revision: revision)
-            await self?.refreshVisibleServicePortDisplays(deviceID: device.id)
-        }
-    }
-
-    func stopRemoteBrowserForwards(deviceID: String) {
-        guard deviceID != deviceModel.localDeviceID else { return }
-        let manager = browserSSHForwardManager
-        let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
-        Task.detached(priority: .utility) { [weak self] in
-            manager.stop(deviceID: deviceID, revision: revision)
-            await self?.refreshVisibleServicePortDisplays(deviceID: deviceID)
-        }
-    }
-
-    private func nextRemoteBrowserForwardRevision(deviceID: String) -> Int {
-        let next = (remoteBrowserForwardRevisions[deviceID] ?? 0) + 1
-        remoteBrowserForwardRevisions[deviceID] = next
-        return next
-    }
-
     nonisolated static func scheduleAfterNextRunLoopTurn(_ action: @escaping @MainActor () -> Void) {
         RunLoop.main.perform { Task { @MainActor in action() } }
     }
@@ -4517,7 +4309,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func deviceID(forProjectID projectID: String) -> String? { deviceModel.projects.first(where: { $0.id == projectID })?.deviceID }
 
-    private func isRemoteDeviceID(_ deviceID: String) -> Bool {
+    /// Internal rather than `private`: `BrowserSessionCoordinator.workspaceServiceForwards` also needs
+    /// this to decide whether a workspace's services can have a live SSH forward.
+    func isRemoteDeviceID(_ deviceID: String) -> Bool {
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
     }
 
@@ -5039,7 +4833,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // code pane's assigned-agent dropdown stays current with whatever just spawned/exited.
         panelCoordinator.updateCodePaneAgents(deviceID: deviceID, hosting: self)
         if deviceID != deviceModel.localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
-            reconcileRemoteBrowserForwards(device: device, overview: overview)
+            browserSessions.reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
         rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
@@ -7055,86 +6849,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return slot
     }
 
-    static func browserSessionDisplayURLs(configuredSessions: [BrowserSession], resolvedSessions: [BrowserSession]) -> [String?] {
-        var resolvedSessionCursor = 0
-        return configuredSessions.map { session in
-            guard let rawURL = session.url, !rawURL.isEmpty else { return nil }
-            return matchedBrowserSessionResolvedURL(
-                configuredSession: session, rawURL: rawURL, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor)
-                ?? rawURL
-        }
-    }
-
-    static func matchedBrowserSessionResolvedURL(
-        configuredSession: BrowserSession, rawURL: String, resolvedSessions: [BrowserSession], resolvedSessionCursor: inout Int
-    ) -> String? {
-        let resolvedURLs = Set(resolvedSessions.compactMap(\.url).filter { !$0.isEmpty })
-        return matchedBrowserSessionShortcutURL(
-            configuredSession: configuredSession, rawURL: rawURL, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor,
-            shortcutIndicesByURL: Dictionary(uniqueKeysWithValues: resolvedURLs.map { ($0, 0) }))
-    }
-
-    static func matchedBrowserSessionShortcutURL(
-        configuredSession: BrowserSession, rawURL: String, resolvedSessions: [BrowserSession], resolvedSessionCursor: inout Int,
-        shortcutIndicesByURL: [String: Int]
-    ) -> String? {
-        if shortcutIndicesByURL[rawURL] != nil { return rawURL }
-
-        let trimmedName = configuredSession.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedName, !trimmedName.isEmpty,
-            let matched = resolvedSessions.first(where: {
-                $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName && ($0.url.map { shortcutIndicesByURL[$0] != nil } ?? false)
-            })?.url
-        {
-            return matched
-        }
-
-        guard rawURL.contains("$") else { return nil }
-        while resolvedSessionCursor < resolvedSessions.count {
-            let candidate = resolvedSessions[resolvedSessionCursor]
-            resolvedSessionCursor += 1
-            guard let candidateURL = candidate.url, shortcutIndicesByURL[candidateURL] != nil else { continue }
-            return candidateURL
-        }
-        return nil
-    }
-
-    /// Live SSH-forward snapshots for a workspace's services: remote workspaces read the forward
-    /// manager, local workspaces have no forwards (their assigned port is already local).
-    func workspaceServiceForwards(workspaceID: String) -> [BrowserSSHForwardManager.ServiceForwardSnapshot] {
-        guard let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID), isRemoteDeviceID(workspaceDeviceID) else { return [] }
-        return browserSSHForwardManager.forwardedServicePorts(deviceID: workspaceDeviceID, workspaceID: workspaceID)
-    }
-
-    /// Refreshes the open workspace settings dialog's Services rows' port texts after an SSH forward
-    /// for `deviceID` starts or stops. Reloads the section in place (preserving open editors); when
-    /// no workspace settings dialog is open the weak section reference is nil and this is a no-op.
-    private func refreshVisibleServicePortDisplays(deviceID: String) {
-        guard let section = visibleWorkspacePortsSection, let workspaceID = visiblePortsWorkspaceID,
-            self.deviceID(forWorkspaceID: workspaceID) == deviceID, let workspace = deviceWorkspaceSummary(workspaceID: workspaceID)
-        else { return }
-        section.reload(
-            ports: section.currentPorts,
-            collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
-                assignedPorts: workspace.assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspaceID)))
-    }
-
-    /// The Services row port text: `remote:local` while a remote service has a live SSH forward
-    /// (e.g. "3000:52341"), otherwise the bare assigned port.
-    nonisolated static func servicePortDisplay(assignedPort: Int?, forwardedLocalPort: Int?) -> String? {
-        guard let assignedPort, assignedPort > 0 else { return nil }
-        guard let forwardedLocalPort else { return String(assignedPort) }
-        return "\(assignedPort):\(forwardedLocalPort)"
-    }
-
-    nonisolated static func servicePortDisplayTexts(
-        assignedPorts: [SpacesDeviceAssignedPort], forwards: [BrowserSSHForwardManager.ServiceForwardSnapshot]
-    ) -> [String?] {
-        var localPorts: [String: Int] = [:]
-        for forward in forwards { localPorts["\(forward.serviceName):\(forward.remotePort)"] = forward.localPort }
-        return assignedPorts.map { servicePortDisplay(assignedPort: $0.port, forwardedLocalPort: localPorts["\($0.name):\($0.port)"]) }
-    }
-
     private func clearActiveAddProjectFormState() {
         // Nothing is cloned until Create, so tearing down the form only clears its cached state.
         addProjectFieldRefs = nil
@@ -8342,7 +8056,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
 
     private func performRestartWorkspace(id: String) async {
-        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
+        let browserSessionTargetURLs = browserSessions.configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
@@ -8358,7 +8072,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // Restart goes through the daemon stop path; the daemon does not own the
             // client-side Chrome browser-session tabs, so close them here too for a clean
             // restarted state (a later browser focus then opens fresh tabs).
-            self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+            self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
             self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
@@ -8377,7 +8091,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
 
     private func performStopWorkspace(id: String) async {
-        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
+        let browserSessionTargetURLs = browserSessions.configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
@@ -8390,27 +8104,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         switch result {
         case .success(let response):
-            self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+            self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
             self.closeWorkspacePanes(workspaceID: id)
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
-        }
-    }
-
-    /// Closes the workspace browser-session tabs the app opened or adopted and clears their
-    /// tracking rows. Browser-session tab locations are client/desktop-local, so the
-    /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
-    /// the workspace has no tracked browser-session tabs.
-    ///
-    /// Called from two disjoint triggers: the GUI's own stop/restart/delete handlers (eager, and
-    /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
-    /// transition diff (the net for stop/delete initiated outside this GUI — CLI, MCP, the Device
-    /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
-    /// re-observes the same stopped workspace finds nothing to close.
-    func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
-        Task.detached(priority: .utility) {
-            Self.closeLocalBrowserSessionWindowsSynchronously(
-                workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
         }
     }
 
@@ -8423,10 +8120,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func closeWorkspacePanes(workspaceID: String) {
         panelCoordinator.closeTerminalPanes(workspaceID: workspaceID, sessionIsTerminating: true)
         panelCoordinator.closeCodePanes(workspaceID: workspaceID)
-    }
-
-    private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
-        Self.browserSessionTargetURLs(workspaceID: workspaceID, overview: overview(forWorkspaceID: workspaceID))
     }
 
     @objc private func deleteWorkspace(_ sender: Any) {
@@ -8474,7 +8167,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteLocalBranch = project.isGitRepo && deleteLocalBranchCheckbox.state == .on
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
-        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
+        let browserSessionTargetURLs = browserSessions.configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         // Route the delete to the daemon that owns the workspace's project rather than the local
         // device, so a remote workspace is deleted where it actually lives.
         let device = deviceForMutation(deviceID: project.deviceID)
@@ -8495,7 +8188,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
-                    self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                    self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspacePanes(workspaceID: id)
                     // Install the post-delete overview first, then clear the marking: the workspace is
                     // already absent from that overview, so its row leaves the sidebar exactly once.
@@ -8572,7 +8265,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // cleanup a direct success performs — otherwise its browser windows would outlive it
                         // indefinitely.
                         self.workspaceDeletion.endPendingWorkspaceDeletion(workspaceID: id)
-                        self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                        self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                         self.closeWorkspacePanes(workspaceID: id)
                         if deleteLocalBranch || deleteRemoteBranch {
                             // The delete landed, but the branch-deletion report existed only in the response
@@ -8688,19 +8381,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         menu.popUp(positioning: nil, at: origin, in: sender)
     }
 
-    nonisolated static func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
-        guard let targetURL, !targetURL.isEmpty else { return nil }
-        var bestMatch: (length: Int, name: String)?
-        for session in sessions {
-            guard let prefix = session.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines), !prefix.isEmpty, !name.isEmpty, targetURL.hasPrefix(prefix)
-            else { continue }
-            if let bestMatch, bestMatch.length >= prefix.count { continue }
-            bestMatch = (length: prefix.count, name: name)
-        }
-        return bestMatch?.name
-    }
-
     func showError(_ error: Error) {
         if showLocalDaemonCompatibilityBlockIfNeeded(error) { return }
         let alert = NSAlert(error: error)
@@ -8791,13 +8471,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let targetDeviceID, let section = deviceModel.deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
         showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
-    }
-
-    /// Reports a browser-session focus that Chrome refused. The permission is read at
-    /// failure time so the message matches the current grant.
-    private func showBrowserSessionFocusFailureError() {
-        showError(
-            WorkspaceError.invalidArgument(message: Self.browserSessionFocusFailureMessage(automationStatus: ChromeAutomationPermission.status())))
     }
 
     /// The configured editor resolved to a launchable CLI, carrying the per-family data a
@@ -9472,89 +9145,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return deviceSection(id: deviceID)?.overview
     }
 
-    /// Focuses the local Chrome tab for a workspace browser session. Browser-session window ids are
-    /// client state keyed by resolved URL; multiple browser sessions in the same workspace may point
-    /// at the same Chrome window so they stay grouped as tabs. Re-focus first uses the tracked window
-    /// id for the fast path, then scans all Chrome windows for a matching URL so a tab the user moved
-    /// by hand is adopted into tracking instead of duplicated. Workspace browser sessions are a Chrome
-    /// feature; when Chrome cannot be scripted, the failure is reported to the caller rather than
-    /// redirected to another browser. Remote service sessions use this after their URL has been
-    /// routed through the Mac Caddy router.
-    private func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String]) async -> Bool {
-        let startedAt = Date()
-        let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
-            let chrome = ChromeAdapter()
-            let store = ClientBrowserWindowIDStore()
-            let dbLookupStartedAt = Date()
-            let trackedEntries = ((try? store.windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
-            let trackedID = trackedEntries.first(where: { AppKitController.browserSessionTargetURL($0.targetURL, matches: targetURL) })?.windowID
-            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
-            var chromeAppleScriptMS = 0
-            var clientDBWriteMS = 0
-            if let trackedID {
-                let chromeStartedAt = Date()
-                let didFocus =
-                    (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs))
-                    ?? false
-                chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
-                if didFocus {
-                    return BrowserFocusResult(
-                        focused: true, path: "focused_tracked", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
-                        chromeAppleScriptMS: chromeAppleScriptMS)
-                }
-            }
-
-            let allWindowFocusStartedAt = Date()
-            let relocatedMatch = try? chrome.focusFirstMatchingTabMatch(urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs)
-            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: allWindowFocusStartedAt)
-            if let relocatedMatch {
-                let dbWriteStartedAt = Date()
-                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: relocatedMatch.windowID)
-                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
-                return BrowserFocusResult(
-                    focused: true, path: "focused_all_windows", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
-                    chromeAppleScriptMS: chromeAppleScriptMS)
-            }
-
-            let candidateWindowIDs = trackedEntries.map(\.windowID)
-            let candidateURLPrefixes = trackedEntries.map(\.targetURL)
-            let groupedTabStartedAt = Date()
-            let groupedWindowID = try? chrome.openTabInFirstAvailableWindow(
-                windowIDs: candidateWindowIDs, containingAnyURLPrefix: candidateURLPrefixes, url: targetURL, background: false)
-            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: groupedTabStartedAt)
-            if let groupedWindowID {
-                let dbWriteStartedAt = Date()
-                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: groupedWindowID)
-                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
-                return BrowserFocusResult(
-                    focused: true, path: "opened_grouped_tab", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
-                    chromeAppleScriptMS: chromeAppleScriptMS)
-            }
-
-            let chromeStartedAt = Date()
-            let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
-            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
-            guard newWindowID > 0 else {
-                return BrowserFocusResult(
-                    focused: false, path: "chrome_failed", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
-                    chromeAppleScriptMS: chromeAppleScriptMS)
-            }
-            let dbWriteStartedAt = Date()
-            try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
-            clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
-            return BrowserFocusResult(
-                focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
-                chromeAppleScriptMS: chromeAppleScriptMS)
-        }.value
-        logPerfMetric(
-            "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            success: result.focused,
-            detail:
-                "path=\(result.path) client_db_lookup_ms=\(result.clientDBLookupMS) client_db_write_ms=\(result.clientDBWriteMS) chrome_applescript_ms=\(result.chromeAppleScriptMS)"
-        )
-        return result.focused
-    }
-
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
     /// target the numbered-shortcut path produces, so both flow through one dispatcher.
     nonisolated static func windowFocusResolution(for request: WindowFocusRequest, overview: SpacesDeviceOverviewPayload)
@@ -9633,7 +9223,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     workspaceID: workspaceID, sessionID: sessionID, title: fallbackTitle, workingDirectory: fallbackDir, kind: fallbackKind))
     }
 
-    nonisolated private static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload)
+    /// Internal rather than `private`: `BrowserSessionCoordinator.browserSessionTargetURLs` also needs
+    /// this to look up a workspace's configured browser sessions from an overview.
+    nonisolated static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload)
         -> SpacesDeviceWorkspaceDetailViewModel?
     { overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init) }
 
@@ -9664,6 +9256,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         activeWindowShortcutProfile = nil
     }
 
+    private struct RoutedBrowserFocusTarget: Sendable {
+        let targetURL: URL
+        let siblingTargetURLs: [String]
+    }
+
     /// Executes a resolved focus target on the client and reports whether a target was
     /// focused (the executor surfaces its own errors on failure). Shared by the
     /// numbered-shortcut, command-palette, and cycle focus paths so all three behave
@@ -9687,9 +9284,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showDeviceNotLoadedError()
                 return false
             }
-            let browserSessionTargetURLs = Self.browserSessionTargetURLs(
+            let browserSessionTargetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(
                 workspaceID: workspaceID, targetURL: targetURL, overview: overview(forWorkspaceID: workspaceID))
-            let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserSessionTargetURLs)
+            let siblingTargetURLs = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(
+                targetURL: targetURL, targetURLs: browserSessionTargetURLs)
             if isRemoteDeviceID(workspaceDeviceID) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                     showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
@@ -9703,7 +9301,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // `ssh`, polls local ports and router config up to the timeout), so run it off the main
                 // actor to keep the focus keypress from freezing the UI. The manager is `Sendable` and
                 // serializes its own state, so the detached task can safely own the reconciliation.
-                let manager = browserSSHForwardManager
+                let manager = browserSessions.forwardManager
                 let routeResult: Result<RoutedBrowserFocusTarget, Error> = await Task.detached(priority: .userInitiated) {
                     do {
                         let routedURL = try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)
@@ -9715,13 +9313,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }.value
                 switch routeResult {
                 case .success(let routedTarget):
-                    refreshVisibleServicePortDisplays(deviceID: device.id)
+                    browserSessions.refreshVisibleServicePortDisplays(deviceID: device.id)
                     guard
-                        await focusLocalChromeTab(
+                        await browserSessions.focusLocalChromeTab(
                             workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString,
                             siblingTargetURLs: routedTarget.siblingTargetURLs)
                     else {
-                        showBrowserSessionFocusFailureError()
+                        browserSessions.showBrowserSessionFocusFailureError()
                         return false
                     }
                 case .failure(let error):
@@ -9729,8 +9327,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     return false
                 }
             } else {
-                guard await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs) else {
-                    showBrowserSessionFocusFailureError()
+                guard await browserSessions.focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs)
+                else {
+                    browserSessions.showBrowserSessionFocusFailureError()
                     return false
                 }
             }
@@ -10046,26 +9645,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clientWorkspaceIDForFocusedWindow() -> String? {
         let chrome = ChromeAdapter()
         guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
-        return Self.workspaceIDForObservedBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
-    }
-
-    nonisolated static func workspaceIDForObservedBrowserURL(_ activeURL: String, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
-        var best: (workspaceID: String, prefixLength: Int)?
-        for overview in overviews {
-            for workspace in overview.workspaces {
-                let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: workspace.config.resolvedBrowserSessions)
-                for session in workspace.config.resolvedBrowserSessions {
-                    guard let url = session.url, !url.isEmpty else { continue }
-                    let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
-                    guard
-                        let matchLength = browserObservedURLMatchLength(
-                            activeURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
-                    else { continue }
-                    if best == nil || matchLength > best!.prefixLength { best = (workspace.id, matchLength) }
-                }
-            }
-        }
-        return best?.workspaceID
+        return BrowserSessionCoordinator.workspaceIDForObservedBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
     }
 
     /// Validates a process template before it is saved. Pure, client-local string

@@ -645,6 +645,8 @@ Focusing a terminal is an owner-intent, foregrounding action symmetric with focu
 
 ### Browser sessions and service routing
 
+`BrowserSessionCoordinator` (an `AppKitController` sub-controller) owns this domain on the Mac: the SSH forward manager and its per-device revision bookkeeping, service-port display formatting, browser-session URL matching and teardown, focusing a local Chrome tab, and closing the tabs a stopped/restarted/deleted workspace configured. The window-cycle and focus-dispatch entry points (`cycleWorkspaceWindow`, `executeWindowFocusResolution`) stay on `AppKitController` since they resolve terminal and browser targets together, reaching this domain as `host.browserSessions`.
+
 The macOS daemon runs a bundled Caddy reverse proxy mapping `http://<service>.<slug>.localhost:<router port>` to each service's assigned port. Routing runs only on the Mac, because that is where the browser lives; headless daemons never seed a router port. Transport is plain HTTP bound to loopback only, so there is no LAN listener, TLS material, or certificate trust to manage — Chrome and Safari treat `*.localhost` as a secure context.
 
 For a remote workspace, `BrowserSSHForwardManager` owns one `ssh -L` process per (device, workspace) with one binding per assigned service. It writes client-owned routes into the profile route registry and asks the local daemon to reconcile Caddy; the daemon is the only component that reloads Caddy, merging daemon-owned local routes with client-owned forward routes. Remote overview updates preload forwards for running workspaces and stop them for stopped ones, with on-demand opening as the fallback.

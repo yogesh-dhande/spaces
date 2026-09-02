@@ -1330,14 +1330,14 @@ import workspacecore
     }
 
     @Test func servicePortDisplayShowsRemoteAndForwardedLocalPortPair() {
-        #expect(AppKitController.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: 52341) == "3000:52341")
-        #expect(AppKitController.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: nil) == "3000")
-        #expect(AppKitController.servicePortDisplay(assignedPort: nil, forwardedLocalPort: 52341) == nil)
-        #expect(AppKitController.servicePortDisplay(assignedPort: 0, forwardedLocalPort: 52341) == nil)
+        #expect(BrowserSessionCoordinator.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: 52341) == "3000:52341")
+        #expect(BrowserSessionCoordinator.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: nil) == "3000")
+        #expect(BrowserSessionCoordinator.servicePortDisplay(assignedPort: nil, forwardedLocalPort: 52341) == nil)
+        #expect(BrowserSessionCoordinator.servicePortDisplay(assignedPort: 0, forwardedLocalPort: 52341) == nil)
     }
 
     @Test func servicePortDisplayTextsMatchForwardsByServiceNameAndRemotePort() {
-        let texts = AppKitController.servicePortDisplayTexts(
+        let texts = BrowserSessionCoordinator.servicePortDisplayTexts(
             assignedPorts: [
                 SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391"),
                 SpacesDeviceAssignedPort(name: "api", port: 32002, url: "http://api.feature-123.localhost:7391"),
