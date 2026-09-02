@@ -21,6 +21,10 @@ public enum AutomationConcurrencyPolicy: String, Codable, Sendable, CaseIterable
     case allow
     case skip
     case queue
+
+    /// The policy a newly created automation starts on. Automations created before this default existed
+    /// keep whatever policy is already stored for them; this only seeds the editor for a brand-new automation.
+    public static let defaultForNewAutomation: AutomationConcurrencyPolicy = .skip
 }
 
 /// What a restarted daemon does with a cron automation whose `nextFireTime` elapsed while it was down.

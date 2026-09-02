@@ -1,8 +1,21 @@
 import Testing
+import spacesdevicecore
+import spacesterminalcore
 
 @testable import spacesui
 
 @Suite struct AutomationControllerAsyncSafetyTests {
+    // A freshly opened editor (no seed automation) starts its concurrency pop-up on the "new automation"
+    // default, Skip, rather than Allow; an automation being edited keeps its own stored policy untouched.
+    @MainActor @Test func seededConcurrencyPolicyDefaultsNewAutomationsToSkip() {
+        #expect(AutomationEditorController.seededConcurrencyPolicy(nil) == .skip)
+
+        let existing = TerminalServiceAutomationSummary(
+            id: "auto-1", name: "Nightly", enabled: true, triggerKind: "manual", cronExpression: nil, script: "echo hi", workspaceID: "workspace-1",
+            timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "", updatedAt: "")
+        #expect(AutomationEditorController.seededConcurrencyPolicy(existing) == .allow)
+    }
+
     @MainActor @Test func mutationQueuePreservesEnqueueOrderAndLastSelection() async {
         let queue = AutomationMutationQueue()
         let state = MutationState()
