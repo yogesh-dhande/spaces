@@ -2700,7 +2700,7 @@ private struct AutomationCreateCommand: ParsableCommand {
     @Option(name: .long) var agentCommand: String?
     @Option(name: .long) var agentPrompt: String?
     @Option(name: .long) var workspaceID: String
-    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var concurrency: String = AutomationConcurrencyPolicy.defaultForNewAutomation.rawValue
     @Option(name: .long) var missedRun: String = "run_once"
     @Option(name: .long) var timeoutSeconds: Int?
     @Flag(name: .long, inversion: .prefixedNo) var enabled = true
@@ -2725,7 +2725,7 @@ private struct AutomationUpdateCommand: ParsableCommand {
     @Option(name: .long) var agentCommand: String?
     @Option(name: .long) var agentPrompt: String?
     @Option(name: .long) var workspaceID: String
-    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var concurrency: String = AutomationConcurrencyPolicy.defaultForNewAutomation.rawValue
     @Option(name: .long) var missedRun: String = "run_once"
     @Option(name: .long) var timeoutSeconds: Int?
     @Flag(name: .long, inversion: .prefixedNo) var enabled = true
@@ -3082,8 +3082,8 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     private func waitUntilReady(_ connection: NWConnection) throws {
         let queue = DispatchQueue(label: "spaces.e2e.mobile.request")
         let box = TransportResultBox()
-        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out connecting to the Device API.") }) {
-            semaphore in
+        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out connecting to the Device API.") })
+        { semaphore in
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready: semaphore.signal()
@@ -3102,8 +3102,9 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         var payload = requestData
         payload.append(0x0A)
         let box = TransportResultBox()
-        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out sending the Device API request.") }) {
-            semaphore in
+        try NWConnectionSyncBridge.waitForSignal(
+            timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out sending the Device API request.") }
+        ) { semaphore in
             connection.send(
                 content: payload,
                 completion: .contentProcessed { error in
@@ -3116,9 +3117,9 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
 
     private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
         let box = TransportResultBox()
-        try NWConnectionSyncBridge.waitForSignal(timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.") }) {
-            semaphore in receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
-        }
+        try NWConnectionSyncBridge.waitForSignal(
+            timeout: 10, onTimeout: { DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.") }
+        ) { semaphore in receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore) }
         if let error = box.error() { throw error }
         return box.responseData()
     }
