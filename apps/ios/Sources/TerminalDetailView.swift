@@ -120,9 +120,13 @@ struct TerminalDetailView: View {
 
             if model.isDemoMode { demoNoticeBanner }
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
-        }.background(Theme.terminalSurface.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
-            .hidden, for: .navigationBar
-        ).task {
+            // The pane is an accessibility container (`.accessibilityElement(children: .contain)`) rather
+            // than a plain identified view: an identifier on a SwiftUI container otherwise replaces the
+            // identifier of every element beneath it, which would leave this whole screen -- back button,
+            // banners, dismiss controls -- carrying "terminal.detail.<id>" and nothing else.
+        }.background(Theme.terminalSurface.ignoresSafeArea()).accessibilityElement(children: .contain).accessibilityIdentifier(
+            "terminal.detail.\(session.id)"
+        ).toolbar(.hidden, for: .navigationBar).task {
             if scenePhase != .active { model.prepareForBackgrounding() }
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
@@ -164,9 +168,7 @@ struct TerminalDetailView: View {
             // Transient and self-clearing: never dismissable, and explicitly non-interactive so it
             // never swallows a tap meant for the terminal underneath.
             if model.isPreparingLinkPreview { previewStatusBanner("Preparing preview…").allowsHitTesting(false) }
-            if let previewErrorMessage = model.linkPreviewErrorMessage {
-                errorBanner(previewErrorMessage, onDismiss: { model.dismissLinkBanners() })
-            }
+            if let previewErrorMessage = model.linkPreviewErrorMessage { errorBanner(previewErrorMessage, onDismiss: { model.dismissLinkBanners() }) }
             if let linkNotice = model.linkNotice { noticeBanner(linkNotice, onDismiss: { model.dismissLinkBanners() }) }
         }
     }
@@ -416,22 +418,26 @@ struct TerminalDetailView: View {
             onDismiss: onDismiss)
     }
 
-    /// Shared row for `errorBanner`/`noticeBanner`. Hit-testable only when `onDismiss` is supplied:
+    /// Shared row for `errorBanner`/`noticeBanner`. An accessibility container for the same reason as the
+    /// pane root: the banner keeps `identifier` and its dismiss button keeps `dismissIdentifier`, instead
+    /// of the banner's identifier overwriting the button's.
+    ///
+    /// Hit-testable only when `onDismiss` is supplied:
     /// the trailing xmark button and a tap anywhere on the banner both call it. The `model.errorMessage`
     /// banner reuses `errorBanner` without an `onDismiss`, so it keeps its present (already
     /// non-interactive) behavior unchanged.
-    private func dismissableBanner(
-        message: String, textColor: Color, identifier: String, dismissIdentifier: String, onDismiss: (() -> Void)?
-    ) -> some View {
+    private func dismissableBanner(message: String, textColor: Color, identifier: String, dismissIdentifier: String, onDismiss: (() -> Void)?)
+        -> some View
+    {
         HStack(spacing: 8) {
             Text(message).font(.footnote).foregroundStyle(textColor).frame(maxWidth: .infinity, alignment: .leading)
             if let onDismiss {
                 Button(action: onDismiss) { Image(systemName: "xmark").font(.footnote.weight(.semibold)).foregroundStyle(.secondary) }
                     .accessibilityIdentifier(dismissIdentifier)
             }
-        }.padding(.horizontal, 16).padding(.vertical, 12).background(Color(uiColor: .secondarySystemBackground)).accessibilityIdentifier(
-            identifier
-        ).contentShape(Rectangle()).allowsHitTesting(onDismiss != nil).onTapGesture { onDismiss?() }
+        }.padding(.horizontal, 16).padding(.vertical, 12).background(Color(uiColor: .secondarySystemBackground)).accessibilityElement(
+            children: .contain
+        ).accessibilityIdentifier(identifier).contentShape(Rectangle()).allowsHitTesting(onDismiss != nil).onTapGesture { onDismiss?() }
     }
 
     /// Persistent read-only notice shown on every demo terminal. Like the session-ended banner, it names
@@ -516,7 +522,15 @@ struct TerminalDetailView: View {
             if let data = try? Data(contentsOf: requestURL) {
                 if let request = try? JSONDecoder().decode(E2ECommandRequest.self, from: data) {
                     let requestDetail = request.detail
-                    if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+                    // A link open is not terminal input: it neither needs nor waits for input readiness,
+                    // and it is the only way a test fixture can drive this path. Ghostty's link hit-test
+                    // is refused on a column-cropped frame (see `appliedFrameCoversHostColumns`), and the
+                    // Demo Mode recording the blocking smoke lane runs against is always a few columns
+                    // wider than the phone's viewport, so a tap on a rendered link there can never open
+                    // one. The link-banner regression coverage (#650) reaches the banners through this.
+                    if let link = request.link?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+                        await model.openTerminalLink(link)
+                    } else if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
                         await waitForE2EInputReadiness()
                         await model.sendKey(key)
                     } else if request.sendEnter ?? true, let text = request.text {
@@ -558,9 +572,12 @@ private struct E2ECommandRequest: Decodable {
     let id: String
     let text: String?
     let key: String?
+    let link: String?
     let sendEnter: Bool?
 
-    var detail: String { ["id=\(id)", "sendEnter=\(sendEnter ?? true)", "text=\(text ?? "")", "key=\(key ?? "")"].joined(separator: " ") }
+    var detail: String {
+        ["id=\(id)", "sendEnter=\(sendEnter ?? true)", "text=\(text ?? "")", "key=\(key ?? "")", "link=\(link ?? "")"].joined(separator: " ")
+    }
 }
 
 private struct TerminalLinkPreviewSheet: View {

@@ -44,7 +44,9 @@
 		5E74AE9B5CC2326AD53BA04E /* AlertsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 895AC546F077905FD8E53CF9 /* AlertsTabView.swift */; };
 		5FD4313E441F15B6AFE8A029 /* BrowserProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */; };
 		636C2B8EB59BDDBE8707D1E1 /* TerminalArtifactViewersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */; };
+		64386B5E52455F5574BB70E3 /* TerminalViewerSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6F95FD027F230D6B74B751F /* TerminalViewerSmokeUITests.swift */; };
 		690D6FC159F64BF7E519C01C /* SpacesMobileAlertsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5746D7B660E9B5038B0DDEAF /* SpacesMobileAlertsTests.swift */; };
+		760F184E4F43ABDFE5B143CA /* SpacesMobileUITestDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7778C31C1AE42DF8EE0A2F37 /* SpacesMobileUITestDriver.swift */; };
 		786315FEB4746B0CE93CC2C6 /* SpacesMobileAutomationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8404111CDF419C458E5666F /* SpacesMobileAutomationsTests.swift */; };
 		788325853D6047915FC13115 /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5C2B6685BB88364360E9184 /* QRCodeScannerView.swift */; };
 		7B0BCDB061E38A6F9CB42501 /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 573064C6726817E7F264E9C5 /* RootTabView.swift */; };
@@ -58,6 +60,7 @@
 		8114F3BD1347A9DEFA285F34 /* AutomationsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C2C77E3995840835C0CF5B /* AutomationsListView.swift */; };
 		86DE89DD870097152C07726A /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEAC1705996DF60D174EFB /* AppAppearance.swift */; };
 		890842A7C996FCFF798FB056 /* TerminalFontSizeSettingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B47F7663F6BEF7DBB35014D /* TerminalFontSizeSettingTests.swift */; };
+		8A0EB72D9EB916F702B7BF4F /* SpacesMobileUITestDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7778C31C1AE42DF8EE0A2F37 /* SpacesMobileUITestDriver.swift */; };
 		8C4445C0E3B95A44BA7EEE21 /* ScreenshotStagingFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9E6C2EA4A8629D32905544D /* ScreenshotStagingFlowTests.swift */; };
 		8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684BF4A0996100451CA52A51 /* MobileAppVersion.swift */; };
 		8D7BDE377CE95CEA15E0F28F /* AgentsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70794A5FB7ED310FA4568364 /* AgentsTabView.swift */; };
@@ -72,6 +75,7 @@
 		A36481FF653604E873C1A93B /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = F242C1DB3E9B92832963F8A6 /* ghostty */; };
 		A52DB52E99C5021E119AD218 /* SpacesDeviceAPIClientPasteImageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CE224F40DCBDF15B9DF5A0D /* SpacesDeviceAPIClientPasteImageTests.swift */; };
 		A5AB8C3614BB7444A8FB4C5D /* AttentionEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19845234400228576231BEBB /* AttentionEvents.swift */; };
+		A5B43C5E216BB2F41FE167E9 /* TerminalViewerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA68AED2895AEB8CC0D1B824 /* TerminalViewerState.swift */; };
 		A689FBD78BB4F03E56B97D3C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68621C6469CFDB965239753C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift */; };
 		AAED3289F85B868C2AA29B44 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E15C5763CA61AE8C9C2D6E /* SubscriptionStore.swift */; };
 		B476AD376F17B415C12E45F2 /* TerminalMarkdownArtifactView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB657C9D6E4D2D2EA3DAD06 /* TerminalMarkdownArtifactView.swift */; };
@@ -111,7 +115,6 @@
 		EE95049EA7A7DAEADA1BD9A5 /* SpacesMobileDeviceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 562EF1EAEF495091FF1EE091 /* SpacesMobileDeviceStoreTests.swift */; };
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
-		E2819B68FCE32C2B1D809FEA /* TerminalViewerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C72D8F5E2B603E21D5B87EC /* TerminalViewerState.swift */; };
 		F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */; };
 		F4DCDE7C8A94835047353CCE /* ScreenshotMarkupPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9115C75CD6E289D76B640B9 /* ScreenshotMarkupPresenter.swift */; };
 		F511A2B7894644697179FA8D /* PendingDaemonUpdateCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A169D605A2F2531FCFBF185B /* PendingDaemonUpdateCardView.swift */; };
@@ -121,6 +124,13 @@
 
 /* Begin PBXContainerItemProxy section */
 		3FD5F9EECB8244393A627D3D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 40FC7BE745B5FC2BE6F64E8A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4949E5F0DB06D967871C1581;
+			remoteInfo = SpacesMobile;
+		};
+		6921A0D02AE338D2556F6B6E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 40FC7BE745B5FC2BE6F64E8A /* Project object */;
 			proxyType = 1;
@@ -189,6 +199,8 @@
 		733C6A36BBA3E7FCA82CBA12 /* TerminalSelectionCopyPillLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSelectionCopyPillLayoutTests.swift; sourceTree = "<group>"; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
 		75ADBC1DFE5DC487F78D5BC2 /* terminal-markdown.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = "terminal-markdown.css"; sourceTree = "<group>"; };
+		7778C31C1AE42DF8EE0A2F37 /* SpacesMobileUITestDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITestDriver.swift; sourceTree = "<group>"; };
+		784131399C289E534B48BA92 /* SpacesMobileSmokeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileSmokeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalImageAttachments.swift; sourceTree = "<group>"; };
 		7CB657C9D6E4D2D2EA3DAD06 /* TerminalMarkdownArtifactView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalMarkdownArtifactView.swift; sourceTree = "<group>"; };
 		8558FA040BF164F6A5B8023F /* BrowserProxySmokeTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxySmokeTestView.swift; sourceTree = "<group>"; };
@@ -219,6 +231,7 @@
 		B8404111CDF419C458E5666F /* SpacesMobileAutomationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAutomationsTests.swift; sourceTree = "<group>"; };
 		B8E05F8671F750CBD22F18BA /* AutomationsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsTabView.swift; sourceTree = "<group>"; };
 		B9115C75CD6E289D76B640B9 /* ScreenshotMarkupPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotMarkupPresenter.swift; sourceTree = "<group>"; };
+		BA68AED2895AEB8CC0D1B824 /* TerminalViewerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerState.swift; sourceTree = "<group>"; };
 		BBE1C9B8E2B76EC07A3F5722 /* TerminalViewerModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerModelTests.swift; sourceTree = "<group>"; };
 		BC1BDE1EAB567C36A820E82C /* ScreenshotStager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotStager.swift; sourceTree = "<group>"; };
 		BD6C69B64AFC5E704DE3C780 /* TerminalWebArtifactView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWebArtifactView.swift; sourceTree = "<group>"; };
@@ -230,6 +243,7 @@
 		C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxyTunnel.swift; sourceTree = "<group>"; };
 		C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowPrimitives.swift; sourceTree = "<group>"; };
 		CB9E795017B860ABC7458AE3 /* AgentGroups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentGroups.swift; sourceTree = "<group>"; };
+		D6F95FD027F230D6B74B751F /* TerminalViewerSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerSmokeUITests.swift; sourceTree = "<group>"; };
 		DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontSizeStorage.swift; sourceTree = "<group>"; };
 		E0E658EA8EFBEBFC2356558E /* AutomationRunRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationRunRow.swift; sourceTree = "<group>"; };
 		E1A8848C54C746BC1DEFF9CC /* SpacesDeviceEndpointResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceEndpointResolverTests.swift; sourceTree = "<group>"; };
@@ -241,7 +255,6 @@
 		F242C1DB3E9B92832963F8A6 /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ghostty; path = ../macos/.local/ghosttykit/Resources/ghostty; sourceTree = SOURCE_ROOT; };
 		F271EB1FD55E1D03CB0CC6AC /* BrowserProxyHTTPHead.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxyHTTPHead.swift; sourceTree = "<group>"; };
 		F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerModel.swift; sourceTree = "<group>"; };
-		4C72D8F5E2B603E21D5B87EC /* TerminalViewerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerState.swift; sourceTree = "<group>"; };
 		F5D30357B101A99C39E09E4C /* DaemonVersionHeroView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonVersionHeroView.swift; sourceTree = "<group>"; };
 		F92F892C7AB88FC7A037ABB6 /* TerminalTextArtifactView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalTextArtifactView.swift; sourceTree = "<group>"; };
 		F9E6C2EA4A8629D32905544D /* ScreenshotStagingFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotStagingFlowTests.swift; sourceTree = "<group>"; };
@@ -347,7 +360,7 @@
 				F92F892C7AB88FC7A037ABB6 /* TerminalTextArtifactView.swift */,
 				F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */,
 				0621F6FAE858496A299A14CD /* TerminalViewerOpenScreenHold.swift */,
-				4C72D8F5E2B603E21D5B87EC /* TerminalViewerState.swift */,
+				BA68AED2895AEB8CC0D1B824 /* TerminalViewerState.swift */,
 				BD6C69B64AFC5E704DE3C780 /* TerminalWebArtifactView.swift */,
 				99364D0D95BDF6680EFCD26D /* Theme.swift */,
 				2FCCF66DBDEF4E737A9C8FF0 /* Agents */,
@@ -432,10 +445,19 @@
 			path = macos;
 			sourceTree = "<group>";
 		};
+		7A0BA63C64574A899E066E89 /* UITestSupport */ = {
+			isa = PBXGroup;
+			children = (
+				7778C31C1AE42DF8EE0A2F37 /* SpacesMobileUITestDriver.swift */,
+			);
+			path = UITestSupport;
+			sourceTree = "<group>";
+		};
 		80C53D729D7E7F3AB9BBDC82 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				2A942269988694E66C1CA6F4 /* SpacesMobile.app */,
+				784131399C289E534B48BA92 /* SpacesMobileSmokeUITests.xctest */,
 				E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */,
 				5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */,
 			);
@@ -461,9 +483,11 @@
 				A2CBFAA5B4DF490C0C86C859 /* apps */,
 				CB2D338B9B55AD82C84E6311 /* Packages */,
 				21C5A9A4E04249D13D49172C /* Resources */,
+				E10C43C098693F4E58F11E11 /* SmokeUITests */,
 				503B7623EC298940F0110912 /* Sources */,
 				504A7EEA4BE7AE55C6855384 /* Tests */,
 				E5AB46FF545C04AB6319A6DB /* UITests */,
+				7A0BA63C64574A899E066E89 /* UITestSupport */,
 				80C53D729D7E7F3AB9BBDC82 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -531,6 +555,14 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
+		E10C43C098693F4E58F11E11 /* SmokeUITests */ = {
+			isa = PBXGroup;
+			children = (
+				D6F95FD027F230D6B74B751F /* TerminalViewerSmokeUITests.swift */,
+			);
+			path = SmokeUITests;
+			sourceTree = "<group>";
+		};
 		E5AB46FF545C04AB6319A6DB /* UITests */ = {
 			isa = PBXGroup;
 			children = (
@@ -584,6 +616,24 @@
 			productReference = 2A942269988694E66C1CA6F4 /* SpacesMobile.app */;
 			productType = "com.apple.product-type.application";
 		};
+		60F2A3BD29322D7BC33B5573 /* SpacesMobileSmokeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA8180A8B1316D4C03033A9E /* Build configuration list for PBXNativeTarget "SpacesMobileSmokeUITests" */;
+			buildPhases = (
+				FA6A53231A38A231AA161E2D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9272C80C886394EBDD4231BA /* PBXTargetDependency */,
+			);
+			name = SpacesMobileSmokeUITests;
+			packageProductDependencies = (
+			);
+			productName = SpacesMobileSmokeUITests;
+			productReference = 784131399C289E534B48BA92 /* SpacesMobileSmokeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		A22491DEE0C1C690D99FCFB0 /* SpacesMobileTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 96517D12E198C57740C2A889 /* Build configuration list for PBXNativeTarget "SpacesMobileTests" */;
@@ -621,6 +671,10 @@
 					4949E5F0DB06D967871C1581 = {
 						DevelopmentTeam = BEMDA62NB6;
 					};
+					60F2A3BD29322D7BC33B5573 = {
+						DevelopmentTeam = BEMDA62NB6;
+						TestTargetID = 4949E5F0DB06D967871C1581;
+					};
 					A22491DEE0C1C690D99FCFB0 = {
 						DevelopmentTeam = BEMDA62NB6;
 					};
@@ -644,6 +698,7 @@
 			projectRoot = "";
 			targets = (
 				4949E5F0DB06D967871C1581 /* SpacesMobile */,
+				60F2A3BD29322D7BC33B5573 /* SpacesMobileSmokeUITests */,
 				A22491DEE0C1C690D99FCFB0 /* SpacesMobileTests */,
 				208F5D8D223E754EF66F12E0 /* SpacesMobileUITests */,
 			);
@@ -733,7 +788,7 @@
 				43857F33AFBE626C3EF5B3A6 /* TerminalTextArtifactView.swift in Sources */,
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
 				45EE757E4B53081A0EA81D69 /* TerminalViewerOpenScreenHold.swift in Sources */,
-				E2819B68FCE32C2B1D809FEA /* TerminalViewerState.swift in Sources */,
+				A5B43C5E216BB2F41FE167E9 /* TerminalViewerState.swift in Sources */,
 				CAEFA68B6F87086897B9C88D /* TerminalWebArtifactView.swift in Sources */,
 				D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */,
 				F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */,
@@ -783,13 +838,28 @@
 			files = (
 				9FE76441EB7F3AA2798D2995 /* SpacesMobileDemoModeUITests.swift in Sources */,
 				04B9B8FE1DF35D0770AA024B /* SpacesMobileScreenshotUITests.swift in Sources */,
+				760F184E4F43ABDFE5B143CA /* SpacesMobileUITestDriver.swift in Sources */,
 				3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FA6A53231A38A231AA161E2D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8A0EB72D9EB916F702B7BF4F /* SpacesMobileUITestDriver.swift in Sources */,
+				64386B5E52455F5574BB70E3 /* TerminalViewerSmokeUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		9272C80C886394EBDD4231BA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4949E5F0DB06D967871C1581 /* SpacesMobile */;
+			targetProxy = 6921A0D02AE338D2556F6B6E /* PBXContainerItemProxy */;
+		};
 		B1502EF3CA22E9855FD6C983 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 4949E5F0DB06D967871C1581 /* SpacesMobile */;
@@ -884,6 +954,25 @@
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
+		};
+		8A8FC2254CA45C57A3BE6560 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = BEMDA62NB6;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.smokeuitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SpacesMobile;
+			};
+			name = Release;
 		};
 		985CD486AA72A37850F6CB23 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -985,6 +1074,25 @@
 			};
 			name = Release;
 		};
+		D37246136D1CD5FD8CB976EF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = BEMDA62NB6;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.smokeuitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SpacesMobile;
+			};
+			name = Debug;
+		};
 		F07128855F6F753318FD2BC7 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1068,6 +1176,15 @@
 			buildConfigurations = (
 				FC4A32922D4BBBE8C90A5DAE /* Debug */,
 				F07128855F6F753318FD2BC7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		AA8180A8B1316D4C03033A9E /* Build configuration list for PBXNativeTarget "SpacesMobileSmokeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D37246136D1CD5FD8CB976EF /* Debug */,
+				8A8FC2254CA45C57A3BE6560 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

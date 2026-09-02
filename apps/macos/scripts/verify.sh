@@ -50,7 +50,7 @@ print_lane_summary() {
     printf '  run INTERRUPTED before it finished\n'
   fi
   printf '  macOS build, lint, unit tests   %s\n' "$(render_lane_state "$coverage_lane_state")"
-  printf '  iOS unit tests                  %s\n' "$(render_lane_state "$ios_lane_state")"
+  printf '  iOS tests                       %s\n' "$(render_lane_state "$ios_lane_state")"
   if [ "$coverage_lane_state" = "not started" ] && [ "$ios_lane_state" = "not started" ]; then
     printf '  the run ended during preparation (simulator lifecycle checks, Ghostty artifact sync,\n'
     printf '  formatting, lint, the SwiftPM build, or release bundle signing)\n'
@@ -75,7 +75,7 @@ run_verify_steps() {
   # cannot interleave with coverage.sh's output; the log is tailed once the lane finishes.
   local ios_log="$root/.build/ios-verify.log"
   : >"$ios_log"
-  printf 'Starting iOS unit test lane in the background (log: %s)...\n' "$ios_log"
+  printf 'Starting iOS test lane in the background (log: %s)...\n' "$ios_log"
   "$root/scripts/ios-test-lane.sh" >"$ios_log" 2>&1 &
   ios_lane_pid=$!
   ios_lane_state="started"
@@ -98,13 +98,13 @@ run_verify_steps() {
     ios_lane_state="FAILED (exit $ios_status)"
   fi
 
-  printf '\n--- iOS unit test lane log (last 60 lines) ---\n'
+  printf '\n--- iOS test lane log (last 60 lines) ---\n'
   tail -n 60 "$ios_log" || true
-  printf -- '--- end iOS unit test lane log ---\n\n'
+  printf -- '--- end iOS test lane log ---\n\n'
   if [ "$ios_status" -eq 0 ]; then
-    echo "iOS unit test lane: PASSED"
+    echo "iOS test lane: PASSED"
   else
-    echo "iOS unit test lane: FAILED (exit $ios_status)"
+    echo "iOS test lane: FAILED (exit $ios_status)"
   fi
 
   if [ "$coverage_status" -ne 0 ]; then
