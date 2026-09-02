@@ -172,6 +172,78 @@ import workspacecore
         #expect(error.localizedRecoverySuggestion == "Restart the local daemon and try again.")
     }
 
+    @Test func devicesPaneOpensOneInlinePanelAtATime() {
+        // Opening a row's pairing panel from a closed list opens exactly that panel.
+        #expect(
+            DevicePairingController.expansion(after: nil, activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: false)
+                == .pairing(deviceID: "mac-1"))
+
+        // Activating the same row again collapses it, so the pair button reads as a toggle.
+        #expect(
+            DevicePairingController.expansion(
+                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: true) == nil)
+
+        // A row whose code expired (or whose open returned nothing) is expanded with nothing on screen, so
+        // the same click asks for a fresh code instead of closing an invisible panel.
+        #expect(
+            DevicePairingController.expansion(
+                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: false)
+                == .pairing(deviceID: "mac-1"))
+
+        // Pairing another device moves the panel to that row rather than opening a second one.
+        #expect(
+            DevicePairingController.expansion(
+                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "linux-2"), currentPanelIsLive: true)
+                == .pairing(deviceID: "linux-2"))
+
+        // The add-remote-device form shares the single slot: opening it closes an open pairing panel, and
+        // opening a pairing panel closes it.
+        #expect(
+            DevicePairingController.expansion(after: .pairing(deviceID: "mac-1"), activating: .addRemoteDevice, currentPanelIsLive: true)
+                == .addRemoteDevice)
+        #expect(
+            DevicePairingController.expansion(after: .addRemoteDevice, activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: true)
+                == .pairing(deviceID: "mac-1"))
+        #expect(DevicePairingController.expansion(after: .addRemoteDevice, activating: .addRemoteDevice, currentPanelIsLive: true) == nil)
+    }
+
+    @Test func deviceRowStatusDotReportsReachabilityRatherThanStoredCredentials() {
+        // A paired device whose daemon is answering reads as healthy (solid green).
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: true, loadState: .loaded) == .reachable)
+        #expect(DevicePairingController.DeviceRowStatus.reachable.statusKind == .ready)
+        #expect(DevicePairingController.DeviceRowStatus.reachable.tooltip == "Reachable")
+
+        // A stored credential is not reachability: a powered-off device is unreachable, not green.
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: true, loadState: .offline("no route to host")) == .unreachable)
+        #expect(DevicePairingController.DeviceRowStatus.unreachable.statusKind == .exited)
+        #expect(DevicePairingController.DeviceRowStatus.unreachable.tooltip == "Unreachable")
+
+        // Before the first load answers, the row claims neither.
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: true, loadState: .loading) == .connecting)
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: true, loadState: nil) == .connecting)
+        #expect(DevicePairingController.DeviceRowStatus.connecting.statusKind == .idle)
+        #expect(DevicePairingController.DeviceRowStatus.connecting.tooltip == "Connecting…")
+
+        // A device whose credential is gone is waiting on the user to re-pair, not failed — and that wins
+        // over whatever the load state says, since re-pairing is the fix either way.
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: false, loadState: .loaded) == .reconnectRequired)
+        #expect(DevicePairingController.remoteDeviceStatus(hasCredentials: false, loadState: .offline("down")) == .reconnectRequired)
+        #expect(DevicePairingController.DeviceRowStatus.reconnectRequired.statusKind == .waiting)
+        #expect(DevicePairingController.DeviceRowStatus.reconnectRequired.tooltip == "Reconnect required")
+    }
+
+    @Test func removingADeviceConfirmsAndPromisesOnlyLocalEffects() {
+        let confirmation = DevicePairingController.removeDeviceConfirmation(deviceName: "keptune")
+        // The title names the device and scopes the action to this Mac.
+        #expect(confirmation.title == "Remove keptune from this Mac?")
+        // Removal deletes only this Mac's paired-device record, its stored credential, and its tracked
+        // update progress; the removed device keeps running everything it was running. The copy must keep
+        // saying so, since the opposite reading ("this stops my agents") is the costly misunderstanding.
+        #expect(confirmation.message.contains("stay on keptune and keep running"))
+        #expect(confirmation.message.contains("stored credential"))
+        #expect(confirmation.message.contains("Pair it again to get it back."))
+    }
+
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
         // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
         // not running, or its control endpoint was unreachable (daemon down) — offer the action.
