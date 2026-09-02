@@ -76,7 +76,8 @@ final class DaemonHandoffTests: XCTestCase {
     }
 
     func testConsumeReturnsNilAndDeletesWhenNoTableIsPresent() throws {
-        _ = try useIsolatedProfile()
+        let root = try useIsolatedProfile()
+        defer { try? FileManager.default.removeItem(at: root) }
         XCTAssertNil(DaemonHandoffStore.consume())
     }
 

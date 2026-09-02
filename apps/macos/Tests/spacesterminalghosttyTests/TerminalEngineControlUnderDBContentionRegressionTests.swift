@@ -203,6 +203,9 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         // lock is held, then time the FIRST session's control round-trip through the same engine.
         let createdBox = UncheckedBox<CoreBox?>(nil)
         let created = DispatchSemaphore(value: 0)
+        // Registered before the throwable sleep below so a throw that exits the function early still
+        // cleans up the background thread's root, once it has been assigned to `createdBox.value`.
+        defer { if let root = createdBox.value?.root { try? FileManager.default.removeItem(at: root) } }
         Thread.detachNewThread {
             let box = TerminalEngineActor.runSynchronously { try? Self.makeStartedCoreBox(tag: "create-while-live") }
             createdBox.value = box
@@ -227,7 +230,6 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
             liveBox.core.terminate()
             createdBox.value?.core.terminate()
         }
-        if let root = createdBox.value?.root { try? FileManager.default.removeItem(at: root) }
     }
 
     /// Carries a value written on one thread and read on another; the test's own semaphore orders the two.

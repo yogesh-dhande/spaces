@@ -59,6 +59,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryUpsertsEntriesAndLoadsRoutes() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
 
         try CaddyRouteRegistry.upsert(
@@ -73,6 +74,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryUpsertEvictsStaleEntryForSameHostUnderDifferentKey() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
 
         // Same service host, but the registry key embeds the remote port, so a re-forward after a port
@@ -92,6 +94,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryReplaceReportsChangeAndSkipsIdenticalRewrite() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
         let entries = [
             CaddyRouteRegistryEntry(key: "remote:workspace:web", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31001")),
@@ -120,6 +123,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryReplaceSkipsRewriteWhenUpsertingUnchangedSubset() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
         let entryA = CaddyRouteRegistryEntry(key: "remote:a:web", route: CaddyRoute(host: "web.a.localhost", upstream: "127.0.0.1:31001"))
         let entryB = CaddyRouteRegistryEntry(key: "remote:b:api", route: CaddyRoute(host: "api.b.localhost", upstream: "127.0.0.1:31002"))
@@ -139,6 +143,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryRemovesEntriesByKey() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
 
         try CaddyRouteRegistry.upsert(
@@ -155,6 +160,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryRemoveWherePrunesPersistedRemoteBrowserEntriesByDevice() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
 
         let entries = [
@@ -183,6 +189,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
 
     func testRouteRegistryConcurrentUpsertsPreserveEntries() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("routes.json").path
         let errors = LockedErrorMessages()
 

@@ -31,6 +31,7 @@ final class TerminalOutputTailTests: XCTestCase {
 
     func testTailReturnsLastLinesWithoutScanningWholeFileInCaller() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = (1...10).map { "line-\($0)" }.joined(separator: "\n") + "\n"
         try text.data(using: .utf8)?.write(to: url)
 
@@ -41,6 +42,7 @@ final class TerminalOutputTailTests: XCTestCase {
 
     func testTailRendersVisibleScreenTextFromANSITranscript() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = """
             \u{001B}[24;1H  \u{001B}[1mWould you like to run the following command?\u{001B}[25;1H\u{001B}[22m
             \u{001B}[26;1H  Reason: \u{001B}[3mDo you want to allow `spaces agent signal --workspace ws --session s init` to access its database
@@ -66,6 +68,7 @@ final class TerminalOutputTailTests: XCTestCase {
 
     func testTailPreservesOrderedSuffixForLargeTranscript() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = (1...10000).map { String(format: "SEQ %05d", $0) }.joined(separator: "\n") + "\n"
         try text.data(using: .utf8)?.write(to: url)
 
@@ -76,6 +79,7 @@ final class TerminalOutputTailTests: XCTestCase {
 
     func testTailKeepsPlainTextFastPathForCarriageReturnFreeLogs() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = (1...2000).map { "plain-\($0)" }.joined(separator: "\n") + "\n"
         try text.data(using: .utf8)?.write(to: url)
 
@@ -86,6 +90,7 @@ final class TerminalOutputTailTests: XCTestCase {
 
     func testTailFallsBackToRenderedTranscriptWhenCarriageReturnsRewriteLine() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = "progress 10%\rprogress 100%\ncomplete\n"
         try text.data(using: .utf8)?.write(to: url)
 
@@ -246,6 +251,7 @@ final class TerminalOutputTailTests: XCTestCase {
         // to clear below the prompt, then the prompt text — mirroring a real interactive transcript.
         let promptRedraw = "\(esc)[1m\(esc)[7m%\(esc)[27m\(esc)[0m\r \r\r\(esc)[0m\(esc)[24m\(esc)[Juser@host demo % \(esc)[K\(esc)[?2004h"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         let text = "\(promptRedraw)\(esc)[?2004le\u{0008}echo scrolled-marker\(esc)[?2004l\r\r\n" + "scrolled-marker\r\n" + promptRedraw
         try text.data(using: .utf8)?.write(to: url)
 

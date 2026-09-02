@@ -11,6 +11,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     func testTabSnapshotInWindowIDsParsesFrontmostURLAndScopedRows() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -69,6 +70,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     func testFocusFirstMatchingTabMatchParsesFocusedTab() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -105,6 +107,7 @@ final class ChromeAdapterTests: XCTestCase {
     // rather than .activateAllWindows.
     func testFocusFirstMatchingTabMatchRaisesOnlyTargetWindowNotAllChromeWindows() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -126,6 +129,7 @@ final class ChromeAdapterTests: XCTestCase {
     // window back on the Space it belongs to so the raise can cross to that Space.
     func testFocusFirstMatchingTabMatchUnminimizesTargetWindowBeforeRaisingIt() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -143,6 +147,7 @@ final class ChromeAdapterTests: XCTestCase {
     // Same rule as focusFirstMatchingTabMatch above, scoped to a known window id.
     func testFocusMatchingTabInWindowUnminimizesTargetWindowBeforeRaisingIt() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -161,6 +166,7 @@ final class ChromeAdapterTests: XCTestCase {
     // may have minimized, so this path un-minimizes it too.
     func testOpenTabInFirstAvailableWindowUnminimizesTargetWindowBeforeRaisingIt() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -183,6 +189,7 @@ final class ChromeAdapterTests: XCTestCase {
     // the raise renumbers the window list.
     func testOpenTabInFirstAvailableWindowRaisesTargetWindowBeforeCreatingTheTab() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -224,6 +231,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     func testFocusMatchingTabInWindowUsesExactPassBeforePrefixFallback() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -251,6 +259,7 @@ final class ChromeAdapterTests: XCTestCase {
     // target Chrome window, never every Chrome window.
     func testFocusMatchingTabInWindowRaisesOnlyTargetWindowNotAllChromeWindows() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -289,6 +298,7 @@ final class ChromeAdapterTests: XCTestCase {
 
         let focusMatchingTabInWindowLog = FileManager.default.temporaryDirectory.appendingPathComponent(
             "chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: focusMatchingTabInWindowLog) }
         let focusMatchingTabInWindowMock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(focusMatchingTabInWindowLog.path))
@@ -301,6 +311,7 @@ final class ChromeAdapterTests: XCTestCase {
 
         let focusFirstMatchingTabMatchLog = FileManager.default.temporaryDirectory.appendingPathComponent(
             "chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: focusFirstMatchingTabMatchLog) }
         let focusFirstMatchingTabMatchMock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(focusFirstMatchingTabMatchLog.path))
@@ -313,6 +324,7 @@ final class ChromeAdapterTests: XCTestCase {
 
         let openTabInFirstAvailableWindowLog = FileManager.default.temporaryDirectory.appendingPathComponent(
             "chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: openTabInFirstAvailableWindowLog) }
         let openTabInFirstAvailableWindowMock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(openTabInFirstAvailableWindowLog.path))
@@ -335,6 +347,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     func testCloseMatchingTabsInWindowExcludesSiblingPrefixes() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
@@ -356,6 +369,7 @@ final class ChromeAdapterTests: XCTestCase {
 
     func testOpenTabInFirstAvailableWindowReturnsFocusedWindowID() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        defer { try? FileManager.default.removeItem(at: scriptLog) }
         let mock = """
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))

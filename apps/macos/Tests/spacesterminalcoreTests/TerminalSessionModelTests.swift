@@ -48,7 +48,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionPaths = try TerminalSessionPaths.forSession(id: "session-1")
         let metadata = TerminalSessionLaunchConfiguration(
@@ -147,7 +150,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-automation-roundtrip"
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -243,7 +249,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-attach"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -280,7 +289,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-stale-remote"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -301,7 +313,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-targeted-remote"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -354,7 +369,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-transfer"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -384,7 +402,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let sessionID = "session-concurrent-owner"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -411,7 +432,10 @@ final class TerminalSessionModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let paths = try TerminalSessionPaths.forSession(id: "7399141B-E18F-429C-AD87-1FA6191DC9FE")
 

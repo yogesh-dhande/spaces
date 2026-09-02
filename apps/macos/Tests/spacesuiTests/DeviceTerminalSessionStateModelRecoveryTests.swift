@@ -264,6 +264,13 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
     /// needs a stable certificate to pin. Mirrors `DeviceTerminalSessionStateModelTranscriptTests`.
     private static let tlsRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
         "device-terminal-session-state-model-recovery-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+    /// `tlsRoot` is process-lifetime, shared across every test method in this class, so it is cleaned up
+    /// once here rather than per-test in `tearDownWithError`.
+    override class func tearDown() {
+        try? FileManager.default.removeItem(at: tlsRoot)
+        super.tearDown()
+    }
 }
 
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as an

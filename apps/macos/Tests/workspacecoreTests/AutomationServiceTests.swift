@@ -2292,7 +2292,7 @@ import spacesterminalcore
         ticksSuspended: @escaping @Sendable () -> Bool = { false }
     ) throws {
         store = try testCase.makeTemporaryStore()
-        let workspaceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("automation-workspace-\(UUID().uuidString)")
+        let workspaceDirectory = try makeTempDirectory().appendingPathComponent("automation-workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceDirectory, withIntermediateDirectories: true)
         let project = makeProjectRecord(dir: workspaceDirectory.deletingLastPathComponent().path)
         try store.upsert(project: project)

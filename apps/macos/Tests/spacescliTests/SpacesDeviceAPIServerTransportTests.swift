@@ -9,6 +9,11 @@ import spacesterminalcore
 @testable import workspacecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
+    override class func tearDown() {
+        try? FileManager.default.removeItem(at: deviceAPITransportTestTLSRoot)
+        super.tearDown()
+    }
+
     /// Deleting a workspace can be asked to delete its branches, and the notice the daemon computes for that
     /// is failure-only: a branch deleted cleanly, as asked here, carries no notice on the response at all,
     /// rather than a fixed "Deleted workspace." report the client would have to show regardless.

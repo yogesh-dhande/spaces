@@ -16,6 +16,8 @@ import Testing
 @Suite final class TerminalSessionAttachmentSnapshotMutationsTests {
     private let databaseRoot: URL
     private let databasePath: String
+    /// Roots created by `makeAttachedSession()`, removed alongside `databaseRoot` in `deinit`.
+    private var attachedSessionRoots: [URL] = []
 
     init() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -26,6 +28,7 @@ import Testing
 
     deinit {
         try? FileManager.default.removeItem(at: databaseRoot)
+        for root in attachedSessionRoots { try? FileManager.default.removeItem(at: root) }
     }
 
     // MARK: - Fixtures
@@ -40,6 +43,7 @@ import Testing
     private func makeAttachedSession() throws -> (paths: TerminalSessionPaths, sessionID: String) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        attachedSessionRoots.append(root)
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(

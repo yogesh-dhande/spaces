@@ -7,6 +7,11 @@
     @testable import spacesterminalcore
 
     final class TerminalTranscriptServerTests: XCTestCase {
+        override class func tearDown() {
+            try? FileManager.default.removeItem(at: transcriptTestTLSRoot)
+            super.tearDown()
+        }
+
         func testTerminalTranscriptCappedSuffixStartsAtALineBoundary() throws {
             try withTemporaryProfile { _ in
                 let sessionID = "session-transcript-\(UUID().uuidString)"

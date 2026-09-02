@@ -88,6 +88,7 @@ import Testing
 
     @Test func installStateIsNotInstalledWithoutASpacesEntry() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
 
         #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .notInstalled)
@@ -99,6 +100,7 @@ import Testing
 
     @Test func installStateIsCurrentWhenEveryBoundEventCarriesACurrentEntry() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
         try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: "/usr/local/bin/spaces")
 
@@ -107,6 +109,7 @@ import Testing
 
     @Test func installStateIsOutdatedWhenEntriesCarryAnOlderVersion() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
         try writeHooks(
             ["SessionStart": [group(command(event: .initialize, version: 0))], "Stop": [group(command(event: .done, version: 0))]], to: file)
@@ -118,6 +121,7 @@ import Testing
     /// that wrote the config did not, so the hooks present are real but incomplete.
     @Test func installStateIsOutdatedWhenThisBuildBindsAnEventTheConfigLacks() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
         try writeHooks(["SessionStart": [group(command(event: .initialize, version: AgentHookCommand.hookVersion))]], to: file)
 
@@ -131,6 +135,7 @@ import Testing
     /// every Spaces upgrade would leave a second, stale hook firing on every event.
     @Test func reinstallReplacesOlderVersionEntriesAndPreservesTheUsersOwnHooks() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
         try writeHooks(
             [
@@ -190,6 +195,7 @@ import Testing
 
     @Test func opencodePluginStateTracksTheHeaderVersion() throws {
         let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let plugin = directory.appendingPathComponent(AgentHookOpencodePluginWriter.pluginFileName)
 
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .notInstalled)

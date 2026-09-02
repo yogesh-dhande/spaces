@@ -235,6 +235,7 @@ import spacesterminalui
 
     @Test func localFileLinkResolvesRelativePathAndOpens() throws {
         let workingDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: workingDirectory) }
         let subdirectory = workingDirectory.appendingPathComponent("nested", isDirectory: true)
         try FileManager.default.createDirectory(at: subdirectory, withIntermediateDirectories: true)
         let file = subdirectory.appendingPathComponent("notes.txt")
@@ -254,6 +255,7 @@ import spacesterminalui
 
     @Test func localFileLinkForMissingFileShowsErrorAndDoesNotOpen() throws {
         let workingDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: workingDirectory) }
         let banner = RecordingBanner()
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: true, workingDirectory: workingDirectory.path, banner: banner, recorder: recorder)

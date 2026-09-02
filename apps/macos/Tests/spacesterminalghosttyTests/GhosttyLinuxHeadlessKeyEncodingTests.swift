@@ -72,9 +72,12 @@
         /// exactly the bytes the daemon wrote. `programEnables` is emitted by the child before it starts
         /// echoing, which is how a real program announces the modes that change key encoding; it cannot be
         /// sent as input because `cat -v` renders input escapes as visible text.
-        private func startEchoSession(programEnables: String = "") async throws -> (core: Box<GhosttyEmbeddedSessionCore>, outputPath: String) {
+        private func startEchoSession(programEnables: String = "") async throws -> (
+            core: Box<GhosttyEmbeddedSessionCore>, outputPath: String, cleanup: () -> Void
+        ) {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let cleanup: () -> Void = { try? FileManager.default.removeItem(at: root) }
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let enableModes = programEnables.isEmpty ? "" : "printf '\(programEnables)'; "
@@ -93,10 +96,19 @@
             try await waitUntil(transcriptPath: outputPath, "the child must reach its echo loop") {
                 Self.transcript(at: outputPath).contains("KEYS_READY")
             }
-            return (coreBox, outputPath)
+            return (coreBox, outputPath, cleanup)
         }
 
         private func terminate(_ core: Box<GhosttyEmbeddedSessionCore>) { TerminalEngineActor.runSynchronously { core.value.terminate() } }
+
+        /// Terminates the core and waits for the writes terminate enqueues to commit before the deferred
+        /// `cleanup()` deletes this test's root — a delayed persistence queue would otherwise recreate the
+        /// runtime directory after teardown. The deferred `terminate()` + `cleanup()` backstop then no-ops
+        /// on the terminate (it is idempotent) and only covers early-throw exits.
+        private func shutDownAndDrain(_ core: Box<GhosttyEmbeddedSessionCore>) async {
+            terminate(core)
+            await core.value.drainPersistenceForShutdown()
+        }
 
         private func sendKey(_ key: String, to core: Box<GhosttyEmbeddedSessionCore>) {
             let response = TerminalEngineActor.runSynchronously { core.value.handleControlRequest(TerminalControlRequest(command: "key", key: key)) }
@@ -107,8 +119,11 @@
 
         @Test func shiftEnterEncodesAKittySequenceOnceTheProgramEnablesTheProtocol() async throws {
             // `CSI > 1 u` pushes the disambiguate flag, the way an agent TUI does on startup.
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[>1u")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[>1u")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             // Enter keeps its legacy encoding even under the Kitty protocol, so a shell stays usable.
             sendKey("enter", to: core)
@@ -121,11 +136,16 @@
 
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^M", in: output) == 1, "Shift+Enter must not also send a carriage return: \(output)")
+
+            await shutDownAndDrain(core)
         }
 
         @Test func enterStaysACarriageReturnAndShiftEnterDoesNotSubmitWithoutTheKittyProtocol() async throws {
-            let (core, outputPath) = try await startEchoSession()
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession()
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             sendKey("enter", to: core)
             try await waitUntil(transcriptPath: outputPath, "Enter must send a carriage return") { Self.transcript(at: outputPath).contains("^M") }
@@ -137,23 +157,33 @@
 
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^M", in: output) == 1, "Shift+Enter must not submit the line: \(output)")
+
+            await shutDownAndDrain(core)
         }
 
         @Test func arrowsFollowApplicationCursorKeyMode() async throws {
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[?1h")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             sendKey("up", to: core)
             try await waitUntil(transcriptPath: outputPath, "DECCKM must switch the arrow to its SS3 form") {
                 Self.transcript(at: outputPath).contains("^[OA")
             }
+
+            await shutDownAndDrain(core)
         }
 
         /// The Mac line-editing chords are fixed byte sequences on purpose, so they must not start varying
         /// with terminal mode the way encoded key presses do.
         @Test func macLineEditingChordsKeepTheirReadlineBytes() async throws {
-            let (core, outputPath) = try await startEchoSession(programEnables: "\\033[>1u")
-            defer { terminate(core) }
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[>1u")
+            defer {
+                terminate(core)
+                cleanup()
+            }
 
             sendKey("cmd+left", to: core)
             try await waitUntil(transcriptPath: outputPath, "cmd+left must stay ctrl+a") { Self.transcript(at: outputPath).contains("^A") }
@@ -163,6 +193,8 @@
 
             sendKey("opt+left", to: core)
             try await waitUntil(transcriptPath: outputPath, "opt+left must stay meta-b") { Self.transcript(at: outputPath).contains("^[b") }
+
+            await shutDownAndDrain(core)
         }
     }
 #endif
