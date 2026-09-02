@@ -1054,7 +1054,7 @@ Headless session creation (`ghostty_session_new_headless`) and Ghostty config pa
 
 ### Projects and `spaces.yaml`
 
-A project's identity is a freshly minted UUID, separate from its filesystem path, so the same repository on two devices is two distinct projects and IDs never collide when one client aggregates several devices.
+A project's identity is a freshly minted UUID, separate from its filesystem path, so the same repository on two devices is two distinct projects with distinct ids. That id is unique per daemon, not globally: a profile database copied or restored across devices can make two daemons report the same project id. `AppKitController.mergedSidebarData` resolves such a collision first-wins by device section order when it aggregates several devices — the winning section's project row and workspace list survive, a shadowed section's workspaces for that id are dropped rather than merged in, and alerts stay per-device (their attention ids embed the device id, so a duplicated project id never collides two alert rows into one).
 
 Because the UUID is the identity, project deletion is keyed on it: `removeProject(id:)` resolves the record by its primary key and tears it down, and the Device API delete handler uses the id it already resolved. Deletion therefore never re-resolves the project by directory, so a project whose recorded directory no longer canonicalizes to itself — for example a plain folder that later gained a Git repository (`git init`), or a directory that moved — is still removed reliably instead of a directory lookup silently matching nothing. `removeProject(dir:)` stays only for directory-scoped callers (fixture cleanup) that have no id.
 

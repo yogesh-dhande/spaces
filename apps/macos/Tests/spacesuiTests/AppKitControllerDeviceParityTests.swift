@@ -808,6 +808,91 @@ import workspacecore
         #expect(merged.alertsGroups.map(\.workspaceID) == ["ws-local", "ws-remote", "ws-retrying"])
     }
 
+    @Test func duplicateProjectIDAcrossDeviceSectionsMergesFirstWinsEverywhere() {
+        // Project ids are per-daemon UUIDs, so two sections legitimately sharing one is not reachable
+        // through normal pairing. It is reachable when a profile database is copied or restored across
+        // devices (#532). Before the fix, `projects` was appended unconditionally while
+        // `workspacesByProject`/`workspaceRuntimeStatusByID` merged first-wins, so the merged model
+        // disagreed with itself: the duplicated project id showed up twice in `projects` (device B's
+        // copy, isHidden true, surviving alongside device A's), while only device A's workspace was
+        // reachable under that id. Every collection must agree on first-wins so the surviving project
+        // record is always the one whose workspaces actually survived.
+        let sharedProjectID = "shared-project"
+        let deviceA = AppKitController.DeviceSection(
+            deviceID: "device-a", deviceName: "Device A", isLocal: true, loadState: .loaded, device: nil,
+            projects: [
+                ProjectSummary(
+                    id: sharedProjectID, name: "Shared", dir: "/a/shared", isGitRepo: true, defaultBranch: "main", isHidden: false,
+                    deviceID: "device-a")
+            ],
+            workspacesByProject: [
+                sharedProjectID: [
+                    WorkspaceSummary(id: "ws-a", branch: "feature-a", dir: "/a/shared/feature-a", isRunning: true, isDefault: false, deviceID: "device-a")
+                ]
+            ], workspaceRuntimeStatusByID: [:])
+        let deviceB = AppKitController.DeviceSection(
+            deviceID: "device-b", deviceName: "Device B", isLocal: false, loadState: .loaded, device: nil,
+            projects: [
+                ProjectSummary(
+                    id: sharedProjectID, name: "Shared", dir: "/b/shared", isGitRepo: true, defaultBranch: "main", isHidden: true,
+                    deviceID: "device-b")
+            ],
+            workspacesByProject: [
+                sharedProjectID: [
+                    WorkspaceSummary(id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
+                ]
+            ], workspaceRuntimeStatusByID: [:])
+
+        let merged = AppKitController.mergedSidebarData(sections: [deviceA, deviceB])
+
+        // Exactly one project record survives per id, and it is device A's: the same section whose
+        // workspace is reachable under that id below.
+        #expect(merged.projects.map(\.id) == [sharedProjectID])
+        #expect(merged.projects.first?.deviceID == "device-a")
+        #expect(merged.projects.first?.isHidden == false)
+        #expect(merged.workspacesByProject[sharedProjectID]?.map(\.id) == ["ws-a"])
+    }
+
+    @Test func duplicateProjectIDWhereTheWinningSectionHasNoWorkspacesDoesNotLeakTheShadowedSectionsWorkspaces() {
+        // Same collision as above, but device A (the winning section, first in `sections`) has no
+        // workspaces at all for the shared project -- its `workspacesByProject` simply omits the key,
+        // which is what a project with zero workspaces on that device actually looks like. Before the
+        // fix, `mergedWorkspaces.merge(section.workspacesByProject) { current, _ in current }` only
+        // resolves first-wins for keys that exist in both dicts; a key device A's dict never wrote falls
+        // through to device B's value, pairing device B's workspace with device A's surviving project
+        // record -- cross-device project/workspace pairing, wrong daemon routing (#532 follow-up).
+        let sharedProjectID = "shared-project"
+        let deviceA = AppKitController.DeviceSection(
+            deviceID: "device-a", deviceName: "Device A", isLocal: true, loadState: .loaded, device: nil,
+            projects: [
+                ProjectSummary(
+                    id: sharedProjectID, name: "Shared", dir: "/a/shared", isGitRepo: true, defaultBranch: "main", isHidden: false,
+                    deviceID: "device-a")
+            ],
+            workspacesByProject: [:], workspaceRuntimeStatusByID: [:])
+        let deviceB = AppKitController.DeviceSection(
+            deviceID: "device-b", deviceName: "Device B", isLocal: false, loadState: .loaded, device: nil,
+            projects: [
+                ProjectSummary(
+                    id: sharedProjectID, name: "Shared", dir: "/b/shared", isGitRepo: true, defaultBranch: "main", isHidden: true,
+                    deviceID: "device-b")
+            ],
+            workspacesByProject: [
+                sharedProjectID: [
+                    WorkspaceSummary(id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
+                ]
+            ], workspaceRuntimeStatusByID: [:])
+
+        let merged = AppKitController.mergedSidebarData(sections: [deviceA, deviceB])
+
+        // Device A's project record wins (it is first in `sections`), and it must show no workspaces --
+        // device B's workspace list must not leak into it even though device A's dict had no entry to
+        // "win" with.
+        #expect(merged.projects.map(\.id) == [sharedProjectID])
+        #expect(merged.projects.first?.deviceID == "device-a")
+        #expect(merged.workspacesByProject[sharedProjectID] == [])
+    }
+
     @Test func anUnreachableDevicesRowsAreDimmed() {
         // The rows stay listed but read as not actionable. Dimming plus the section caption is the whole
         // treatment — no per-row icon — and a device mid-retry stays dimmed until its load lands.
