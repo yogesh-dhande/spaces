@@ -1244,6 +1244,25 @@ struct TerminalTailCommand: ParsableCommand {
     }
 }
 
+/// Fails loudly when no Spaces app instance holds this profile's app-owner lease, instead of letting a
+/// fire-and-forget IPC notification go out with nothing listening for it.
+/// `SpacesLeaseCoordinator.currentProfileAppOwner` is the canonical owner lookup: profile-scoped (never
+/// "any SpacesApp on the machine") and pid-liveness-checked, the same one `spacese2e profile-app-owner`
+/// and desktop-control arbitration rely on, so "running" means the same thing everywhere it's asked.
+///
+/// Known honesty gap, accepted: the app acquires the app-owner lease before `app.run()` and registers
+/// its IPC observer in `applicationDidFinishLaunching` (removing the observer before releasing the
+/// lease at termination), so a `spaces terminal show` landing inside the launch or termination window
+/// still passes this guard while its notification reaches nobody. Left as-is because the window is
+/// brief, a rerun self-heals, and closing it would require an acknowledgement round-trip over IPC
+/// beyond the minimal liveness check this guard is scoped to.
+func requireRunningAppInstance(profile: SpacesProfile? = nil, fileManager: FileManager = .default) throws {
+    guard try SpacesLeaseCoordinator.currentProfileAppOwner(profile: profile, fileManager: fileManager) != nil else {
+        throw WorkspaceError.invalidArgument(
+            message: "No Spaces app instance is running for this profile. Launch Spaces, then run `spaces terminal show` again.")
+    }
+}
+
 struct TerminalShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show", abstract: "Open a native Spaces window for a terminal session.")
 
@@ -1255,6 +1274,7 @@ struct TerminalShowCommand: ParsableCommand {
             guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
                 throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
             }
+            try requireRunningAppInstance()
             let requestID = UUID().uuidString
             try postCLIIPCNotification(
                 name: IPCNotification.openTerminalSessionWindow,

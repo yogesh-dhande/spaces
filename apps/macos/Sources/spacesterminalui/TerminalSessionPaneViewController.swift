@@ -366,9 +366,13 @@ private final class NotificationObserverBag: @unchecked Sendable {
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
         let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
-        let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
-        lastObservedOwnerClientID = currentOwnerClient?.id
-        let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
+        // Keyed on the owner attachment's `clientID`, not on resolving that client's row in
+        // `snapshot.clients`: a snapshot can carry an owner attachment whose client row has not landed
+        // yet (or has already dropped out), and that must still read as a different active owner to
+        // take over from, not fall through to a plain attach.
+        let ownerAttachment = activeOwnerAttachment(snapshot: attachmentSnapshot)
+        lastObservedOwnerClientID = ownerAttachment?.clientID
+        let hasDifferentActiveOwner = ownerAttachment != nil && ownerAttachment?.clientID != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
             takeOverOwnership()
             return
@@ -377,7 +381,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
             refreshNow(allowGhosttyOwnerAttach: false)
             return
         }
-        if currentOwnerClient?.id == client.id, activeAttachment(snapshot: attachmentSnapshot)?.mode == .owner {
+        if ownerAttachment?.clientID == client.id, activeAttachment(snapshot: attachmentSnapshot)?.mode == .owner {
+            // The refocus shortcut in `AppKitController.openTerminalSessionPane` calls this on every
+            // owner-mode `spaces terminal show`, but it only takes that shortcut when the pane already
+            // holds the owner surface (`canRefocusTerminalPaneWithoutReattaching`). So the common warm
+            // case lands here with nothing outstanding and nothing changed: no pending attach, and the
+            // lifecycle already reads confirmed owner. Reattaching to the host and refreshing in that
+            // case would defeat the whole point of the refocus shortcut ("without reattaching"), so bail
+            // out before touching any of it. The reclaim call below still runs for the case this guard
+            // does not cover: a snapshot where the daemon-side owner has moved since the last
+            // observation, which fails `holdsOwnerAttachedSurface` and falls through to the reattach.
+            if holdsOwnerAttachedSurface, pendingAttach == nil, clientAttachmentLifecycle == .attached(mode: .owner) { return }
             // The snapshot can already show this client as the confirmed owner while its own attach
             // send's completion is still in flight (the daemon answered; the main-actor hop has not
             // run). The outstanding request stays represented, exactly as `refreshNow`'s
@@ -1064,6 +1078,15 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let activeAttachments = snapshot.attachments
         guard let ownerAttachment = activeAttachments.last(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
         return snapshot.clients.first(where: { $0.id == ownerAttachment.clientID })
+    }
+
+    /// The active owner's attachment record itself, rather than the client row it names. A snapshot can
+    /// carry an owner attachment for a client whose row has already dropped out of `snapshot.clients`
+    /// (a race between the client list and the attachment list settling). `requestOwnershipIfNeeded` keys
+    /// its takeover decision on this so that case still reads as a different active owner; resolving
+    /// through `activeOwnerClient` instead would return `nil` there and fall through to a plain attach.
+    private func activeOwnerAttachment(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalAttachment? {
+        snapshot?.attachments.last(where: { $0.mode == .owner && $0.detachedAt == nil })
     }
 
     private func activeAttachment(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalAttachment? {

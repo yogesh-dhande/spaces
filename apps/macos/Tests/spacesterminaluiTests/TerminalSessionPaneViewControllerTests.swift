@@ -524,6 +524,56 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.holdsOwnerAttachedSurface)
     }
 
+    /// `AppKitController.openTerminalSessionPane`'s refocus shortcut calls `requestOwnershipIfNeeded()`
+    /// on every owner-mode `spaces terminal show`, but only takes that shortcut when the pane already
+    /// holds the owner surface. A warm reclaim in that state must stay a pure focus operation: reattaching
+    /// to the host and refreshing on every such call would defeat `canRefocusTerminalPaneWithoutReattaching`'s
+    /// whole purpose.
+    @MainActor func testAWarmConfirmedOwnerReclaimIsANoOpSoTheRefocusShortcutStaysReattachFree() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-warm-owner"
+        // Pin this pane's own client id so the seeded attachment snapshot below can name it directly,
+        // rather than racing whatever id the controller would otherwise mint for itself.
+        let ownClientID = "warm-owner-client"
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "warm", workingDirectory: "/tmp/warm", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-07-26T00:00:01Z",
+            title: "warm", workingDirectory: "/tmp/warm", columns: 80, rows: 24)
+        // The warm no-op guard lives inside the snapshot-confirmed-owner branch of
+        // `requestOwnershipIfNeeded`, which only triggers when the attachment snapshot itself already
+        // names this client as the active, non-detached owner (not just the host-local state) — the
+        // actual shape of the production warm state the refocus shortcut hits.
+        let ownerAttachment = TerminalAttachment(sessionID: sessionID, clientID: ownClientID, mode: .owner, attachedAt: "2026-07-26T00:00:00Z")
+        let provider = FakeTerminalSessionStateProvider(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [], attachments: [ownerAttachment]))
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: sessionID, paths: .init(rootDirectory: root.path), stateProvider: provider, preferredAttachmentMode: .owner,
+            performInitialRefresh: false, reusableOwnerClientID: ownClientID, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            sessionHostProvider: { _, _ in host })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertTrue(controller.holdsOwnerAttachedSurface, "precondition: the pane already holds the owner surface")
+        XCTAssertEqual(controller.clientAttachmentLifecycle, .attached(mode: .owner), "precondition: the attach already confirmed")
+
+        let refreshCountBeforeReclaim = controller.debugRefreshNowCallCountForTesting
+        controller.requestOwnershipIfNeeded()
+
+        XCTAssertEqual(
+            controller.debugRefreshNowCallCountForTesting, refreshCountBeforeReclaim,
+            "a warm reclaim while already the confirmed owner must not trigger a presentation refresh")
+        XCTAssertEqual(
+            controller.clientAttachmentLifecycle, .attached(mode: .owner), "a warm reclaim must not perturb an already-confirmed attachment")
+    }
+
     @MainActor func testCloseForSessionTerminationSkipsDetachAndSurfaceRelease() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1825,6 +1875,46 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+    }
+
+    /// An active owner attachment can name a client id that is missing from `snapshot.clients` (for
+    /// example, a takeover racing this Mac's own next state fetch). `activeOwnerClient(snapshot:)`
+    /// resolves a client row before it will recognize a different owner, so that gap must not make the
+    /// takeover decision fall through to a plain attach: the whole point of an owner-mode
+    /// `requestOwnershipIfNeeded()` is to preempt whichever client currently holds the attachment.
+    @MainActor func testRequestOwnershipTakesOverWhenOwnerAttachmentHasNoMatchingClientRow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-orphaned-owner"
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "orphaned", workingDirectory: "/tmp/orphaned", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-08-30T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-08-30T00:00:01Z",
+            title: "orphaned", workingDirectory: "/tmp/orphaned", columns: 80, rows: 24)
+        // The owner attachment names "vanished-owner", but `clients` carries no row for it: exactly the
+        // partial snapshot `activeOwnerClient(snapshot:)` cannot resolve.
+        let ownerAttachment = TerminalAttachment(sessionID: sessionID, clientID: "vanished-owner", mode: .owner, attachedAt: "2026-08-30T00:00:00Z")
+        let provider = FakeTerminalSessionStateProvider(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [], attachments: [ownerAttachment]))
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        let attempts = TakeoverAttemptRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: sessionID, paths: .init(rootDirectory: root.path), stateProvider: provider, preferredAttachmentMode: .owner,
+            performInitialRefresh: false,
+            takeoverAction: { clientID in
+                _ = attempts.record(clientID: clientID)
+                return TerminalControlResponse(ok: true, message: "Took over ownership.")
+            }, attachClientAction: { _, _ in }, detachClientAction: { _ in }, sessionHostProvider: { _, _ in host })
+
+        controller.requestOwnershipIfNeeded()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(attempts.count, 1, "a missing client row for the active owner attachment must not skip the takeover")
     }
 
     /// The takeover must reach the daemon behind the attach the same show issued. Sent independently it

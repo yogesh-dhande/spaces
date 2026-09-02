@@ -1401,6 +1401,15 @@ import spacesterminalcore
         return content
     }
 
+    /// Test-only seam: swaps in a caller-supplied content controller for `sessionID`, bypassing
+    /// `ensureContentController`'s daemon-backed construction. Lets a unit test exercise
+    /// `openTerminalSessionPane`'s pane-reuse paths (the refocus shortcut, ownership reclaim) against a
+    /// controller whose `holdsOwnerAttachedSurface`/`requestOwnershipIfNeeded()` it can observe, without a
+    /// live daemon behind it.
+    func installContentControllerForTesting(_ content: any TerminalPaneContentHosting, sessionID: String) {
+        installContentController(content, sessionID: sessionID)
+    }
+
     private func installContentController(_ content: any TerminalPaneContentHosting, sessionID: String) {
         content.onTitleChanged = { [weak self, weak content] title in
             guard let self, let content, let sessionID = content.descriptor.terminalSessionID, self.placement(forSessionID: sessionID) != nil else {
