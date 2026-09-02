@@ -73,12 +73,33 @@ targets:
         product: spacesterminalcore
       - package: SpacesPackage
         product: spacesterminalmobileghostty
+  # Blocking screen-level coverage: built and run by scripts/ios-test-lane.sh alongside the unit
+  # tests. Runs against Demo Mode's bundled recording, so it needs no daemon, no network, and no
+  # paired Mac. Screen-level coverage that needs a live daemon belongs in SpacesMobileUITests below,
+  # which stays on demand.
+  SpacesMobileSmokeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - SmokeUITests
+      - UITestSupport
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: BEMDA62NB6
+        PRODUCT_BUNDLE_IDENTIFIER: dev.usespaces.spacesmobile.smokeuitests
+        TEST_TARGET_NAME: SpacesMobile
+    dependencies:
+      - target: SpacesMobile
+  # On-demand only (apps/macos/Tests/e2e.sh mobile): these drive a live daemon and a paired Mac.
   SpacesMobileUITests:
     type: bundle.ui-testing
     platform: iOS
     deploymentTarget: "17.0"
     sources:
       - UITests
+      - UITestSupport
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -93,10 +114,12 @@ schemes:
       targets:
         SpacesMobile: all
         SpacesMobileTests: [test]
+        SpacesMobileSmokeUITests: [test]
         SpacesMobileUITests: [test]
     run:
       storeKitConfiguration: SpacesMobile.storekit
     test:
       targets:
         - SpacesMobileTests
+        - SpacesMobileSmokeUITests
         - SpacesMobileUITests

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the iOS unit test lane as a standalone process. verify.sh backgrounds this whole script
+# Runs the blocking iOS test lane (unit tests plus the Demo Mode smoke UI tests) as a standalone
+# process. verify.sh backgrounds this whole script
 # (see run_verify_steps in verify.sh) so it can overlap with the SwiftPM/coverage lane in the
 # foreground; a CI workflow can equally invoke it as its own job.
 
@@ -100,14 +101,18 @@ run_ios_tests() {
     -configuration Debug
     -destination "$destination"
     -derivedDataPath "$ios_derived_data"
+    # The blocking iOS lane: model tests plus the Demo Mode screen-level smoke tests, built once and
+    # run together. SpacesMobileUITests is excluded because it drives a live daemon and a paired Mac,
+    # which no CI runner has; it runs on demand through apps/macos/Tests/e2e.sh mobile.
     -only-testing:SpacesMobileTests
+    -only-testing:SpacesMobileSmokeUITests
     -skip-testing:SpacesMobileUITests
   )
 
   unset $(git rev-parse --local-env-vars)
-  printf 'Building iOS unit tests for %s...\n' "$destination"
+  printf 'Building iOS tests for %s...\n' "$destination"
   run_with_silence_watchdog "$ios_build_stall_seconds" xcodebuild "${xcodebuild_args[@]}" build-for-testing
-  printf 'Running iOS unit tests on %s...\n' "$destination"
+  printf 'Running iOS tests on %s...\n' "$destination"
   run_with_silence_watchdog "$verify_stall_seconds" xcodebuild "${xcodebuild_args[@]}" test-without-building
 }
 

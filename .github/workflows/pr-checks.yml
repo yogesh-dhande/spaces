@@ -146,9 +146,10 @@ jobs:
           if-no-files-found: ignore
 
   # Its own job rather than a lane inside verify: on the three-core macOS runner the iOS build and
-  # the macOS test run starved each other, and only ~16s of this lane is actually running tests --
-  # the rest is simulator boot and build-for-testing. Run directly, so its output lands in the CI
-  # log instead of the file verify.sh has to redirect and tail.
+  # the macOS test run starved each other, and only ~75s of this lane is actually running tests
+  # (~50s of unit tests plus ~25s of Demo Mode smoke UI tests) -- the rest is simulator boot and
+  # build-for-testing. Run directly, so its output lands in the CI log instead of the file
+  # verify.sh has to redirect and tail.
   ios-tests:
     needs: [changes, publish-ghostty-artifacts]
     if: ${{ always() && needs.changes.outputs.code == 'true' && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
@@ -181,8 +182,8 @@ jobs:
           restore-keys: |
             ios-dd-${{ runner.os }}-
 
-      - name: Run iOS unit test lane
-        # Well under the verify job's ceiling: this lane is a build plus ~16s of tests, and the
+      - name: Run iOS test lane
+        # Well under the verify job's ceiling: this lane is a build plus ~75s of tests, and the
         # simulator boot inside it carries its own deadline.
         timeout-minutes: 30
         run: apps/macos/scripts/ios-test-lane.sh
