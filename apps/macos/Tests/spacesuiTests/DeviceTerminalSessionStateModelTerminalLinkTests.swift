@@ -123,7 +123,7 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func resolveTerminalLinkWithoutALinkThrowsWithoutIssuingADeviceAPIRequest() throws {
             // A nil `terminalLink` has nothing to resolve; the model must reject it locally (mirroring the
-            // `.control` case's `AppKitController.deviceTerminalControlRequest` guard) rather than opening a
+            // `.control` case's `TerminalPaneService.deviceTerminalControlRequest` guard) rather than opening a
             // connection for a request the daemon would also reject. Point at a closed port so any attempt to
             // actually send would fail loudly instead of silently succeeding.
             let requestClient = try SpacesDeviceAPIRequestSessionClient(

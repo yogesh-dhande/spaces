@@ -27,12 +27,12 @@ import workspacecore
     }
 
     @Test func terminalQuitPolicyPromptsOnlyWhenLiveSessionsExist() {
-        #expect(AppKitController.terminalQuitPolicy(liveTerminalSessionCount: 0) == .quitImmediately)
-        #expect(AppKitController.terminalQuitPolicy(liveTerminalSessionCount: 2) == .promptForLiveSessions(count: 2))
+        #expect(TerminalPaneService.terminalQuitPolicy(liveTerminalSessionCount: 0) == .quitImmediately)
+        #expect(TerminalPaneService.terminalQuitPolicy(liveTerminalSessionCount: 2) == .promptForLiveSessions(count: 2))
     }
 
     @Test func liveBuiltInTerminalSessionsTreatsListFailureAsEmpty() {
-        let sessions = AppKitController.liveBuiltInTerminalSessions { throw NSError(domain: "TerminalServiceUnavailable", code: 1) }
+        let sessions = TerminalPaneService.liveBuiltInTerminalSessions { throw NSError(domain: "TerminalServiceUnavailable", code: 1) }
 
         #expect(sessions.isEmpty)
     }
@@ -189,8 +189,8 @@ import workspacecore
     /// Quitting with sessions kept running must leave every session alone, including the ad hoc terminal
     /// whose pane the app tears down on the way out.
     @Test func adHocSessionStopIsNotRequestedWhenQuitKeepsSessionsRunning() {
-        #expect(AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
-        #expect(!AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
+        #expect(TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
+        #expect(!TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {
@@ -199,7 +199,7 @@ import workspacecore
             createdAt: "2026-05-27T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let capturedConfiguration = LaunchConfigurationCapture()
 
-        let launcher = AppKitController.appBuiltInTerminalSessionLauncher { configuration in
+        let launcher = TerminalPaneService.appBuiltInTerminalSessionLauncher { configuration in
             capturedConfiguration.value = configuration
             return Self.terminalSessionSummary(
                 id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory)

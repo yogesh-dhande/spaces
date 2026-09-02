@@ -133,15 +133,15 @@ import workspacecore
         // The two operations behind one sidebar click part ways during an outage. Focusing a pane that is
         // already open is client-side — it owns its state model and renders the disconnected notice — so
         // an unreachable device never withholds it.
-        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: false))
-        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: true))
+        #expect(TerminalPaneService.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: false))
+        #expect(TerminalPaneService.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: true))
 
         // Opening a pane the layout does not have yet can only work by attaching to the owning daemon, so
         // it is refused while the device cannot act — and refused before the install, because installing
         // adds the pane to the layout and persists it before credentials are prepared: a pane admitted
         // here is saved as permanently failed and never retries when the device returns.
-        #expect(!AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: false))
-        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
+        #expect(!TerminalPaneService.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: false))
+        #expect(TerminalPaneService.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
     }
 
     @Test func aFreshCodePaneIsRefusedForADeviceThatCannotAct() {
@@ -151,8 +151,8 @@ import workspacecore
         // creation branch. Unlike that function, there is no `hasExistingPane` flag here:
         // `openOrFocusGlobalEditorWindow` already handles "a pane exists" by focusing it before creation
         // is ever considered, so this only ever answers "can we create."
-        #expect(!AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: false))
-        #expect(AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: true))
+        #expect(!TerminalPaneService.canCreateCodePane(deviceAcceptsDaemonActions: false))
+        #expect(TerminalPaneService.canCreateCodePane(deviceAcceptsDaemonActions: true))
     }
 
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
@@ -246,7 +246,7 @@ import workspacecore
             workingDirectory: staleDirectory.path, foregroundPID: foreground.processIdentifier)
 
         #expect(
-            AppKitController.terminalLinkWorkingDirectory(
+            TerminalPaneService.terminalLinkWorkingDirectory(
                 runtimeState: runtimeState, streamedWorkingDirectory: staleDirectory.path, launchWorkingDirectory: staleDirectory.path,
                 requestWorkingDirectory: staleDirectory.path) == liveDirectory.path)
     }
@@ -1136,7 +1136,7 @@ import workspacecore
     @Test func deviceTerminalControlRequestTranslatesRendererControlPayload() throws {
         let control = TerminalControlRequest(command: "resize", clientID: "mac-client", columns: 120, rows: 40, ownerEpoch: 7, resizeSerial: 3)
 
-        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
         #expect(request.action == .resize)
         #expect(request.sessionID == "session-web")
@@ -1155,7 +1155,7 @@ import workspacecore
                 TerminalControlMouseButtonPayload(
                     clientID: "mac-client", ownerEpoch: 7, button: 1, pressed: true, pointerX: 0.25, pointerY: 0.75, pointerMods: 4)))
 
-        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
         #expect(request.action == .mouseButton)
         #expect(request.clientID == "mac-client")
@@ -1173,7 +1173,7 @@ import workspacecore
                 TerminalControlSendPayload(
                     text: "line one\nline two", bytes: nil, clientID: "mac-client", ownerEpoch: 7, appendNewline: false, asPaste: true)))
 
-        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
         #expect(request.action == .send)
         #expect(request.text == "line one\nline two")
@@ -1185,7 +1185,7 @@ import workspacecore
         // Linux daemon never learns the client's light/dark preference and keeps its default theme.
         let control = TerminalControlRequest(command: "attach", attachmentMode: .owner, appearance: .light)
 
-        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
         #expect(request.action == .attach)
         #expect(request.appearance == .light)
@@ -1196,7 +1196,7 @@ import workspacecore
         // the requested appearance must both survive so the remote daemon re-themes its live session.
         let control = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "mac-client", appearance: .dark)))
 
-        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
         #expect(request.action == .setAppearance)
         #expect(request.appearance == .dark)
@@ -1212,10 +1212,10 @@ import workspacecore
 
         var appearanceA: ThemeAppearance = .light
         var appearanceB: ThemeAppearance = .light
-        appearanceA = AppKitController.applyAppearanceToLiveSession(
+        appearanceA = TerminalPaneService.applyAppearanceToLiveSession(
             .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: appearanceA, requestSender: recorder.send,
             applyState: noopApply)
-        appearanceB = AppKitController.applyAppearanceToLiveSession(
+        appearanceB = TerminalPaneService.applyAppearanceToLiveSession(
             .dark, sessionID: "session-b", clientID: "client-b", lastAppliedAppearance: appearanceB, requestSender: recorder.send,
             applyState: noopApply)
 
@@ -1226,7 +1226,7 @@ import workspacecore
         #expect(recorder.sends.contains { $0.sessionID == "session-b" && $0.appearance == .dark })
 
         // A redundant broadcast of the same appearance to an already-dark session sends nothing.
-        appearanceA = AppKitController.applyAppearanceToLiveSession(
+        appearanceA = TerminalPaneService.applyAppearanceToLiveSession(
             .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: appearanceA, requestSender: recorder.send,
             applyState: noopApply)
         #expect(appearanceA == .dark)
@@ -1241,14 +1241,14 @@ import workspacecore
         let recorder = AppearanceControlRecorder()
 
         // Appearance flips to dark while unattached: nothing sent, but the stored value advances to dark.
-        let recorded = AppKitController.applyAppearanceToLiveSession(
+        let recorded = TerminalPaneService.applyAppearanceToLiveSession(
             .dark, sessionID: "session-a", clientID: nil, lastAppliedAppearance: .light, requestSender: recorder.send, applyState: { _ in })
         #expect(recorded == .dark)
         #expect(recorder.sends.isEmpty)
 
         // The attach then carries dark and the client is present; a follow-up broadcast of dark dedupes
         // against the recorded value, so it does not double-send what the attach already applied.
-        let afterAttach = AppKitController.applyAppearanceToLiveSession(
+        let afterAttach = TerminalPaneService.applyAppearanceToLiveSession(
             .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: recorded, requestSender: recorder.send, applyState: { _ in })
         #expect(afterAttach == .dark)
         #expect(recorder.sends.isEmpty)
@@ -1416,7 +1416,7 @@ import workspacecore
             })
 
         let resolved = try #require(match)
-        let request = AppKitController.terminalSessionPaneOpenRequest(from: resolved)
+        let request = TerminalPaneService.terminalSessionPaneOpenRequest(from: resolved)
         #expect(request.sessionID == "session-ended")
         #expect(request.workspaceID == "workspace-ended")
         #expect(request.shell == "/bin/zsh")
@@ -1462,7 +1462,7 @@ import workspacecore
         let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
         let applied = AppliedStateBox()
 
-        let response = try AppKitController.sendDeviceTerminalControl(
+        let response = try TerminalPaneService.sendDeviceTerminalControl(
             sessionID: "session-1",
             request: TerminalControlRequest(
                 command: "attach",
@@ -1484,7 +1484,7 @@ import workspacecore
         let recorder = ControlRequestRecorder(stateResponseSnapshot: nil, controlResponseSnapshot: carriedState)
         let applied = AppliedStateBox()
 
-        let response = try AppKitController.sendDeviceTerminalControl(
+        let response = try TerminalPaneService.sendDeviceTerminalControl(
             sessionID: "session-1",
             request: TerminalControlRequest(
                 command: "attach",
@@ -1503,7 +1503,7 @@ import workspacecore
         let recorder = ControlRequestRecorder(stateResponseSnapshot: nil)
         let applied = AppliedStateBox()
 
-        let response = try AppKitController.sendDeviceTerminalControl(
+        let response = try TerminalPaneService.sendDeviceTerminalControl(
             sessionID: "session-1", request: TerminalControlRequest(command: "send", text: "ls", clientID: "mac-window", appendNewline: true),
             requestSender: recorder.send, refreshStateAfterControl: false, applyState: { applied.store($0) })
 

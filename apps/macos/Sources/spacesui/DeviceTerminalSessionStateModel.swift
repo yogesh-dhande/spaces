@@ -1332,7 +1332,7 @@
                 )
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
             case .control(let payload):
-                let deviceRequest = try AppKitController.deviceTerminalControlRequest(
+                let deviceRequest = try TerminalPaneService.deviceTerminalControlRequest(
                     sessionID: payload.sessionID, controlRequest: payload.controlRequest)
                 let controlAPIRequest = SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp)
                 let timeoutSeconds = Self.controlRequestTimeoutSeconds(for: payload.controlRequest, command: controlAPIRequest.command)

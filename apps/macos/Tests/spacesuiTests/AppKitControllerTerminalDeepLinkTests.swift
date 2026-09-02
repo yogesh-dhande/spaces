@@ -55,7 +55,7 @@ import workspacecore
         let device = device(id: "linux-box", name: "Build Box")
         let summary = summary(id: "session-remote", workspaceID: "workspace-remote")
 
-        let request = AppKitController.terminalSessionPaneOpenRequest(
+        let request = TerminalPaneService.terminalSessionPaneOpenRequest(
             from: AppKitController.TerminalSessionSummaryMatch(device: device, summary: summary))
 
         // The device is pinned so the pane attaches to the remote device rather than resolving the

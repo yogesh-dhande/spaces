@@ -322,7 +322,7 @@ extension AppKitController {
                     completion(nil)
                     return
                 }
-                self.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
+                self.terminalPanes.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
                     guard let self else { return }
                     defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
                     completion(request.map { .terminal($0) })
