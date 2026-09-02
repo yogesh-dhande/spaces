@@ -2016,6 +2016,55 @@
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
+        func testOpenTerminalLinkFailureSetsErrorMessage() async {
+            let settings = settings()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "resolveTerminalLink":
+                    return SpacesDeviceAPIResponse(ok: false, message: "Terminal link file is not a readable regular file.")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink("broken-link")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertEqual(model.linkPreviewErrorMessage, "Terminal link file is not a readable regular file.")
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
+        func testDismissLinkBannersClearsErrorAndNotice() {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            model.linkPreviewErrorMessage = "Terminal link file is not a readable regular file."
+            model.linkNotice = "This address runs on the session's host machine and isn't reachable from this device yet."
+
+            model.dismissLinkBanners()
+
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+        }
+
+        func testDismissLinkBannersLeavesPreviewAndPreparingStateIntact() {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            let preview = TerminalLinkPreview(id: "link-1", title: "image.png", kind: .image, content: .quickLook(URL(fileURLWithPath: "/tmp/image.png")))
+            model.linkPreview = preview
+            model.isPreparingLinkPreview = true
+            model.linkPreviewErrorMessage = "Terminal link file is not a readable regular file."
+            model.linkNotice = "This address runs on the session's host machine and isn't reachable from this device yet."
+
+            model.dismissLinkBanners()
+
+            XCTAssertEqual(model.linkPreview, preview)
+            XCTAssertTrue(model.isPreparingLinkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+        }
+
         func testOpenTerminalLinkDeletesPartialLocalPreviewOnTransferFailure() async throws {
             let settings = settings()
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -1310,6 +1310,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         linkPreview = nil
     }
 
+    /// Tap-to-dismiss for the link-open error and loopback notice banners. Unlike `dismissLinkPreview`,
+    /// this never touches an in-flight preview request or an already-open preview: a failed link open
+    /// never opened a sheet, so there is nothing else to tear down, and the caller (a banner's own
+    /// dismiss button/tap) must not cancel a request or preview it knows nothing about.
+    func dismissLinkBanners() {
+        linkPreviewErrorMessage = nil
+        linkNotice = nil
+    }
+
     func dismissSafariLink() { safariLink = nil }
 
     func openTerminalLink(_ link: String) async {
