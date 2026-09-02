@@ -70,6 +70,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Group related controls and data into clearly bounded sections when that improves scanability.
 - Prefer one section per concern instead of mixing unrelated controls into one generic settings block.
 - Use section cards when they help related content read as one unit. Avoid card-on-card-on-card nesting.
+- When a card's rows each own a piece of setup, expand that setup inline under its own row rather than in a separate card: the panel sits on the inset surface, shares that surface with the row that opened it (no hairline between them), and indents to the row's title column so it reads as belonging to that row. Only one panel in a card is open at a time — opening another moves it, and activating the open row's control closes it — so the card never grows into a stack of competing forms.
 
 ## Status And Feedback
 - Status should usually be conveyed with compact iconography and placement, not verbose labels everywhere.
@@ -99,7 +100,8 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Reserve strong emphasis for genuinely primary actions.
 - Keep frequent actions visible and secondary actions quieter.
 - Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
-- Use text buttons where clarity matters more than compactness.
+- Use text buttons where clarity matters more than compactness. A primary setup action a user has to find, rather than one they already know is there, gets an accent-tinted label next to its icon instead of a bare glyph.
+- Destructive row actions use the `trash` icon tinted `Theme.red` and always confirm first. The confirmation names the target in its title, states in plain terms what the action does and does not touch, marks the destructive button as such, and leaves Cancel as the default so Return dismisses it.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
 - Use a segmented control in a sheet's or view's toolbar/navigation-bar principal position to switch between a small, fixed set of content-rendering modes (e.g. Rendered/Raw) instead of separate screens, buttons, or menu items.
 - In a crowded Editor toolbar, represent agent assignment as a compact selector when running agents exist, with a separated `Start new…` menu item; when none exist, use a compact `Start agent…` action that opens the command-entry dialog without widening the row.

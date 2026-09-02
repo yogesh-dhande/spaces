@@ -1529,6 +1529,9 @@ private struct DeviceSyncState {
     /// so the outline is reloaded wholesale only when the rows themselves changed (added, removed, or
     /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
     func applySidebarDataChange() {
+        // Device load-state transitions land here. The Devices settings pane paints a status dot per device,
+        // so it repaints from them when it is open and no-ops otherwise.
+        host.devicePairing.refreshDeviceSettingsForDeviceStatusChange()
         rebuildFlatSidebarData()
         // Until `attachOutlineView` wires the outline's data source (the window build runs on a
         // deferred launch task, so an IPC-triggered reload can get here first; issue #581), there is

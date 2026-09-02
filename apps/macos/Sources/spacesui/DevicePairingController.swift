@@ -90,8 +90,12 @@ import workspacecore
         let sshUser: String?
         let sshPort: Int?
         let isLocal: Bool
+        /// Whether this client holds what it needs to talk to the device: a live local daemon for the local
+        /// row, a stored credential for a remote one. Gates the row's pairing action, which needs a working
+        /// channel to mint a code. Distinct from `status`, which reports whether the device is answering.
         let isAvailable: Bool
         let requiresReconnect: Bool
+        let status: DeviceRowStatus
 
         /// The label shown for this device in the Devices settings list. The local device always
         /// renders as "Local" regardless of its stored machine name; remote devices show their stored name.
@@ -106,6 +110,37 @@ import workspacecore
 
         var isVisible: Bool { expiresAt > Date() }
     }
+
+    /// Which inline panel the Devices card has open. The card shows at most one at a time: a device
+    /// row's iPhone/iPad pairing panel, or the add-remote-device SSH form that ends the list.
+    enum DeviceRowExpansion: Equatable, Sendable {
+        case pairing(deviceID: String)
+        case addRemoteDevice
+    }
+
+    /// One entry in the Devices card. A `row` sits on the card surface; an `expandedRow` is the row
+    /// whose panel is open and shares the `panel`'s inset surface, so the two read as one block.
+    private enum DevicesCardEntry {
+        case row(NSView)
+        case expandedRow(NSView)
+        case panel(NSView)
+    }
+
+    /// The single-expansion rule for the Devices card: activating a row's disclosure control opens it and
+    /// closes whatever else was open, and activating the control of the row that is already open closes it —
+    /// but only while that row's panel is actually on screen. A pairing expansion outlives its panel (the
+    /// code expires, or the open returned no window), and a click on such a row must ask for a fresh code
+    /// rather than spend itself closing something the user cannot see. Pure so the rule is testable without
+    /// building the pane.
+    nonisolated static func expansion(after current: DeviceRowExpansion?, activating activated: DeviceRowExpansion, currentPanelIsLive: Bool)
+        -> DeviceRowExpansion?
+    {
+        current == activated && currentPanelIsLive ? nil : activated
+    }
+
+    /// True while a remote-device connect or install attempt is running. The add-remote disclosure stays
+    /// open for the length of an attempt because its inline status label is where the result is reported.
+    private var isRemoteDeviceAttemptInFlight: Bool { isConnectingRemoteDevice || isInstallingRemoteSpaces }
 
     private weak var remoteDeviceSSHHostField: NSTextField?
     private weak var remoteDeviceNameField: NSTextField?
@@ -124,6 +159,31 @@ import workspacecore
     private weak var remoteDeviceInstallCommandField: NSTextField?
     private weak var remoteDeviceInstallButton: NSButton?
     private weak var remoteDeviceInstallSpinner: NSProgressIndicator?
+    /// The add-remote disclosure, retained weakly so a running attempt can gray it out on the live view: the
+    /// form holds the status label that reports the attempt, so it must not be collapsed until the attempt
+    /// lands, and a live-disabled control says that instead of silently ignoring the click.
+    private weak var addRemoteDeviceToggle: NSButton?
+    /// The live row pairing buttons, held weakly, so a running attempt can gray them out on the views already
+    /// on screen and restore them when it lands. Only rows whose device can actually be paired are tracked; a
+    /// button disabled because its device is unreachable must stay that way when the attempt ends.
+    private let devicePairButtons = NSHashTable<NSButton>.weakObjects()
+    /// The live row remove buttons, held weakly for the same reason: removing a device rebuilds the pane,
+    /// which would take a running attempt's form off screen with the fields and status label it needs.
+    private let deviceRemoveButtons = NSHashTable<NSButton>.weakObjects()
+    /// What the add-remote form holds between renders. Every change to the pane rebuilds it wholesale, so the
+    /// entered values are read out of the live fields before the rebuild and seeded back into the new ones;
+    /// otherwise a rename, a removal, or a device changing state silently empties a half-filled form.
+    private struct RemoteDeviceFormDraft {
+        var sshHost = ""
+        var name = ""
+        var sshUser = ""
+        var sshPort = ""
+        var advancedExpanded = false
+    }
+    private var remoteDeviceFormDraft = RemoteDeviceFormDraft()
+    /// True while the background status refresh's probe is running, so stacked load-state transitions queue
+    /// no second probe against the same daemon.
+    private var isProbingDeviceStatusForRefresh = false
     private var currentDevicePairingWindow: ClientDevicePairingWindow?
     private var devicePanelStatusMessage: (message: String, isError: Bool)?
     private var isRelaunchingLocalDaemon = false
@@ -134,6 +194,21 @@ import workspacecore
     /// True while the SSH install-and-pair recovery is running, so a rebuild keeps the install and Connect
     /// buttons disabled and the spinner visible.
     private var isInstallingRemoteSpaces = false
+    /// True while a plain connect attempt is in flight. Together with `isInstallingRemoteSpaces` this keeps
+    /// the add-remote disclosure pinned open and the Connect button disabled for the length of an attempt,
+    /// so the form cannot be collapsed out from under a running attempt (its status label is the only place
+    /// the result is reported) and a second click cannot start an overlapping pairing.
+    private var isConnectingRemoteDevice = false
+    /// Which row's inline panel is open, or nil when the card is a plain list.
+    private var expandedDeviceRow: DeviceRowExpansion?
+    /// The pairing-window request in flight, if any: the row that asked, and a token a later request
+    /// invalidates. A row counts as showing its panel while its request runs, even before a code exists.
+    private var inFlightPairingRequest: (deviceID: String, token: Int)?
+    private var pairingRequestTokenSeed = 0
+    /// The device load states the pane last painted. Sidebar load-state transitions happen in the
+    /// background, so `refreshDeviceSettingsForDeviceStatusChange` compares against these to repaint
+    /// exactly when a device's connection state changed and never otherwise.
+    private var lastRenderedDeviceLoadStates: [String: DeviceModelStore.SidebarDeviceLoadState] = [:]
     var renamingClientDeviceID: String?
     weak var renamingClientDeviceField: NSTextField?
 
@@ -170,6 +245,31 @@ import workspacecore
         }
     }
 
+    /// Called when Settings is about to replace the Devices content with another section, or close the window
+    /// holding it. The pane's views go away with it and nothing reads them afterwards, so the add-remote
+    /// form's entered values are taken out of them here; the expansion itself is controller state and comes
+    /// back with the section.
+    func prepareDeviceSettingsForContentReplacement() { captureRemoteDeviceFormDraft() }
+
+    /// Drops everything the add-remote form holds: what was entered, and the install recovery a failed
+    /// attempt left behind. Opening the form again starts on a new device rather than under the previous
+    /// one's install command and retry action.
+    private func discardRemoteDeviceFormState() {
+        remoteDeviceFormDraft = RemoteDeviceFormDraft()
+        remoteDeviceLinuxInstallCommand = nil
+    }
+
+    /// Reads the add-remote form's live fields into the draft the next render seeds from. Only the fields of
+    /// the form that is currently open are read: the weak references outlive the views a previous render
+    /// built, and a closed form's values were dropped when the user closed it.
+    private func captureRemoteDeviceFormDraft() {
+        guard expandedDeviceRow == .addRemoteDevice, let sshHostField = remoteDeviceSSHHostField else { return }
+        remoteDeviceFormDraft = RemoteDeviceFormDraft(
+            sshHost: sshHostField.stringValue, name: remoteDeviceNameField?.stringValue ?? "",
+            sshUser: remoteDeviceSSHUserField?.stringValue ?? "", sshPort: remoteDeviceSSHPortField?.stringValue ?? "",
+            advancedExpanded: remoteDeviceAdvancedRow?.isHidden == false)
+    }
+
     private func refreshVisibleDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
         guard host.settings.settingsWindow?.isVisible == true, host.settings.selectedSettingsSection == .devices,
             host.settings.settingsSectionContentContainer != nil
@@ -178,6 +278,8 @@ import workspacecore
     }
 
     func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
+        captureRemoteDeviceFormDraft()
+        lastRenderedDeviceLoadStates = deviceSectionLoadStates()
         host.shortcuts.activeShortcutCaptureSetting = nil
         host.shortcuts.shortcutButtonsBySetting.removeAll()
         host.settings.renderSettingsCards(deviceSettingsCards(response: response))
@@ -190,7 +292,6 @@ import workspacecore
 
     private func deviceSettingsCards(response: SpacesDeviceAPIControlResponse) -> [NSView] {
         var cards: [NSView] = []
-        let pairingWindow = visibleDevicePairingWindow(for: response)
 
         if let status = devicePanelStatusMessage {
             let statusLabel = host.helpTextLabel(status.message)
@@ -201,12 +302,7 @@ import workspacecore
             cards.append(statusLabel)
         }
 
-        if let displayWindow = visibleClientDevicePairingWindow(response: response, pairingWindow: pairingWindow) {
-            cards.append(clientDevicePairingQRCodeSection(displayWindow))
-        }
-
-        cards.append(connectedDevicesSection(response: response))
-        cards.append(remoteDevicePairingSection())
+        cards.append(devicesSection(response: response))
         return cards
     }
 
@@ -224,13 +320,55 @@ import workspacecore
         return window
     }
 
-    private func clientDevicePairingQRCodeSection(_ window: ClientDevicePairingWindow) -> NSView {
-        var rows: [NSView] = []
-        rows.append(devicePairingInstructionLabel("Scan this QR code with Spaces on iPhone or iPad to pair it with \(window.deviceName)."))
-        rows.append(mobileQRCodeView(link: window.linkString))
+    /// Whether the row's pairing panel is showing anything: a live code, or the request that will produce
+    /// one. Its button collapses the row only then; on a row whose window expired (or whose open returned
+    /// nothing) the same click asks for a fresh code instead.
+    private func pairingPanelIsLive(deviceID: String) -> Bool {
+        if inFlightPairingRequest?.deviceID == deviceID { return true }
+        guard let window = currentDevicePairingWindow else { return false }
+        return window.deviceID == deviceID && window.isVisible
+    }
+
+    /// The pairing panel shown inline beneath the device row that opened it: the QR code for that device's
+    /// pairing window, alongside the addresses the link advertises. Returns nil while the row is expanded but
+    /// no live window exists yet — a remote device's window is opened asynchronously, and every window expires
+    /// — so the row falls back to a plain row rather than showing a code that would not work.
+    private func devicePairingPanel(for device: ClientConnectedDevice, response: SpacesDeviceAPIControlResponse) -> NSView? {
+        guard
+            let window = visibleClientDevicePairingWindow(response: response, pairingWindow: visibleDevicePairingWindow(for: response)),
+            window.deviceID == device.id
+        else { return nil }
+
+        let heading = NSTextField(labelWithString: "Scan with Spaces on iPhone or iPad")
+        heading.font = Typography.controlLabel
+        heading.textColor = Theme.text
+        heading.lineBreakMode = .byTruncatingTail
+        heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let instruction = devicePairingInstructionLabel("Open Spaces on the phone, add a device, and point its camera at this code.")
+        instruction.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        var details: [NSView] = [heading, instruction]
         let hosts = (try? SpacesDevicePairingLink.parse(window.linkString))?.hosts ?? []
-        if !hosts.isEmpty { rows.append(pairingLinkAddressesView(hosts: hosts)) }
-        return mobilePanelSection(icon: "qrcode", title: "Pair iPhone or iPad", rows: rows)
+        if !hosts.isEmpty { details.append(pairingLinkAddressesView(hosts: hosts)) }
+
+        let detailStack = NSStackView(views: details)
+        detailStack.orientation = .vertical
+        detailStack.alignment = .leading
+        detailStack.spacing = 6
+        detailStack.translatesAutoresizingMaskIntoConstraints = false
+        // A leading-aligned stack does not stretch its children, and the wrapping labels need a definite
+        // width to wrap against rather than an intrinsic one that would widen the settings window.
+        for detail in details { detail.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true }
+
+        let qrSize: CGFloat = 150
+        let panel = NSStackView(views: [mobileQRCodeView(link: window.linkString, size: qrSize), detailStack])
+        panel.orientation = .horizontal
+        panel.alignment = .top
+        panel.spacing = 14
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        detailStack.widthAnchor.constraint(equalTo: panel.widthAnchor, constant: -(qrSize + panel.spacing)).isActive = true
+        panel.setAccessibilityIdentifier("device-pairing-panel")
+        return panel
     }
 
     /// Summarizes the addresses this pairing link advertises, so the person scanning the QR code can
@@ -255,30 +393,153 @@ import workspacecore
         return stack
     }
 
-    private func connectedDevicesSection(response: SpacesDeviceAPIControlResponse) -> NSView {
-        var rows: [NSView] = []
-        let devices = connectedClientDevices(localStatus: response.status, requireLocalStatus: true)
-        rows.append(contentsOf: devices.map(connectedDeviceRow(_:)))
+    /// The one card the Devices pane shows: this Mac and every connected device as rows, each able to
+    /// expand an inline pairing panel, followed by the local-daemon error (when the control response is not
+    /// ok) and the collapsed "Add remote device over SSH" disclosure.
+    private func devicesSection(response: SpacesDeviceAPIControlResponse) -> NSView {
+        var entries: [DevicesCardEntry] = []
+        // The rows below are rebuilt from scratch, so the previous render's pairing buttons are gone.
+        devicePairButtons.removeAllObjects()
+        deviceRemoveButtons.removeAllObjects()
+        for device in connectedClientDevices(response: response) {
+            let isPairingExpanded = expandedDeviceRow == .pairing(deviceID: device.id)
+            let row = connectedDeviceRow(device, isPairingExpanded: isPairingExpanded, response: response)
+            if isPairingExpanded, let panel = devicePairingPanel(for: device, response: response) {
+                entries.append(.expandedRow(row))
+                entries.append(.panel(panel))
+            } else {
+                entries.append(.row(row))
+            }
+        }
+
+        // A non-ok control response means the local daemon (or just its Device API endpoint) is
+        // down/unreachable. The error reads inline under the device rows; the recovery action lives in the
+        // local row's overflow menu, gated on the same failure classes a relaunch can actually resolve.
+        // restartLocalDaemon warns before killing if the daemon still reports live sessions (the Device API
+        // can be down while the terminal service is not).
         if !response.ok {
             let errorLabel = host.helpTextLabel(response.message)
             errorLabel.lineBreakMode = .byCharWrapping
-            rows.append(errorLabel)
-            // A non-ok control response means the local daemon (or just its Device API endpoint) is
-            // down/unreachable. Offer a one-click relaunch right next to the error — but only for failures a
-            // relaunch can resolve, and not while a relaunch is already running. This is the only place the
-            // local daemon restart lives; restartLocalDaemon warns before killing if the daemon still reports
-            // live sessions (the Device API can be down while the terminal service is not).
-            if Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon) {
-                let restartButton = actionButton(
-                    title: "Restart Local Daemon", symbol: "arrow.clockwise", tooltip: "Relaunch the local spacesd daemon on this Mac",
-                    action: #selector(DevicePairingController.restartLocalDaemon), primary: true, target: self)
-                rows.append(mobilePanelButtonRow([restartButton]))
-            }
+            entries.append(.row(errorLabel))
         }
-        return mobilePanelSection(icon: "desktopcomputer.and.macbook", title: "Connected Devices", rows: rows)
+
+        let isAddRemoteExpanded = expandedDeviceRow == .addRemoteDevice
+        let disclosure = addRemoteDeviceDisclosureRow(expanded: isAddRemoteExpanded)
+        if isAddRemoteExpanded {
+            entries.append(.expandedRow(disclosure))
+            entries.append(.panel(remoteDevicePairingPanel()))
+        } else {
+            entries.append(.row(disclosure))
+        }
+
+        return devicesCard(icon: "desktopcomputer.and.macbook", title: "Devices", entries: entries)
     }
 
-    private func connectedDeviceRow(_ device: ClientConnectedDevice) -> NSView {
+    /// A device row's connection state, mapped onto the shared status-dot vocabulary: solid green when the
+    /// device is answering, solid orange while it waits on the user to re-pair, hollow grey while its first
+    /// load is still in flight, hollow red when its daemon is not answering.
+    enum DeviceRowStatus: Equatable, Sendable {
+        case reachable
+        case connecting
+        case reconnectRequired
+        case unreachable
+
+        var statusKind: RowPrimitives.StatusKind {
+            switch self {
+            case .reachable: return .ready
+            case .connecting: return .idle
+            case .reconnectRequired: return .waiting
+            case .unreachable: return .exited
+            }
+        }
+
+        var tooltip: String {
+            switch self {
+            case .reachable: return "Reachable"
+            case .connecting: return "Connecting…"
+            case .reconnectRequired: return "Reconnect required"
+            case .unreachable: return "Unreachable"
+            }
+        }
+    }
+
+    /// A remote device's row status. A missing credential outranks reachability because re-pairing, not
+    /// waiting, is what fixes it. Otherwise the row reports the sidebar's load state for that device, which
+    /// is the client's only real reachability signal: a stored credential says nothing about whether the
+    /// device is powered on, so it must never on its own paint the row as reachable. A device whose section
+    /// has not loaded yet (or does not exist yet) is still connecting rather than known-good or known-bad.
+    nonisolated static func remoteDeviceStatus(hasCredentials: Bool, loadState: DeviceModelStore.SidebarDeviceLoadState?) -> DeviceRowStatus {
+        guard hasCredentials else { return .reconnectRequired }
+        switch loadState {
+        case .loaded: return .reachable
+        case .offline: return .unreachable
+        case .loading, nil: return .connecting
+        }
+    }
+
+    /// The wording of the remove-device confirmation. Removal only ever touches this Mac's own records, so
+    /// the copy is pinned here (and asserted in tests) to keep it from drifting into implying the removed
+    /// device is stopped or wiped.
+    nonisolated static func removeDeviceConfirmation(deviceName: String) -> (title: String, message: String) {
+        (
+            title: "Remove \(deviceName) from this Mac?",
+            message: "Its projects, workspaces, and running terminals stay on \(deviceName) and keep running. This Mac deletes the pairing and "
+                + "its stored credential, and stops listing that device. Pair it again to get it back."
+        )
+    }
+
+    /// The overflow menu for a device row, also used as the row's right-click context menu. It carries only
+    /// actions that exist elsewhere in this controller: rename and remove for a connected device, and the
+    /// local daemon relaunch when the control response reports a failure a relaunch can resolve. An empty
+    /// menu means the row gets no overflow button at all.
+    private func deviceRowMenu(for device: ClientConnectedDevice, response: SpacesDeviceAPIControlResponse) -> NSMenu {
+        let menu = NSMenu()
+        if device.isLocal {
+            if !response.ok,
+                Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon)
+            {
+                let restartItem = NSMenuItem(
+                    title: "Restart Local Daemon", action: #selector(DevicePairingController.restartLocalDaemon), keyEquivalent: "")
+                restartItem.target = self
+                restartItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+                menu.addItem(restartItem)
+            }
+            return menu
+        }
+
+        let renameItem = NSMenuItem(title: "Rename…", action: #selector(DevicePairingController.beginClientDeviceRename(_:)), keyEquivalent: "")
+        renameItem.target = self
+        renameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+        renameItem.identifier = NSUserInterfaceItemIdentifier(device.id)
+        menu.addItem(renameItem)
+
+        let removeItem = NSMenuItem(title: "Remove Device…", action: #selector(DevicePairingController.removeMacPairedDevice(_:)), keyEquivalent: "")
+        removeItem.target = self
+        removeItem.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+        removeItem.identifier = NSUserInterfaceItemIdentifier(device.id)
+        menu.addItem(removeItem)
+        return menu
+    }
+
+    /// The last row of the card: a collapsed disclosure that expands the SSH form in place, so the pane
+    /// reads as a device list until the user asks to add one.
+    private func addRemoteDeviceDisclosureRow(expanded: Bool) -> NSView {
+        let toggle = NSButton(
+            title: expanded ? "Add remote device over SSH" : "Add remote device over SSH…", target: self,
+            action: #selector(DevicePairingController.toggleAddRemoteDeviceForm))
+        toggle.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        toggle.imagePosition = .imageLeading
+        toggle.imageHugsTitle = true
+        toggle.setButtonType(.momentaryChange)
+        Theme.applyTextStyle(to: toggle, color: Theme.muted)
+        toggle.toolTip = "Connect this Mac with another Mac or Linux device over SSH"
+        toggle.setAccessibilityIdentifier("add-remote-device-toggle")
+        toggle.isEnabled = !isRemoteDeviceAttemptInFlight
+        addRemoteDeviceToggle = toggle
+        return mobilePanelButtonRow([toggle])
+    }
+
+    private func connectedDeviceRow(_ device: ClientConnectedDevice, isPairingExpanded: Bool, response: SpacesDeviceAPIControlResponse) -> NSView {
         let detail = NSTextField(labelWithString: clientDeviceDetailText(device))
         detail.font = Typography.caption
         detail.textColor = .secondaryLabelColor
@@ -313,37 +574,72 @@ import workspacecore
         textStack.spacing = 2
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let pairButton = host.sidebarRowIconButton(
-            symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.displayName)",
-            action: #selector(DevicePairingController.pairIOSWithConnectedDevice(_:)))
-        pairButton.target = self
+        // A labeled button rather than a bare icon: pairing a phone is the pane's primary job and was not
+        // discoverable as an unlabeled glyph.
+        let pairButton = NSButton(
+            title: "Pair iPhone", target: self, action: #selector(DevicePairingController.togglePairingForConnectedDevice(_:)))
+        pairButton.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
+        pairButton.imagePosition = .imageLeading
+        pairButton.imageHugsTitle = true
+        pairButton.setButtonType(.momentaryChange)
+        Theme.applyTextStyle(to: pairButton, color: device.isAvailable ? Theme.accentStrong : .tertiaryLabelColor)
+        // A row can stay expanded with no code under it (the code expired, or the request for one is still
+        // running), and clicking then asks for a fresh code rather than closing, so the tooltip follows the
+        // panel rather than the expansion.
+        pairButton.toolTip =
+            isPairingExpanded && pairingPanelIsLive(deviceID: device.id)
+            ? "Hide the pairing code for \(device.displayName)" : "Pair iPhone or iPad with \(device.displayName)"
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
-        pairButton.isEnabled = device.isAvailable
+        pairButton.isEnabled = device.isAvailable && !isRemoteDeviceAttemptInFlight
+        pairButton.setAccessibilityIdentifier("device-row-pair-\(device.id)")
+        if device.isAvailable { devicePairButtons.add(pairButton) }
+
+        let statusSlot = RowPrimitives.statusSlot(RowPrimitives.statusDot(device.status.statusKind))
+        statusSlot.toolTip = device.status.tooltip
 
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
+        row.addArrangedSubview(statusSlot)
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(NSView())
         row.addArrangedSubview(pairButton)
         if !device.isLocal {
             let removeButton = host.sidebarRowIconButton(
-                symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(DevicePairingController.removeMacPairedDevice(_:)))
+                symbol: "trash", tooltip: "Remove \(device.displayName) from this Mac",
+                action: #selector(DevicePairingController.removeMacPairedDevice(_:)))
             removeButton.target = self
             removeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
+            removeButton.contentTintColor = Theme.red
+            removeButton.setAccessibilityIdentifier("device-row-remove-\(device.id)")
+            removeButton.isEnabled = !isRemoteDeviceAttemptInFlight
+            deviceRemoveButtons.add(removeButton)
             row.addArrangedSubview(removeButton)
+            // Right-click on the row keeps offering the same actions as the overflow button. The two menus
+            // are separate instances because an NSMenu serves one presentation at a time.
+            row.menu = deviceRowMenu(for: device, response: response)
+        }
 
-            let menu = NSMenu()
-            let renameItem = NSMenuItem(title: "Rename", action: #selector(DevicePairingController.beginClientDeviceRename(_:)), keyEquivalent: "")
-            renameItem.target = self
-            renameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
-            renameItem.identifier = NSUserInterfaceItemIdentifier(device.id)
-            menu.addItem(renameItem)
-            row.menu = menu
+        let overflowMenu = deviceRowMenu(for: device, response: response)
+        if !overflowMenu.items.isEmpty {
+            let overflowButton = host.sidebarRowIconButton(
+                symbol: "ellipsis", tooltip: "More actions for \(device.displayName)",
+                action: #selector(DevicePairingController.showDeviceRowMenu(_:)))
+            overflowButton.target = self
+            overflowButton.menu = overflowMenu
+            overflowButton.setAccessibilityIdentifier("device-row-menu-\(device.id)")
+            row.addArrangedSubview(overflowButton)
         }
         return row
+    }
+
+    /// Pops the row's overflow menu below its button. The menu is built with the row so it reflects the
+    /// control response that rendered it.
+    @objc func showDeviceRowMenu(_ sender: NSButton) {
+        guard let menu = sender.menu else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
     private func devicePairingInstructionLabel(_ text: String) -> NSTextField {
@@ -354,8 +650,7 @@ import workspacecore
         return label
     }
 
-    private func mobileQRCodeView(link: String) -> NSView {
-        let qrSize: CGFloat = 200
+    private func mobileQRCodeView(link: String, size qrSize: CGFloat) -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
@@ -370,14 +665,18 @@ import workspacecore
         container.addSubview(qrView)
 
         NSLayoutConstraint.activate([
-            container.heightAnchor.constraint(equalToConstant: qrSize), qrView.widthAnchor.constraint(equalToConstant: qrSize),
-            qrView.heightAnchor.constraint(equalToConstant: qrSize), qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            container.heightAnchor.constraint(equalToConstant: qrSize), container.widthAnchor.constraint(equalToConstant: qrSize),
+            qrView.widthAnchor.constraint(equalToConstant: qrSize), qrView.heightAnchor.constraint(equalToConstant: qrSize),
+            qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             qrView.topAnchor.constraint(equalTo: container.topAnchor), qrView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         return container
     }
 
-    private func remoteDevicePairingSection() -> NSView {
+    /// The add-remote-device form, rendered inline under its disclosure row rather than as an always-open
+    /// card. Field identities and validation are unchanged: a bare SSH host, an optional display name, and
+    /// the optional username/port behind the "Advanced" disclosure.
+    private func remoteDevicePairingPanel() -> NSView {
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
@@ -386,6 +685,7 @@ import workspacecore
 
         let sshHostField = NSTextField()
         sshHostField.placeholderString = "SSH host"
+        sshHostField.stringValue = remoteDeviceFormDraft.sshHost
         sshHostField.setAccessibilityIdentifier("remote-device-ssh-host")
         sshHostField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         remoteDeviceSSHHostField = sshHostField
@@ -394,6 +694,7 @@ import workspacecore
         // Optional display name for the paired device; when left blank the daemon-reported name is used.
         let nameField = NSTextField()
         nameField.placeholderString = "Name (optional)"
+        nameField.stringValue = remoteDeviceFormDraft.name
         nameField.setAccessibilityIdentifier("remote-device-name")
         nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         remoteDeviceNameField = nameField
@@ -405,7 +706,8 @@ import workspacecore
         advancedToggle.isBordered = false
         advancedToggle.bezelStyle = .inline
         advancedToggle.setButtonType(.momentaryChange)
-        advancedToggle.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Advanced")
+        advancedToggle.image = NSImage(
+            systemSymbolName: remoteDeviceFormDraft.advancedExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: "Advanced")
         advancedToggle.imagePosition = .imageLeading
         advancedToggle.imageHugsTitle = true
         advancedToggle.font = Typography.controlLabel
@@ -417,11 +719,13 @@ import workspacecore
 
         let sshUserField = NSTextField()
         sshUserField.placeholderString = "username (defaults to SSH login)"
+        sshUserField.stringValue = remoteDeviceFormDraft.sshUser
         sshUserField.setAccessibilityIdentifier("remote-device-ssh-user")
         remoteDeviceSSHUserField = sshUserField
 
         let sshPortField = NSTextField()
         sshPortField.placeholderString = "port (22)"
+        sshPortField.stringValue = remoteDeviceFormDraft.sshPort
         sshPortField.setAccessibilityIdentifier("remote-device-ssh-port")
         remoteDeviceSSHPortField = sshPortField
 
@@ -432,25 +736,44 @@ import workspacecore
         advancedRow.translatesAutoresizingMaskIntoConstraints = false
         sshUserField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         sshPortField.widthAnchor.constraint(equalToConstant: 70).isActive = true
-        advancedRow.isHidden = true
+        advancedRow.isHidden = !remoteDeviceFormDraft.advancedExpanded
         remoteDeviceAdvancedRow = advancedRow
         rows.append(advancedRow)
 
         let connectButton = actionButton(
             title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
             action: #selector(DevicePairingController.connectRemoteDeviceFromPairingPanel), primary: true, target: self)
-        connectButton.isEnabled = !isInstallingRemoteSpaces
+        connectButton.isEnabled = !isRemoteDeviceAttemptInFlight
         remoteDeviceConnectButton = connectButton
         rows.append(mobilePanelButtonRow([connectButton]))
 
         let statusLabel = host.helpTextLabel("")
         statusLabel.isHidden = true
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.setAccessibilityIdentifier("remote-device-status")
         remoteDevicePairingStatusLabel = statusLabel
         rows.append(statusLabel)
 
         rows.append(remoteDeviceInstallSection())
 
-        return mobilePanelSection(icon: "link.badge.plus", title: "Add Remote Device", rows: rows)
+        let panel = NSStackView(views: rows)
+        panel.orientation = .vertical
+        panel.alignment = .leading
+        panel.spacing = 8
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        for row in rows { row.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true }
+        return panel
+    }
+
+    /// Expands or collapses the add-remote-device form. Kept open while an attempt is running, because the
+    /// form holds the status label that reports the attempt's outcome.
+    @objc func toggleAddRemoteDeviceForm() {
+        guard !isRemoteDeviceAttemptInFlight else { return }
+        devicePanelStatusMessage = nil
+        expandedDeviceRow = Self.expansion(after: expandedDeviceRow, activating: .addRemoteDevice, currentPanelIsLive: true)
+        // Closing the form discards what was entered into it; the draft only survives renders of an open form.
+        if expandedDeviceRow != .addRemoteDevice { discardRemoteDeviceFormState() }
+        refreshVisibleDeviceSettingsAfterClientDeviceChange()
     }
 
     /// The recovery block shown once a pairing attempt reports Spaces is missing on a Linux device: the
@@ -518,7 +841,10 @@ import workspacecore
         sender.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Advanced")
     }
 
-    private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
+    /// Builds the Devices card: an accented header, then its entries separated by hairlines. A row that has
+    /// an open panel shares the panel's inset surface and takes no divider between the two, so the pair reads
+    /// as one block.
+    private func devicesCard(icon: String, title: String, entries: [DevicesCardEntry]) -> NSView {
         let section = NSView()
         section.translatesAutoresizingMaskIntoConstraints = false
         section.setContentHuggingPriority(.required, for: .vertical)
@@ -552,11 +878,25 @@ import workspacecore
         header.translatesAutoresizingMaskIntoConstraints = false
         header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        if !rows.isEmpty { stack.addArrangedSubview(mobilePanelDivider()) }
-        for row in rows {
-            let paddedRow = mobilePanelPaddedRow(row)
-            stack.addArrangedSubview(paddedRow)
-            paddedRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        var needsDivider = !entries.isEmpty
+        for entry in entries {
+            let padded: NSView
+            switch entry {
+            case .row(let view):
+                if needsDivider { appendDivider(to: stack) }
+                padded = mobilePanelPaddedRow(view)
+                needsDivider = true
+            case .expandedRow(let view):
+                if needsDivider { appendDivider(to: stack) }
+                padded = mobilePanelInsetRow(view, leadingInset: 14)
+                // The panel that follows belongs to this row, so no hairline separates them.
+                needsDivider = false
+            case .panel(let view):
+                padded = mobilePanelInsetRow(view, leadingInset: 14 + RowPrimitives.statusSlotWidth + 8)
+                needsDivider = true
+            }
+            stack.addArrangedSubview(padded)
+            padded.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
 
         section.addSubview(stack)
@@ -565,6 +905,29 @@ import workspacecore
             stack.topAnchor.constraint(equalTo: section.topAnchor), stack.bottomAnchor.constraint(equalTo: section.bottomAnchor),
         ])
         return section
+    }
+
+    private func appendDivider(to stack: NSStackView) {
+        let divider = mobilePanelDivider()
+        stack.addArrangedSubview(divider)
+        divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    /// A padded row painted on the secondary surface, used for an expanded row and its panel so the open
+    /// expansion reads as one recessed block inside the card.
+    private func mobilePanelInsetRow(_ view: NSView, leadingInset: CGFloat) -> NSView {
+        let container = ColoredBackgroundView()
+        container.fillColor = Theme.surface2
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: leadingInset),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: 9),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -9),
+        ])
+        return container
     }
 
     private func mobilePanelPaddedRow(_ view: NSView) -> NSView {
@@ -613,6 +976,8 @@ import workspacecore
         return row
     }
 
+    /// Opens a fresh pairing window on the local daemon and renders it in the expanded local row. On failure
+    /// the expansion is dropped so the row does not sit open with nothing under it.
     @objc func openDevicePairingWindow() {
         do {
             let response = try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
@@ -624,21 +989,51 @@ import workspacecore
             devicePanelStatusMessage = nil
             showDeviceSettings(response)
         } catch {
+            expandedDeviceRow = nil
+            inFlightPairingRequest = nil
             if let unavailableResponse = Self.deviceAPIDisabledOverrideResponse(for: error) {
                 showDeviceSettings(unavailableResponse)
             } else {
+                // The expansion was just dropped; without a repaint the panel this click was replacing —
+                // another row's code, or the SSH form — stays on screen under state that no longer has it
+                // open. Repaint first so the pane behind the error alert already matches.
+                refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 host.showError(error)
             }
         }
     }
 
-    @objc func pairIOSWithConnectedDevice(_ sender: NSButton) {
+    /// Toggles the inline pairing panel for a device row. Opening it closes whatever expansion was open and
+    /// requests a fresh pairing window on that device — the local daemon's Device API directly, a remote
+    /// device's over its authenticated Device API. Clicking the same row again collapses it and drops the
+    /// window this client is holding, so the next open always shows a live code rather than a stale one.
+    @objc func togglePairingForConnectedDevice(_ sender: NSButton) {
         guard let deviceID = sender.identifier?.rawValue else { return }
+        // A running SSH attempt reports into the add-remote panel's status label, so opening a pairing
+        // panel — which would replace that panel — waits until the attempt finishes.
+        guard !isRemoteDeviceAttemptInFlight else { return }
+        let target = DeviceRowExpansion.pairing(deviceID: deviceID)
+        let panelIsLive = expandedDeviceRow == target && pairingPanelIsLive(deviceID: deviceID)
+        devicePanelStatusMessage = nil
+        // Any previously shown code, and any request still running for it, belongs to the expansion being
+        // replaced or closed.
+        currentDevicePairingWindow = nil
+        inFlightPairingRequest = nil
+        expandedDeviceRow = Self.expansion(after: expandedDeviceRow, activating: target, currentPanelIsLive: panelIsLive)
+        // Opening a pairing panel replaces the add-remote form, which discards what was entered into it.
+        discardRemoteDeviceFormState()
+        guard expandedDeviceRow == target else {
+            refreshVisibleDeviceSettingsAfterClientDeviceChange()
+            return
+        }
         if deviceID == SpacesPairedDeviceRecord.localDeviceID {
             openDevicePairingWindow()
             return
         }
         guard let device = pairedDevices().first(where: { $0.id == deviceID }) else { return }
+        pairingRequestTokenSeed += 1
+        let requestToken = pairingRequestTokenSeed
+        inFlightPairingRequest = (deviceID: deviceID, token: requestToken)
         devicePanelStatusMessage = (message: "Opening pairing window on \(device.name)...", isError: false)
         refreshVisibleDeviceSettingsAfterClientDeviceChange()
         Task { [weak self] in
@@ -648,19 +1043,31 @@ import workspacecore
                 let result = try await Task.detached(priority: .userInitiated) {
                     try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion, profile: profile)
                 }.value
+                guard let self else { return }
+                // The user may have collapsed the row or opened another one while the request was in flight;
+                // dropping the result then keeps the single-expansion state authoritative.
+                guard self.inFlightPairingRequest?.token == requestToken, self.expandedDeviceRow == target else { return }
+                self.inFlightPairingRequest = nil
                 let expiresAt = result.expiresAt.flatMap { Self.iso8601Formatter.date(from: $0) } ?? Date().addingTimeInterval(300)
-                self?.currentDevicePairingWindow = ClientDevicePairingWindow(
+                self.currentDevicePairingWindow = ClientDevicePairingWindow(
                     deviceID: device.id, deviceName: result.name, linkString: result.linkString, expiresAt: expiresAt)
-                self?.devicePanelStatusMessage = nil
-                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
+                self.devicePanelStatusMessage = nil
+                self.refreshVisibleDeviceSettingsAfterClientDeviceChange()
             } catch {
-                self?.devicePanelStatusMessage = (message: error.localizedDescription, isError: true)
-                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
+                // Same rule as the success path: a request the user already moved on from reports nothing,
+                // so a late failure can never post its error above another row's open panel.
+                guard let self, self.inFlightPairingRequest?.token == requestToken, self.expandedDeviceRow == target else { return }
+                self.inFlightPairingRequest = nil
+                self.expandedDeviceRow = nil
+                self.devicePanelStatusMessage = (message: error.localizedDescription, isError: true)
+                self.refreshVisibleDeviceSettingsAfterClientDeviceChange()
             }
         }
     }
 
     @objc func connectRemoteDeviceFromPairingPanel() {
+        guard !isRemoteDeviceAttemptInFlight else { return }
+        landActiveClientDeviceRename()
         // Each attempt starts from a clean recovery state: hide any install block left from a prior failure
         // so it only reappears if this attempt again finds Spaces missing.
         remoteDeviceLinuxInstallCommand = nil
@@ -670,15 +1077,20 @@ import workspacecore
             setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
             return
         }
+        setRemoteDeviceAttemptControlsEnabled(false)
+        isConnectingRemoteDevice = true
         setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) { try SpacesDevicePairingClient.pairRemoteDevice(request) }.value
-                self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
-                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
-                self?.host.requestSidebarReload()
+                guard let self else { return }
+                self.isConnectingRemoteDevice = false
+                self.collapseAddRemoteDeviceFormAfterSuccess("Connected \(result.name).")
+                self.refreshVisibleDeviceSettingsAfterClientDeviceChange()
+                self.host.requestSidebarReload()
             } catch {
                 guard let self else { return }
+                self.isConnectingRemoteDevice = false
                 // A Linux device without Spaces installed carries the pinned install one-liner, so connecting
                 // continues straight into installing it over SSH and pairing. The recovery block is surfaced
                 // first so a failed install still leaves the command copyable and the button there to retry.
@@ -693,16 +1105,47 @@ import workspacecore
                 } else {
                     self.remoteDeviceLinuxInstallCommand = nil
                     self.remoteDeviceInstallBlock?.isHidden = true
+                    self.setRemoteDeviceAttemptControlsEnabled(true)
                     self.setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
                 }
             }
         }
     }
 
+    /// Enables or disables the controls that must not act while a remote-device attempt is running: a second
+    /// Connect would start an overlapping pairing, and collapsing the disclosure — or opening a pairing panel,
+    /// which replaces it — would take the status label the attempt reports through away with it.
+    /// Saves an open rename editor before an attempt starts. The editor stays reachable by keyboard while an
+    /// attempt runs — Return commits, Escape cancels — and either rebuilds the pane, which would take the
+    /// attempt's status label and install progress off screen. Committing keeps what was typed rather than
+    /// discarding it.
+    private func landActiveClientDeviceRename() {
+        guard let deviceID = renamingClientDeviceID, let field = renamingClientDeviceField else { return }
+        commitClientDeviceRename(deviceID: deviceID, newName: field.stringValue)
+    }
+
+    private func setRemoteDeviceAttemptControlsEnabled(_ enabled: Bool) {
+        remoteDeviceConnectButton?.isEnabled = enabled
+        addRemoteDeviceToggle?.isEnabled = enabled
+        for pairButton in devicePairButtons.allObjects { pairButton.isEnabled = enabled }
+        for removeButton in deviceRemoveButtons.allObjects { removeButton.isEnabled = enabled }
+    }
+
+    /// Collapses the add-remote-device disclosure once an attempt succeeds and reports the result at the top
+    /// of the pane, where it survives the form going away. A failed attempt leaves the form open with its own
+    /// status label so the fields stay filled in for a retry.
+    private func collapseAddRemoteDeviceFormAfterSuccess(_ message: String) {
+        expandedDeviceRow = nil
+        discardRemoteDeviceFormState()
+        devicePanelStatusMessage = (message: message, isError: false)
+    }
+
     /// Retries the SSH install after the automatic run that connecting starts failed, so the user is never
     /// left with only a copyable command. Reads the SSH fields again, since they stay editable while the
     /// install block is showing.
     @objc func installSpacesOnRemoteDevice() {
+        guard !isRemoteDeviceAttemptInFlight else { return }
+        landActiveClientDeviceRename()
         let request: SpacesRemoteDevicePairingRequest
         do { request = try remoteDevicePairingRequestFromPanelFields() } catch {
             setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
@@ -723,7 +1166,7 @@ import workspacecore
         guard !isInstallingRemoteSpaces else { return }
         isInstallingRemoteSpaces = true
         remoteDeviceInstallButton?.isEnabled = false
-        remoteDeviceConnectButton?.isEnabled = false
+        setRemoteDeviceAttemptControlsEnabled(false)
         remoteDeviceInstallSpinner?.isHidden = false
         remoteDeviceInstallSpinner?.startAnimation(nil)
         setRemoteDevicePairingStatus(statusMessage, isError: false)
@@ -737,7 +1180,7 @@ import workspacecore
                 self.remoteDeviceLinuxInstallCommand = nil
                 self.remoteDeviceInstallSpinner?.stopAnimation(nil)
                 self.remoteDeviceInstallBlock?.isHidden = true
-                self.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
+                self.collapseAddRemoteDeviceFormAfterSuccess("Connected \(result.name).")
                 self.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self.host.requestSidebarReload()
             } catch {
@@ -746,7 +1189,7 @@ import workspacecore
                 self.remoteDeviceInstallSpinner?.stopAnimation(nil)
                 self.remoteDeviceInstallSpinner?.isHidden = true
                 self.remoteDeviceInstallButton?.isEnabled = true
-                self.remoteDeviceConnectButton?.isEnabled = true
+                self.setRemoteDeviceAttemptControlsEnabled(true)
                 self.setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
             }
         }
@@ -834,21 +1277,39 @@ import workspacecore
         }
     }
 
-    @objc func removeMacPairedDevice(_ sender: NSButton) {
-        guard let deviceID = sender.identifier?.rawValue else { return }
+    /// Confirms, then removes a connected device. Reached from both the row's trash button and the row
+    /// menu's Remove Device item; `sender` is whichever of the two carries the device id.
+    ///
+    /// Removal is entirely local to this Mac: it deletes the paired-device record, the stored credential for
+    /// it, and any daemon-update progress tracked against it. Nothing is sent to the removed device — its
+    /// daemon, projects, workspaces, and running terminals are untouched — so the alert says exactly that
+    /// rather than implying the other end is shut down.
+    @objc func removeMacPairedDevice(_ sender: Any) {
+        guard let deviceID = (sender as? any NSUserInterfaceItemIdentification)?.identifier?.rawValue else { return }
         let deviceName = pairedDevices().first(where: { $0.id == deviceID })?.name ?? "this device"
+        let confirmation = Self.removeDeviceConfirmation(deviceName: deviceName)
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove \(deviceName)?"
-        alert.informativeText = "Spaces will disconnect from this device and forget its pairing. You can pair it again later."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = confirmation.title
+        alert.informativeText = confirmation.message
+        // Cancel is the default so Return dismisses without destroying anything; Remove is marked destructive
+        // so AppKit renders it as the dangerous choice.
+        let removeButton = alert.addButton(withTitle: "Remove")
+        removeButton.hasDestructiveAction = true
+        removeButton.keyEquivalent = ""
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
             let database = try self.database()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
             host.daemonUpdate.forgetDaemonUpdateProgress(deviceID: deviceID)
+            // A pairing panel or rename editor open on the removed row has nothing left to point at.
+            if expandedDeviceRow == .pairing(deviceID: deviceID) {
+                expandedDeviceRow = nil
+                currentDevicePairingWindow = nil
+            }
+            if renamingClientDeviceID == deviceID { renamingClientDeviceID = nil }
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
@@ -890,26 +1351,99 @@ import workspacecore
         label.isHidden = message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func refreshVisibleDeviceSettingsAfterClientDeviceChange() {
-        do { refreshVisibleDeviceSettings(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
+    /// Repaints the open Devices pane when a device's connection state changed underneath it: a remote
+    /// daemon dropping out, a device finishing its first load, the local daemon going down. The sidebar's
+    /// data-change funnel calls this, which is where every load-state transition lands.
+    ///
+    /// That funnel runs several times a second while any device streams updates, so this reads nothing but
+    /// in-memory state until a load state actually changed: no database read, no credential read, and no
+    /// daemon call. A real change then repaints from the same status probe every other change to this pane
+    /// uses, so the row statuses, the inline local-daemon failure, and the restart action move together
+    /// instead of one of them lagging. That probe is blocking socket I/O, and nothing about this path is
+    /// user-initiated, so it runs off the main actor and applies its answer back on it: a daemon that
+    /// accepts the connection and then goes quiet must not freeze the app for its timeout.
+    ///
+    /// Load state is therefore the only trigger, and it does not describe everything the pane paints: the
+    /// local Device API can stop answering while the terminal service keeps serving a loaded overview, and
+    /// this pane keeps its previous statuses until the next render (any action in it, or reselecting the
+    /// section). Accepted: closing that gap means polling the daemon on a timer for as long as the pane sits
+    /// open, and each answer rebuilds the pane wholesale — which resets its scroll position — for a status
+    /// that is almost always the one already shown.
+    func refreshDeviceSettingsForDeviceStatusChange() {
+        guard host.settings.settingsWindow?.isVisible == true, host.settings.selectedSettingsSection == .devices,
+            host.settings.settingsSectionContentContainer != nil
+        else { return }
+        // Repainting rebuilds the pane's editable controls. Their contents survive it — the form draft is
+        // carried across, and a rename editor is rebuilt with its device's name — but first responder and the
+        // insertion point are not, so a repaint arriving mid-keystroke would drop the user out of the field.
+        // A background status change therefore waits while the SSH form or a rename editor is open; closing
+        // either repaints from current state, as does any action in the pane.
+        let probedLoadStates = deviceSectionLoadStates()
+        guard expandedDeviceRow != .addRemoteDevice, renamingClientDeviceID == nil, !isProbingDeviceStatusForRefresh,
+            probedLoadStates != lastRenderedDeviceLoadStates
+        else { return }
+        isProbingDeviceStatusForRefresh = true
+        Task { [weak self] in
+            let response = await Task.detached(priority: .userInitiated) { () -> SpacesDeviceAPIControlResponse in
+                do { return try SpacesDeviceAPIControlClient.status(timeout: 1) } catch {
+                    return DevicePairingController.controlResponse(forThrownError: error)
+                }
+            }.value
+            guard let self else { return }
+            self.isProbingDeviceStatusForRefresh = false
+            // The user may have started typing into the SSH form or a rename editor while the probe ran;
+            // the same suppression that skips the refresh applies to landing it.
+            guard self.expandedDeviceRow != .addRemoteDevice, self.renamingClientDeviceID == nil else { return }
+            self.refreshVisibleDeviceSettings(response)
+            // The render stamps the load states as of now, but this response describes the ones the probe
+            // started from, and transitions that landed while it ran were skipped by the in-flight guard.
+            // Stamping what the response actually describes leaves those pending, and asking again here
+            // repaints them rather than waiting for a sidebar change that may not come.
+            self.lastRenderedDeviceLoadStates = probedLoadStates
+            self.refreshDeviceSettingsForDeviceStatusChange()
+        }
     }
 
-    private func connectedClientDevices(localStatus: SpacesDeviceAPIStatus? = nil, requireLocalStatus: Bool = false) -> [ClientConnectedDevice] {
+    private func deviceSectionLoadStates() -> [String: DeviceModelStore.SidebarDeviceLoadState] {
+        host.deviceModel.deviceSections.reduce(into: [:]) { $0[$1.deviceID] = $1.loadState }
+    }
+
+    /// Re-renders the Devices pane after this client's own device state changed. A failing local control
+    /// endpoint is rendered rather than swallowed: the device list, the pairing panels, and the add-remote
+    /// form all stay usable while the local daemon is down, and the failure itself is what the pane reports.
+    private func refreshVisibleDeviceSettingsAfterClientDeviceChange() {
+        do { refreshVisibleDeviceSettings(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {
+            refreshVisibleDeviceSettings(Self.controlResponse(forThrownError: error))
+        }
+    }
+
+    private func connectedClientDevices(response: SpacesDeviceAPIControlResponse) -> [ClientConnectedDevice] {
+        let localStatus = response.status
         let localHost = localStatus?.networkAddresses.first ?? localStatus?.host
+        // The local row's status comes from the control-endpoint probe this render already made, which is the
+        // freshest reachability fact the client has about its own daemon. A failed answer counts as
+        // unreachable even when it carries a status payload — a daemon reporting that its Device API is not
+        // running answers exactly that way — so the dot never reads green above the inline failure and the
+        // restart action the same response produces.
+        let localIsAvailable = response.ok && localStatus != nil
         let local = ClientConnectedDevice(
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
-            sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
+            sshPort: nil, isLocal: true, isAvailable: localIsAvailable, requiresReconnect: false,
+            status: localIsAvailable ? .reachable : .unreachable)
         let remote = pairedDevices().map {
             let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
                 id: $0.id, name: $0.name, host: $0.dialHost, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort,
-                isLocal: false, isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
+                isLocal: false, isAvailable: hasCredentials, requiresReconnect: !hasCredentials,
+                status: Self.remoteDeviceStatus(hasCredentials: hasCredentials, loadState: host.deviceSection(id: $0.id)?.loadState))
         }
         return [local] + remote
     }
 
     private func clientDeviceDetailText(_ device: ClientConnectedDevice) -> String {
         var parts: [String] = []
+        // The local row is labeled "Local" in the list, so its caption names the machine it actually is.
+        if device.isLocal { parts.append("This Mac") }
         if device.requiresReconnect { parts.append("Reconnect required") }
         if let host = device.host, let port = device.port {
             // A remote device is reachable at several addresses; the one shown is the address it is
@@ -925,7 +1459,7 @@ import workspacecore
             let portSuffix = device.sshPort.map { ":\($0)" } ?? ""
             parts.append("ssh: \(userPrefix)\(sshHost)\(portSuffix)")
         }
-        return parts.joined(separator: "  ")
+        return parts.joined(separator: " · ")
     }
 
     private func qrImage(for value: String, size: CGFloat) -> NSImage? {
@@ -935,10 +1469,16 @@ import workspacecore
         guard let output = filter?.outputImage else { return nil }
         let quietZone: CGFloat = 16
         let availableSize = max(size - (quietZone * 2), 1)
-        let scale = max(floor(availableSize / output.extent.width), 1)
-        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        // Fill availableSize regardless of module count (a fractional scale, not floor'd to an
+        // integer factor), so a long link with many modules doesn't shrink to a tiny square inside
+        // the quiet zone. samplingNearest() keeps module edges crisp under the fractional scale, and
+        // rendering at 2x pixel density (then letting NSImage's draw scale back down to point size)
+        // keeps it sharp on Retina.
+        let scale = availableSize / output.extent.width
+        let pixelScale = scale * 2
+        let transformed = output.samplingNearest().transformed(by: CGAffineTransform(scaleX: pixelScale, y: pixelScale))
         guard let cgImage = CIContext().createCGImage(transformed, from: transformed.extent) else { return nil }
-        let qrSize = transformed.extent.size
+        let qrSize = NSSize(width: availableSize, height: availableSize)
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
         NSColor.white.setFill()
@@ -963,4 +1503,12 @@ import workspacecore
         }
         return port
     }
+}
+
+/// Grays out the device row menus while an SSH connect or install is running. Rename, remove, and the local
+/// daemon restart each rebuild the Devices pane, which would take the running attempt's form away with the
+/// fields it holds and the status label it reports through. The trailing row buttons are disabled directly;
+/// a menu is built with its row but presented later, so its items answer here instead.
+extension DevicePairingController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isRemoteDeviceAttemptInFlight }
 }

@@ -46,6 +46,9 @@ import workspacecore
     /// Opens user settings as a floating dialog on the given section. The dialog floats over the
     /// main window, so the current sidebar selection and detail pane are left untouched.
     func openSettings(section: SettingsSection) {
+        // Same handoff as a sidebar section switch: this rebuilds the window's content, and the Devices pane
+        // keeps state in the views that are about to go away.
+        if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
         selectedSettingsSection = section
         host.showingSettings = true
         presentSettingsWindow()
@@ -56,6 +59,7 @@ import workspacecore
     /// Clears settings-window UI references when the window closes. Called from the
     /// host's shared `windowWillClose` delegate.
     func handleSettingsWindowClosed() {
+        if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
         settingsSectionContentContainer = nil
         settingsSectionRowViews.removeAll()
     }
@@ -232,6 +236,8 @@ import workspacecore
 
     private func selectSettingsSection(_ section: SettingsSection) {
         guard section != selectedSettingsSection else { return }
+        // The outgoing section's views are about to be torn down; the Devices pane keeps state in its own.
+        if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
         selectedSettingsSection = section
         for (candidate, row) in settingsSectionRowViews { row.isSelected = candidate == section }
         renderSelectedSettingsSection()

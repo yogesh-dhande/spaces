@@ -496,7 +496,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 
-6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Devices, choose Pair iPhone or iPad for the target daemon, and scan the QR code from the iPhone or iPad.
+6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Devices, choose Pair iPhone on the target device's row, and scan the QR code that opens under it from the iPhone or iPad.
 7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the daemon Device API.
 
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted Device API, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
