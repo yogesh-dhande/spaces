@@ -115,6 +115,20 @@ cp "$SPACES_CLI" "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 cp "$SPACESD" "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
+
+# SwiftPM emits each target's resource bundle (backing Bundle.module) next to the built
+# binaries. The app loads them from Contents/Resources at runtime; a missing
+# spaces_spacesui.bundle makes the packaged app trap on first Bundle.module access (#632).
+SWIFTPM_PRODUCTS_DIR="$(cd "$(dirname "$SPACES_APP")" && pwd)"
+for resource_bundle in spaces_spacesui.bundle spaces_SpacesApp.bundle; do
+  resource_bundle_source="$SWIFTPM_PRODUCTS_DIR/$resource_bundle"
+  if [[ ! -d "$resource_bundle_source" ]]; then
+    echo "Error: SwiftPM resource bundle not found at $resource_bundle_source. Build the app before packaging." >&2
+    exit 1
+  fi
+  cp -R "$resource_bundle_source" "$BUNDLE_OUTPUT/Contents/Resources/$resource_bundle"
+done
+
 cp -R "$GHOSTTY_RESOURCES_DIR" "$BUNDLE_OUTPUT/Contents/Resources/ghostty"
 cp -R "$GHOSTTY_TERMINFO_DIR" "$BUNDLE_OUTPUT/Contents/Resources/terminfo"
 spaces_release_require_universal_binary "$CADDY_BIN" "caddy router binary"

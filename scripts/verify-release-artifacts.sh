@@ -106,6 +106,24 @@ if [[ -z "$(find "$ghostty_terminfo" -type f -name xterm-ghostty -print -quit)" 
   exit 1
 fi
 
+spacesui_bundle="$mountpoint/Spaces.app/Contents/Resources/spaces_spacesui.bundle"
+if [[ ! -d "$spacesui_bundle" ]]; then
+  echo "Error: Missing SwiftPM resource bundle at $spacesui_bundle" >&2
+  exit 1
+fi
+# The universal (--arch arm64 --arch x86_64) build emits the deep bundle layout
+# (Contents/Resources/CodePane/...), flat builds emit CodePane/ at the top; search
+# instead of hard-coding either layout.
+if [[ -z "$(find "$spacesui_bundle" -type f -path '*/CodePane/index.html' -print -quit)" ]]; then
+  echo "Error: Bundled spaces_spacesui.bundle is missing CodePane/index.html at $spacesui_bundle" >&2
+  exit 1
+fi
+spacesapp_bundle="$mountpoint/Spaces.app/Contents/Resources/spaces_SpacesApp.bundle"
+if [[ ! -d "$spacesapp_bundle" ]]; then
+  echo "Error: Missing SwiftPM resource bundle at $spacesapp_bundle" >&2
+  exit 1
+fi
+
 ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
 ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"
 if [[ ! -e "$ghostty_vt_dylib" && ! -L "$ghostty_vt_dylib" ]]; then
