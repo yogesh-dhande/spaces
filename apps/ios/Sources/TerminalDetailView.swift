@@ -161,10 +161,14 @@ struct TerminalDetailView: View {
 
     private var linkPreviewBannerOverlay: some View {
         VStack(spacing: 0) {
-            if model.isPreparingLinkPreview { previewStatusBanner("Preparing preview…") }
-            if let previewErrorMessage = model.linkPreviewErrorMessage { errorBanner(previewErrorMessage) }
-            if let linkNotice = model.linkNotice { noticeBanner(linkNotice) }
-        }.allowsHitTesting(false)
+            // Transient and self-clearing: never dismissable, and explicitly non-interactive so it
+            // never swallows a tap meant for the terminal underneath.
+            if model.isPreparingLinkPreview { previewStatusBanner("Preparing preview…").allowsHitTesting(false) }
+            if let previewErrorMessage = model.linkPreviewErrorMessage {
+                errorBanner(previewErrorMessage, onDismiss: { model.dismissLinkBanners() })
+            }
+            if let linkNotice = model.linkNotice { noticeBanner(linkNotice, onDismiss: { model.dismissLinkBanners() }) }
+        }
     }
 
     /// The Copy pill, positioned from the current frame's shared selection. Absent whenever the frame
@@ -400,16 +404,34 @@ struct TerminalDetailView: View {
         ).accessibilityLabel(accessibilityLabel)
     }
 
-    private func errorBanner(_ message: String) -> some View {
-        Text(message).font(.footnote).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(
-            .vertical, 12
-        ).background(Color(uiColor: .secondarySystemBackground)).accessibilityIdentifier("terminal.errorBanner")
+    private func errorBanner(_ message: String, onDismiss: (() -> Void)? = nil) -> some View {
+        dismissableBanner(
+            message: message, textColor: .red, identifier: "terminal.errorBanner", dismissIdentifier: "terminal.errorBanner.dismiss",
+            onDismiss: onDismiss)
     }
 
-    private func noticeBanner(_ message: String) -> some View {
-        Text(message).font(.footnote).foregroundStyle(.primary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(
-            .vertical, 12
-        ).background(Color(uiColor: .secondarySystemBackground)).accessibilityIdentifier("terminal.linkNotice")
+    private func noticeBanner(_ message: String, onDismiss: (() -> Void)? = nil) -> some View {
+        dismissableBanner(
+            message: message, textColor: .primary, identifier: "terminal.linkNotice", dismissIdentifier: "terminal.linkNotice.dismiss",
+            onDismiss: onDismiss)
+    }
+
+    /// Shared row for `errorBanner`/`noticeBanner`. Hit-testable only when `onDismiss` is supplied:
+    /// the trailing xmark button and a tap anywhere on the banner both call it. The `model.errorMessage`
+    /// banner reuses `errorBanner` without an `onDismiss`, so it keeps its present (already
+    /// non-interactive) behavior unchanged.
+    private func dismissableBanner(
+        message: String, textColor: Color, identifier: String, dismissIdentifier: String, onDismiss: (() -> Void)?
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(message).font(.footnote).foregroundStyle(textColor).frame(maxWidth: .infinity, alignment: .leading)
+            if let onDismiss {
+                Button(action: onDismiss) { Image(systemName: "xmark").font(.footnote.weight(.semibold)).foregroundStyle(.secondary) }
+                    .accessibilityIdentifier(dismissIdentifier)
+            }
+        }.padding(.horizontal, 16).padding(.vertical, 12).background(Color(uiColor: .secondarySystemBackground)).accessibilityIdentifier(
+            identifier
+        ).contentShape(Rectangle()).allowsHitTesting(onDismiss != nil).onTapGesture { onDismiss?() }
     }
 
     /// Persistent read-only notice shown on every demo terminal. Like the session-ended banner, it names
