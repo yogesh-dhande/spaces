@@ -425,7 +425,20 @@ import workspacecore
     func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = loadDismissedAlertsAttentionItemIDs() }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
-        let prunedIDs = Self.retainedDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs, in: host.deviceModel.alertsGroups)
+        // Read through the same injected `database` closure dismissals persist through (never
+        // `host.clientDatabase()`), so a test's throwaway database is the one this reads back, same as
+        // load/store above. Includes the local device row: `retainedDismissedAttentionItemIDs` does not
+        // special-case it, since a local-device attention id with no matching section is exactly as stale
+        // as a remote one would be.
+        //
+        // A failed read is unknown pairing state, not evidence that nothing is paired; pruning against
+        // an empty set here would erase every not-yet-loaded device's dismissals. Abort this pass
+        // instead: the set is untouched, and the next sidebar refresh prunes again. No modal, unlike the
+        // store path below, because pruning is refresh-cadence hygiene, not a user action that failed.
+        guard let pairedDevices = try? database().pairedDevices() else { return }
+        let pairedDeviceIDs = Set(pairedDevices.map(\.id))
+        let prunedIDs = Self.retainedDismissedAttentionItemIDs(
+            dismissedAlertsAttentionItemIDs, sections: host.deviceModel.deviceSections, pairedDeviceIDs: pairedDeviceIDs)
         guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
         dismissedAlertsAttentionItemIDs = prunedIDs
         do { try storeDismissedAlertsAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
@@ -440,6 +453,53 @@ import workspacecore
     /// `includingHiddenWorkspaces` in its attention-event derivation).
     nonisolated static func retainedDismissedAttentionItemIDs(_ dismissed: Set<String>, in groups: [AlertsGroup]) -> Set<String> {
         dismissed.intersection(Set(groups.flatMap { $0.items.map(\.attentionID) }))
+    }
+
+    /// The device id embedded in every attention id built by `buildOverviewAlertsGroups`
+    /// (`alert:<deviceID>:...`), or nil for an id that does not carry one (a stale/legacy identity).
+    nonisolated static func deviceID(fromAttentionID attentionID: String) -> String? {
+        let components = attentionID.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard components.count >= 2, components[0] == "alert" else { return nil }
+        return String(components[1])
+    }
+
+    /// Per-device retention, called once per refresh across every paired device's dismissals at once
+    /// (the persisted set is a single flat store, not one bucket per device the way iOS's
+    /// `SpacesMobileDismissedAlertsStore` is). A dismissal is pruned against its owning device's
+    /// derived alerts only once that device has actually reported an overview; a device whose section
+    /// has not loaded yet, or that has no section at all yet, contributes no evidence either way, so
+    /// its dismissals are left untouched rather than read as "no longer derived" (mirroring the iOS
+    /// store, whose bucket for a device is pruned only when that device's own overview refreshes, never
+    /// by another device's).
+    ///
+    /// "No section at all" is not a corner case: on a cold launch the local snapshot installs its
+    /// section and triggers this prune (`SidebarController.applyLocalDeviceSidebarSnapshot`) before
+    /// `loadRemoteDeviceSections` has run even once, so every paired remote device is missing from
+    /// `sections` at that moment, not merely `.loading`. Treating "missing" the same as "not yet loaded"
+    /// there is what `pairedDeviceIDs` is for: a bucket for a device with no section keeps its dismissals
+    /// when the device is still paired, and drops them only when it is not (unpaired since the dismissal
+    /// was recorded) or the id has no parseable device at all. That keeps the set bounded rather than
+    /// growing for the life of the install, without depending on section-array ordering or on every
+    /// paired device having already gotten a `.loading` placeholder.
+    nonisolated static func retainedDismissedAttentionItemIDs(
+        _ dismissed: Set<String>, sections: [DeviceModelStore.DeviceSection], pairedDeviceIDs: Set<String>
+    ) -> Set<String> {
+        let sectionsByDeviceID = Dictionary(uniqueKeysWithValues: sections.map { ($0.deviceID, $0) })
+        let dismissedByDevice = Dictionary(grouping: dismissed, by: { deviceID(fromAttentionID: $0) })
+        var retained: Set<String> = []
+        for (deviceID, bucket) in dismissedByDevice {
+            guard let deviceID else { continue }
+            if let section = sectionsByDeviceID[deviceID] {
+                if section.overview != nil {
+                    retained.formUnion(retainedDismissedAttentionItemIDs(Set(bucket), in: section.alertsGroups))
+                } else {
+                    retained.formUnion(bucket)
+                }
+            } else if pairedDeviceIDs.contains(deviceID) {
+                retained.formUnion(bucket)
+            }
+        }
+        return retained
     }
 
     /// Marks the bell of the session the user is typing in as already seen, every time the alerts are
