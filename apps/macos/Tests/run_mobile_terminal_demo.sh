@@ -62,6 +62,10 @@ remote_forward_host="127.0.0.1"
 remote_forward_port=""
 remote_project_dir=""
 remote_workspace_id=""
+# Set by create_remote_demo_project, read by delete_remote_demo_project in cleanup(). Declared here
+# (rather than left to its first assignment) so cleanup's `-n` guard is safe under `set -u` even when
+# the run exits before create_remote_demo_project ever executes.
+remote_project_id=""
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Local Demo}"
 secondary_workspace_title="${SPACES_MOBILE_DEMO_SECONDARY_WORKSPACE_TITLE:-Secondary Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
@@ -229,11 +233,88 @@ stop_device_api() {
   fi
 }
 
+# Deletes the remote demo project create_remote_demo_project registered, through the same paired
+# iPhone credentials and Device API transport used to create it. Cleanup for this run, not the
+# one-time cleanup of records already orphaned by past runs (see #582) -- this only ever targets the
+# project this run itself created.
+#
+# Guarded like create_remote_demo_project: nothing to delete when no remote project was created this
+# run (local-only scenarios, or a run that failed before pairing). remote_project_id being non-empty
+# implies remote_forward_port, iphone_remote_token, iphone_installation_id, remote_certificate_fingerprint,
+# and demo_home are already set, since create_remote_demo_project is the only place remote_project_id
+# is assigned and it requires all of those first.
+#
+# Called from cleanup() before the SSH forward is torn down: this delete's only route to the daemon is
+# that forward. A failed delete is logged but does not fail the run -- deleting the run's own project
+# record is best-effort cleanup, not part of the scenario under test, and the daemon's runtime state
+# (workspace dirs, worktrees) may already be gone by the time cleanup runs, which handleDeleteProjectRequest
+# tolerates the same way an already-missing worktree tolerates a normal project delete.
+delete_remote_demo_project() {
+  [[ -n "$remote_project_id" && -n "$remote_forward_port" && -n "$iphone_remote_token" ]] || return 0
+  if ! run_demo_env \
+    HOME="$demo_home" \
+    python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_id" "$remote_workspace_id" <<'PY'
+import json
+import subprocess
+import sys
+
+spacese2e, bundle_id, host, port, certificate_fingerprint, auth_token, installation_id, project_id, workspace_id = sys.argv[1:]
+client_app = {
+    "installationID": installation_id,
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": "Remote Demo Setup",
+    "appVersion": "1.0",
+}
+
+
+def send(command):
+    request = {"authToken": auth_token, "clientApp": client_app, "command": command}
+    completed = subprocess.run(
+        [spacese2e, "mobile-request", "--host", host, "--port", port, "--certificate-fingerprint=" + certificate_fingerprint, "--request-json", json.dumps(request)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(f"mobile-request exited {completed.returncode}: {(completed.stderr or completed.stdout or '').strip()}")
+    payload = json.loads(completed.stdout)
+    if not payload.get("ok"):
+        raise SystemExit(json.dumps(payload))
+    return payload
+
+
+# deleteProject's removeProjectUnlocked only terminates agent-backed terminals, so a persistent
+# demo shell would otherwise outlive its deleted workspace on the remote host. Stop the workspace
+# first, over the same transport, and warn but continue to the delete if the stop fails -- teardown
+# must always attempt the delete.
+if workspace_id:
+    try:
+        send({"stopWorkspace": {"workspaceID": workspace_id}})
+    except (SystemExit, Exception) as exc:
+        # SystemExit covers send()'s own failure reports; Exception covers the transport-level
+        # failures send() can raise (subprocess timeout, malformed JSON, OSError). Every stop
+        # failure must fall through to deleteProject, never abort the teardown.
+        print(f"Failed to stop remote demo workspace {workspace_id} before delete: {exc}", file=sys.stderr)
+
+try:
+    send({"deleteProject": {"projectID": project_id}})
+except SystemExit as exc:
+    raise SystemExit(f"deleteProject failed: {exc}")
+PY
+  then
+    echo "Failed to delete remote demo project $remote_project_id on $remote_demo_profile_name; it will be orphaned." >&2
+  fi
+}
+
 cleanup() {
   local exit_code=$?
   stop_demo_workspace
   stop_device_api
   stop_terminal_service
+  # Must run before the forward below is torn down: deleting the remote project goes over it, the
+  # same as create_remote_demo_project did.
+  delete_remote_demo_project
   if [[ -n "$remote_forward_pid" ]]; then
     terminate_pid "$remote_forward_pid" "remote Device API SSH forward"
   fi
@@ -999,11 +1080,13 @@ git("add", "README.txt")
 git("commit", "-m", "Initial remote mobile-ui demo fixture")
 PY
   remote_project_dir="$project_root"
-  remote_workspace_id="$(
+  local create_output
+  create_output="$(
     run_demo_env \
       HOME="$demo_home" \
       python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
 import json
+import shlex
 import subprocess
 import sys
 
@@ -1032,11 +1115,14 @@ except subprocess.CalledProcessError as error:
 payload = json.loads(completed.stdout)
 mutation = ((payload.get("result") or {}).get("mutation") or {})
 workspace_id = mutation.get("workspaceID")
-if not payload.get("ok") or not workspace_id:
-    raise SystemExit(f"createProject did not return a workspaceID: {json.dumps(payload)}")
-print(workspace_id)
+project_id = mutation.get("projectID")
+if not payload.get("ok") or not workspace_id or not project_id:
+    raise SystemExit(f"createProject did not return a workspaceID and projectID: {json.dumps(payload)}")
+print(f"remote_workspace_id={shlex.quote(workspace_id)}")
+print(f"remote_project_id={shlex.quote(project_id)}")
 PY
   )"
+  eval "$create_output"
 }
 
 wait_for_session_owner() {
