@@ -480,10 +480,16 @@ import workspacecore
             popUp.addItem(withTitle: Self.concurrencyTitle(policy))
             popUp.itemArray.last?.representedObject = policy.rawValue
         }
-        let seeded = seed.flatMap { AutomationConcurrencyPolicy(rawValue: $0.concurrencyPolicy) } ?? .allow
+        let seeded = Self.seededConcurrencyPolicy(seed)
         popUp.selectItem(at: AutomationConcurrencyPolicy.allCases.firstIndex(of: seeded) ?? 0)
         concurrencyPopUp = popUp
         return popUp
+    }
+
+    /// The concurrency policy the editor's pop-up starts on: the seed automation's stored policy when
+    /// editing an existing one, or `defaultForNewAutomation` when there is no seed (a brand-new automation).
+    static func seededConcurrencyPolicy(_ seed: TerminalServiceAutomationSummary?) -> AutomationConcurrencyPolicy {
+        seed.flatMap { AutomationConcurrencyPolicy(rawValue: $0.concurrencyPolicy) } ?? .defaultForNewAutomation
     }
 
     private func makeMissedRunPopUp(seed: TerminalServiceAutomationSummary?) -> NSView {
@@ -769,7 +775,8 @@ import workspacecore
             cronExpression = expression
         }
 
-        let concurrency = (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue
+        let concurrency =
+            (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.defaultForNewAutomation.rawValue
         let missed = (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue
 
         let result = AutomationsViewModel.buildAutomationFields(
@@ -820,7 +827,8 @@ import workspacecore
             agentCommand: agentCommandField?.stringValue, agentPrompt: agentPromptTextView?.string,
             workspaceID: (workspacePopUp?.selectedItem?.representedObject as? String) ?? "",
             timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
-            concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue,
+            concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String)
+                ?? AutomationConcurrencyPolicy.defaultForNewAutomation.rawValue,
             missedRunPolicy: (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue,
             nextFireTime: nil, createdAt: "", updatedAt: "")
     }
