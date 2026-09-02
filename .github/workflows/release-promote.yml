@@ -1,9 +1,11 @@
 # Promote a Spaces prerelease to the stable update feed.
 #
 # Trigger: the `released` release event, which GitHub fires when an existing prerelease is
-# switched to a full release -- that is, when a maintainer clears "Set as a pre-release" on the
-# GitHub release (`gh release edit <tag> --prerelease=false --latest`). That gesture is the whole
-# promotion; this workflow is what makes it visible to installed Macs.
+# switched to a full release -- that is, when a maintainer edits the release and selects "Latest".
+# The releases UI offers pre-release and latest as a single radio choice, so that one selection
+# clears the pre-release flag and pins `latest` in one update (`gh release edit <tag>
+# --prerelease=false --latest` on the CLI). That gesture is the whole promotion; this workflow is
+# what makes it visible to installed Macs.
 #
 # The `released` event does not fire for a release created by the Actions token, so release.yml
 # publishing a prerelease cannot trigger this workflow and there is no loop.
@@ -41,9 +43,11 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       # Ordered before the site build because the build resolves the stable feed through
-      # `releases/latest/download`. Clearing the pre-release flag does not by itself move a `latest`
-      # marker that was pinned to an earlier release, and a site rebuilt in that state would quietly
-      # republish the previous release as stable -- so fail here instead, before anything deploys.
+      # `releases/latest/download`. Selecting "Latest" moves the marker in the same update that
+      # raises this event, but a promotion made some other way (clearing the pre-release flag
+      # alone, or via the API) can leave `latest` on an earlier release, and a site rebuilt in that
+      # state would quietly republish the previous release as stable -- so fail here instead,
+      # before anything deploys.
       - name: Confirm GitHub latest resolves to the promoted release
         env:
           GH_TOKEN: ${{ github.token }}

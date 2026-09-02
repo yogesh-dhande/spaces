@@ -8,7 +8,7 @@ description: Prepare and publish a Spaces release through the repository's tag-t
 ## Inspect release state
 
 1. Read `AGENTS.md`, `docs/dev.md`, `.github/workflows/release.yml` (a thin caller of the shared `.github/workflows/release-build.yml`), `.github/workflows/release-promote.yml`, `.github/workflows/ios-release.yml`, and the Version Metadata Rules before acting.
-2. Know the two phases before starting: pushing a tag publishes a GitHub **pre-release** served by the pre-release Sparkle feed, and unticking "This is a pre-release" afterwards promotes it onto the stable feed. Tagging alone does not ship a release to everyone.
+2. Know the two phases before starting: pushing a tag publishes a GitHub **pre-release** served by the pre-release Sparkle feed, and selecting **Latest** on that release afterwards promotes it onto the stable feed. Tagging alone does not ship a release to everyone.
 3. Confirm `gh` authentication and inspect the current branch, worktree, remote default branch, open PRs, existing releases, and local and remote tags.
 4. Require the release commit to be on `main`, with a clean worktree and all required GitHub checks passing. Do not tag an unmerged branch or bypass a failed check.
 5. Treat `apps/macos/AppVersion.plist` as the authored version source. Never hand-edit generated version files.
@@ -51,9 +51,9 @@ Present the complete proposed notes alongside the tag confirmation. Apply the ap
 Promotion is a separate, explicitly requested step. A pre-release stays a pre-release until the user says it has been tested.
 
 1. Confirm with the user which tag is being promoted, and that it has been tested.
-2. Promote it with `gh release edit <tag> --prerelease=false --latest`, or by unticking "Set as a pre-release" and ticking "Set as the latest release" together in the GitHub releases UI. Pass both: clearing the pre-release flag alone leaves `latest` wherever it was explicitly pinned, and `latest` is what the stable feed and `install.sh` resolve through. Do not promote a release older than the newest one without the user saying so.
+2. Promote it by editing the release and selecting **Latest**: the releases UI offers pre-release and latest as one radio choice, so that single selection clears the pre-release flag and pins `latest` in one update. The CLI equivalent is `gh release edit <tag> --prerelease=false --latest`, which must pass both flags to match what the radio does. `latest` is what the stable feed and `install.sh` resolve through. Do not promote a release older than the newest one without the user saying so.
 3. The `released` event runs `Release Promote` (`release-promote.yml`), which redeploys the website from the release's commit and confirms the stable feed serves the promoted version. Monitor that run to completion.
-4. Verify that `gh api repos/yogesh-dhande/spaces/releases/latest --jq .tag_name` reports the promoted tag (`gh release view` has no `isLatest` field) and that `https://usespaces.dev/releases/appcast.xml` serves the promoted version. If the workflow failed because `latest` had not moved, set it with `gh release edit <tag> --latest` and re-run the workflow: editing an already-promoted release fires `edited`, not `released`, so it does not restart on its own.
+4. Verify that `gh api repos/yogesh-dhande/spaces/releases/latest --jq .tag_name` reports the promoted tag (`gh release view` has no `isLatest` field) and that `https://usespaces.dev/releases/appcast.xml` serves the promoted version. If the workflow failed because `latest` had not moved, select **Latest** on the release (or `gh release edit <tag> --latest`) and re-run the workflow by hand: editing an already-promoted release fires `edited`, not `released`, so it does not restart on its own.
 5. A pre-release that failed testing is left alone; the fix ships under the next patch tag, and Macs on the pre-release feed pick it up automatically. Do not delete a superseded pre-release to "clean up" without explicit approval.
 
 ## Existing failed releases

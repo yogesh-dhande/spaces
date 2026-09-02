@@ -4,9 +4,9 @@
 # is its caller and resolves the version/build/tag it hands in as inputs.
 #
 # Every release it publishes is a GitHub prerelease, served on the pre-release update feed at
-# https://usespaces.dev/releases/prerelease/appcast.xml. A maintainer promotes one by clearing
-# "Set as a pre-release" on the GitHub release, which runs release-promote.yml; that is the only
-# thing that moves a build onto the stable feed. Nothing here ever claims `latest`.
+# https://usespaces.dev/releases/prerelease/appcast.xml. A maintainer promotes one by editing the
+# GitHub release and selecting "Latest", which runs release-promote.yml; that is the only thing
+# that moves a build onto the stable feed. Nothing here ever claims `latest`.
 #
 # Required secrets:
 #   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
@@ -306,8 +306,8 @@ jobs:
           # Every tagged build is published as a prerelease, and `--latest` is never passed: the
           # `latest` release, which `releases/latest/download` and therefore the stable Sparkle
           # feed resolve through, must keep pointing at the last promoted build until a maintainer
-          # promotes this one (`gh release edit <tag> --prerelease=false --latest`), at which point
-          # release-promote.yml redeploys the site from it.
+          # promotes this one by selecting "Latest" on it (`gh release edit <tag> --prerelease=false
+          # --latest`), at which point release-promote.yml redeploys the site from it.
           #
           # --target pins the tag to the commit this run built rather than the default branch tip.
           if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
