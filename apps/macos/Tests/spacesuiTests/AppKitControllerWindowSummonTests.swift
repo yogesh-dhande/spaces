@@ -185,7 +185,7 @@ extension ProcessProfileEnvironmentSuites {
         @Test func activeSpaceSummonAddsMoveToActiveSpaceBehavior() {
             let behavior = NSWindow.CollectionBehavior.fullScreenAuxiliary
 
-            let updated = AppKitController.collectionBehaviorForActiveSpaceSummon(behavior)
+            let updated = WindowFocusController.collectionBehaviorForActiveSpaceSummon(behavior)
 
             #expect(updated.contains(.moveToActiveSpace))
             #expect(updated.contains(.fullScreenAuxiliary))
@@ -193,9 +193,9 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func activeSpaceSummonCleanupRemovesOnlyTransientBehavior() {
             let original: NSWindow.CollectionBehavior = [.fullScreenAuxiliary, .managed]
-            let summoned = AppKitController.collectionBehaviorForActiveSpaceSummon(original)
+            let summoned = WindowFocusController.collectionBehaviorForActiveSpaceSummon(original)
 
-            let cleaned = AppKitController.collectionBehaviorAfterActiveSpaceSummon(summoned)
+            let cleaned = WindowFocusController.collectionBehaviorAfterActiveSpaceSummon(summoned)
 
             #expect(!cleaned.contains(.moveToActiveSpace))
             #expect(cleaned.contains(.fullScreenAuxiliary))
@@ -203,28 +203,28 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         @Test func targetedHotkeyRevealUsesDirectRouteWhenAppIsAlreadyActive() {
-            #expect(AppKitController.shouldUseDirectTargetedHotkeyReveal(appIsActive: true))
-            #expect(!AppKitController.shouldUseDirectTargetedHotkeyReveal(appIsActive: false))
+            #expect(WindowFocusController.shouldUseDirectTargetedHotkeyReveal(appIsActive: true))
+            #expect(!WindowFocusController.shouldUseDirectTargetedHotkeyReveal(appIsActive: false))
         }
 
         @Test func targetedHotkeyRevealActivatesAppWhenInactive() {
-            #expect(AppKitController.shouldActivateAppForTargetedHotkeyReveal(appIsActive: false))
-            #expect(!AppKitController.shouldActivateAppForTargetedHotkeyReveal(appIsActive: true))
+            #expect(WindowFocusController.shouldActivateAppForTargetedHotkeyReveal(appIsActive: false))
+            #expect(!WindowFocusController.shouldActivateAppForTargetedHotkeyReveal(appIsActive: true))
         }
 
         @Test func targetedHotkeyRevealPrefersLightweightFocusForVisibleWindow() {
-            #expect(AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: false))
-            #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: false, windowIsVisible: true, windowIsMiniaturized: false))
-            #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: false, windowIsMiniaturized: false))
-            #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: true))
+            #expect(WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: false))
+            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: false, windowIsVisible: true, windowIsMiniaturized: false))
+            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: false, windowIsMiniaturized: false))
+            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: true))
         }
 
         @Test func commandPalettePresentationActivatesAppWhenInactive() {
-            #expect(AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: false))
+            #expect(WindowFocusController.shouldActivateAppForCommandPalettePresentation(appIsActive: false))
         }
 
         @Test func commandPalettePresentationSkipsActivationWhenAlreadyActive() {
-            #expect(!AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
+            #expect(!WindowFocusController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
         }
 
         @Test func commandPaletteDismissRestoresOnlyItsCapturedReturnTarget() {
@@ -259,16 +259,16 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         @Test func toggleHotkeyHidesOnlyWhenMainWindowIsFocused() {
-            #expect(AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: true))
-            #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: true, mainWindowIsFocused: true))
-            #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: false))
+            #expect(WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: true))
+            #expect(!WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: true, mainWindowIsFocused: true))
+            #expect(!WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: false))
         }
 
         @Test func toggleHotkeyVisibilityMatrix() {
             let cases: [(Bool, Bool, Bool)] = [(true, true, false), (true, false, false), (false, true, true), (false, false, false)]
             for (appIsHidden, mainWindowIsFocused, expectedHide) in cases {
                 #expect(
-                    AppKitController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide
+                    WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide
                 )
             }
         }
@@ -276,61 +276,61 @@ extension ProcessProfileEnvironmentSuites {
         // Terminal panes live inside the main window, so hiding it needs no terminal
         // return-focus handling; the only restoration is the previously frontmost app.
         @Test func toggleHotkeyRestoresReturnApplicationOnlyWhenOneWasCaptured() {
-            #expect(AppKitController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: 123))
-            #expect(!AppKitController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: nil))
+            #expect(WindowFocusController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: 123))
+            #expect(!WindowFocusController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: nil))
         }
 
         @Test func toggleHotkeyCapturesOnlyNonSpacesReturnApplicationProcessID() {
-            #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 123, currentProcessID: 456) == 123)
-            #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 456, currentProcessID: 456) == nil)
-            #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
+            #expect(WindowFocusController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 123, currentProcessID: 456) == 123)
+            #expect(WindowFocusController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 456, currentProcessID: 456) == nil)
+            #expect(WindowFocusController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
         }
 
         @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
-            #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
-            #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))
-            #expect(AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: true))
+            #expect(!WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
+            #expect(!WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))
+            #expect(WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: true))
         }
 
         @Test func commandPaletteToggleDismissesOnlyWhenPaletteIsFocused() {
-            #expect(AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: true))
-            #expect(!AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: false))
-            #expect(!AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: false, panelIsFocused: true))
+            #expect(WindowFocusController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: true))
+            #expect(!WindowFocusController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: false))
+            #expect(!WindowFocusController.shouldDismissCommandPaletteForToggle(panelIsVisible: false, panelIsFocused: true))
         }
 
         @Test func commandPaletteToggleVisibilityMatrix() {
             let cases: [(Bool, Bool, Bool)] = [(true, true, true), (true, false, false), (false, true, false), (false, false, false)]
             for (panelIsVisible, panelIsFocused, expectedDismiss) in cases {
                 #expect(
-                    AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: panelIsVisible, panelIsFocused: panelIsFocused)
+                    WindowFocusController.shouldDismissCommandPaletteForToggle(panelIsVisible: panelIsVisible, panelIsFocused: panelIsFocused)
                         == expectedDismiss)
             }
         }
 
         @Test func globalWindowNavigationResolvesWorkspaceFromFocusedPaneThenWindowThenActive() {
-            #expect(AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: true))
-            #expect(!AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: false))
-            #expect(AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.google.Chrome"))
-            #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.apple.TextEdit"))
-            #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: nil))
+            #expect(WindowFocusController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: true))
+            #expect(!WindowFocusController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: false))
+            #expect(WindowFocusController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.google.Chrome"))
+            #expect(!WindowFocusController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.apple.TextEdit"))
+            #expect(!WindowFocusController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: nil))
             #expect(
-                AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                WindowFocusController.preferredWorkspaceIDForGlobalNavigation(
                     focusedTerminalSessionWorkspaceID: "terminal", focusedWindowWorkspaceID: "focused", activeWorkspaceID: "active")
                     == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "terminal", source: "focused_terminal_session"))
             #expect(
-                AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                WindowFocusController.preferredWorkspaceIDForGlobalNavigation(
                     focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "focused", activeWorkspaceID: "active")
                     == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "focused", source: "focused_window"))
             #expect(
-                AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                WindowFocusController.preferredWorkspaceIDForGlobalNavigation(
                     focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, activeWorkspaceID: "active")
                     == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "active", source: "active_workspace"))
             #expect(
-                AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                WindowFocusController.preferredWorkspaceIDForGlobalNavigation(
                     focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, activeWorkspaceID: nil)
                     == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: nil, source: "none"))
-            #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: true, activeWorkspaceID: "active") == "active")
-            #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: false, activeWorkspaceID: "active") == nil)
+            #expect(WindowFocusController.activeWorkspaceIDForGlobalNavigation(appIsActive: true, activeWorkspaceID: "active") == "active")
+            #expect(WindowFocusController.activeWorkspaceIDForGlobalNavigation(appIsActive: false, activeWorkspaceID: "active") == nil)
         }
 
         @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {

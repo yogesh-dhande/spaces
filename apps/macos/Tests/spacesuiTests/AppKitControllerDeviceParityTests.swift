@@ -771,14 +771,14 @@ import workspacecore
 
         // A browser attention item maps to the device-agnostic openURL target carrying its workspace.
         #expect(
-            AppKitController.windowFocusResolution(
+            WindowFocusController.windowFocusResolution(
                 for: .workspaceBrowserSession(workspaceID: "workspace-1", targetURL: "http://localhost:3000"), overview: overview)
                 == .openURL(workspaceID: "workspace-1", targetURL: "http://localhost:3000"))
 
         // A running-process attention item maps to the same openTerminal target the numbered path produces,
         // falling back to the row's title/dir when the session is not yet in the catalog.
         #expect(
-            AppKitController.windowFocusResolution(for: .workspaceProcess(workspaceID: "workspace-1", processID: "running-web"), overview: overview)
+            WindowFocusController.windowFocusResolution(for: .workspaceProcess(workspaceID: "workspace-1", processID: "running-web"), overview: overview)
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-web", title: "web", workingDirectory: "/device/project-feature",
@@ -786,7 +786,7 @@ import workspacecore
 
         // A missing-configured-process item maps to a run via the Device API with the resolved template id.
         #expect(
-            AppKitController.windowFocusResolution(
+            WindowFocusController.windowFocusResolution(
                 for: .workspaceMissingConfiguredProcess(workspaceID: "workspace-1", processKey: "web"), overview: overview)
                 == .runProcess(workspaceID: "workspace-1", processKey: "web", processTemplateID: "process-web"))
     }
@@ -886,7 +886,7 @@ import workspacecore
 
         // Resolving it opens the agent's terminal session.
         #expect(
-            AppKitController.windowFocusResolution(for: focusRequest, overview: overview)
+            WindowFocusController.windowFocusResolution(for: focusRequest, overview: overview)
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-agent", title: "Codex", workingDirectory: "/device/project-feature",
@@ -1046,9 +1046,9 @@ import workspacecore
             workspaceID: "workspace-1", sessionID: "session-1", title: "shell-1", workingDirectory: "/device/project-feature", kind: .shell,
             shell: "/bin/zsh")
 
-        #expect(AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: false))
-        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: true))
-        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(resolvedRequest, hasExistingPane: false))
+        #expect(WindowFocusController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: false))
+        #expect(!WindowFocusController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: true))
+        #expect(!WindowFocusController.terminalOpenRequestNeedsColdResolution(resolvedRequest, hasExistingPane: false))
     }
 
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {

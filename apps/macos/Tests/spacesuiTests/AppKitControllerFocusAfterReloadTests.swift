@@ -115,7 +115,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.deviceModel.deviceSections = [section(overview: overview(processIsRunning: false), deviceID: deviceID)]
             controller.sidebar.applySidebarDataChange()
 
-            let staleTargets = try #require(controller.focusableWindowContext(workspaceID: Self.workspaceID)?.targets)
+            let staleTargets = try #require(controller.windowFocus.focusableWindowContext(workspaceID: Self.workspaceID)?.targets)
             #expect(
                 staleTargets.map(\.kind) == [.missingConfiguredProcess],
                 "precondition: the snapshot on screen has the process configured but not running")
@@ -123,7 +123,7 @@ extension ProcessProfileEnvironmentSuites {
             let runningSnapshot = snapshot(overview: overview(processIsRunning: true), deviceID: deviceID)
             controller.sidebar.loadSnapshotOverrideForTesting = { .success(runningSnapshot) }
 
-            let resolved = await controller.processFocusMatch(workspaceID: Self.workspaceID, processName: Self.processName)
+            let resolved = await controller.windowFocus.processFocusMatch(workspaceID: Self.workspaceID, processName: Self.processName)
 
             #expect(resolved.retried, "the miss must be retried against a fresh snapshot rather than refused")
             let target = try #require(resolved.value?.target)
@@ -146,7 +146,7 @@ extension ProcessProfileEnvironmentSuites {
                 return .success(stoppedSnapshot)
             }
 
-            let resolved = await controller.processFocusMatch(workspaceID: Self.workspaceID, processName: Self.processName)
+            let resolved = await controller.windowFocus.processFocusMatch(workspaceID: Self.workspaceID, processName: Self.processName)
 
             #expect(resolved.value == nil)
             #expect(resolved.retried)

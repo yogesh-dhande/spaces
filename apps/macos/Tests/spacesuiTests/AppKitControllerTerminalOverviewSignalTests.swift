@@ -13,16 +13,16 @@ import spacesterminalcore
 
     @Test func terminalOverviewSignalReloadsOnlyForStartedMatchingProfile() {
         #expect(
-            AppKitController.shouldReloadSidebarForTerminalOverviewSignal(
+            WindowFocusController.shouldReloadSidebarForTerminalOverviewSignal(
                 didStartBackgroundServices: true, notificationObject: "profile-a", profileObject: "profile-a"))
         #expect(
-            !AppKitController.shouldReloadSidebarForTerminalOverviewSignal(
+            !WindowFocusController.shouldReloadSidebarForTerminalOverviewSignal(
                 didStartBackgroundServices: false, notificationObject: "profile-a", profileObject: "profile-a"))
         #expect(
-            !AppKitController.shouldReloadSidebarForTerminalOverviewSignal(
+            !WindowFocusController.shouldReloadSidebarForTerminalOverviewSignal(
                 didStartBackgroundServices: true, notificationObject: "profile-b", profileObject: "profile-a"))
         #expect(
-            !AppKitController.shouldReloadSidebarForTerminalOverviewSignal(
+            !WindowFocusController.shouldReloadSidebarForTerminalOverviewSignal(
                 didStartBackgroundServices: true, notificationObject: nil, profileObject: "profile-a"))
     }
 }
