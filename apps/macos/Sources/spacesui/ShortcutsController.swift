@@ -151,7 +151,7 @@ import workspacecore
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
-            if self.host.handleFormCancelShortcut(event: event) { return nil }
+            if self.host.projectForms.handleFormCancelShortcut(event: event) { return nil }
             if self.host.alerts.handleAlertsShortcut(event: event) { return nil }
             if let openSettingsShortcutSpec, self.matches(event: event, spec: openSettingsShortcutSpec) {
                 self.host.showSettings()
@@ -246,8 +246,8 @@ import workspacecore
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
         guard let addWorkspaceShortcutSpec, matches(event: event, spec: addWorkspaceShortcutSpec) else { return false }
         if host.showingAlerts, host.windowShortcutIndex(for: event) != nil { return false }
-        if host.activeAddWorkspaceFormTag != nil { return true }
-        host.addWorkspaceFromShortcut()
+        if host.projectForms.activeAddWorkspaceFormTag != nil { return true }
+        host.projectForms.addWorkspaceFromShortcut()
         return true
     }
 

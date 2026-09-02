@@ -68,9 +68,9 @@ import workspacecore
     @Test func addProjectDeviceIsSelectableOnlyWhenReachable() {
         // Offline devices are not selectable in the add-project device step: creating on one would make
         // the source step's Continue hang on a request that only times out.
-        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loaded))
-        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loading))
-        #expect(!AppKitController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
+        #expect(ProjectFormsController.addProjectDeviceIsSelectable(loadState: .loaded))
+        #expect(ProjectFormsController.addProjectDeviceIsSelectable(loadState: .loading))
+        #expect(!ProjectFormsController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
     }
 
     @Test func onlyALoadedDeviceAcceptsDaemonBackedActions() {

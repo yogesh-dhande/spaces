@@ -83,7 +83,7 @@ import workspacecore
     func showAutomationsDetail() {
         let isReenteringPane = !host.showingAutomations
         if isReenteringPane { resetRetainedRunHistory() }
-        host.clearActiveAddFormStateAndCloseWindows()
+        host.projectForms.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.presentDetailPane(.automations)
         host.showingSettings = false

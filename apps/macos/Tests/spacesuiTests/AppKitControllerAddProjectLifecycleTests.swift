@@ -7,9 +7,9 @@ import Testing
 @Suite struct AppKitControllerAddProjectLifecycleTests {
     @Test func addProjectRequiresDeviceSelectionOnlyWithMultipleDevices() {
         // A single device (the local Mac) skips the device step and opens configuration directly.
-        #expect(!AppKitController.addProjectRequiresDeviceSelection(deviceCount: 1))
+        #expect(!ProjectFormsController.addProjectRequiresDeviceSelection(deviceCount: 1))
         // More than one paired device shows the device-selection step first.
-        #expect(AppKitController.addProjectRequiresDeviceSelection(deviceCount: 2))
+        #expect(ProjectFormsController.addProjectRequiresDeviceSelection(deviceCount: 2))
     }
 
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
@@ -55,49 +55,49 @@ import Testing
     }
 
     @MainActor @Test func importedProjectSaveDecisionMapsAlertResponses() {
-        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertFirstButtonReturn) == .updateAllWorkspaces)
-        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertSecondButtonReturn) == .projectOnly)
-        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertThirdButtonReturn) == .cancel)
-        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
+        #expect(ProjectFormsController.projectImportWorkspaceSyncDecision(for: .alertFirstButtonReturn) == .updateAllWorkspaces)
+        #expect(ProjectFormsController.projectImportWorkspaceSyncDecision(for: .alertSecondButtonReturn) == .projectOnly)
+        #expect(ProjectFormsController.projectImportWorkspaceSyncDecision(for: .alertThirdButtonReturn) == .cancel)
+        #expect(ProjectFormsController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
     }
 
     @MainActor @Test func nonGitProjectSaveAlwaysSyncsItsWorkspace() {
         // A non-git project stands in for its single workspace, so saving its settings must sync to
         // that workspace regardless of any pending-import choice — the edits are the config that runs.
-        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: false))
-        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: true))
+        #expect(ProjectFormsController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: false))
+        #expect(ProjectFormsController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: true))
     }
 
     @MainActor @Test func gitProjectSaveSyncsOnlyWhenImportChoseUpdateAll() {
         // A git project keeps the template/per-workspace split: a plain save leaves existing
         // workspaces untouched, and only a pending import that chose Update All Workspaces syncs.
-        #expect(!AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: false))
-        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: true))
+        #expect(!ProjectFormsController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: false))
+        #expect(ProjectFormsController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: true))
     }
 
     @MainActor @Test func managedDirectoryReplacementDecisionMapsAlertResponses() {
-        #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertFirstButtonReturn) == .replace)
-        #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertSecondButtonReturn) == .cancel)
-        #expect(AppKitController.managedDirectoryReplacementDecision(for: .abort) == .cancel)
+        #expect(ProjectFormsController.managedDirectoryReplacementDecision(for: .alertFirstButtonReturn) == .replace)
+        #expect(ProjectFormsController.managedDirectoryReplacementDecision(for: .alertSecondButtonReturn) == .cancel)
+        #expect(ProjectFormsController.managedDirectoryReplacementDecision(for: .abort) == .cancel)
     }
 
     @MainActor @Test func managedDirectoryReplacementCancelStopsFlow() {
-        #expect(AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 0, decision: .cancel))
-        #expect(AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .replace))
-        #expect(!AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .cancel))
+        #expect(ProjectFormsController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 0, decision: .cancel))
+        #expect(ProjectFormsController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .replace))
+        #expect(!ProjectFormsController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .cancel))
     }
 
     @MainActor @Test func importedProjectSaveDecisionUpdatesWorkspaceSyncFlag() {
         let refs = makeProjectFieldRefs()
 
-        #expect(AppKitController.applyProjectImportWorkspaceSyncDecision(.updateAllWorkspaces, to: refs))
+        #expect(ProjectFormsController.applyProjectImportWorkspaceSyncDecision(.updateAllWorkspaces, to: refs))
         #expect(refs.pendingImportUpdateAllWorkspaces)
 
-        #expect(AppKitController.applyProjectImportWorkspaceSyncDecision(.projectOnly, to: refs))
+        #expect(ProjectFormsController.applyProjectImportWorkspaceSyncDecision(.projectOnly, to: refs))
         #expect(!refs.pendingImportUpdateAllWorkspaces)
 
         refs.pendingImportUpdateAllWorkspaces = true
-        #expect(!AppKitController.applyProjectImportWorkspaceSyncDecision(.cancel, to: refs))
+        #expect(!ProjectFormsController.applyProjectImportWorkspaceSyncDecision(.cancel, to: refs))
         #expect(refs.pendingImportUpdateAllWorkspaces)
     }
 
@@ -105,7 +105,7 @@ import Testing
         // A control from the live form carries the form's generation tag, so its action resolves to
         // the live refs and is honored.
         let refs = makeProjectFieldRefs(formTag: 7)
-        #expect(AppKitController.liveFormRefs(refs, forSenderTag: 7) === refs)
+        #expect(ProjectFormsController.liveFormRefs(refs, forSenderTag: 7) === refs)
     }
 
     @MainActor @Test func liveFormRefsIgnoresSenderFromAReplacedForm() {
@@ -114,12 +114,12 @@ import Testing
         // rather than mutate the current form's state.
         let liveRefs = makeProjectFieldRefs(formTag: 2)
         let staleSenderTag = 1
-        #expect(AppKitController.liveFormRefs(liveRefs, forSenderTag: staleSenderTag) == nil)
+        #expect(ProjectFormsController.liveFormRefs(liveRefs, forSenderTag: staleSenderTag) == nil)
     }
 
     @MainActor @Test func liveFormRefsIgnoresSenderWhenNoFormIsLive() {
         // After the dialog closes its refs are nil, so any late action is dropped instead of crashing.
-        #expect(AppKitController.liveFormRefs(nil as ProjectFieldRefs?, forSenderTag: 3) == nil)
+        #expect(ProjectFormsController.liveFormRefs(nil as ProjectFieldRefs?, forSenderTag: 3) == nil)
     }
 
     @MainActor private func makeProjectFieldRefs(formTag: Int = "project".hashValue) -> ProjectFieldRefs {

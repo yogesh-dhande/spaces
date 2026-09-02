@@ -29,7 +29,7 @@ import workspacecore
     private var workspaceVisibilityQuery = ""
 
     @objc func showWorkspaceVisibilityDialog() {
-        host.clearActiveAddFormStateAndCloseWindows()
+        host.projectForms.clearActiveAddFormStateAndCloseWindows()
         workspaceVisibilityQuery = ""
 
         let searchField = NSSearchField()
