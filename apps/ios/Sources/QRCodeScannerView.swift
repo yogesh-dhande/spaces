@@ -15,8 +15,11 @@ struct QRCodeScannerView: View {
                 dismiss()
             } label: {
                 Image(systemName: "xmark.circle.fill").font(.system(size: 30)).foregroundStyle(.white.opacity(0.85)).padding(20)
-            }
-        }
+            }.accessibilityLabel("Close").accessibilityIdentifier("pairing.scanner.close")
+            // An accessibility container rather than a plain identified view: an identifier on a SwiftUI
+            // container replaces the identifier of every element beneath it, which would leave the close
+            // control carrying "pairing.scanner" too.
+        }.accessibilityElement(children: .contain).accessibilityIdentifier("pairing.scanner")
     }
 }
 
