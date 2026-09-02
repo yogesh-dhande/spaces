@@ -23,7 +23,7 @@ import spacesterminalcore
     }
 
     @Test func runCommandSessionResolvesToAutomation() {
-        let kind = AppKitController.terminalSessionKind(
+        let kind = TerminalPaneService.terminalSessionKind(
             sessionID: "cmd-session", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
         #expect(kind == .automation)
     }
@@ -31,13 +31,13 @@ import spacesterminalcore
     @Test func attributedAgentSessionResolvesToAgent() {
         let agent = TerminalServiceAutomationAgentSummary(
             terminalSessionID: "agent-session", status: "idle", live: true, title: "claude", workspaceID: nil)
-        let kind = AppKitController.terminalSessionKind(
+        let kind = TerminalPaneService.terminalSessionKind(
             sessionID: "agent-session", overviews: [overview(runs: [run(terminalSessionID: "cmd-session", attributedAgents: [agent])])])
         #expect(kind == .agent)
     }
 
     @Test func unknownSessionFallsBackToShell() {
-        let kind = AppKitController.terminalSessionKind(
+        let kind = TerminalPaneService.terminalSessionKind(
             sessionID: "stray-shell", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
         #expect(kind == .shell)
     }

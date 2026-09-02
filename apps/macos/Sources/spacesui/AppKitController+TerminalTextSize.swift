@@ -5,7 +5,7 @@ extension AppKitController {
     /// Loads the profile's persisted terminal text size at launch, before any pane exists, so every
     /// pane opened afterwards is built at it. A missing or unreadable setting resolves to the default.
     func loadStoredTerminalTextSize() {
-        terminalTextSize = TerminalTextSize(
+        terminalPanes.terminalTextSize = TerminalTextSize(
             persistedRawValue: (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.terminalTextSize)) ?? nil)
     }
 
@@ -14,9 +14,9 @@ extension AppKitController {
     /// resolves to the size already in use, so it persists nothing and repaints nothing: pressing zoom
     /// past either end does nothing at all.
     func adjustTerminalTextSize(_ command: TerminalTextZoomCommand) {
-        let adjusted = terminalTextSize.applying(command)
-        guard adjusted != terminalTextSize else { return }
-        terminalTextSize = adjusted
+        let adjusted = terminalPanes.terminalTextSize.applying(command)
+        guard adjusted != terminalPanes.terminalTextSize else { return }
+        terminalPanes.terminalTextSize = adjusted
         try? SpacesClientDatabase.defaultDatabase().setSetting(key: ClientSettingsKey.terminalTextSize, value: adjusted.persistedRawValue)
         panelCoordinator.broadcastTerminalTextSize(adjusted)
     }

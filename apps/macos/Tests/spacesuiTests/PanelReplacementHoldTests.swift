@@ -69,7 +69,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") == nil, "precondition: nothing is materialized")
 
-            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+            controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
             #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.contains("predecessor"))
         }
@@ -77,10 +77,10 @@ extension ProcessProfileEnvironmentSuites {
         /// And the handler's own report tells the three outcomes apart, so a hold recorded without a pane
         /// is a success rather than the nothing-to-do case it used to be filed under.
         @Test func theCloseHandlerReportsAHoldSeparatelyFromHavingNothingToDo() {
-            #expect(AppKitController.terminalPaneCloseRoute(hasPlacement: false, disposition: .awaitReplacement) == .hold)
-            #expect(AppKitController.terminalPaneCloseRoute(hasPlacement: false, disposition: .teardown) == .missingPane)
-            #expect(AppKitController.terminalPaneCloseRoute(hasPlacement: true, disposition: .awaitReplacement) == .pane)
-            #expect(AppKitController.terminalPaneCloseRoute(hasPlacement: true, disposition: .teardown) == .pane)
+            #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: false, disposition: .awaitReplacement) == .hold)
+            #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: false, disposition: .teardown) == .missingPane)
+            #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: true, disposition: .awaitReplacement) == .pane)
+            #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: true, disposition: .teardown) == .pane)
         }
 
         /// The two IPCs are independent, so a replacement's open can be processed before the close it
@@ -92,7 +92,7 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
 
             controller.panelCoordinator.releasePaneHeldForReplacement(sessionID: "predecessor")
-            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+            controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
             #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.isEmpty, "the hold is settled on arrival, not left waiting")
         }
@@ -107,7 +107,7 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aFailedContentConstructionRaisesNoModalForANonFocusingOpen() {
             let controller = makeController()
 
-            let content = controller.makeTerminalPaneContent(
+            let content = controller.terminalPanes.makeTerminalPaneContent(
                 request: AppKitController.DeviceTerminalOpenRequest(
                     workspaceID: "workspace-1", deviceID: "local", sessionID: "no-such-session", title: "t", workingDirectory: "/tmp", kind: .shell),
                 focusIntent: .withoutFocus)
@@ -143,16 +143,16 @@ extension ProcessProfileEnvironmentSuites {
         /// leave a dead id in every keep-set, and treating it as an ordinary hold to tear down would kill
         /// the pane the replacement is now living in.
         @Test func aClaimThatBeatsItsCloseMakesTheLateHoldANoOp() {
-            #expect(AppKitController.terminalPaneHoldAction(hasPendingClaim: true, hasPendingRelease: false) == .consumeClaim)
+            #expect(TerminalPaneService.terminalPaneHoldAction(hasPendingClaim: true, hasPendingRelease: false) == .consumeClaim)
         }
 
         /// All three orders of the close and its replacement's open, which are independent IPCs. A pending
         /// claim wins over a pending release: a claim that succeeded is authoritative about where the pane
         /// went, while a release only says some open did not claim it.
         @Test func theHoldTransitionCoversEveryOrderOfTheTwoMessages() {
-            #expect(AppKitController.terminalPaneHoldAction(hasPendingClaim: false, hasPendingRelease: false) == .hold)
-            #expect(AppKitController.terminalPaneHoldAction(hasPendingClaim: false, hasPendingRelease: true) == .teardown)
-            #expect(AppKitController.terminalPaneHoldAction(hasPendingClaim: true, hasPendingRelease: true) == .consumeClaim)
+            #expect(TerminalPaneService.terminalPaneHoldAction(hasPendingClaim: false, hasPendingRelease: false) == .hold)
+            #expect(TerminalPaneService.terminalPaneHoldAction(hasPendingClaim: false, hasPendingRelease: true) == .teardown)
+            #expect(TerminalPaneService.terminalPaneHoldAction(hasPendingClaim: true, hasPendingRelease: true) == .consumeClaim)
         }
 
         /// The ordinary order still holds a pane: a release only converts the *next* hold when it arrived
@@ -160,9 +160,9 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aReleaseIsConsumedByOneHoldOnly() {
             let controller = makeController()
             controller.panelCoordinator.releasePaneHeldForReplacement(sessionID: "predecessor")
-            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+            controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
-            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+            controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
             #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.contains("predecessor"), "a later restart holds normally again")
         }
@@ -173,11 +173,11 @@ extension ProcessProfileEnvironmentSuites {
         /// restoration keep-set for the life of the app.
         @Test func aFallbackInstallReleasesTheHoldItNeverClaimed() {
             #expect(
-                AppKitController.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .installUnselectedTab) == "predecessor"
+                TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .installUnselectedTab) == "predecessor"
             )
-            #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .claimReplacedPane) == nil)
-            #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: nil) == "predecessor")
-            #expect(AppKitController.heldPredecessorSessionToRelease(replacesSessionID: nil, openAction: .installUnselectedTab) == nil)
+            #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .claimReplacedPane) == nil)
+            #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: nil) == "predecessor")
+            #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: nil, openAction: .installUnselectedTab) == nil)
         }
 
         // MARK: - Overview-driven retarget
@@ -232,7 +232,7 @@ extension ProcessProfileEnvironmentSuites {
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
             controller.rebuildFlatSidebarData()
-            controller.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
+            controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
             controller.panelCoordinator.retargetPaneForReplacement(replacedSessionID: "predecessor", request: openRequest(sessionID: "replacement"))
 

@@ -2628,7 +2628,7 @@ private struct DeviceSyncState {
             addItem(
                 "Open in New Window", symbol: "macwindow.badge.plus",
                 action: item.sessionID == nil ? nil : #selector(openRuntimeTargetInNewWindowMenuItem(_:)),
-                isEnabled: AppKitController.canOpenOrFocusTerminalPane(
+                isEnabled: TerminalPaneService.canOpenOrFocusTerminalPane(
                     hasExistingPane: sessionIsOpenInAPane, deviceAcceptsDaemonActions: daemonActionsEnabled))
         }
         // Only offered while the row carries at least one undismissed alert (an exit, an agent

@@ -1253,13 +1253,13 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         ]
 
         for controlRequest in interactiveRequests {
-            let deviceRequest = try AppKitController.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+            let deviceRequest = try TerminalPaneService.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
             XCTAssertEqual(
                 Model.controlRequestTimeoutSeconds(for: controlRequest, command: .terminalControl(deviceRequest)),
                 Model.interactiveControlRequestTimeoutSeconds, "'\(controlRequest.command)' must use the shortened interactive deadline")
         }
         for controlRequest in nonInteractiveRequests {
-            let deviceRequest = try AppKitController.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+            let deviceRequest = try TerminalPaneService.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
             let command = SpacesDeviceAPICommand.terminalControl(deviceRequest)
             XCTAssertEqual(
                 Model.controlRequestTimeoutSeconds(for: controlRequest, command: command), SpacesDeviceClient.requestTimeoutSeconds(for: command),

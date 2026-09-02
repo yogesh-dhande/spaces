@@ -44,7 +44,7 @@ extension ProcessProfileEnvironmentSuites {
                 createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let paths = TerminalSessionPaths(rootDirectory: root.path)
 
-            let resolvedHost = AppKitController.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            let resolvedHost = TerminalPaneService.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             #expect(resolvedHost is RemoteGhosttySessionHost)
         }
@@ -54,16 +54,16 @@ extension ProcessProfileEnvironmentSuites {
         /// most importantly the one where another client owns the session — reclaiming that is the request.
         @Test func reShowingTheFocusedOwnerAttachedPaneSkipsTheAttachPath() {
             #expect(
-                AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                TerminalPaneService.canRefocusTerminalPaneWithoutReattaching(
                     paneIsFocused: true, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: true))
             #expect(
-                !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                !TerminalPaneService.canRefocusTerminalPaneWithoutReattaching(
                     paneIsFocused: false, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: true))
             #expect(
-                !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                !TerminalPaneService.canRefocusTerminalPaneWithoutReattaching(
                     paneIsFocused: true, paneIsInSelectedTab: false, paneHoldsOwnerAttachedSurface: true))
             #expect(
-                !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                !TerminalPaneService.canRefocusTerminalPaneWithoutReattaching(
                     paneIsFocused: true, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: false))
         }
 
@@ -73,10 +73,10 @@ extension ProcessProfileEnvironmentSuites {
         /// left exactly where it sits.
         @Test func programmaticOpenInstallsOrKeepsThePaneWithoutMovingFocus() {
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
                     == .installUnselectedTab)
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .withoutFocus)
                     == .leaveExistingPaneInPlace)
         }
 
@@ -84,9 +84,9 @@ extension ProcessProfileEnvironmentSuites {
         /// the pane brought forward and focused, which is the behavior every caller inherits by default.
         @Test func userRequestedOpenFocusesThePane() {
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .focus) == .openFocusedTab)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .focus) == .openFocusedTab)
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .focus) == .focusExistingPane)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .focus) == .focusExistingPane)
         }
 
         /// A restart's replacement takes over the pane its predecessor held rather than arriving at the end
@@ -95,7 +95,7 @@ extension ProcessProfileEnvironmentSuites {
         /// reduce to the same input here, which is what makes the outcome order-independent.
         @Test func replacementClaimsThePaneOfTheSessionItReplaces() {
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: true, focusIntent: .withoutFocus)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: true, focusIntent: .withoutFocus)
                     == .claimReplacedPane)
         }
 
@@ -104,10 +104,10 @@ extension ProcessProfileEnvironmentSuites {
         /// its own pane keeps it: re-opening a placed session must never go move a different pane.
         @Test func replacementFallsBackToInstallingAndNeverStealsAnotherPane() {
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
                     == .installUnselectedTab)
             #expect(
-                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: true, focusIntent: .withoutFocus)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: true, focusIntent: .withoutFocus)
                     == .leaveExistingPaneInPlace)
         }
 
@@ -115,11 +115,11 @@ extension ProcessProfileEnvironmentSuites {
         /// decodes to nil, the same as a missing session ID, so the handler drops the notification instead
         /// of guessing what the poster meant.
         @Test func closeIPCWithoutAStatedDispositionDecodesToNil() {
-            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: nil) == nil)
-            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "  ") == nil)
-            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "sideways") == nil)
-            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "teardown") == .teardown)
-            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "awaitReplacement") == .awaitReplacement)
+            #expect(TerminalPaneService.terminalPaneCloseDisposition(ipcRawValue: nil) == nil)
+            #expect(TerminalPaneService.terminalPaneCloseDisposition(ipcRawValue: "  ") == nil)
+            #expect(TerminalPaneService.terminalPaneCloseDisposition(ipcRawValue: "sideways") == nil)
+            #expect(TerminalPaneService.terminalPaneCloseDisposition(ipcRawValue: "teardown") == .teardown)
+            #expect(TerminalPaneService.terminalPaneCloseDisposition(ipcRawValue: "awaitReplacement") == .awaitReplacement)
         }
 
         /// The intent has to survive the async credential preparation, which finishes long after the pane
@@ -127,9 +127,9 @@ extension ProcessProfileEnvironmentSuites {
         /// window to click into the sidebar or another pane, so a programmatic launch's late completion
         /// must not take the caret.
         @Test func programmaticOpenStillDoesNotMoveFocusWhenItsPreparationFinishes() {
-            #expect(AppKitController.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: false) == .none)
+            #expect(TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: false) == .none)
             #expect(
-                AppKitController.terminalPanePreparationFocusAction(focusIntent: .focus, preparedPaneHoldsKeyboardFocus: false)
+                TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .focus, preparedPaneHoldsKeyboardFocus: false)
                     == .activatePanelFocusedPane)
         }
 
@@ -138,7 +138,7 @@ extension ProcessProfileEnvironmentSuites {
         /// drop it. Restoring focus the user gave this pane is not stealing it.
         @Test func aPaneTheUserClickedIntoWhilePreparingKeepsTheCaret() {
             #expect(
-                AppKitController.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: true)
+                TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: true)
                     == .restoreToPreparedPane)
         }
 
@@ -147,8 +147,8 @@ extension ProcessProfileEnvironmentSuites {
         /// responder goes with it, so the caret moves across rather than being dropped. Every other
         /// retarget touches focus not at all.
         @Test func aRetargetCarriesTheCaretOnlyWhenThePaneAlreadyHadIt() {
-            #expect(AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: true))
-            #expect(!AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: false))
+            #expect(TerminalPaneService.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: true))
+            #expect(!TerminalPaneService.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: false))
         }
 
         /// A user waiting on a terminal they asked for is owed the error in front of them. A background
@@ -158,8 +158,8 @@ extension ProcessProfileEnvironmentSuites {
         /// first written for: content construction throwing after preparation succeeded, and the owning
         /// device refusing the install, both route through `reportTerminalPaneOpenFailure` and ask this.
         @Test func onlyAUserRequestedOpenReportsItsFailureWithAModal() {
-            #expect(AppKitController.terminalPaneOpenFailureUsesModalAlert(focusIntent: .focus))
-            #expect(!AppKitController.terminalPaneOpenFailureUsesModalAlert(focusIntent: .withoutFocus))
+            #expect(TerminalPaneService.terminalPaneOpenFailureUsesModalAlert(focusIntent: .focus))
+            #expect(!TerminalPaneService.terminalPaneOpenFailureUsesModalAlert(focusIntent: .withoutFocus))
         }
 
         /// A close the daemon drove (a stop, a restart, an exited process, a pruned session) is not a user
@@ -167,19 +167,19 @@ extension ProcessProfileEnvironmentSuites {
         /// workspace in a row, and moving focus on each would walk the caret through the survivors.
         /// Closing a pane the user closed still hands focus on, because they are working in that panel.
         @Test func daemonDrivenPaneCloseLeavesTheCaretWhereItIs() {
-            #expect(!AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: true))
-            #expect(AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: false))
+            #expect(!TerminalPaneService.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: true))
+            #expect(TerminalPaneService.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: false))
         }
 
         /// The intent is required. A missing, blank, or unrecognized value is a malformed IPC and decodes
         /// to nil, the same as a missing session ID, so the handler drops the notification instead of
         /// guessing what the poster meant.
         @Test func openIPCWithoutAStatedIntentDecodesToNil() {
-            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: nil) == nil)
-            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "   ") == nil)
-            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "sideways") == nil)
-            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "focus") == .focus)
-            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "without_focus") == .withoutFocus)
+            #expect(TerminalPaneService.terminalOpenFocusIntent(ipcRawValue: nil) == nil)
+            #expect(TerminalPaneService.terminalOpenFocusIntent(ipcRawValue: "   ") == nil)
+            #expect(TerminalPaneService.terminalOpenFocusIntent(ipcRawValue: "sideways") == nil)
+            #expect(TerminalPaneService.terminalOpenFocusIntent(ipcRawValue: "focus") == .focus)
+            #expect(TerminalPaneService.terminalOpenFocusIntent(ipcRawValue: "without_focus") == .withoutFocus)
         }
 
         @Test func activeSpaceSummonAddsMoveToActiveSpaceBehavior() {
@@ -349,18 +349,18 @@ extension ProcessProfileEnvironmentSuites {
         // at a bare prompt are the daemon's to answer, so these cases cover the ask itself.
         @MainActor @Test func ownerPaneCloseAsksTheDaemonToStopTheSession() {
             #expect(
-                AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
+                TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
         }
 
         @MainActor @Test func viewerPaneCloseNeverAsksTheDaemonToStopTheSession() {
             #expect(
-                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: false, isAppTerminatingAndKeepingSessions: false)
+                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: false, isAppTerminatingAndKeepingSessions: false)
             )
         }
 
         @MainActor @Test func paneCloseDuringQuitThatKeepsSessionsAsksNothing() {
             #expect(
-                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
+                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
         }
     }
 }

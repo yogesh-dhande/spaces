@@ -438,7 +438,7 @@ import spacesterminalcore
     /// fallback install: an open that installed a fresh pane leaves any hold on its named predecessor
     /// untouched and still owing a release. Nil means the open failed.
     @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent)
-        -> AppKitController.TerminalPaneOpenAction?
+        -> TerminalPaneService.TerminalPaneOpenAction?
     {
         let focusIntent = openIntent.focus
         // Adopt the workspace's persisted layout first: on a fresh launch a session
@@ -464,7 +464,7 @@ import spacesterminalcore
         // the late close finds no placement for the predecessor and does nothing.
         let replacedPlacement = openIntent.replacesSessionID.flatMap { placement(forSessionID: $0) }
         guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement, focusIntent: focusIntent) else { return nil }
-        switch AppKitController.terminalPaneOpenAction(
+        switch TerminalPaneService.terminalPaneOpenAction(
             hasExistingPane: existingPlacement != nil, hasReplaceablePane: replacedPlacement != nil, focusIntent: focusIntent)
         {
         case .focusExistingPane:
@@ -589,7 +589,7 @@ import spacesterminalcore
         }
         // A replacement that is still preparing takes the caret on its placeholder; the preparation
         // completion then carries it across the second swap by the same rule.
-        if AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: replacedHeldKeyboardFocus) {
+        if TerminalPaneService.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: replacedHeldKeyboardFocus) {
             _ = content.makeContentFirstResponder()
         }
         return true
@@ -663,7 +663,7 @@ import spacesterminalcore
         guard let placement = placement(forSessionID: sessionID), let content = contentControllers[sessionID] else { return false }
         let layout = layout(for: placement.scope)
         guard
-            AppKitController.canRefocusTerminalPaneWithoutReattaching(
+            TerminalPaneService.canRefocusTerminalPaneWithoutReattaching(
                 paneIsFocused: layout.focusedPaneID == placement.paneID, paneIsInSelectedTab: layout.selectedTabID == placement.tabID,
                 paneHoldsOwnerAttachedSurface: content.holdsOwnerAttachedSurface)
         else { return false }
@@ -687,7 +687,7 @@ import spacesterminalcore
         request: AppKitController.DeviceTerminalOpenRequest, existingPlacement: PanePlacement?, focusIntent: TerminalOpenFocusIntent
     ) -> Bool {
         guard
-            AppKitController.canOpenOrFocusTerminalPane(
+            TerminalPaneService.canOpenOrFocusTerminalPane(
                 hasExistingPane: existingPlacement != nil,
                 deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forTerminalOpenRequest: request))
         else {
@@ -704,7 +704,7 @@ import spacesterminalcore
     /// reaches this helper for that case (its own existing-placement branch returns first), so this
     /// only ever needs to gate creation, never focus.
     private func mayCreateCodePane(workspaceID: String) -> Bool {
-        guard AppKitController.canCreateCodePane(deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forWorkspaceID: workspaceID)) else {
+        guard TerminalPaneService.canCreateCodePane(deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forWorkspaceID: workspaceID)) else {
             host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             return false
         }
@@ -1075,7 +1075,7 @@ import spacesterminalcore
         // terminal that no longer exists.
         contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
         if disposition == .awaitReplacement {
-            switch AppKitController.terminalPaneHoldAction(
+            switch TerminalPaneService.terminalPaneHoldAction(
                 hasPendingClaim: pendingReplacementClaims.contains(sessionID), hasPendingRelease: pendingReplacementReleases.contains(sessionID))
             {
             case .consumeClaim:
@@ -1097,7 +1097,7 @@ import spacesterminalcore
         if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) { content.closeForSessionTermination() }
         removePane(
             scope: placement.scope, paneID: placement.paneID,
-            movingKeyboardFocus: AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: sessionIsTerminating))
+            movingKeyboardFocus: TerminalPaneService.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: sessionIsTerminating))
     }
 
     /// Detaches every open pane's terminal client at app termination without stopping
@@ -1396,7 +1396,7 @@ import spacesterminalcore
             scheduleTerminalPaneContentPreparation(request: request, focusIntent: focusIntent)
             return content
         }
-        guard let content = host.makeTerminalPaneContent(request: request, focusIntent: focusIntent) else { return nil }
+        guard let content = host.terminalPanes.makeTerminalPaneContent(request: request, focusIntent: focusIntent) else { return nil }
         installContentController(content, sessionID: request.sessionID)
         return content
     }
@@ -1427,13 +1427,13 @@ import spacesterminalcore
         contentPreparationTasks[sessionID] = Task { @MainActor [weak self, host] in
             guard let self else { return }
             defer { self.contentPreparationTasks[sessionID] = nil }
-            let result = await host.prepareTerminalPaneOpenRequest(request)
+            let result = await host.terminalPanes.prepareTerminalPaneOpenRequest(request)
             guard !Task.isCancelled else { return }
             guard self.placement(forSessionID: sessionID) != nil else { return }
             guard self.contentControllers[sessionID] is TerminalPanePlaceholderContentController else { return }
             switch result {
             case .success(let preparedRequest):
-                guard let content = host.makeTerminalPaneContent(request: preparedRequest, focusIntent: focusIntent) else {
+                guard let content = host.terminalPanes.makeTerminalPaneContent(request: preparedRequest, focusIntent: focusIntent) else {
                     (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(message: "Terminal pane failed to open.")
                     return
                 }
@@ -1445,7 +1445,7 @@ import spacesterminalcore
                 // for an open the user is waiting on; raising one for a launch a script triggered would
                 // interrupt whatever they were doing to announce a pane they never asked to see.
                 (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(error: error)
-                host.reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
+                host.terminalPanes.reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
             }
         }
     }
@@ -1466,7 +1466,7 @@ import spacesterminalcore
         if let pane = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope)) {
             activateContentIfVisible(scope: placement.scope, pane: pane)
         }
-        switch AppKitController.terminalPanePreparationFocusAction(
+        switch TerminalPaneService.terminalPanePreparationFocusAction(
             focusIntent: focusIntent, preparedPaneHoldsKeyboardFocus: previousHeldKeyboardFocus)
         {
         case .none: return

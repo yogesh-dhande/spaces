@@ -35,7 +35,7 @@ import spacesterminalui
     let sessionID: String
     private let pane: TerminalSessionPaneViewController
     /// Re-themes this session's live daemon rendering to `appearance` (see
-    /// `AppKitController.applyAppearanceToLiveSession`). Dedupe and pending-attach state live in the
+    /// `TerminalPaneService.applyAppearanceToLiveSession`). Dedupe and pending-attach state live in the
     /// session's shared appearance store, captured by the closure, so this controller holds no copy.
     private let setAppearanceAction: (ThemeAppearance) -> Void
     /// Routes terminal link clicks for this pane (fetches remote artifacts, shows the loopback notice).
