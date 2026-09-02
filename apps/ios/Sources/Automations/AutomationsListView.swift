@@ -49,7 +49,7 @@ struct AutomationsListView: View {
                 Text(
                     "Automations run commands on \(model.activeDeviceName ?? "this device") on a schedule — manually or with cron. Create them in Spaces on your Mac."
                 )
-            }.background(Theme.bg.ignoresSafeArea())
+            }.background(Theme.bg.ignoresSafeArea()).accessibilityIdentifier("automations.empty")
         } else {
             ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in automationRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(
                 .hidden

@@ -24,7 +24,7 @@ struct AlertsTabView: View {
                 Label("No Alerts", systemImage: "bell")
             } description: {
                 Text("Agents waiting for input and exited runs show up here.")
-            }
+            }.accessibilityIdentifier("alerts.empty")
         } else {
             List {
                 swipeHint

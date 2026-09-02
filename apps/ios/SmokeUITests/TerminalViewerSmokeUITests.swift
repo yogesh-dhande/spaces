@@ -86,21 +86,13 @@ final class TerminalViewerSmokeUITests: XCTestCase {
     // MARK: - Fixture
 
     private func launchDemoModeApp(eventLogPath: String? = nil) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
+        var environment: [String: String] = [:]
         if let eventLogPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
-            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = harborFrontendSessionID
+            environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+            environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = harborFrontendSessionID
         }
-        SpacesMobileUITestDriver.applyCleanSlateLaunchArguments(to: app)
-        app.launch()
-        XCUIDevice.shared.orientation = .portrait
-        RunLoop.current.run(until: Date().addingTimeInterval(1))
-
-        SpacesMobileUITestDriver.selectTab("Spaces", in: app)
-        let tryDemoButton = app.buttons["spaces.tryDemoMode"]
-        XCTAssertTrue(tryDemoButton.waitForExistence(timeout: 20), "The unpaired empty state did not offer Try Demo Mode")
-        tryDemoButton.tap()
+        let app = SpacesMobileUITestDriver.launchApp(environment: environment)
+        SpacesMobileUITestDriver.enterDemoMode(in: app)
         return app
     }
 
