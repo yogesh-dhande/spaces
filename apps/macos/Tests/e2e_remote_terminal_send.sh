@@ -94,8 +94,17 @@ REMOTE_SESSION_ID=""
 REMOTE_CLI="$REMOTE_E2E_ROOT/daemon/current/bin/spaces"
 REMOTE_PROJECT_DIR=""
 CERTIFICATE_FINGERPRINT=""
+# Set once createProject's response is parsed, read by delete_remote_project in cleanup(). Declared
+# here (not left to its first assignment) so cleanup's `-n` guard is set -u safe even if the run exits
+# before the project is ever created.
+REMOTE_PROJECT_ID=""
 
 cleanup() {
+  # Must run first, and specifically before "rm -rf $TMP_ROOT" below: device_request writes its
+  # response to a file under $TMP_ROOT, so deleting that root first would cut off this delete's own
+  # transport. There is no SSH forward to outlive here (this lane dials the daemon directly), so
+  # $TMP_ROOT is the only teardown step this ordering has to beat.
+  delete_remote_project
   if [[ -n "$REMOTE_SESSION_ID" ]]; then
     remote_ssh "$REMOTE_CLI terminal send text $REMOTE_SESSION_ID exit --submit" >/dev/null 2>&1 || true
   fi
@@ -156,6 +165,40 @@ if not payload.get("ok"):
     raise SystemExit(payload.get("message") or payload)
 print(json.dumps(payload, sort_keys=True))
 PY
+}
+
+# Deletes the project this run registered through createProject (see #582): without this, cleanup only
+# ever removed the project's directory from disk (below), leaving an orphaned project record in the
+# daemon's database on every run. Guarded on REMOTE_PROJECT_ID rather than issued unconditionally, since
+# a run that fails before project creation has nothing to delete.
+#
+# Best-effort like every other cleanup step here: a failure is logged, not fatal, and this function
+# never calls fail/exit, so it can't turn a passing run's real exit code into its own.
+delete_remote_project() {
+  [[ -n "$REMOTE_PROJECT_ID" ]] || return 0
+  if ! (
+    delete_request="$(
+      python3 - "$SETUP_TOKEN" "$REMOTE_PROJECT_ID" <<'PY'
+import json
+import sys
+token, project_id = sys.argv[1:3]
+print(json.dumps({
+    "authToken": token,
+    "clientApp": {
+        "installationID": "REMOTE-TERMINAL-SEND-SETUP",
+        "bundleID": "dev.usespaces.spaces",
+        "platform": "macos",
+        "deviceName": "Remote Terminal Send Setup",
+        "appVersion": "1.0",
+    },
+    "command": {"deleteProject": {"projectID": project_id}},
+}, separators=(",", ":")))
+PY
+    )"
+    device_request "$delete_request" >/dev/null
+  ); then
+    echo "Failed to delete remote project $REMOTE_PROJECT_ID on $REMOTE_E2E_PROFILE_NAME; it will be orphaned." >&2
+  fi
 }
 
 if [[ -z "$REMOTE_DAEMON_HOST" ]]; then
@@ -249,8 +292,27 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
-REMOTE_WORKSPACE_ID="$(device_request "$CREATE_PROJECT_REQUEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["mutation"]["workspaceID"])')"
-[[ -n "$REMOTE_WORKSPACE_ID" ]] || fail "createProject did not return a default workspace id"
+# Both ids come out of the one createProject response (a second call would register a second
+# project), the same way open_remote_pairing_window above sets several ALL_CAPS variables from one
+# parsed payload.
+CREATE_PROJECT_FIELDS="$(
+  device_request "$CREATE_PROJECT_REQUEST" | python3 -c '
+import json
+import shlex
+import sys
+
+payload = json.load(sys.stdin)
+mutation = (payload.get("result") or {}).get("mutation") or {}
+workspace_id = mutation.get("workspaceID")
+project_id = mutation.get("projectID")
+if not workspace_id or not project_id:
+    raise SystemExit(f"createProject did not return a workspaceID and projectID: {json.dumps(payload)}")
+print(f"REMOTE_WORKSPACE_ID={shlex.quote(workspace_id)}")
+print(f"REMOTE_PROJECT_ID={shlex.quote(project_id)}")
+'
+)"
+eval "$CREATE_PROJECT_FIELDS"
+[[ -n "$REMOTE_WORKSPACE_ID" && -n "$REMOTE_PROJECT_ID" ]] || fail "createProject did not return a default workspace id and project id"
 echo "remote workspace: $REMOTE_WORKSPACE_ID"
 
 echo "== pairing this client's CLI with the remote E2E daemon (link redemption) =="
