@@ -4157,6 +4157,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             evaluator.evaluatedScripts.contains { $0.contains("spaces:agentStartStatus") && $0.contains("\"status\":\"timedOut\"") }
         }
 
+        // Persistence is enqueued to an async coalescing writer, so poll for the drained state
+        // rather than reading storage once right after the script event fires.
+        await waitUntil {
+            guard let stored = try? storage.stateJSON(workspaceID: "workspace-1"),
+                let recovered = try? JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stored.utf8))
+            else { return false }
+            return recovered.pendingAgentLaunch?.status == "failed" && recovered.pendingAgentLaunch?.deadlineEpochMilliseconds == nil
+        }
         let stored = try #require(try storage.stateJSON(workspaceID: "workspace-1"))
         let recovered = try JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stored.utf8))
         #expect(recovered.pendingAgentLaunch?.status == "failed")
@@ -4181,6 +4189,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         content.dispatch(.init(id: "start", method: "startWorkspaceCommand", params: ["command": "custom-agent --review"]))
         await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("spaces:agentStartStatus") && $0.contains("\"status\":\"timedOut\"") } }
 
+        // Persistence is enqueued to an async coalescing writer, so poll for the drained state
+        // rather than reading storage once right after the script event fires.
+        await waitUntil {
+            guard let stored = try? storage.stateJSON(workspaceID: "workspace-1"),
+                let recovered = try? JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stored.utf8))
+            else { return false }
+            return recovered.pendingAgentLaunch?.status == "failed"
+        }
         let stored = try #require(try storage.stateJSON(workspaceID: "workspace-1"))
         let recovered = try JSONDecoder().decode(CodePaneWorkspaceState.self, from: Data(stored.utf8))
         #expect(recovered.pendingAgentLaunch?.command == "custom-agent --review")
