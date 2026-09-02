@@ -561,6 +561,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let name = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
         Task { @MainActor [weak self, object, workspaceID, name] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
+            await self.awaitMainWindowContentBuilt()
             await self.windowFocus.focusWorkspaceWindowByName(workspaceID: workspaceID, name: name)
         }
     }
@@ -573,6 +574,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             in: .whitespacesAndNewlines)
         Task { @MainActor [weak self, object, workspaceID, name, requestID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
+            await self.awaitMainWindowContentBuilt()
             await self.windowFocus.focusWorkspaceProcess(workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
         }
     }
@@ -617,6 +619,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         Task { @MainActor [weak self, object, workspaceID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
+            await self.awaitMainWindowContentBuilt()
+            // The gate resumes at main_content_ready, before the initial sidebar load has installed
+            // any workspace rows, so a cold-launch open resolves against an empty model and would be
+            // refused as unavailable. Wait for one fresh snapshot on a miss and let the open resolve
+            // again, the same miss handling the session-window open and the focus IPC paths carry;
+            // a workspace still unresolved after that gets the unavailable alert from the open itself.
+            if self.deviceForWorkspaceMutation(workspaceID: workspaceID) == nil {
+                await self.sidebar.reloadAwaitingFreshSnapshot()
+            }
             self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
         }
     }
@@ -681,6 +692,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 detail:
                     "mode=\(mode.rawValue) focus=\(openIntent.focus.rawValue) replaces=\(openIntent.replacesSessionID ?? "-")\(requestID.map { " request_id=\($0)" } ?? "")"
             )
+            await self.awaitMainWindowContentBuilt()
             await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, openIntent: openIntent, requestID: requestID)
         }
     }
@@ -732,6 +744,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let focusRequestID = UUID().uuidString
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                await self.awaitMainWindowContentBuilt()
                 let opened = await self.openTerminalSessionPane(sessionID: sessionID, mode: .owner, openIntent: .focused, requestID: focusRequestID)
                 if !opened { self.presentTerminalDeepLinkUnknownSessionAlert(sessionID: sessionID) }
             }
@@ -745,13 +758,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// query), and opens the pane with the session's owning device pinned so it attaches remotely. An
     /// unpaired/unreachable device or a session the device doesn't have surfaces a loud, specific alert.
     private func openRemoteTerminalDeepLink(sessionID: String, deviceID: String) {
-        guard let device = deviceForMutation(deviceID: deviceID) else {
-            presentTerminalDeepLinkUnknownDeviceAlert(deviceID: deviceID)
-            return
-        }
         let focusRequestID = UUID().uuidString
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // Same launch-race gate as the local branch (issue #581): a device-qualified link that
+            // launches the app must not resolve its device against sections that haven't loaded yet,
+            // or a valid paired device is refused as unknown.
+            await self.awaitMainWindowContentBuilt()
+            var resolvedDevice = self.deviceForMutation(deviceID: deviceID)
+            if resolvedDevice == nil {
+                // The gate resumes at main_content_ready, before the initial sidebar load has
+                // installed any device section, so a cold-launch link can miss here with the device
+                // genuinely paired. Mirror the local open path's miss handling: wait for the app's
+                // next snapshot and resolve once more. Per `reloadAwaitingFreshSnapshot`'s accepted
+                // limitation, that wait covers the local snapshot only; a remote section still
+                // loading when it returns resolves nil and gets the specific unavailable alert, which
+                // tells the user to open the link again. That retryable alert is the accepted
+                // behavior for a cold launch racing the remote overview pull; waiting for a named
+                // section to become actionable would need per-device waiter machinery this rare path
+                // does not justify.
+                await self.sidebar.reloadAwaitingFreshSnapshot()
+                resolvedDevice = self.deviceForMutation(deviceID: deviceID)
+            }
+            guard let device = resolvedDevice else {
+                self.presentTerminalDeepLinkUnknownDeviceAlert(deviceID: deviceID)
+                return
+            }
             guard let match = await self.resolveRemoteTerminalSessionMatch(sessionID: sessionID, device: device) else {
                 self.presentTerminalDeepLinkRemoteSessionNotFoundAlert(sessionID: sessionID, deviceName: device.name)
                 return
@@ -842,6 +874,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_focus_ipc_received", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: requestID.map { "request_id=\($0)" } ?? "")
+            await self.awaitMainWindowContentBuilt()
             await self.focusTerminalSessionPane(sessionID: sessionID, requestID: requestID)
         }
     }
@@ -2995,6 +3028,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// Whether `buildMainWindowContent()` has run: the split-view content exists and the sidebar
+    /// outline is attached to its data source. IPC- and deep-link-driven pane opens gate on this.
+    private(set) var isMainWindowContentBuilt = false
+    private var mainWindowContentBuiltWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Suspends until the main workspace UI exists (immediately when it already does).
+    ///
+    /// The launch sequence registers the IPC observers before the deferred window build, so a
+    /// terminal open or focus posted by the CLI that launched the app can arrive while there is no
+    /// window content at all. Opening then would run the sidebar reload and row-selection machinery
+    /// against an outline whose data source is not attached yet: the selection scan finds no rows,
+    /// silently selects nothing, and the freshly installed pane is never presented into any window,
+    /// which latches the mirror's display hold and freezes the pane permanently (issue #581). An
+    /// externally driven open therefore waits here; every in-app caller runs after the build by
+    /// construction and never suspends. While the launch setup flow is pending, the wait spans it:
+    /// the open proceeds the moment the workspace UI replaces the setup content.
+    func awaitMainWindowContentBuilt() async {
+        if isMainWindowContentBuilt { return }
+        await withCheckedContinuation { mainWindowContentBuiltWaiters.append($0) }
+    }
+
     /// Builds the main split-view content and kicks off the initial sidebar load. Shared by the
     /// normal launch path and the setup flow's completion handler.
     private func presentMainWorkspaceUI() {
@@ -3002,6 +3056,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         setupFlowController = nil
         buildMainWindowContent()
         logStartupProfile("main_content_ready")
+        isMainWindowContentBuilt = true
+        let contentWaiters = mainWindowContentBuiltWaiters
+        mainWindowContentBuiltWaiters = []
+        for waiter in contentWaiters { waiter.resume() }
         showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
         logStartupProfile("loading_placeholder_ready")
         Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }

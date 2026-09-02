@@ -218,6 +218,11 @@ private struct DeviceSyncState {
     /// rebuilds — so a "previous" snapshot taken at that point would already describe the new state and
     /// every diff would come back unchanged.
     private var lastOutlineRowSnapshot: [SidebarOutlineRow]?
+    /// Set when `applySidebarDataChange` ran before the outline's data source was attached (issue
+    /// #581) and consumed by `attachOutlineView`: the skipped apply installed model data, so a later
+    /// refresh with an identical payload takes the unchanged path and would never paint it. The
+    /// attach itself repaints instead of waiting for the next data change.
+    private var needsApplyAfterOutlineAttach = false
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -294,6 +299,13 @@ private struct DeviceSyncState {
         outlineView.onRowMenu = { [weak self] row in self?.menuForRow(row) }
         outlineView.delegate = self
         outlineView.dataSource = self
+        // A data change that arrived before this attach installed model data without painting it
+        // (issue #581); an identical later refresh takes the unchanged path and would never paint,
+        // so the attach repaints what the skipped apply enumerated.
+        if needsApplyAfterOutlineAttach {
+            needsApplyAfterOutlineAttach = false
+            applySidebarDataChange()
+        }
     }
 
     func cancelSidebarReloadTask() { reloadCoordinator.cancelCurrentTask() }
@@ -1518,6 +1530,17 @@ private struct DeviceSyncState {
     /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
     func applySidebarDataChange() {
         rebuildFlatSidebarData()
+        // Until `attachOutlineView` wires the outline's data source (the window build runs on a
+        // deferred launch task, so an IPC-triggered reload can get here first; issue #581), there is
+        // nothing to diff or paint: `reloadData()` on an unattached outline is a silent no-op, and
+        // advancing `lastOutlineRowSnapshot` past it would make every later diff compare against rows
+        // that were never painted, leaving the outline permanently missing rows. The model rebuild
+        // above still runs so launch-time lookups resolve; the attach then repaints (via
+        // `needsApplyAfterOutlineAttach`), diffing from the still-nil baseline and rebuilding wholesale.
+        guard host.outlineView.dataSource != nil else {
+            needsApplyAfterOutlineAttach = true
+            return
+        }
         let snapshot = outlineRowSnapshot()
         let verdict = SidebarOutlineDiff.compute(previous: lastOutlineRowSnapshot, current: snapshot.rows)
         lastOutlineRowSnapshot = snapshot.rows
