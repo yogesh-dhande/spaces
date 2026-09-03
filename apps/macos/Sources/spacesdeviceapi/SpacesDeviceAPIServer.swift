@@ -501,6 +501,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     case .workspaceSetup: server.handleWorkspaceSetupRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .workspaceTerminalLaunch:
                         server.handleStartWorkspaceCommandSessionAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .workspaceCreate: server.handleWorkspaceCreateRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .projectClone: server.handleProjectCloneRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .projectConfigFile: server.handleProjectConfigFileRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .terminalControl: server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .workspaceGit: server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .mainQueue: finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
@@ -777,6 +780,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             case .workspaceTerminalLaunch:
                                 try server.admitAndAuthorizeOnQueue(request)
                                 response = try server.handleStartWorkspaceCommandSessionOnWorkerQueue(request)
+                            case .workspaceCreate:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleWorkspaceCreateRequestOnWorkerQueue(request)
+                            case .projectClone:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleProjectCloneRequestOnWorkerQueue(request)
+                            case .projectConfigFile:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleProjectConfigFileRequestOnWorkerQueue(request)
                             case .terminalControl:
                                 try server.admitAndAuthorizeOnQueue(request)
                                 response = try server.handleTerminalControlRequestOnWorkerQueue(request)
@@ -1068,6 +1080,35 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// the shared request queue while retaining serial ordering among explicit starts.
     private let workspaceTerminalLaunchQueue = DispatchQueue(label: "spaces.device.api.workspace-terminal-launch", qos: .userInitiated)
 
+    /// `.createWorkspace` (descriptor lane `.workspaceCreate`) runs `git worktree add`, which checks the
+    /// branch out and runs the repository's own `post-checkout` hooks to completion: seconds on a large
+    /// repository, longer on a slow volume. Serialize it away from the state queue so it cannot stall
+    /// another client's overview polls or a corroboration probe behind it. Serial rather than concurrent
+    /// because two creates in the same repository would race on the same git index lock.
+    ///
+    /// These three project/workspace lanes extend the divert pattern the lanes above already use rather
+    /// than restructuring the server so every command runs off the state queue. `handleRequest` is one
+    /// exhaustive switch over every command, each arm reaching into queue-confined state directly, so
+    /// there is no single seam to move: moving them all at once would change the concurrency semantics of
+    /// every command in the API in one step, while these three families are exactly the ones that block on
+    /// unbounded git, network, and filesystem work in a user's repository. Running them off the state
+    /// queue is safe because the orchestrator's project and workspace lifecycle gates, not the queue,
+    /// are what serialize them against teardowns and each other, and each handler opens its own store on
+    /// the queue that runs it.
+    private let workspaceCreateQueue = DispatchQueue(label: "spaces.device.api.workspace-create", qos: .userInitiated)
+    /// `.createProject` and `.previewGitProject` (descriptor lane `.projectClone`) both clone from a git
+    /// remote: the preview fetches the repository's `spaces.yaml`, the create clones it in full. Neither
+    /// clone has a timeout, so a remote that accepts the connection and never answers holds its handler
+    /// for as long as it stays silent. They share one serial queue because both write the same managed
+    /// destination directory for a given git URL.
+    private let projectCloneQueue = DispatchQueue(label: "spaces.device.api.project-clone", qos: .userInitiated)
+    /// `.importProject` and `.exportProject` (descriptor lane `.projectConfigFile`) read and write the
+    /// project's `spaces.yaml` inside its working tree (which can be a slow or unresponsive volume) and
+    /// an import additionally rewrites every workspace's settings and port assignments under the project
+    /// gate. One serial queue for both so an import and an export of the same project cannot interleave
+    /// over that file.
+    private let projectConfigFileQueue = DispatchQueue(label: "spaces.device.api.project-config-file", qos: .userInitiated)
+
     /// The fixed queue behind a `SpacesDeviceAPICommandLane`, shared by both transports' dispatch chains.
     /// Covers every lane that has one stored instance; `.terminalControl` and `.workspaceGit` resolve their
     /// queue per request instead (a per-session lane from `terminalControlLanes`, a per-workspace queue
@@ -1080,6 +1121,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceStop: return workspaceStopQueue
         case .workspaceSetup: return workspaceSetupQueue
         case .workspaceTerminalLaunch: return workspaceTerminalLaunchQueue
+        case .workspaceCreate: return workspaceCreateQueue
+        case .projectClone: return projectCloneQueue
+        case .projectConfigFile: return projectConfigFileQueue
         case .terminalControl, .workspaceGit, .mainQueue: preconditionFailure("\(lane) resolves its queue at the call site, not through this table.")
         }
     }
@@ -2721,8 +2765,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.",
                 result: .overview(try loadOverview(store: context.store(), clientApp: request.clientApp)))
-        case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
-        case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
+        // Both transports divert the two commands that clone from a git remote (descriptor lane
+        // `.projectClone`; see `SpacesDeviceAPICommandDescriptor`) to `projectCloneQueue` before they reach
+        // here, so this case only keeps the switch exhaustive.
+        case .createProject, .previewGitProject: return try handleProjectCloneRequest(request)
         // Both transports divert workspace-teardown commands (descriptor lane `.workspaceTeardown`; see
         // `SpacesDeviceAPICommandDescriptor`) to `workspaceTeardownQueue` before they reach here, so this
         // case only keeps the switch exhaustive.
@@ -2739,12 +2785,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
             .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
-        case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
-        case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
+        // Both transports divert the project `spaces.yaml` import/export commands (descriptor lane
+        // `.projectConfigFile`) to `projectConfigFileQueue` before they reach here, so this case only keeps
+        // the switch exhaustive.
+        case .importProject, .exportProject: return try handleProjectConfigFileRequest(request)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
         case .listDirectories(let payload): return try handleListDirectoriesRequest(payload)
         case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload, context: context)
-        case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload, context: context)
+        // Both transports divert `.createWorkspace` (descriptor lane `.workspaceCreate`) to
+        // `workspaceCreateQueue` before it reaches here, so this case only keeps the switch exhaustive.
+        case .createWorkspace: return try handleWorkspaceCreateLaneRequest(request)
         case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload, context: context)
         case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload, context: context)
         case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload, context: context)
@@ -2903,6 +2953,44 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Runs `.createWorkspace` (descriptor lane `.workspaceCreate`; see
+    /// `SpacesDeviceAPICommandDescriptor`) on its own serial queue, confined the same way the handlers
+    /// above confine their store and orchestrator: a request handled on one queue must not touch a
+    /// `SQLiteStore` opened on another. The project lifecycle gate inside `Orchestrator.createWorkspace`
+    /// still serializes this against a delete of the same project, and the deferred setup script this
+    /// command starts already runs on its own background queue with its own store.
+    private func handleWorkspaceCreateLaneRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload, context: context)
+        default: preconditionFailure("Only `.createWorkspace` runs on the workspace-create queue.")
+        }
+    }
+
+    /// Runs the two commands that clone from a git remote (descriptor lane `.projectClone`; see
+    /// `SpacesDeviceAPICommandDescriptor`) on `projectCloneQueue`, confined the same way the handlers
+    /// above confine their store.
+    private func handleProjectCloneRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
+        case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
+        default: preconditionFailure("Only the git project create/preview commands run on the project-clone queue.")
+        }
+    }
+
+    /// Runs the project `spaces.yaml` import/export commands (descriptor lane `.projectConfigFile`; see
+    /// `SpacesDeviceAPICommandDescriptor`) on `projectConfigFileQueue`, confined the same way the handlers
+    /// above confine their store.
+    private func handleProjectConfigFileRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
+        case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
+        default: preconditionFailure("Only the project spaces.yaml import/export commands run on the project-config-file queue.")
+        }
+    }
+
     /// Runs one workspace file-read/write/diff/file-list/ref-list command (descriptor lane
     /// `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) on
     /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
@@ -2959,6 +3047,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 on: queue(for: .workspaceTerminalLaunch), handler: { try $0.handleWorkspaceTerminalLaunchRequest(request) }, completion: completion)
         }
 
+        private func handleWorkspaceCreateRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) { dispatchAsync(on: queue(for: .workspaceCreate), handler: { try $0.handleWorkspaceCreateLaneRequest(request) }, completion: completion) }
+
+        private func handleProjectCloneRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) { dispatchAsync(on: queue(for: .projectClone), handler: { try $0.handleProjectCloneRequest(request) }, completion: completion) }
+
+        private func handleProjectConfigFileRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) { dispatchAsync(on: queue(for: .projectConfigFile), handler: { try $0.handleProjectConfigFileRequest(request) }, completion: completion) }
+
         private func handleWorkspaceGitRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
@@ -2998,6 +3098,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         private func handleStartWorkspaceCommandSessionOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try dispatchSync(on: queue(for: .workspaceTerminalLaunch)) { try $0.handleWorkspaceTerminalLaunchRequest(request) }
+        }
+
+        private func handleWorkspaceCreateRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try dispatchSync(on: queue(for: .workspaceCreate)) { try $0.handleWorkspaceCreateLaneRequest(request) }
+        }
+
+        private func handleProjectCloneRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try dispatchSync(on: queue(for: .projectClone)) { try $0.handleProjectCloneRequest(request) }
+        }
+
+        private func handleProjectConfigFileRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try dispatchSync(on: queue(for: .projectConfigFile)) { try $0.handleProjectConfigFileRequest(request) }
         }
 
         private func handleWorkspaceGitRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
