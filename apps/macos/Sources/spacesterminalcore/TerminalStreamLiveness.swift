@@ -12,19 +12,23 @@ import Foundation
 public enum TerminalStreamLiveness {
     /// The daemon writes a keepalive when a terminal relay has written nothing for this long.
     ///
-    /// 15s is chosen against the client's `silenceTimeout`: it is short enough that a dead stream is
-    /// detected in well under a minute with no keystrokes, and its cost is one small TLS record every 15s
-    /// per open terminal view, only while a view is open, which is negligible against the frames the same
-    /// stream carries the moment the terminal paints.
-    public static let keepaliveIntervalSeconds: Double = 15
+    /// 3s is chosen against the client's `silenceTimeout`: a frozen screen the user may be trying to type
+    /// into must be caught within seconds, not tens of seconds, so the interval is set by how long a stale
+    /// pane is tolerable rather than by bandwidth. The cost is one small TLS record every 3s per open
+    /// terminal view, only while a view is open and only while the terminal is idle, which is negligible
+    /// against the frames the same stream carries the moment the terminal paints. On a phone it keeps the
+    /// radio awake while a terminal view is open; that is measured, not assumed, by the battery pass.
+    public static let keepaliveIntervalSeconds: Double = 3
 
     /// A client gives up on a terminal stream after receiving no bytes at all for this long.
     ///
-    /// 40s must stay above `2 * keepaliveIntervalSeconds` plus network slack: one missed keepalive (a
+    /// 8s must stay above `2 * keepaliveIntervalSeconds` plus network slack: one missed keepalive (a
     /// stalled write, a scheduling hiccup, a slow link) must never be read as a dead stream, and the
-    /// daemon's own worst-case gap is ~20s (see `daemonCheckIntervalSeconds`). Changing either constant
-    /// means rechecking that relationship.
-    public static let silenceTimeoutSeconds: Double = 40
+    /// daemon's own worst-case gap is ~4s (see `daemonCheckIntervalSeconds`). Changing either constant
+    /// means rechecking that relationship and raising `SpacesWireProtocol.version`: the cadence is part of
+    /// the stream contract, and a client that times out faster than its daemon writes keepalives would
+    /// read every idle stream as dead.
+    public static let silenceTimeoutSeconds: Double = 8
 
     /// The keepalive frame: a single empty line.
     ///
@@ -36,9 +40,9 @@ public enum TerminalStreamLiveness {
 
     /// How often the daemon's relay checks whether a keepalive is due.
     ///
-    /// A third of the interval, so a keepalive lands between 15s and 20s after the last write rather than
-    /// between 15s and 30s. Only the first gap after a real frame can reach 20s; once the relay is idle,
-    /// keepalives land every 15s.
+    /// A third of the interval, so a keepalive lands between 3s and 4s after the last write rather than
+    /// between 3s and 6s. Only the first gap after a real frame can reach 4s; once the relay is idle,
+    /// keepalives land every 3s.
     public static var daemonCheckIntervalSeconds: Double { keepaliveIntervalSeconds / 3 }
 
     /// How often a client checks its stream for silence, derived from the timeout so that shortening the

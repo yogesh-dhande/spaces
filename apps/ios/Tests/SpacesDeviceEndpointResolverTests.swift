@@ -314,7 +314,7 @@
             settings.hosts = ["127.0.0.1"]
             settings.port = Int(port)
             settings.certificateFingerprint = server.certificateFingerprint
-            // Compressed from the production 40s so the suite does not wait out a real timeout; the check
+            // Compressed from the production timeout so the suite does not wait out a real one; the check
             // cadence scales with it, so this exercises the same code path at the same ratios.
             let backend = SpacesDeviceNetworkBackend(settings: settings, streamSilenceTimeout: 1)
 

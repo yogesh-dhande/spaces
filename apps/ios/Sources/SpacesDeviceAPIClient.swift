@@ -856,7 +856,7 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
     let resolver: SpacesDeviceEndpointResolver
 
     /// Silence budget handed to every session stream this backend opens. Only tests pass anything other
-    /// than the default, and they pass a shorter one so a stalled-stream assertion does not wait 40s.
+    /// than the default, and they pass a shorter one so a stalled-stream assertion does not wait out the production timeout.
     let streamSilenceTimeout: TimeInterval
 
     init(settings: SpacesMobileConnectionSettings, streamSilenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds) {
