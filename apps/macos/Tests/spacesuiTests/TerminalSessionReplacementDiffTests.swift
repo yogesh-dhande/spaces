@@ -214,4 +214,42 @@ import spacestestsupport
                 .init(workspaceID: "ws", replacedSessionID: "session-a", replacementSessionID: "session-b")
             ])
     }
+
+    /// The overwhelmingly common refresh: rows change in every way except the session they track. Nothing
+    /// is replaced, and the answer must not depend on the session timestamps the overview happens to carry.
+    @Test func rowsThatChangeWithoutSwappingTheirSessionYieldNoReplacements() {
+        let sessions = [sessionSummary(id: "live", createdAt: "2026-07-20T00:00:00Z")]
+        let before = overview([workspace(id: "ws", processRows: [processRow(id: "api", workspaceID: "ws", sessionID: "live")])], sessions: sessions)
+        let after = overview(
+            [
+                workspace(
+                    id: "ws", processRows: [processRow(id: "api", workspaceID: "ws", sessionID: "live", runState: .exited)],
+                    terminalRows: [terminalRow(id: "terminal-window:1", workspaceID: "ws", sessionID: nil)])
+            ], sessions: sessions)
+
+        #expect(TerminalSessionReplacementDiff.replacements(previous: before, current: after).isEmpty)
+    }
+
+    /// Several rows restarting in the same refresh are reported in a fixed order across workspaces, because
+    /// the caller applies them one after another against a panel layout it is mutating as it goes.
+    @Test func replacementsAcrossWorkspacesAreReportedInAStableOrder() {
+        let before = overview([
+            workspace(id: "ws-b", processRows: [processRow(id: "api", workspaceID: "ws-b", sessionID: "b-ended", runState: .exited)]),
+            workspace(id: "ws-a", processRows: [processRow(id: "api", workspaceID: "ws-a", sessionID: "a-ended", runState: .exited)]),
+        ])
+        let after = overview(
+            [
+                workspace(id: "ws-b", processRows: [processRow(id: "api", workspaceID: "ws-b", sessionID: "b-new")]),
+                workspace(id: "ws-a", processRows: [processRow(id: "api", workspaceID: "ws-a", sessionID: "a-new")]),
+            ],
+            sessions: [
+                sessionSummary(id: "b-new", createdAt: "2026-07-20T00:01:00Z"), sessionSummary(id: "a-new", createdAt: "2026-07-20T00:01:00Z"),
+            ])
+
+        #expect(
+            TerminalSessionReplacementDiff.replacements(previous: before, current: after) == [
+                .init(workspaceID: "ws-a", replacedSessionID: "a-ended", replacementSessionID: "a-new"),
+                .init(workspaceID: "ws-b", replacedSessionID: "b-ended", replacementSessionID: "b-new"),
+            ])
+    }
 }

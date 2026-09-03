@@ -90,9 +90,7 @@ import workspacecore
     // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
     // overview-mapping helper below (buildOverviewAlertsGroups), which runs off the main actor.
     // ISO8601DateFormatter is documented thread-safe, so a single nonisolated instance is safe to
-    // reuse instead of allocating a fresh formatter per call. `AppKitController` keeps its own
-    // identical instance for its overview-mapping helpers (agentWindows, deviceTerminalWindows)
-    // rather than reaching into this one.
+    // reuse instead of allocating a fresh formatter per call.
     nonisolated(unsafe) private static let staticISO8601Formatter = ISO8601DateFormatter()
 
     /// Builds attention alerts for a device from its overview payload — used for both the local and

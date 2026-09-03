@@ -1672,15 +1672,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
-    // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
-    // overview-mapping helpers below (agentWindows, deviceTerminalWindows), which run off the main
-    // actor. ISO8601DateFormatter is documented thread-safe, so a single nonisolated instance is
-    // safe to reuse instead of allocating a fresh formatter per call. `AlertsController` keeps its
-    // own identical instance for its overview-mapping helper (`buildOverviewAlertsGroups`), and
-    // `TerminalPaneService` keeps an instance-scoped one for its pane factory, rather than
-    // reaching back into this one.
-    nonisolated(unsafe) private static let staticISO8601Formatter = ISO8601DateFormatter()
-
     private enum LocalDeviceSnapshotPurpose: Sendable {
         case launch
         case refresh
@@ -1948,23 +1939,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// The timestamps carry the row's own `updatedAt`, the stamp the owning daemon last wrote for that
+    /// agent session, exactly as `AlertsController` reads it: an overview row reports when the agent last
+    /// changed state and nothing else, so it is the one timestamp this projection can state truthfully.
+    /// It is empty when the daemon reports none. The record type carries these fields for the daemon-side
+    /// paths that persist them; the client surfaces built from this projection (shortcut targets, the
+    /// command palette, the terminal pane picker) read the id, label, session and status alone.
     nonisolated static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
-        let now = staticISO8601Formatter.string(from: Date())
-        return rows.compactMap { row in
+        rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
+            let updatedAt = row.updatedAt ?? ""
             return AgentWindowRecord(
                 id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
                 terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, status: agentStatus(from: row.activityState),
-                createdAt: now, updatedAt: now)
+                createdAt: updatedAt, updatedAt: updatedAt)
         }
     }
 
+    /// `lastSeenAt` is empty because a terminal row reports no timestamp of any kind: the row says what
+    /// the terminal is and which session it tracks, and the moment a client happened to map it says
+    /// nothing about the terminal. The record type carries the field for the daemon-side paths that
+    /// persist it; the client surfaces built from this projection read the id, name, session and order.
     nonisolated static func deviceTerminalWindows(from rows: [SpacesDeviceWorkspaceTerminalRow]) -> [WindowRecord] {
-        let now = staticISO8601Formatter.string(from: Date())
-        return rows.enumerated().map { index, row in
+        rows.enumerated().map { index, row in
             WindowRecord(
                 id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.liveTitle, terminalTrackingID: row.sessionID,
-                role: "terminal", orderIndex: index, lastSeenAt: now)
+                role: "terminal", orderIndex: index, lastSeenAt: "")
         }
     }
 

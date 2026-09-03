@@ -433,8 +433,7 @@ import workspacecore
 
     // ISO8601DateFormatter construction is expensive and `makeTerminalPaneContent` is the only reader,
     // so one lazily-built instance is shared across every pane it builds rather than allocating a fresh
-    // formatter per call. `AppKitController` keeps its own separate `staticISO8601Formatter` for its
-    // nonisolated overview-mapping helpers, which cannot reach this instance-scoped one.
+    // formatter per call.
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and
