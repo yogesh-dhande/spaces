@@ -12,12 +12,18 @@ import spacesterminalcore
     private static let fingerprint = "SHA256:" + String(repeating: "c", count: 64)
     private static let port = 47_847
     /// Short enough to keep the suite fast, long enough that a loaded machine cannot mistake normal
-    /// scheduling delay for silence.
+    /// scheduling delay for silence. The tests poll asynchronously rather than with `Thread.sleep`, so
+    /// they never park a cooperative-pool thread (see `SpacesBlockingIOThread`).
     private static let silenceTimeout: TimeInterval = 0.8
+    /// An upper bound for a starved CI runner, not a measurement: the stall is reported after
+    /// `silenceTimeout` and the wait returns the moment it is, so a generous ceiling costs a passing run
+    /// nothing and keeps a runner that pauses the process for tens of seconds (CI run 33789498420 stalled
+    /// every suite in flight for ~30 s) from reading a late report as a missing one.
+    private static let stallReportCeiling: TimeInterval = 30
 
     /// The bug this fix is about: the peer keeps the socket open but nothing arrives, so without a
     /// liveness watch the client sits on a dead stream forever.
-    @Test func silenceAfterAPayloadReportsAStallAndReleasesTheConnection() throws {
+    @Test func silenceAfterAPayloadReportsAStallAndReleasesTheConnection() async throws {
         let dialer = StreamingConnectionDialer()
         let events = StreamRecorder()
         let client = try SpacesDeviceAPIStateStreamClient(
@@ -27,9 +33,9 @@ import spacesterminalcore
 
         let connection = try #require(dialer.connections().first)
         connection.deliverPayload(Self.payload())
-        #expect(events.waitForEvents(count: 1, timeout: 2))
+        #expect(await events.waitForEvents(count: 1, timeout: 2))
 
-        #expect(events.waitForDisconnect(timeout: Self.silenceTimeout * 6))
+        #expect(await events.waitForDisconnect(timeout: Self.stallReportCeiling))
         guard case SpacesDeviceAPIRequestClientError.streamStalled = try #require(events.disconnectError()) else {
             Issue.record("Expected streamStalled, got \(String(describing: events.disconnectError()))")
             return
@@ -39,7 +45,14 @@ import spacesterminalcore
 
     /// The daemon side of the fix: empty keepalive lines carry no state and never reach `onEvent`, but
     /// they are bytes off the wire, so an idle terminal's stream stays connected indefinitely.
-    @Test func keepaliveFramesKeepAnIdleStreamConnected() throws {
+    ///
+    /// Both the keepalive producer and the observation of its effect run on a dedicated thread rather
+    /// than the cooperative pool: the watchdog itself now runs on a real thread precisely so it survives
+    /// pool starvation, so a `Task.sleep`-driven producer that pool starvation pauses for longer than
+    /// `silenceTimeout` would read as silence and cause a false stall. The result is captured immediately
+    /// after the last keepalive, while keepalives are still fresh, because the moment they stop the
+    /// stream legitimately begins its silence countdown.
+    @Test func keepaliveFramesKeepAnIdleStreamConnected() async throws {
         let dialer = StreamingConnectionDialer()
         let events = StreamRecorder()
         let client = try SpacesDeviceAPIStateStreamClient(
@@ -50,15 +63,21 @@ import spacesterminalcore
 
         let connection = try #require(dialer.connections().first)
         let keepaliveInterval = Self.silenceTimeout / 4
-        let deadline = Date().addingTimeInterval(Self.silenceTimeout * 3)
-        while Date() < deadline {
-            connection.deliverKeepalive()
-            Thread.sleep(forTimeInterval: keepaliveInterval)
+        let result = KeepaliveObservationResult()
+        SpacesBlockingIOThread.spawn(name: "spaces.test.stream-keepalive") {
+            let deadline = Date().addingTimeInterval(Self.silenceTimeout * 3)
+            while Date() < deadline {
+                connection.deliverKeepalive()
+                Thread.sleep(forTimeInterval: keepaliveInterval)
+            }
+            result.capture(disconnectCount: events.disconnectCount(), eventCount: events.eventCount(), cancelled: connection.isCancelled())
         }
 
-        #expect(events.disconnectCount() == 0)
-        #expect(events.eventCount() == 0)
-        #expect(!connection.isCancelled())
+        #expect(await result.waitForCompletion(timeout: Self.stallReportCeiling))
+        let captured = try #require(result.captured())
+        #expect(captured.disconnectCount == 0)
+        #expect(captured.eventCount == 0)
+        #expect(!captured.cancelled)
     }
 
     private static func request() -> SpacesDeviceAPIRequest {
@@ -116,17 +135,51 @@ private final class StreamRecorder: @unchecked Sendable {
         return disconnects.first ?? nil
     }
 
-    func waitForEvents(count: Int, timeout: TimeInterval) -> Bool { waitUntil(timeout: timeout) { self.eventCount() >= count } }
+    func waitForEvents(count: Int, timeout: TimeInterval) async -> Bool { await waitUntil(timeout: timeout) { self.eventCount() >= count } }
 
-    func waitForDisconnect(timeout: TimeInterval) -> Bool { waitUntil(timeout: timeout) { self.disconnectCount() > 0 } }
+    func waitForDisconnect(timeout: TimeInterval) async -> Bool { await waitUntil(timeout: timeout) { self.disconnectCount() > 0 } }
 
-    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.02)
+            try? await Task.sleep(for: .milliseconds(20))
         }
         return condition()
+    }
+}
+
+/// Holds the keepalive test's captured result, set once from the dedicated thread that drives the
+/// keepalive loop and read by the async test body polling for it.
+private final class KeepaliveObservationResult: @unchecked Sendable {
+    struct Captured {
+        let disconnectCount: Int
+        let eventCount: Int
+        let cancelled: Bool
+    }
+
+    private let lock = NSLock()
+    private var value: Captured?
+
+    func capture(disconnectCount: Int, eventCount: Int, cancelled: Bool) {
+        lock.lock()
+        value = Captured(disconnectCount: disconnectCount, eventCount: eventCount, cancelled: cancelled)
+        lock.unlock()
+    }
+
+    func captured() -> Captured? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func waitForCompletion(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if captured() != nil { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return captured() != nil
     }
 }
 

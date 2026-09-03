@@ -419,8 +419,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
                 guard self?.markFinished() ?? true else { return }
                 onDisconnect(error)
             })
-        // Watches for the silence a dead-but-open transport produces; see `TerminalStreamLiveness`.
-        scheduleSilenceCheck(onDisconnect: onDisconnect)
+        startSilenceWatch(onDisconnect: onDisconnect)
     }
 
     private func noteBytesReceived() {
@@ -439,22 +438,30 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         return true
     }
 
-    private func scheduleSilenceCheck(onDisconnect: @escaping @Sendable ((any Error)?) -> Void) {
+    /// Watches for the silence a dead-but-open transport produces; see `TerminalStreamLiveness`.
+    ///
+    /// The watch lives on its own thread rather than a GCD timer: a global or private concurrent
+    /// queue is non-overcommit, and when the kernel workqueue is saturated (issue #611: cooperative-pool
+    /// threads parked in blocking waits) its blocks are never provisioned a thread, so a timer-based
+    /// watchdog can sit unscheduled for longer than the timeout it is meant to enforce. One sleeping
+    /// thread per open stream is the price of a check that always runs.
+    private func startSilenceWatch(onDisconnect: @escaping @Sendable ((any Error)?) -> Void) {
         let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + checkInterval) { [weak self] in
-            guard let self else { return }
-            connectionLock.lock()
-            let isRunning = !hasFinished && connection != nil
-            let silentSeconds = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
-            connectionLock.unlock()
-            guard isRunning else { return }
-            guard silentSeconds >= silenceTimeout else {
-                scheduleSilenceCheck(onDisconnect: onDisconnect)
+        SpacesBlockingIOThread.spawn(name: "spaces.device.stream.liveness") { [weak self] in
+            while true {
+                Thread.sleep(forTimeInterval: checkInterval)
+                guard let self else { return }
+                connectionLock.lock()
+                let isRunning = !hasFinished && connection != nil
+                let silentSeconds = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
+                connectionLock.unlock()
+                guard isRunning else { return }
+                guard silentSeconds >= silenceTimeout else { continue }
+                guard markFinished() else { return }
+                onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
+                stop()
                 return
             }
-            guard markFinished() else { return }
-            onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
-            stop()
         }
     }
 
