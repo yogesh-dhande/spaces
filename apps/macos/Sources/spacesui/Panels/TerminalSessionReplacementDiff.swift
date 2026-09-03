@@ -56,11 +56,19 @@ enum TerminalSessionReplacementDiff {
         guard let previous else { return [] }
         let previousSessionIDs = trackedSessionIDsByRow(previous)
         guard !previousSessionIDs.isEmpty else { return [] }
+        // Pair the rows first. Almost every overview arrives with no row having swapped its session, and
+        // the timestamps below are read only for a row that did, so a candidate-free overview answers
+        // without parsing a single `createdAt`.
+        var candidates: [(key: RowKey, replacedSessionID: String, replacementSessionID: String)] = []
+        for (key, replacementSessionID) in trackedSessionIDsByRow(current) {
+            guard let replacedSessionID = previousSessionIDs[key], replacedSessionID != replacementSessionID else { continue }
+            candidates.append((key: key, replacedSessionID: replacedSessionID, replacementSessionID: replacementSessionID))
+        }
+        guard !candidates.isEmpty else { return [] }
         let previousCreatedAt = createdAtBySessionID(previous)
         let currentCreatedAt = createdAtBySessionID(current)
         var replacements: [Replacement] = []
-        for (key, replacementSessionID) in trackedSessionIDsByRow(current) {
-            guard let replacedSessionID = previousSessionIDs[key], replacedSessionID != replacementSessionID else { continue }
+        for (key, replacedSessionID, replacementSessionID) in candidates {
             // The replacement's createdAt must be known and not older than the replaced session's. See
             // the type-level doc comment for why each side of this comparison is required.
             //
