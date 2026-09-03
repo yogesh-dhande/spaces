@@ -80,22 +80,15 @@ enum SpacesMobileUITestDriver {
         XCTFail("Timed out selecting the \(label) tab", file: file, line: line)
     }
 
+    /// Opens the terminal row for `sessionID`, walking the list in both directions when an earlier
+    /// lookup left it scrolled past the row (the same recovery `waitForText` needs).
     static func openTerminalRow(sessionID: String, in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let row = app.buttons["terminal.row.\(sessionID)"]
-        let deadline = Date().addingTimeInterval(20)
-        while Date() < deadline {
-            if row.exists, row.isHittable {
-                row.tap()
-                return
-            }
-            if row.exists {
-                row.tap()
-                return
-            }
-            app.swipeUp()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        guard scanWhileScrolling(in: app, timeout: 20, check: { row.exists }) else {
+            XCTFail("Timed out opening terminal row \(sessionID)", file: file, line: line)
+            return
         }
-        XCTFail("Timed out opening terminal row \(sessionID)", file: file, line: line)
+        row.tap()
     }
 
     /// Dismisses the terminal detail back to the Spaces list, matching the resilient lookup the other
