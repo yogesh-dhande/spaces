@@ -78,6 +78,35 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertEqual(notifiedSessionIDs, [sessionID])
     }
 
+    /// A stream whose transport died without closing reports itself stalled instead of never reporting
+    /// anything. The pane must treat that exactly like a socket that closed — raise the notice, retry —
+    /// because the frozen render it would otherwise keep is indistinguishable from a live idle terminal.
+    @MainActor func testStalledStreamIsReportedAndRetriedLikeAnyOtherDrop() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        // Far beyond this test's own runtime: what is asserted is that a retry is armed, not what it does
+        // when it runs, and a retry that fired here would dial the unreachable fixture device.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        var notifiedSessionIDs: [String] = []
+        let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, object: nil, queue: .main) {
+            notification in
+            let notifiedSessionID = TerminalSessionNotification.sessionID(from: notification)
+            MainActor.assumeIsolated { notifiedSessionIDs.append(notifiedSessionID ?? "") }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        model.handleStreamDisconnect(SpacesDeviceAPIRequestClientError.streamStalled, generation: generation)
+
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertEqual(notifiedSessionIDs, [sessionID])
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "a stalled stream is only recoverable by replacing it")
+    }
+
     /// The flip is published on change only: a device that stays down retries for the whole outage,
     /// and a notification per retry would wake every observing pane into a full refresh for a fact
     /// that has not moved.

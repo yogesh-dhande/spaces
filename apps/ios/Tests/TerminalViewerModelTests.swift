@@ -244,6 +244,38 @@
             }
         }
 
+        /// Holds the first key input open, then fails it with `CancellationError` — what the real client's
+        /// in-flight request throws when the viewer's stop cancels the task running it. The closure backend
+        /// the tests use never observes task cancellation itself, so the failure is injected by hand.
+        private actor HeldCancelledInputSendResponder {
+            private var keyCount = 0
+            private var didStart = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func waitForFirstKeyThenFailWithCancellation() async throws {
+                keyCount += 1
+                guard keyCount == 1 else { return }
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+                throw CancellationError()
+            }
+
+            func waitForFirstKeyStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func failWithCancellation() {
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
         private actor HeldConnectLifecycleBackend: SpacesDeviceAPIBackend {
             private let stateResponse: SpacesDeviceAPIResponse
             private var attachCount = 0
@@ -1010,6 +1042,31 @@
             XCTAssertNotNil(attachIndex)
             XCTAssertNotNil(detachIndex)
             if let attachIndex, let detachIndex { XCTAssertLessThan(attachIndex, detachIndex) }
+        }
+
+        func testBackNavigationDoesNotSurfaceTheInputSendItCancelled() async throws {
+            let heldSend = HeldCancelledInputSendResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                if case .terminalControl(let payload) = request.command, payload.action == .key {
+                    try await heldSend.waitForFirstKeyThenFailWithCancellation()
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.sendKey("enter")
+            await heldSend.waitForFirstKeyStart()
+            XCTAssertNil(model.errorMessage, "an input send that is still in flight must not surface anything on its own")
+
+            await model.prepareForBackNavigation()
+            XCTAssertNil(model.errorMessage, "beginning the back navigation must not surface anything")
+            await heldSend.failWithCancellation()
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertNil(model.errorMessage, "leaving the terminal view must not surface the input send that its own exit cancelled")
         }
 
         func testForegroundResumeReclaimsALeaseExpiredOwner() async throws {
@@ -2897,6 +2954,86 @@
             await waitUntil("the stop-time apply to release its waiter") { waiterBox.released }
             XCTAssertNil(model.latestState, "a payload reduced after stop must still be dropped, not applied")
             _ = await waitingTask.value
+        }
+
+        /// The viewer's reaction to the stream liveness watch firing. A stalled stream is a transport that
+        /// died under a connection that still looks open, so the only fix is a new stream — and while the
+        /// last frame is still on screen the user must not be shown an error for a reconnect that is about
+        /// to succeed on its own.
+        func testAStalledStreamReconnectsSilentlyWithoutReportingAnError() async throws {
+            let backend = StalledStreamBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+
+            await backend.reportDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a stalled stream is only recoverable by opening a new one")
+            XCTAssertNil(model.errorMessage, "a stall with a frame still on screen must reconnect silently")
+        }
+
+        /// Hands out stream handles and keeps the last stream's `onDisconnect`, so a test can make the
+        /// stream end exactly the way the liveness watch ends it. Every request is answered `ok`, so the
+        /// reconnect the disconnect triggers gets as far as subscribing again.
+        private actor StalledStreamBackend: SpacesDeviceAPIBackend {
+            private var subscribeCount = 0
+            private var onDisconnect: (@MainActor (Error?) -> Void)?
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { StalledStreamRequestTransport() }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (Error?) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                await recordSubscribe(onDisconnect: onDisconnect)
+                return SpacesDeviceAPIStreamHandle {}
+            }
+
+            /// Polls rather than parking a continuation, so a subscribe that never happens fails the
+            /// assertion in the test instead of hanging the run.
+            @discardableResult func waitForSubscribeCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if subscribeCount >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return subscribeCount >= count
+            }
+
+            func reportDisconnect(_ error: any Error) async {
+                let handler = onDisconnect
+                await MainActor.run { handler?(error) }
+            }
+
+            private func recordSubscribe(onDisconnect: @escaping @MainActor (Error?) -> Void) {
+                subscribeCount += 1
+                self.onDisconnect = onDisconnect
+            }
+        }
+
+        private struct StalledStreamRequestTransport: SpacesDeviceAPIRequestTransport {
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                // The reconnect reads state before it resubscribes, and a read that answers `ok` without
+                // terminal state is itself an error the viewer reports — so answer it the way the daemon
+                // would, leaving the stall as the only thing under test.
+                if case .state = request.command {
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
         }
 
         private final class WaiterReleaseBox: @unchecked Sendable { var released = false }

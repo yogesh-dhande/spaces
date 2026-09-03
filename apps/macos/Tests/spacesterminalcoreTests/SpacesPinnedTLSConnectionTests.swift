@@ -100,11 +100,13 @@ import XCTest
             receivedLines.expectedFulfillmentCount = 3
             let closed = expectation(description: "receive loop closed")
             let lineBox = LockedLineCollector()
+            let byteReads = LockedCounter()
             connection.startReceiveLoop(
                 onLine: { line in
                     lineBox.append(line)
                     receivedLines.fulfill()
                 },
+                onBytesReceived: { _ = byteReads.increment() },
                 onClosed: { error in
                     XCTAssertNil(error)
                     closed.fulfill()
@@ -117,6 +119,7 @@ import XCTest
 
             let responses = try lineBox.lines().map { try TerminalServiceCodec.decodeResponse($0) }
             XCTAssertEqual(responses, Array(repeating: TerminalServiceResponse(ok: true, message: "ping"), count: 3))
+            XCTAssertGreaterThan(byteReads.value(), 0)
         }
 
         func testReadLineTimesOutWithoutData() throws {
@@ -142,6 +145,12 @@ import XCTest
             lock.lock()
             defer { lock.unlock() }
             count += 1
+            return count
+        }
+
+        func value() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
             return count
         }
     }

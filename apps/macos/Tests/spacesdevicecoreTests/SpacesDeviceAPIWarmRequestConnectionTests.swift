@@ -335,7 +335,10 @@ private final class FakeLineConnection: SpacesPinnedTLSLineConnection, @unchecke
         }
     }
 
-    func startReceiveLoop(onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void) {}
+    func startReceiveLoop(
+        onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+        onClosed: @escaping @Sendable ((any Error)?) -> Void
+    ) {}
 
     func cancel() {
         lock.lock()
