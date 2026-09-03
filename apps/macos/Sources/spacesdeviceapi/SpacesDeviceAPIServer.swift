@@ -271,6 +271,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
+        /// Uptime of the last payload a terminal relay wrote to its connection, held by reference because
+        /// `StreamRelay` is a struct that every reader copies out of `streamRelays`: a value field would
+        /// leave the keepalive timer comparing against the timestamp captured when it copied the relay,
+        /// not against the frames sent since. Only read and written on the Device API `queue`.
+        private final class StreamRelayWriteClock: @unchecked Sendable {
+            var lastWriteUptimeNanoseconds: UInt64
+            init(lastWriteUptimeNanoseconds: UInt64) { self.lastWriteUptimeNanoseconds = lastWriteUptimeNanoseconds }
+        }
+
         private struct StreamRelay {
             let sessionID: String
             let installationID: String
@@ -280,6 +289,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let heartbeatTimer: DispatchSourceTimer?
             let connection: NWConnection
             let sendSequencer: StreamSendSequencer
+            /// Set only for a terminal `subscribe` relay: the timer that writes the empty-line keepalive
+            /// when this relay has gone `TerminalStreamLiveness.keepaliveIntervalSeconds` without writing.
+            /// Cancelled everywhere `heartbeatTimer` is.
+            var keepaliveTimer: DispatchSourceTimer? = nil
+            /// Set only for a terminal `subscribe` relay, alongside `keepaliveTimer`.
+            var writeClock: StreamRelayWriteClock? = nil
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `closeStreamRelay` uses it to
             /// release that scope's poll-subscriber slot when this relay's connection closes.
             var diffSignatureScope: WorkspaceDiffScope? = nil
@@ -551,6 +566,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let subscriptionSocketPath: String
             let controlSocketPath: String
             let clientID: String?
+            /// True only for a terminal session's `subscribe` relay, which is the one relay whose producer
+            /// can stay silent indefinitely and therefore needs the empty-line keepalive. The signature and
+            /// device-overview relays below already broadcast on their own timers.
+            var isTerminalSession: Bool = false
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `relayLinuxSubscription` uses it to
             /// release that scope's poll-subscriber slot once the relay loop returns.
             var diffSignatureScope: WorkspaceDiffScope? = nil
@@ -560,6 +579,50 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceFileListSignature` relay; `relayLinuxSubscription` uses it
             /// to release that workspace's poll-subscriber slot once the relay loop returns.
             var fileListSignatureWorkspaceID: String? = nil
+        }
+
+        /// Serializes the terminal keepalive timer's writes against the relay thread's writes on the same
+        /// `SSL` object (OpenSSL forbids concurrent writes to one connection) and, more importantly, bounds
+        /// the timer's lifetime: `DispatchSourceTimer.cancel()` does not wait for a handler that is already
+        /// running, so cancelling alone would leave a keepalive write racing the `SSL_free` that
+        /// `handleClient` performs once `relayLinuxSubscription` returns. `finish()` blocks until any
+        /// in-flight keepalive write completes and refuses every later one, which is what makes that free
+        /// safe.
+        private final class LinuxStreamRelayWriteGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var isFinished = false
+            private var lastWriteUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+
+            /// The relay thread's write of a real frame. Resets the keepalive cadence.
+            func write(_ body: () throws -> Void) rethrows {
+                lock.lock()
+                defer { lock.unlock() }
+                lastWriteUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                try body()
+            }
+
+            /// The timer's write. Skipped outright when the relay thread already holds the lock: that
+            /// thread is mid-write, which is the same proof of life a keepalive would carry, and blocking a
+            /// pooled timer thread behind a `SSL_write` to a stalled client would be worse than skipping.
+            func writeKeepaliveIfDue(intervalNanoseconds: UInt64, _ body: () -> Void) {
+                guard lock.`try`() else { return }
+                defer { lock.unlock() }
+                guard !isFinished else { return }
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard
+                    SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                        nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: lastWriteUptimeNanoseconds,
+                        intervalNanoseconds: intervalNanoseconds)
+                else { return }
+                lastWriteUptimeNanoseconds = now
+                body()
+            }
+
+            func finish() {
+                lock.lock()
+                isFinished = true
+                lock.unlock()
+            }
         }
 
         private enum LinuxSubscribeAction: Sendable {
@@ -1991,6 +2054,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// (see `WorkspaceDiffSignatureSubscription`). Extracted as a free function, free of that class's
     /// mutable state, so the cadence is testable without a TLS harness.
     static func workspaceDiffSignatureKeepaliveShouldBroadcast(tick: Int, changed: Bool) -> Bool { changed || tick % 10 == 0 }
+
+    /// Pure decision for whether a terminal `subscribe` relay owes its client a keepalive: true once
+    /// `intervalNanoseconds` have elapsed since that relay last wrote anything (a real frame or a previous
+    /// keepalive). A terminal that nobody is typing into produces no frames, so without this the stream is
+    /// byte-identical to one whose transport has silently died and the client keeps rendering a frozen
+    /// screen (see `TerminalStreamLiveness`). Extracted free of relay state so the cadence is testable
+    /// without a TLS harness or a live session. Both the Darwin and the Linux relay ask this question.
+    static func terminalStreamKeepaliveIsDue(
+        nowUptimeNanoseconds: UInt64, lastWriteUptimeNanoseconds: UInt64, intervalNanoseconds: UInt64
+    ) -> Bool {
+        // Uptime clocks are monotonic, so `now` can only be behind a recorded write if a write was stamped
+        // by a caller that read the clock slightly later; treat that as "just wrote".
+        guard nowUptimeNanoseconds >= lastWriteUptimeNanoseconds else { return false }
+        return nowUptimeNanoseconds - lastWriteUptimeNanoseconds >= intervalNanoseconds
+    }
+
+    /// `TerminalStreamLiveness.keepaliveIntervalSeconds` in the units both relay paths compare in.
+    static let terminalStreamKeepaliveIntervalNanoseconds = UInt64(TerminalStreamLiveness.keepaliveIntervalSeconds * 1_000_000_000)
 
     /// Substituted for `signatureProvider`'s result whenever it returns `nil` (most commonly: the workspace
     /// was deleted while a pane stayed subscribed to it), so the poll timer's cadence logic always has a
@@ -6018,7 +6099,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return .relay(
                 LinuxSubscription(
                     sessionID: sessionID, installationID: installationID, subscriptionSocketPath: paths.subscriptionSocketPath,
-                    controlSocketPath: paths.controlSocketPath, clientID: request.clientID))
+                    controlSocketPath: paths.controlSocketPath, clientID: request.clientID, isTerminalSession: true))
         }
 
         private func relayLinuxSubscription(_ subscription: LinuxSubscription, ssl: OpaquePointer) throws {
@@ -6055,6 +6136,40 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             defer { heartbeatTimer?.cancel() }
 
+            // Terminal relays also write an empty-line keepalive whenever they have been silent for
+            // `TerminalStreamLiveness.keepaliveIntervalSeconds`, so a client can tell an idle terminal from
+            // a dead transport. A failing keepalive write is also how this thread learns its peer is gone:
+            // it is blocked in `read()` on a producer socket an idle terminal never writes to, so nothing
+            // else would ever wake it, and the relay thread plus its subscriber slot would leak until the
+            // session ended. Shutting the producer socket down unwinds the read into the normal EOF exit.
+            let keepaliveGate: LinuxStreamRelayWriteGate?
+            let keepaliveTimer: DispatchSourceTimer?
+            if subscription.isTerminalSession {
+                let gate = LinuxStreamRelayWriteGate()
+                let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+                let checkInterval = DispatchTimeInterval.milliseconds(Int(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1000))
+                timer.schedule(deadline: .now() + checkInterval, repeating: checkInterval)
+                timer.setEventHandler {
+                    gate.writeKeepaliveIfDue(intervalNanoseconds: Self.terminalStreamKeepaliveIntervalNanoseconds) {
+                        do {
+                            try LinuxServer.writeTLSResponse(TerminalStreamLiveness.keepaliveFrame, ssl: ssl)
+                        } catch {
+                            Self.shutdownSocket(relaySocketFD, how: Self.shutdownReadWrite)
+                        }
+                    }
+                }
+                keepaliveGate = gate
+                keepaliveTimer = timer
+                timer.resume()
+            } else {
+                keepaliveGate = nil
+                keepaliveTimer = nil
+            }
+            defer {
+                keepaliveTimer?.cancel()
+                keepaliveGate?.finish()
+            }
+
             let startedAt = Date()
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             var buffer = [UInt8](repeating: 0, count: Self.streamRelayReadBufferSize)
@@ -6077,7 +6192,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         logDeviceAPIPerformance(
                             sessionID: subscription.sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
                     }
-                    try LinuxServer.writeTLSResponse(data, ssl: ssl)
+                    // Through the gate when one exists, so this write cannot overlap a keepalive write on
+                    // the same `SSL`; without a gate (the signature and overview relays) it is unchanged.
+                    if let keepaliveGate {
+                        try keepaliveGate.write { try LinuxServer.writeTLSResponse(data, ssl: ssl) }
+                    } else {
+                        try LinuxServer.writeTLSResponse(data, ssl: ssl)
+                    }
                     if let writeStartedAt {
                         logDeviceAPIPerformance(
                             sessionID: subscription.sessionID, name: "stream_network_send_end",
@@ -6242,12 +6363,33 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 heartbeatTimer = nil
             }
 
+            // Terminal state streams get an empty-line keepalive; the overview, diff-signature, and
+            // file-signature relays below do not, because their producers already broadcast on a timer.
+            // Unlike the heartbeat above this is not conditional on `clientID`: the Mac's remote-pane
+            // stream subscribes with `clientID: nil` (see `DeviceTerminalSessionStateModel`) and needs
+            // the liveness signal exactly as much as a client that does claim the session.
+            let writeClock = StreamRelayWriteClock(lastWriteUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+            let keepaliveTimer = DispatchSource.makeTimerSource(queue: relayQueue)
+            let keepaliveCheckInterval = DispatchTimeInterval.milliseconds(Int(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1000))
+            keepaliveTimer.schedule(deadline: .now() + keepaliveCheckInterval, repeating: keepaliveCheckInterval)
+            keepaliveTimer.setEventHandler { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                // The decision reads `streamRelays` and the write clock, and the write goes through the
+                // relay's send sequencer, all of which are confined to the Device API queue.
+                self.queue.async { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.sendTerminalStreamKeepaliveIfDue(to: connection)
+                }
+            }
+
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: sessionID, installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
-                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
+                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey),
+                keepaliveTimer: keepaliveTimer, writeClock: writeClock)
 
             relaySource.resume()
             heartbeatTimer?.resume()
+            keepaliveTimer.resume()
 
             TerminalPerformance.logMetric(
                 "device_api_subscribe", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
@@ -6445,6 +6587,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let didStartClosing = streamRelaysClosingAfterFinalSend.insert(key).inserted
             guard didStartClosing else { return (relay, false) }
             relay.heartbeatTimer?.cancel()
+            relay.keepaliveTimer?.cancel()
             relay.relaySource.cancel()
             shutdown(relay.relaySocketFD, SHUT_RDWR)
             return (relay, true)
@@ -6454,6 +6597,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             _ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection, closeAfterSend: Bool = false
         ) {
             guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
+            // A real frame is itself proof of life, so it resets the keepalive cadence.
+            relay.writeClock?.lastWriteUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let attributes = performanceLoggingEnabled ? deviceAPIStreamRelayAttributes(for: data) : [:]
             if performanceLoggingEnabled {
@@ -6491,6 +6636,41 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
+        /// Writes one empty-line keepalive to a terminal relay's connection if it has been silent for
+        /// `TerminalStreamLiveness.keepaliveIntervalSeconds`. It goes through the relay's send sequencer
+        /// rather than straight to the connection so it can never interleave with a frame that is mid-send.
+        private func sendTerminalStreamKeepaliveIfDue(to connection: NWConnection) {
+            let key = ObjectIdentifier(connection)
+            guard let relay = streamRelays[key], let writeClock = relay.writeClock else { return }
+            // A relay that has begun its final send is on its way out; another write would race the close.
+            guard !streamRelaysClosingAfterFinalSend.contains(key) else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard
+                Self.terminalStreamKeepaliveIsDue(
+                    nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: writeClock.lastWriteUptimeNanoseconds,
+                    intervalNanoseconds: Self.terminalStreamKeepaliveIntervalNanoseconds)
+            else { return }
+            writeClock.lastWriteUptimeNanoseconds = now
+            relay.sendSequencer.enqueue { [weak self, weak connection] finish in
+                guard let self, let connection else {
+                    finish(nil)
+                    return
+                }
+                self.networkShaper.send(
+                    content: TerminalStreamLiveness.keepaliveFrame, to: connection, on: self.queue, isComplete: false, applyInitialDelay: false,
+                    applyBandwidthDelay: false
+                ) { [weak self, weak connection] error in
+                    self?.queue.async { [weak self, weak connection] in
+                        if let error {
+                            self?.trace("stream_relay_keepalive_send_error error=\(error)")
+                            if let self, let connection { self.closeStreamRelay(connection: connection) }
+                        }
+                        finish(error)
+                    }
+                }
+            }
+        }
+
         private func closeStreamRelay(connection: NWConnection, cancelNetworkConnection: Bool = true) {
             let key = ObjectIdentifier(connection)
             guard let relay = streamRelays.removeValue(forKey: key) else {
@@ -6501,6 +6681,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             trace("stream_relay_close peer=\(String(describing: connection.endpoint))")
             if !relayReadSideAlreadyClosed {
                 relay.heartbeatTimer?.cancel()
+                relay.keepaliveTimer?.cancel()
                 relay.relaySource.cancel()
                 shutdown(relay.relaySocketFD, SHUT_RDWR)
             }

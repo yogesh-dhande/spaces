@@ -1086,7 +1086,10 @@ public enum SpacesDeviceClient {
     public static func isDeviceAPITransportFailure(_ error: any Error) -> Bool {
         if let requestError = error as? SpacesDeviceAPIRequestClientError {
             switch requestError {
-            case .timeout, .emptyResponse, .connectionFailed: return true
+            // A stalled stream is the transport dying under a connection that still looks open: the
+            // daemon's keepalives stopped arriving, so nothing reached this client. Same disposition as a
+            // timeout — the link is gone and the caller should reconnect.
+            case .timeout, .emptyResponse, .connectionFailed, .streamStalled: return true
             case .invalidPort: return false
             // A coded rejection means the daemon answered — it is reachable — so this is not a
             // reachability failure. Callers that need to recover a rejection (e.g. re-authenticate on

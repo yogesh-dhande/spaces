@@ -16,6 +16,10 @@ enum SpacesDeviceAPIClientError: LocalizedError {
     case allCandidatesUnreachable(hosts: [String])
     case missingOverview
     case streamFailed(String, code: SpacesDeviceErrorCode? = nil)
+    /// The stream connection stayed open but stopped delivering bytes for longer than
+    /// `TerminalStreamLiveness.silenceTimeoutSeconds`, which the daemon's keepalive rules out for a
+    /// healthy link (see `StreamSubscription.start`). Transient: the viewer reconnects on it.
+    case streamStalled
     case requestTimedOut
 
     var errorDescription: String? {
@@ -27,6 +31,7 @@ enum SpacesDeviceAPIClientError: LocalizedError {
             "Could not reach the device at any of its known addresses (\(hosts.joined(separator: ", "))). If you're away from its network, make sure Tailscale is connected on both devices."
         case .missingOverview: "The Device API did not return a workspace or terminal overview."
         case .streamFailed(let message, _): message
+        case .streamStalled: "The terminal stream stopped responding."
         case .requestTimedOut: "The Device API request timed out."
         }
     }
@@ -850,8 +855,13 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
     /// `SpacesDeviceEndpointResolver`'s doc comment).
     let resolver: SpacesDeviceEndpointResolver
 
-    init(settings: SpacesMobileConnectionSettings) {
+    /// Silence budget handed to every session stream this backend opens. Only tests pass anything other
+    /// than the default, and they pass a shorter one so a stalled-stream assertion does not wait 40s.
+    let streamSilenceTimeout: TimeInterval
+
+    init(settings: SpacesMobileConnectionSettings, streamSilenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds) {
         self.settings = settings
+        self.streamSilenceTimeout = streamSilenceTimeout
         resolver = SpacesDeviceEndpointResolver(settings: settings)
     }
 
@@ -900,7 +910,8 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             onDisconnect(error)
         }
         StreamSubscription(
-            connection: connection, pinRejection: pinRejection, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
+            connection: connection, pinRejection: pinRejection, request: request, silenceTimeout: streamSilenceTimeout, onEvent: onEvent,
+            onDisconnect: invalidatingOnDisconnect
         ).start(on: queue)
         return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
@@ -1213,6 +1224,12 @@ private final class StreamLifecycle: @unchecked Sendable {
         finished = true
         Task { @MainActor in onDisconnect(error) }
     }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
 }
 
 private final class StreamSubscription: @unchecked Sendable {
@@ -1225,17 +1242,25 @@ private final class StreamSubscription: @unchecked Sendable {
     private let request: SpacesDeviceAPIRequest
     private let lifecycle: StreamLifecycle
     private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
+    /// How long the connection may deliver no bytes at all before this subscription treats it as dead.
+    /// Injected only so tests can compress the wait; production always passes
+    /// `TerminalStreamLiveness.silenceTimeoutSeconds`.
+    private let silenceTimeout: TimeInterval
     private var buffer = Data()
     private var decodedState = false
     private var connectionReady = false
+    /// Uptime of the last bytes received, keepalives included. Confined to the stream's queue, which runs
+    /// both the receive callbacks and the silence check.
+    private var lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 
     init(
-        connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest,
+        connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest, silenceTimeout: TimeInterval,
         onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
         self.pinRejection = pinRejection
         self.request = request
+        self.silenceTimeout = silenceTimeout
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
     }
@@ -1263,6 +1288,11 @@ private final class StreamSubscription: @unchecked Sendable {
             switch state {
             case .ready:
                 connectionReady = true
+                lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                // Armed only once the connection is up: everything before that (dial, TLS handshake, the
+                // wait for the first payload) is already covered by `initialEventTimeout`, and starting
+                // the silence clock earlier would just double-count the handshake.
+                scheduleSilenceCheck(on: queue)
                 sendInitialRequest()
             case .failed(let error):
                 lifecycle.finish(error: pinRejection.error ?? error)
@@ -1301,9 +1331,32 @@ private final class StreamSubscription: @unchecked Sendable {
         }
     }
 
+    /// Re-arms itself on the stream's queue until the stream ends, and finishes the subscription once the
+    /// connection has been silent for `silenceTimeout`. This is the client half of the terminal stream's
+    /// liveness contract: the daemon writes a keepalive every
+    /// `TerminalStreamLiveness.keepaliveIntervalSeconds`, so silence past the timeout means the transport
+    /// is gone even though TCP still believes the peer is there — which is exactly the case that used to
+    /// leave the viewer rendering a frozen screen while its request channel kept working.
+    private func scheduleSilenceCheck(on queue: DispatchQueue) {
+        let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
+        queue.asyncAfter(deadline: .now() + checkInterval) { [weak self] in
+            guard let self, !lifecycle.isFinished else { return }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
+            guard elapsed < silenceTimeout else {
+                lifecycle.finish(error: SpacesDeviceAPIClientError.streamStalled)
+                connection.cancel()
+                return
+            }
+            scheduleSilenceCheck(on: queue)
+        }
+    }
+
     private func receiveNext() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
             if let content, !content.isEmpty {
+                // Any bytes count as proof of life, including the daemon's empty-line keepalives, which
+                // the framing loop below drops before decoding.
+                lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
                 buffer.append(content)
                 while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                     let line = Data(buffer.prefix(upTo: newlineIndex))

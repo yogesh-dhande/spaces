@@ -39,10 +39,20 @@ public enum SpacesPinnedTLSConnectionError: LocalizedError {
 /// exchanges; `startReceiveLoop` switches the connection to streaming delivery (after which
 /// `readLine` must not be used). Lines are JSON documents without the trailing newline; `sendLine`
 /// appends the frame delimiter.
+///
+/// `startReceiveLoop`'s `onBytesReceived` fires for every read that carried bytes, before framing.
+/// Empty lines are dropped here rather than delivered, because "a blank line is a keepalive, not a
+/// frame" is a property of this wire format and belongs in the one place that owns the framing; the
+/// alternative, handing every consumer empty lines to ignore, spreads that rule across five clients that
+/// would each have to re-learn it. Consumers that need liveness (a terminal stream carries no frames
+/// while the terminal is idle, so silence alone cannot be read as a dead transport) watch this rather
+/// than `onLine`.
 public protocol SpacesPinnedTLSLineConnection: AnyObject, Sendable {
     func sendLine(_ line: Data, timeout: TimeInterval) throws
     func readLine(timeout: TimeInterval) throws -> Data
-    func startReceiveLoop(onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void)
+    func startReceiveLoop(
+        onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+        onClosed: @escaping @Sendable ((any Error)?) -> Void)
     func cancel()
 }
 
@@ -219,7 +229,10 @@ public enum SpacesPinnedTLSConnector {
             }
         }
 
-        func startReceiveLoop(onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void) {
+        func startReceiveLoop(
+            onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+            onClosed: @escaping @Sendable ((any Error)?) -> Void
+        ) {
             stateLock.lock()
             guard !streaming, let connection else {
                 let wasStreaming = streaming
@@ -229,11 +242,12 @@ public enum SpacesPinnedTLSConnector {
             }
             streaming = true
             stateLock.unlock()
-            receiveNextStreamLine(on: connection, onLine: onLine, onClosed: onClosed)
+            receiveNextStreamLine(on: connection, onLine: onLine, onBytesReceived: onBytesReceived, onClosed: onClosed)
         }
 
         private func receiveNextStreamLine(
-            on connection: NWConnection, onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void
+            on connection: NWConnection, onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+            onClosed: @escaping @Sendable ((any Error)?) -> Void
         ) {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [self] content, _, isComplete, error in
                 if let error {
@@ -243,17 +257,19 @@ public enum SpacesPinnedTLSConnector {
                     onClosed(cancelled ? nil : SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error)))
                     return
                 }
+                let receivedBytes = !(content?.isEmpty ?? true)
                 stateLock.lock()
                 if let content, !content.isEmpty { readBuffer.append(content) }
                 var lines: [Data] = []
                 while let line = readBuffer.popLine() { if !line.isEmpty { lines.append(line) } }
                 stateLock.unlock()
+                if receivedBytes { onBytesReceived() }
                 for line in lines { onLine(line) }
                 if isComplete {
                     onClosed(nil)
                     return
                 }
-                receiveNextStreamLine(on: connection, onLine: onLine, onClosed: onClosed)
+                receiveNextStreamLine(on: connection, onLine: onLine, onBytesReceived: onBytesReceived, onClosed: onClosed)
             }
         }
     }
@@ -395,7 +411,10 @@ public enum SpacesPinnedTLSConnector {
             }
         }
 
-        func startReceiveLoop(onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void) {
+        func startReceiveLoop(
+            onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+            onClosed: @escaping @Sendable ((any Error)?) -> Void
+        ) {
             stateLock.lock()
             guard !streaming, !cancelled, socketFD >= 0 else {
                 let wasStreaming = streaming
@@ -407,10 +426,15 @@ public enum SpacesPinnedTLSConnector {
             // Streaming reads block indefinitely; cancel() unblocks them via shutdown(2).
             Self.setSocketTimeout(socketFD, seconds: 0)
             stateLock.unlock()
-            DispatchQueue.global(qos: .userInitiated).async { [self] in runReceiveLoop(onLine: onLine, onClosed: onClosed) }
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                runReceiveLoop(onLine: onLine, onBytesReceived: onBytesReceived, onClosed: onClosed)
+            }
         }
 
-        private func runReceiveLoop(onLine: @escaping @Sendable (Data) -> Void, onClosed: @escaping @Sendable ((any Error)?) -> Void) {
+        private func runReceiveLoop(
+            onLine: @escaping @Sendable (Data) -> Void, onBytesReceived: @escaping @Sendable () -> Void,
+            onClosed: @escaping @Sendable ((any Error)?) -> Void
+        ) {
             transferLock.lock()
             defer { transferLock.unlock() }
             guard let (ssl, _) = try? activeSSL() else {
@@ -423,6 +447,7 @@ public enum SpacesPinnedTLSConnector {
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
                     readBuffer.append(Data(buffer[..<Int(count)]))
+                    onBytesReceived()
                     continue
                 }
                 stateLock.lock()

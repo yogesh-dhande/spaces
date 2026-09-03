@@ -11,6 +11,10 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
     /// `.unauthorized`) instead of collapsing the rejection into an opaque `.connectionFailed`, which
     /// would look like a reachability failure and drop the code.
     case requestRejected(message: String, code: SpacesDeviceErrorCode?)
+    /// A subscription connection stayed open but delivered no bytes for longer than
+    /// `TerminalStreamLiveness.silenceTimeoutSeconds`. The daemon keepalives that rule this out for a
+    /// healthy link make the silence conclusive: the transport is gone even though the socket is not.
+    case streamStalled
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +23,7 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
         case .connectionFailed(let message): message
         case .timeout(let message): message
         case .requestRejected(let message, _): message
+        case .streamStalled: "The terminal stream stopped responding."
         }
     }
 }
@@ -312,7 +317,10 @@ enum SpacesDeviceAPIStreamEndpoint {
         guard let error else { return false }
         if let requestError = error as? SpacesDeviceAPIRequestClientError {
             switch requestError {
-            case .timeout, .emptyResponse, .connectionFailed: return true
+            // `streamStalled` belongs with the reachability failures: the daemon keepalives that a live
+            // path would carry stopped arriving on this address, so the next reconnect should be free to
+            // try a different candidate rather than settle back onto the one that went quiet.
+            case .timeout, .emptyResponse, .connectionFailed, .streamStalled: return true
             case .invalidPort, .requestRejected: return false
             }
         }
@@ -340,6 +348,14 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
     private let connectionLock = NSLock()
     private var connection: (any SpacesPinnedTLSLineConnection)?
     private var connectedHostStorage: String?
+    /// How long this stream may receive no bytes at all before it reports itself stalled. Injected only so
+    /// tests can compress the wait; production always uses `TerminalStreamLiveness.silenceTimeoutSeconds`.
+    private let silenceTimeout: TimeInterval
+    /// Uptime of the last bytes received from the daemon, keepalives included. Guarded by `connectionLock`.
+    private var lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    /// Set by whichever termination path runs first, so the silence watchdog can neither report a stream
+    /// that has already ended nor keep polling after it. Guarded by `connectionLock`.
+    private var hasFinished = false
 
     /// The candidate address this stream is pinned to, once `start()` has connected; nil before that and
     /// after `stop()`. A stream picks its host once and keeps it for the life of the connection, so an
@@ -353,11 +369,13 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
 
     public init(
         request: SpacesDeviceAPIRequest, resolver: SpacesDeviceEndpointResolver,
+        silenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds,
         onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws {
         guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
         self.request = request
         self.resolver = resolver
+        self.silenceTimeout = silenceTimeout
         self.onEvent = onEvent
         self.onDisconnect = onDisconnect
     }
@@ -377,6 +395,8 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         connectionLock.lock()
         connection = createdConnection
         connectedHostStorage = host
+        lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        hasFinished = false
         connectionLock.unlock()
         let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
         do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
@@ -387,10 +407,55 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         createdConnection.startReceiveLoop(
             onLine: { [weak self] line in
                 do { onEvent(try GhosttyRemoteSessionStateCodec.decodeLine(line)) } catch {
+                    guard self?.markFinished() ?? true else { return }
                     onDisconnect(Self.streamDecodeError(for: line, fallback: error))
                     self?.stop()
                 }
-            }, onClosed: { error in onDisconnect(error) })
+            },
+            // Keepalive lines never reach `onLine` (the transport drops empty lines), so liveness is
+            // tracked here: any byte off the wire, frame or keepalive, is proof the link is alive.
+            onBytesReceived: { [weak self] in self?.noteBytesReceived() },
+            onClosed: { [weak self] error in
+                guard self?.markFinished() ?? true else { return }
+                onDisconnect(error)
+            })
+        // Watches for the silence a dead-but-open transport produces; see `TerminalStreamLiveness`.
+        scheduleSilenceCheck(onDisconnect: onDisconnect)
+    }
+
+    private func noteBytesReceived() {
+        connectionLock.lock()
+        lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        connectionLock.unlock()
+    }
+
+    /// True for the caller that got to end this stream, false for every later one, so a stall, a decode
+    /// failure, and the receive loop's own close cannot each report a disconnect for the same stream.
+    private func markFinished() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        guard !hasFinished else { return false }
+        hasFinished = true
+        return true
+    }
+
+    private func scheduleSilenceCheck(onDisconnect: @escaping @Sendable ((any Error)?) -> Void) {
+        let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + checkInterval) { [weak self] in
+            guard let self else { return }
+            connectionLock.lock()
+            let isRunning = !hasFinished && connection != nil
+            let silentSeconds = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
+            connectionLock.unlock()
+            guard isRunning else { return }
+            guard silentSeconds >= silenceTimeout else {
+                scheduleSilenceCheck(onDisconnect: onDisconnect)
+                return
+            }
+            guard markFinished() else { return }
+            onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
+            stop()
+        }
     }
 
     public func stop() {
@@ -469,7 +534,10 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
                     }
                     self?.stop()
                 }
-            }, onClosed: { error in onDisconnect(error) })
+            },
+            // These signature and overview producers broadcast on their own timers, so silence here is a
+            // real stall the transport itself surfaces; only the terminal stream needs a liveness watch.
+            onBytesReceived: {}, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {
@@ -556,7 +624,10 @@ public final class SpacesDeviceWorkspaceDiffSignatureStreamClient: @unchecked Se
                     }
                     self?.stop()
                 }
-            }, onClosed: { error in onDisconnect(error) })
+            },
+            // These signature and overview producers broadcast on their own timers, so silence here is a
+            // real stall the transport itself surfaces; only the terminal stream needs a liveness watch.
+            onBytesReceived: {}, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {
@@ -639,7 +710,10 @@ public final class SpacesDeviceWorkspaceFileSignatureStreamClient: @unchecked Se
                     }
                     self?.stop()
                 }
-            }, onClosed: { error in onDisconnect(error) })
+            },
+            // These signature and overview producers broadcast on their own timers, so silence here is a
+            // real stall the transport itself surfaces; only the terminal stream needs a liveness watch.
+            onBytesReceived: {}, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {
@@ -710,7 +784,10 @@ public final class SpacesDeviceWorkspaceFileListSignatureStreamClient: @unchecke
                     }
                     self?.stop()
                 }
-            }, onClosed: { error in onDisconnect(error) })
+            },
+            // These signature and overview producers broadcast on their own timers, so silence here is a
+            // real stall the transport itself surfaces; only the terminal stream needs a liveness watch.
+            onBytesReceived: {}, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {

@@ -60,6 +60,26 @@
             return port
         }
 
+        /// Number of connections accepted so far, so a test can wait until its stream has actually arrived
+        /// before writing to it.
+        func acceptedConnectionCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return acceptedConnections.count
+        }
+
+        /// Writes raw bytes to every accepted connection. The server speaks no application protocol, so a
+        /// test composes the wire bytes itself: a newline-framed payload line, or the daemon's empty-line
+        /// keepalive frame.
+        func broadcast(_ data: Data) {
+            lock.lock()
+            let connections = acceptedConnections
+            lock.unlock()
+            for connection in connections {
+                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { _ in })
+            }
+        }
+
         func stop() {
             listener.cancel()
             lock.lock()

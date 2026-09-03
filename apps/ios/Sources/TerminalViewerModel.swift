@@ -1245,6 +1245,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return
         }
         writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
+        // Same rule as `handleInputSendError`: a stopping viewer, or a cancellation from any other
+        // teardown that cancels the send queue, failed this send itself. `cancelQueuedInputSends` has
+        // already cleared `composerErrorMessage`, and the draft is kept either way.
+        if isStopping || error is CancellationError { return }
         // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
         if routeInputSendRecovery(error) {
             composerErrorMessage = nil
@@ -1493,7 +1497,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func performRequestUsingInputChannel(_ request: @escaping @Sendable (SpacesDeviceAPICommandChannel) async throws -> Void) async throws {
         do { try await request(commandChannel) } catch {
-            guard Self.isTransientInputTransportError(error) else { throw error }
+            // A cancellation classifies as transient (it must never banner) but is not a transport
+            // fault, so it must not spend a channel rebuild and a retry on a send nobody still wants.
+            guard !(error is CancellationError), Self.isTransientInputTransportError(error) else { throw error }
             replaceCommandChannel()
             try await Task.sleep(for: .milliseconds(120))
             try await request(commandChannel)
@@ -1544,6 +1550,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func handleInputSendError(_ error: Error) {
+        // A stopping viewer is what cancelled this send, so whatever it failed with is the exit's own
+        // doing rather than news the user can act on.
+        guard !isStopping else { return }
         guard !Self.isTransientInputTransportError(error) else { return }
         if routeInputSendRecovery(error) { return }
         errorMessage = error.localizedDescription
@@ -2429,7 +2438,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                         "ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))"
                     )
                     if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") { return .settled }
-                    if !Self.isTransientReconnectError(error) {
+                    if !isStopping, !Self.isTransientReconnectError(error) {
                         if handleAuthenticationFailure(error) { return .settled }
                         errorMessage = error.localizedDescription
                     }
@@ -2594,6 +2603,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return true
         }
         switch error {
+        // A cancellation is always this viewer's own doing — a stop, a superseded lifecycle — so it
+        // carries nothing the user can act on.
+        case is CancellationError: return true
         // `allCandidatesUnreachable` is the same retry class as a timeout: the endpoint resolver could
         // not reach the daemon at any of its addresses this instant, which a moment later it often can
         // (a Wi-Fi handoff, a tailnet path still coming up). It must not surface as a hard error.
@@ -2618,9 +2630,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return true
         }
         switch error {
+        // A cancellation is always this viewer's own doing — a stop, a superseded lifecycle — so it
+        // carries nothing the user can act on.
+        case is CancellationError: return true
         // See `isTransientInputTransportError`: an unreachable-at-every-address failure is retryable,
         // so a reconnect attempt during a network change stays silent instead of banner-ing an error.
-        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable: return true
+        // A stalled stream (the daemon's keepalives stopped arriving) is the same kind of failure: the
+        // transport died under a connection that still looks open, and reconnecting is the whole fix.
+        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable,
+            SpacesDeviceAPIClientError.streamStalled:
+            return true
         case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")

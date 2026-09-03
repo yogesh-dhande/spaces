@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import spacesdevicecore
 import spacesruntimecore
+import spacesterminalcore
 
 @testable import spacesdeviceapi
 
@@ -1225,6 +1226,65 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
             broadcastTicks.append(tick)
         }
         #expect(broadcastTicks == [1, 10, 20])
+    }
+}
+
+/// The terminal stream's keepalive cadence, extracted onto `SpacesDeviceAPIServer` for the same reason as
+/// the diff-signature cadence above: both relay paths (Darwin's timer on the relay queue and Linux's timer
+/// against the write gate) ask this one question, and it is testable without a session, a socket, or TLS.
+@Suite struct TerminalStreamKeepaliveCadenceTests {
+    private static let interval = SpacesDeviceAPIServer.terminalStreamKeepaliveIntervalNanoseconds
+
+    @Test func aRelayThatJustWroteOwesNothing() {
+        let now: UInt64 = 1_000_000_000_000
+        #expect(
+            !SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: now, intervalNanoseconds: Self.interval))
+        #expect(
+            !SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                nowUptimeNanoseconds: now + Self.interval - 1, lastWriteUptimeNanoseconds: now, intervalNanoseconds: Self.interval))
+    }
+
+    @Test func aRelaySilentForTheWholeIntervalOwesAKeepalive() {
+        let now: UInt64 = 1_000_000_000_000
+        #expect(
+            SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                nowUptimeNanoseconds: now + Self.interval, lastWriteUptimeNanoseconds: now, intervalNanoseconds: Self.interval))
+        #expect(
+            SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                nowUptimeNanoseconds: now + 10 * Self.interval, lastWriteUptimeNanoseconds: now, intervalNanoseconds: Self.interval))
+    }
+
+    /// Drives the relay's actual loop: a check every `daemonCheckIntervalSeconds`, each write (real frame or
+    /// keepalive) resetting the clock. A terminal that paints once and then goes idle must still put bytes on
+    /// the wire on a fixed cadence, and the gap between them must stay well inside the client's timeout.
+    @Test func anIdleRelayKeepsWritingOnACadenceTheClientTimeoutTolerates() {
+        let checkIntervalNanoseconds = UInt64(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1_000_000_000)
+        var lastWrite: UInt64 = 0
+        var writeTimes: [UInt64] = []
+        // One real frame lands mid-tick, so the first keepalive gap is the worst case the cadence allows.
+        let frameTime = checkIntervalNanoseconds / 2
+        lastWrite = frameTime
+        var now = checkIntervalNanoseconds
+        while now <= 120 * 1_000_000_000 {
+            if SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
+                nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: lastWrite, intervalNanoseconds: Self.interval)
+            {
+                lastWrite = now
+                writeTimes.append(now)
+            }
+            now += checkIntervalNanoseconds
+        }
+        let gaps = zip([frameTime] + writeTimes, writeTimes).map { Double($1 - $0) / 1_000_000_000 }
+        #expect(gaps.allSatisfy { $0 >= TerminalStreamLiveness.keepaliveIntervalSeconds })
+        #expect(gaps.allSatisfy { $0 < TerminalStreamLiveness.silenceTimeoutSeconds })
+    }
+
+    /// The two constants are one contract: a client must be able to miss a keepalive (a stalled write, a
+    /// scheduling hiccup) without declaring a healthy stream dead.
+    @Test func theClientTimeoutToleratesMoreThanTwoMissedKeepalives() {
+        #expect(TerminalStreamLiveness.silenceTimeoutSeconds > 2 * TerminalStreamLiveness.keepaliveIntervalSeconds)
+        #expect(TerminalStreamLiveness.daemonCheckIntervalSeconds < TerminalStreamLiveness.keepaliveIntervalSeconds)
     }
 }
 

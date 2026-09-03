@@ -301,6 +301,113 @@
             try await waitForSubscriptionRelease(sentinelBox)
         }
 
+        /// The bug the stream keepalive exists for: the peer's transport dies without closing the socket,
+        /// so nothing arrives and nothing fails. The viewer used to keep a frozen screen indefinitely,
+        /// with keystrokes still "succeeding" on the separate request channel. Silence past the timeout
+        /// now ends the stream as `streamStalled`, and (like every other ending) releases it.
+        func testASilentConnectionStallsTheStreamAndReleasesItsSubscription() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            // Compressed from the production 40s so the suite does not wait out a real timeout; the check
+            // cadence scales with it, so this exercises the same code path at the same ratios.
+            let backend = SpacesDeviceNetworkBackend(settings: settings, streamSilenceTimeout: 1)
+
+            let sentinelBox = WeakStreamSentinelBox()
+            let receivedPayload = expectation(description: "the stream decoded a payload")
+            receivedPayload.assertForOverFulfill = false
+            let stalled = expectation(description: "the stream reported itself stalled")
+            let stallErrorBox = StreamDisconnectErrorBox()
+            let request = SpacesDeviceAPIRequest(
+                command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
+            _ = try await backend.openSessionStream(
+                request: request,
+                onEvent: makeSentinelEventCallback(recordingInto: sentinelBox, fulfilling: receivedPayload),
+                onDisconnect: { error in
+                    stallErrorBox.record(error)
+                    stalled.fulfill()
+                })
+
+            try await waitForAcceptedConnection(on: server)
+            server.broadcast(try Self.payloadLine())
+            await fulfillment(of: [receivedPayload], timeout: 10)
+
+            // Nothing more is written: the connection stays open and carries nothing, exactly like a link
+            // that died between the two peers.
+            await fulfillment(of: [stalled], timeout: 10)
+            guard case SpacesDeviceAPIClientError.streamStalled? = stallErrorBox.error() as? SpacesDeviceAPIClientError else {
+                return XCTFail("expected streamStalled, got \(String(describing: stallErrorBox.error()))")
+            }
+            try await waitForSubscriptionRelease(sentinelBox)
+        }
+
+        /// The daemon's half of the contract, from the client's side: an idle terminal produces no state
+        /// payloads for as long as the user leaves it alone, so the empty-line keepalives are the only
+        /// thing separating it from a dead link. They carry no state — the framing loop drops empty lines
+        /// before decoding — yet they must hold the stream open indefinitely.
+        func testKeepaliveFramesKeepAnIdleStreamConnected() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let backend = SpacesDeviceNetworkBackend(settings: settings, streamSilenceTimeout: 1)
+
+            let receivedPayload = expectation(description: "the stream decoded a payload")
+            receivedPayload.assertForOverFulfill = false
+            let disconnected = expectation(description: "the stream must not disconnect while keepalives arrive")
+            disconnected.isInverted = true
+            let eventCount = StreamEventCounterBox()
+            let request = SpacesDeviceAPIRequest(
+                command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
+            let handle = try await backend.openSessionStream(
+                request: request,
+                onEvent: { _ in
+                    eventCount.increment()
+                    receivedPayload.fulfill()
+                }, onDisconnect: { _ in disconnected.fulfill() })
+            defer { handle.cancel() }
+
+            try await waitForAcceptedConnection(on: server)
+            server.broadcast(try Self.payloadLine())
+            await fulfillment(of: [receivedPayload], timeout: 10)
+
+            // Three timeouts' worth of keepalives, at the cadence the daemon uses relative to its own
+            // timeout (one keepalive per third of the silence budget).
+            for _ in 0..<12 {
+                server.broadcast(TerminalStreamLiveness.keepaliveFrame)
+                try await Task.sleep(for: .milliseconds(250))
+            }
+
+            await fulfillment(of: [disconnected], timeout: 0.1)
+            XCTAssertEqual(eventCount.value(), 1, "keepalives carry no state and must never reach the viewer as payloads")
+        }
+
+        /// One newline-framed terminal state payload, as the daemon's relay would write it.
+        private static func payloadLine() throws -> Data {
+            try GhosttyRemoteSessionStateCodec.encodeLine(
+                GhosttyRemoteSessionStatePayload(
+                    sessionID: "session-1", reason: "state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
+                    sessionStateRevision: 1, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
+                    title: "zsh", workingDirectory: "/tmp", outputByteCount: 0))
+        }
+
+        /// Waits until the loopback server has the stream's connection in hand, so bytes written next
+        /// actually reach it rather than being broadcast to nobody.
+        private func waitForAcceptedConnection(on server: PinnedTLSLoopbackServer, file: StaticString = #filePath, line: UInt = #line) async throws {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, server.acceptedConnectionCount() == 0 { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertGreaterThan(server.acceptedConnectionCount(), 0, "the stream never connected", file: file, line: line)
+        }
+
         /// Builds an event callback owning a freshly created sentinel, recorded weakly in `box`. Written as
         /// a function so the only strong reference lives inside the returned callback — a strong local in
         /// the test's own frame would keep the sentinel alive no matter what the subscription does.
@@ -309,6 +416,22 @@
             box.object = sentinel
             XCTAssertNotNil(box.object, "the sentinel must be recorded before the callback escapes")
             return { _ in sentinel.noteEvent() }
+        }
+
+        /// As above, and fulfills `expectation` for every payload. Separate from the callback-only
+        /// variant for the same reason that one is a function: a test that composed the two would have to
+        /// hold the sentinel-owning callback in a local, and that local alone would keep the sentinel
+        /// alive past any release the subscription performs.
+        private func makeSentinelEventCallback(recordingInto box: WeakStreamSentinelBox, fulfilling expectation: XCTestExpectation)
+            -> @MainActor (GhosttyRemoteSessionStatePayload) -> Void
+        {
+            let sentinel = StreamLifetimeSentinel()
+            box.object = sentinel
+            XCTAssertNotNil(box.object, "the sentinel must be recorded before the callback escapes")
+            return { _ in
+                sentinel.noteEvent()
+                expectation.fulfill()
+            }
         }
 
         /// Waits for the subscription behind `box` to be released. The release happens on the stream's own
@@ -455,6 +578,27 @@
 
     /// Weak handle to a `StreamLifetimeSentinel`, so a test can observe its deallocation without holding it.
     private final class WeakStreamSentinelBox: @unchecked Sendable { weak var object: StreamLifetimeSentinel? }
+
+    /// Carries the disconnect error out of the stream's main-actor callback to the test, which reads it
+    /// from its own (non-main) frame once the expectation has been fulfilled.
+    private final class StreamDisconnectErrorBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: (any Error)?
+
+        func record(_ error: (any Error)?) { lock.withLock { stored = error } }
+
+        func error() -> (any Error)? { lock.withLock { stored } }
+    }
+
+    /// Counts payloads delivered to the viewer callback, to prove keepalives are not among them.
+    private final class StreamEventCounterBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = 0
+
+        func increment() { lock.withLock { stored += 1 } }
+
+        func value() -> Int { lock.withLock { stored } }
+    }
 
     private final class LoopbackConnectionSink: @unchecked Sendable {
         private let listener: NWListener
