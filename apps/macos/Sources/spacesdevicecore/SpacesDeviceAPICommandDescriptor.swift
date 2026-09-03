@@ -9,6 +9,12 @@ import Foundation
 /// whichever queue is already dispatching it (the shared `spaces.device.api` state queue for both
 /// transports).
 ///
+/// The three lanes that run in a user's repository, `.workspaceCreate` (`git worktree add`, including the
+/// repository's own checkout hooks), `.projectClone` (a clone from a remote), and `.projectConfigFile` (the
+/// project's `spaces.yaml` read/write plus the settings rewrite it drives), are separate lanes rather than
+/// one "project work" lane so that a clone waiting on an unresponsive remote cannot also hold up creating a
+/// workspace in an unrelated project.
+///
 /// Lives in `spacesdevicecore` (not `spacesdeviceapi`) so it can sit on `SpacesDeviceAPICommandDescriptor`
 /// alongside the command's other cross-platform metadata; `spacesdeviceapi` owns everything about how a
 /// lane actually executes (the fixed `DispatchQueue` table, the per-session/per-workspace dynamic
@@ -19,6 +25,9 @@ public enum SpacesDeviceAPICommandLane: Sendable, Equatable {
     case workspaceStop
     case workspaceSetup
     case workspaceTerminalLaunch
+    case workspaceCreate
+    case projectClone
+    case projectConfigFile
     case terminalControl
     case workspaceGit
     case mainQueue
@@ -74,16 +83,16 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "requestDaemonRestart", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .overview: return Self.descriptor(wireKey: "overview", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .createProject:
-            return Self.descriptor(wireKey: "createProject", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+            return Self.descriptor(wireKey: "createProject", lane: .projectClone, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .previewProject: return Self.descriptor(wireKey: "previewProject", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .previewGitProject:
-            return Self.descriptor(wireKey: "previewGitProject", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+            return Self.descriptor(wireKey: "previewGitProject", lane: .projectClone, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .deleteProject:
             return Self.descriptor(wireKey: "deleteProject", lane: .workspaceTeardown, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .importProject:
-            return Self.descriptor(wireKey: "importProject", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+            return Self.descriptor(wireKey: "importProject", lane: .projectConfigFile, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .exportProject:
-            return Self.descriptor(wireKey: "exportProject", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+            return Self.descriptor(wireKey: "exportProject", lane: .projectConfigFile, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .listDirectories: return Self.descriptor(wireKey: "listDirectories", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .updateProjectConfig:
             return Self.descriptor(wireKey: "updateProjectConfig", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
@@ -92,7 +101,7 @@ extension SpacesDeviceAPICommand {
         case .workspaceCreateOptions:
             return Self.descriptor(wireKey: "workspaceCreateOptions", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .createWorkspace:
-            return Self.descriptor(wireKey: "createWorkspace", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+            return Self.descriptor(wireKey: "createWorkspace", lane: .workspaceCreate, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .launchWorkspace:
             return Self.descriptor(wireKey: "launchWorkspace", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .stopWorkspace:
