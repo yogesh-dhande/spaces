@@ -20,8 +20,19 @@
         private let queue = DispatchQueue(label: "spaces.device.api.resolver-test.tls-server")
         private let lock = NSLock()
         private var acceptedConnections: [NWConnection] = []
+        /// Delays starting each accepted connection by this long before the server begins its side of
+        /// the TLS handshake. `NWListener` hands a connection to `newConnectionHandler` as soon as the
+        /// kernel accepts the underlying TCP socket, but nothing about the TLS handshake itself proceeds
+        /// until `connection.start(queue:)` runs on the server side too: the client's own `NWConnection`
+        /// sits in `.preparing` waiting on a `ServerHello` that will not arrive until then. That is the
+        /// only lever this in-process test double has to make a *connect* stage consume a controlled,
+        /// substantial share of a caller's timeout while still eventually succeeding, which is what
+        /// `SpacesDeviceEndpointResolverTests` needs to prove `sendPinnedPing` spends one end-to-end
+        /// deadline across connect, send, and read rather than a fresh budget at each stage.
+        private let acceptDelay: Duration
 
-        init() throws {
+        init(acceptDelay: Duration = .zero) throws {
+            self.acceptDelay = acceptDelay
             let identity = try PinnedTLSTestFixture.loadIdentity()
             certificateFingerprint = identity.certificateFingerprint
             let tlsOptions = NWProtocolTLS.Options()
@@ -40,10 +51,21 @@
 
         func start() async throws -> UInt16 {
             listener.newConnectionHandler = { [weak self] connection in
-                connection.start(queue: self?.queue ?? .main)
-                self?.lock.lock()
-                self?.acceptedConnections.append(connection)
-                self?.lock.unlock()
+                guard let self else { return }
+                let beginHandshake: () -> Void = {
+                    connection.start(queue: self.queue)
+                    self.lock.lock()
+                    self.acceptedConnections.append(connection)
+                    self.lock.unlock()
+                }
+                guard self.acceptDelay > .zero else {
+                    beginHandshake()
+                    return
+                }
+                Task {
+                    try? await Task.sleep(for: self.acceptDelay)
+                    self.queue.async(execute: beginHandshake)
+                }
             }
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 let resume = LoopbackConnectionSinkOneShot(continuation)

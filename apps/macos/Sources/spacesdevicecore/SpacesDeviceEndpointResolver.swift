@@ -218,11 +218,35 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// Records that a stream failed on `host`, so the next `nextStreamHost()` moves on to a different
     /// candidate. Also clears the cached winner when `host` was it, so a command-channel request racing
     /// right after does not trust the same now-suspect address either.
-    public func noteStreamFailed(host: String) {
+    ///
+    /// Returns whether every one of this device's candidate addresses has now failed a stream dial, as
+    /// of this exact insertion under this lock acquisition. A stream tries one candidate per reconnect
+    /// attempt rather than racing them (see `nextStreamHost()`), so this evidence accumulates across
+    /// successive attempts instead of resolving within a single one, unlike the racing command-channel
+    /// connect's `SpacesDeviceEndpointResolverError.allCandidatesUnreachable`. It is the specific fact
+    /// that escalates a stream outage from "still retrying" to "unreachable"
+    /// (`TerminalConnectionStageTracker.attemptEndedUnreachable()`); a device with untried candidates
+    /// left, or with only one candidate that has not yet failed, reads `false`.
+    ///
+    /// The caller must use this return value rather than querying the resolver again afterward: with one
+    /// instance shared per device across every pane's stream, another pane's `nextStreamHost()` call can
+    /// land between this insertion and a later query and self-reset the failed set (see
+    /// `nextStreamHost()`), which would silently read back `false` even though every candidate had, in
+    /// fact, just failed. The value returned here is captured atomically with the recording and cannot be
+    /// raced out from under the caller that way.
+    ///
+    /// This counts any failed `start()`, including one rejected for a pinned-certificate mismatch, as a
+    /// failed dial. That is accepted: a pin mismatch means the pairing itself is stale (the device was
+    /// re-provisioned or re-paired), which is rare, and "Device unreachable" is a tolerable label for it
+    /// since Retry is harmless there and the pairing surfaces are where the real fix (re-pairing)
+    /// happens, not this banner.
+    @discardableResult
+    public func noteStreamFailed(host: String) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
         streamFailedHosts.insert(host)
         if cachedHost == host { cachedHost = nil }
-        lock.unlock()
+        return !hosts.isEmpty && hosts.allSatisfy(streamFailedHosts.contains)
     }
 
     /// Opens one pinned-TLS connection to a specific candidate, without racing. Used by the stream

@@ -110,9 +110,33 @@ actor SpacesDeviceEndpointResolver {
     /// to a different candidate instead of retrying the one that just broke. Also clears the cached
     /// winner if `host` was it, so a command-channel request racing right after does not trust the same
     /// now-suspect address either.
-    func noteStreamFailed(host: String) {
+    ///
+    /// Returns whether every one of this device's candidate addresses has now failed a stream dial, as
+    /// of this exact insertion. A stream tries one candidate per reconnect attempt rather than racing
+    /// them (see `nextStreamHost()`), so this evidence accumulates across successive attempts instead of
+    /// resolving within a single one, unlike the racing command-channel `connect(timeout:queue:)`'s
+    /// `SpacesDeviceAPIClientError.allCandidatesUnreachable`. It is the specific fact that escalates a
+    /// stream outage from "still retrying" to "unreachable"
+    /// (`TerminalConnectionStageTracker.attemptEndedUnreachable()`); a device with untried candidates
+    /// left, or with only one candidate that has not yet failed, reads `false`.
+    ///
+    /// The caller must use this return value rather than querying the resolver again afterward: this
+    /// actor is shared per device across every pane's stream, so another pane's `nextStreamHost()` call
+    /// can land between this insertion and a later query and self-reset the failed set (see
+    /// `nextStreamHost()`), which would silently read back `false` even though every candidate had, in
+    /// fact, just failed. The value returned here is captured atomically with the recording and cannot be
+    /// raced out from under the caller that way.
+    ///
+    /// This counts any failed dial, including one rejected for a pinned-certificate mismatch, as a
+    /// failed candidate. That is accepted: a pin mismatch means the pairing itself is stale (the device
+    /// was re-provisioned or re-paired), which is rare, and "Device unreachable" is a tolerable label
+    /// for it since Retry is harmless there and the pairing surfaces are where the real fix (re-pairing)
+    /// happens, not this banner.
+    @discardableResult
+    func noteStreamFailed(host: String) -> Bool {
         streamFailedHosts.insert(host)
         if cachedHost == host { cachedHost = nil }
+        return !hosts.isEmpty && hosts.allSatisfy(streamFailedHosts.contains)
     }
 
     /// Opens a ready, pinned-TLS connection to the first candidate that answers, racing the preferred
@@ -147,8 +171,7 @@ actor SpacesDeviceEndpointResolver {
             hosts: orderedHosts, port: nwPort, certificateFingerprint: certificateFingerprint, timeout: perCandidateTimeout, queue: queue)
         {
         case .success(let host, let connection):
-            cachedHost = host
-            SpacesMobileDeviceStore.recordActiveHost(host, certificateFingerprint: certificateFingerprint)
+            recordProven(host: host)
             return ResolvedConnection(connection: connection, host: host)
         case .failure(let sawPinMismatch):
             // A pin mismatch on any candidate wins over every other candidate merely being unreachable,
@@ -166,6 +189,46 @@ actor SpacesDeviceEndpointResolver {
             // to come from one candidate (which says nothing about the others also tried).
             throw SpacesDeviceAPIClientError.allCandidatesUnreachable(hosts: orderedHosts)
         }
+    }
+
+    /// Opens a one-shot pinned-TLS connection to a single named candidate, bypassing the multi-candidate
+    /// race `connect(timeout:queue:)` runs. Used only by the input-timeout ping-corroboration probe (see
+    /// `TerminalViewerModel.startInputTimeoutCorroborationProbe`), which must ask specifically the host
+    /// the live stream already depends on whether the daemon is still reachable there: racing every
+    /// candidate again would answer a different question ("is the daemon reachable *somewhere*"), and a
+    /// probe that happened to win on a different address would misreport a live stream's own host as
+    /// unreachable when the stream's host is in fact fine, or mask a genuinely dead stream host.
+    ///
+    /// Mirrors `connect(timeout:queue:)`'s success bookkeeping (cached winner, persisted record) so a
+    /// probe that succeeds also warms the cache like any other successful connect. On failure this
+    /// throws a generic `requestFailed` rather than the underlying transport error, since `attempt(...)`
+    /// only preserves a pin-mismatch bit, not the original error. That is acceptable here because the
+    /// only thing the probe's caller distinguishes is answered vs. not.
+    func connect(host: String, timeout: Duration, queue: DispatchQueue) async throws -> NWConnection {
+        guard let portValue = UInt16(exactly: port), let nwPort = NWEndpoint.Port(rawValue: portValue) else {
+            throw SpacesDeviceAPIClientError.invalidEndpoint
+        }
+        switch await Self.attempt(host: host, port: nwPort, certificateFingerprint: certificateFingerprint, timeout: timeout, queue: queue) {
+        case .success(let winningHost, let connection):
+            recordProven(host: winningHost)
+            return connection
+        case .failure:
+            throw SpacesDeviceAPIClientError.requestFailed("Could not reach \(host).", code: nil)
+        }
+    }
+
+    /// Caches `host` as the resolver's proven winner and clears it from `streamFailedHosts`: a completed
+    /// pinned-TLS handshake here proves the address exactly as much as a stream's own successful dial
+    /// does (the pin is what validates the daemon, and it is the same pin), so a command-channel win
+    /// must be able to clear evidence a stream accumulated against the same host, or a later
+    /// `noteStreamFailed(host:)` on that host could keep returning `true` for an address a request just
+    /// proved reachable. Every successful connect, the racing multi-candidate walk and the
+    /// single-candidate probe alike, goes through here so that cannot be missed at a call site. Mirrors
+    /// the Mac resolver's `recordProven(host:)`.
+    private func recordProven(host: String) {
+        cachedHost = host
+        streamFailedHosts.remove(host)
+        SpacesMobileDeviceStore.recordActiveHost(host, certificateFingerprint: certificateFingerprint)
     }
 
     /// Outcome of racing every candidate: either the winning connection, or a failure across the whole

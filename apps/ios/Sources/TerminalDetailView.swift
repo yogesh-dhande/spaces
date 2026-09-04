@@ -42,6 +42,11 @@ struct TerminalDetailView: View {
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    /// Scale applied to the connection banner, animated up then back down on every
+    /// `model.connectionBannerPulseCount` change so an input attempt made while disconnected/reconnecting
+    /// stays visibly acknowledged. See `pulseConnectionBanner()`.
+    @State private var connectionBannerPulseScale: CGFloat = 1
     @AppStorage(TerminalFontSizeStorage.key) private var terminalFontSize: TerminalFontSize = .default
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
@@ -116,7 +121,7 @@ struct TerminalDetailView: View {
                 } else {
                     statusShell.onAppear { renderedText = "" }
                 }
-            }.overlay(alignment: .bottom) { linkPreviewBannerOverlay }
+            }.overlay(alignment: .bottom) { linkPreviewBannerOverlay }.overlay(alignment: .topTrailing) { connectionBannerOverlay }
 
             if model.isDemoMode { demoNoticeBanner }
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
@@ -171,6 +176,59 @@ struct TerminalDetailView: View {
             if let previewErrorMessage = model.linkPreviewErrorMessage { errorBanner(previewErrorMessage, onDismiss: { model.dismissLinkBanners() }) }
             if let linkNotice = model.linkNotice { noticeBanner(linkNotice, onDismiss: { model.dismissLinkBanners() }) }
         }
+    }
+
+    /// Compact single-line HUD pinned over the top-trailing corner of the terminal frame: an overlay,
+    /// never a blocking or dimming layer, so the frame underneath stays fully visible and interactive.
+    /// Absent entirely (not hidden) while `model.isConnectionBannerVisible` is false, matching
+    /// `selectionCopyPillOverlay`'s pattern so it never intercepts a stray tap while gone. Every part of
+    /// the banner except the Retry button is transparent to touches (see `connectionBanner`'s
+    /// `allowsHitTesting(false)` on its text, spinner, and capsule background), so this HStack itself
+    /// carries none of its own: a tap on the label or capsule reaches the terminal underneath in either
+    /// stage, while a tap on Retry still lands on the button (the Mac `TerminalPaneBanner` applies the
+    /// same pass-through rule).
+    @ViewBuilder private var connectionBannerOverlay: some View {
+        if model.isConnectionBannerVisible {
+            connectionBanner.padding(.top, 8).padding(.trailing, 8).transition(.opacity)
+                .onChange(of: model.connectionBannerPulseCount) { _ in pulseConnectionBanner() }
+        }
+    }
+
+    /// Stage 1 (`.reconnecting`) reads neutral (a small spinner plus "Reconnecting…"), matching the
+    /// chrome pill language used by `chromeActivityBadge`/`previewStatusBanner` elsewhere on this screen.
+    /// Stage 2 (`.unreachable`) keeps the identical pill shape but swaps the hairline border for
+    /// `Theme.statusFailed` and adds the Retry button, so the transition between stages reads as a
+    /// change in severity rather than a different control appearing. Only the Retry button takes a tap:
+    /// the text, spinner, and capsule background all opt out of hit testing so a tap anywhere else in
+    /// the banner's footprint falls through to the terminal underneath.
+    private var connectionBanner: some View {
+        let isUnreachable = model.connectionStage == .unreachable
+        return HStack(spacing: 6) {
+            if isUnreachable {
+                Text(TerminalConnectionNotice.unreachableText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1)
+                    .allowsHitTesting(false)
+                Button(TerminalConnectionNotice.retryActionTitle) { model.retryConnection() }.font(.footnote.weight(.semibold)).foregroundStyle(
+                    Theme.accent
+                ).accessibilityIdentifier("terminal.connectionBanner.retry")
+            } else {
+                ProgressView().controlSize(.mini).tint(.white.opacity(0.9)).allowsHitTesting(false)
+                Text(TerminalConnectionNotice.reconnectingText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1)
+                    .allowsHitTesting(false)
+            }
+        }.padding(.horizontal, 12).padding(.vertical, 6).background(
+            Capsule().fill(.black.opacity(0.28)).overlay(
+                Capsule().strokeBorder(isUnreachable ? Theme.statusFailed : .white.opacity(0.10), lineWidth: isUnreachable ? 1.5 : 1)
+            ).allowsHitTesting(false)
+        ).scaleEffect(connectionBannerPulseScale).accessibilityElement(children: .contain).accessibilityIdentifier("terminal.connectionBanner")
+    }
+
+    /// Scales the banner up then back down (1.0 -> 1.05 -> 1.0 over 0.1s total) so an input attempt made
+    /// while the banner is showing stays visibly acknowledged, without changing the banner's text or
+    /// shape between attempts. Skipped under Reduce Motion.
+    private func pulseConnectionBanner() {
+        guard !accessibilityReduceMotion else { return }
+        withAnimation(.easeInOut(duration: 0.05)) { connectionBannerPulseScale = 1.05 }
+        withAnimation(.easeInOut(duration: 0.05).delay(0.05)) { connectionBannerPulseScale = 1 }
     }
 
     /// The Copy pill, positioned from the current frame's shared selection. Absent whenever the frame

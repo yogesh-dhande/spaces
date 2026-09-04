@@ -201,6 +201,46 @@ import spacesterminalcore
         #expect(dialer.connections().map { $0.isCancelled() } == [false, true])
     }
 
+    /// A pinned request's `timeoutSeconds` is one end-to-end deadline for connect, send, and read
+    /// together, not a fresh budget reissued to each. A slow connect must leave a correspondingly
+    /// smaller remainder for the send that follows, rather than the send seeing the full
+    /// `timeoutSeconds` regardless of how much of it connecting already spent.
+    @Test func aSlowConnectLeavesTheSendStageLessThanTheFullTimeout() throws {
+        let dialer = ConnectionDialer()
+        // Well under the 1-second timeoutSeconds below, so the connect stage still succeeds, but large
+        // enough that a shared deadline and a fresh-per-stage budget are easy to tell apart.
+        dialer.setConnectDelay(host: "lan", 0.7)
+        let store = SpacesDeviceAPIWarmConnectionStore()
+        let resolver = Self.makeResolver(hosts: ["lan"], dialer: dialer)
+
+        let probe = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 1, warmConnections: store)
+        #expect(try probe.request(Self.request(.ping), pinnedHost: "lan").ok)
+
+        let sendTimeout = try #require(dialer.connections().first?.capturedSendTimeout())
+        // Pre-fix, this would be the full 1-second timeoutSeconds every time: the connect stage's 0.7
+        // seconds would not have touched it. Post-fix, the 0.7-second connect stage leaves at most
+        // about 0.3 seconds of the shared deadline for send.
+        #expect(sendTimeout < 0.5)
+    }
+
+    /// Unlike the pinned probe above, the raced path reissues the full `timeoutSeconds` to each stage: a
+    /// slow connect must not shrink what the send stage sees. These requests carry real payloads
+    /// (overview, state) over links that may be slow but alive, and shaving the connect time off the
+    /// read/send budget would trade a correct answer for an earlier timeout, unlike the pinned probe
+    /// which only has to decide within one budget whether an address answers at all.
+    @Test func aSlowConnectLeavesTheRacedSendStageAtTheFullTimeout() throws {
+        let dialer = ConnectionDialer()
+        dialer.setConnectDelay(host: "lan", 0.7)
+        let store = SpacesDeviceAPIWarmConnectionStore()
+        let resolver = Self.makeResolver(hosts: ["lan"], dialer: dialer)
+
+        let client = try SpacesDeviceAPIRequestClient(resolver: resolver, timeoutSeconds: 1, warmConnections: store)
+        #expect(try client.request(Self.request(.overview)).ok)
+
+        let sendTimeout = try #require(dialer.connections().first?.capturedSendTimeout())
+        #expect(sendTimeout == 1)
+    }
+
     private static func request(_ command: SpacesDeviceAPICommand) -> SpacesDeviceAPIRequest {
         SpacesDeviceAPIRequest(command: command, authToken: "token", clientApp: nil)
     }
@@ -243,6 +283,7 @@ private final class ConnectionDialer: @unchecked Sendable {
     private let lock = NSLock()
     private var dialBehaviors: [String: DialBehavior] = [:]
     private var scripts: [String: [FakeLineConnection.Answer]] = [:]
+    private var connectDelays: [String: TimeInterval] = [:]
     private var dialed: [String] = []
     private var made: [FakeLineConnection] = []
 
@@ -255,6 +296,16 @@ private final class ConnectionDialer: @unchecked Sendable {
     func setScript(host: String, _ answers: [FakeLineConnection.Answer]) {
         lock.lock()
         scripts[host] = answers
+        lock.unlock()
+    }
+
+    /// Makes the dial itself take real wall-clock time before it succeeds, standing in for a slow TLS
+    /// handshake. Exists to prove the request client's connect, send, and read stages share one
+    /// end-to-end deadline rather than each getting a fresh `timeoutSeconds` of their own: a delay here
+    /// eats into the budget the later stages see.
+    func setConnectDelay(host: String, _ delay: TimeInterval) {
+        lock.lock()
+        connectDelays[host] = delay
         lock.unlock()
     }
 
@@ -277,8 +328,10 @@ private final class ConnectionDialer: @unchecked Sendable {
         let dialCount = dialed.filter { $0 == host }.count
         let behavior = dialBehaviors[host] ?? .succeeds
         let script = scripts[host] ?? []
+        let delay = connectDelays[host] ?? 0
         lock.unlock()
 
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         if case .succeedsThenFails(let error) = behavior, dialCount > 1 { throw error }
         let connection = FakeLineConnection(script: script)
         lock.lock()
@@ -302,6 +355,7 @@ private final class FakeLineConnection: SpacesPinnedTLSLineConnection, @unchecke
     private var script: [Answer]
     private var completedRoundTrips = 0
     private var cancelled = false
+    private var sendTimeoutSeen: TimeInterval?
 
     init(script: [Answer]) { self.script = script }
 
@@ -317,7 +371,19 @@ private final class FakeLineConnection: SpacesPinnedTLSLineConnection, @unchecke
         return cancelled
     }
 
-    func sendLine(_ line: Data, timeout: TimeInterval) throws {}
+    /// The `timeout` the send stage was actually handed, so a test can tell a remaining-budget deadline
+    /// (shrunk by whatever an earlier connect stage already spent) apart from a fresh `timeoutSeconds`.
+    func capturedSendTimeout() -> TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sendTimeoutSeen
+    }
+
+    func sendLine(_ line: Data, timeout: TimeInterval) throws {
+        lock.lock()
+        sendTimeoutSeen = timeout
+        lock.unlock()
+    }
 
     func readLine(timeout: TimeInterval) throws -> Data {
         lock.lock()

@@ -590,7 +590,7 @@
 
             func openSessionStream(
                 request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-                onDisconnect: @escaping @MainActor (Error?) -> Void
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
             fileprivate func record(_ request: SpacesDeviceAPIRequest) {

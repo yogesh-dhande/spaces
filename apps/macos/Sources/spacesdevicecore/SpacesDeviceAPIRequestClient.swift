@@ -67,12 +67,30 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
         return try pinned(requestLine, host: pinnedHost)
     }
 
+    /// Time left until `deadline`, clamped so a stage that runs after an earlier one already spent the
+    /// whole budget gets none, rather than a fresh `timeoutSeconds` of its own. Throws the same timeout
+    /// error the pinned-TLS transport itself throws on an ordinary stage timeout, so a caller sees one
+    /// failure shape regardless of which stage ran out.
+    private func remainingOrTimeout(until deadline: Date) throws -> TimeInterval {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else { throw SpacesPinnedTLSConnectionError.timeout }
+        return remaining
+    }
+
     /// A request aimed at one address. It always dials its own connection: the caller is asking whether
     /// *this* candidate answers right now, which a connection parked from a race — established on
     /// whichever candidate won then — cannot answer.
+    ///
+    /// This is the one-shot link-corroboration probe: it exists only to decide, within one budget,
+    /// whether an address answers at all. So unlike `raced`, `timeoutSeconds` here is one end-to-end
+    /// deadline for the whole call rather than a budget reissued to each stage: `deadline` is captured
+    /// once at the top and every later stage (connect, send, read) is handed only what remains of it, so
+    /// an address that accepts a dial and then never answers still fails around one `timeoutSeconds`, not
+    /// the sum of however many stages the call happens to run.
     private func pinned(_ requestLine: Data, host: String) throws -> SpacesDeviceAPIResponse {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
         let connection: any SpacesPinnedTLSLineConnection
-        do { connection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
+        do { connection = try resolver.connect(host: host, timeout: remainingOrTimeout(until: deadline)) } catch {
             resolver.noteStreamFailed(host: host)
             throw error
         }
@@ -82,7 +100,12 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
         // stream needs: reporting it as a stream failure moves `nextStreamHost()` off the address
         // instead of redialing it first. Decoding sits outside this: an answer that did not decode came
         // back over a healthy connection, so it is evidence about a payload rather than about an address.
-        do { responseLine = try exchange(requestLine, on: connection) } catch {
+        do {
+            try connection.sendLine(requestLine, timeout: remainingOrTimeout(until: deadline))
+            do { responseLine = try connection.readLine(timeout: remainingOrTimeout(until: deadline)) } catch SpacesPinnedTLSConnectionError.connectionClosed {
+                throw SpacesDeviceAPIRequestClientError.emptyResponse
+            }
+        } catch {
             resolver.noteStreamFailed(host: host)
             throw error
         }
@@ -367,6 +390,22 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         return connectedHostStorage
     }
 
+    /// Whether the failed dial in `start()` was, at the moment it was recorded, evidence that every one
+    /// of this device's candidate addresses has now failed a stream dial
+    /// (`SpacesDeviceEndpointResolver.noteStreamFailed(host:)`'s return value). The owning model reads
+    /// this instead of separately querying the resolver's live failed-host set afterward: with one
+    /// resolver shared per device across every pane's stream, another pane's `nextStreamHost()` call can
+    /// land between this dial's failure and a later query and self-reset that set, which would silently
+    /// swallow real "every candidate is down" evidence. This value is captured atomically with the
+    /// recording, so it cannot be raced out from under the reader that way. False until `start()` fails;
+    /// meaningless (and left false) when `start()` succeeds or has not run yet.
+    public var lastDialExhaustedAllCandidates: Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        return lastDialExhaustedAllCandidatesStorage
+    }
+    private var lastDialExhaustedAllCandidatesStorage = false
+
     public init(
         request: SpacesDeviceAPIRequest, resolver: SpacesDeviceEndpointResolver,
         silenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds,
@@ -389,7 +428,10 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         let host = try SpacesDeviceAPIStreamEndpoint.host(resolver: resolver)
         let createdConnection: any SpacesPinnedTLSLineConnection
         do { createdConnection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
-            resolver.noteStreamFailed(host: host)
+            let exhausted = resolver.noteStreamFailed(host: host)
+            connectionLock.lock()
+            lastDialExhaustedAllCandidatesStorage = exhausted
+            connectionLock.unlock()
             throw error
         }
         connectionLock.lock()
@@ -400,7 +442,10 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         connectionLock.unlock()
         let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
         do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
-            resolver.noteStreamFailed(host: host)
+            let exhausted = resolver.noteStreamFailed(host: host)
+            connectionLock.lock()
+            lastDialExhaustedAllCandidatesStorage = exhausted
+            connectionLock.unlock()
             throw error
         }
         let onEvent = onEvent

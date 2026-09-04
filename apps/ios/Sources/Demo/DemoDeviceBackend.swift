@@ -50,11 +50,13 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
 
     nonisolated func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
+        onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         guard case .subscribe(let subscription) = request.command else { throw DemoRecordingLibraryError.recordingMissing(sessionID: "unknown") }
         let sessionID = subscription.sessionID
-        let lifecycle = DemoStreamLifecycle(onDisconnect: onDisconnect)
+        // Demo Mode has no dial to exhaust, so every disconnect this backend reports carries the
+        // struct's default `dialExhaustedAllCandidates: false`.
+        let lifecycle = DemoStreamLifecycle(onDisconnect: { error in onDisconnect(SpacesDeviceAPIStreamDisconnect(error: error)) })
         let task = Task {
             let payload = await recordedPayload(forSessionID: sessionID)
             guard !Task.isCancelled else { return }
