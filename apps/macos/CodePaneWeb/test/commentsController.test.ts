@@ -2579,6 +2579,98 @@ describe("CommentsController — round-16 Fix 3: a blur auto-discard and a click
   });
 });
 
+describe("CommentsController — a Delete click reaching a draft the blur auto-discard already settled must not RPC", () => {
+  /** Unlike the round-16 Fix 3 coalescing above (which catches a click landing while the blur's
+   *  delete run is still IN FLIGHT), a provisional's blur delete resolves synchronously — nothing to
+   *  await — so `pendingDeleteById` is already empty by the time a press-gate-deferred click
+   *  (`pointerPressActive`'s `setTimeout(0)`, see `renderCard`'s doc comment) reaches `deleteDraft`.
+   *  That click starts a fresh `doDeleteDraft` run for an id that is no longer provisional and no
+   *  longer in `this.drafts` — the guard under test here is what stops that from falling through to
+   *  `reviewCommentDelete` and surfacing a spurious "was not found" banner. */
+  function setup() {
+    const bridge = makeBridge();
+    const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
+    const diffViewFake = makeFakeDiffView();
+    controller.attachDiffView(diffViewFake.fake);
+    controller.setFiles([FILE]);
+    const container = document.createElement("div");
+    controller.mount(container);
+    return { bridge, controller, diffViewFake, container };
+  }
+
+  it("blurring an empty provisional card, then clicking its still-mounted Delete button, issues no RPC and shows no banner", async () => {
+    const { bridge, controller, diffViewFake, container } = setup();
+    controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
+    const draft = firstAnchoredComment(diffViewFake);
+
+    const card = controller.hooks.renderCard({ comment: draft, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+    textarea.dispatchEvent(new Event("blur")); // empty body: deleteDraft(id, true) — the provisional branch, synchronous, no RPC
+
+    // The real bug's press gate defers the click's own handler with `setTimeout(0)` (see
+    // `pointerPressActive`'s doc comment), which lands after blur's fire-and-forget delete has
+    // fully settled — including `deleteDraft`'s `finally` clearing `pendingDeleteById` — not while
+    // it is still in flight. Without this wait, the click would land in the SAME tick as the blur
+    // and get caught by round-16 Fix 3's in-flight coalescing instead, masking the bug this test
+    // exists to catch.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    deleteBtn.click(); // press-gate-deferred click on the still-mounted card, for the now-gone id
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex");
+    expect(controller.collectStateForFlush()).toBeNull(); // no drafts left at all
+  });
+
+  it("clicking Delete on a persisted card whose blur auto-discard already completed (RPC and all) issues no second RPC and shows no banner", async () => {
+    const { bridge, controller, container } = setup();
+    const created = await bridge.reviewCommentUpsert({
+      filePath: "src/foo.ts",
+      side: "new",
+      lineNumber: 1,
+      lineText: "const x = compute();",
+      body: "existing comment",
+    });
+    await controller.loadInitial(); // seeds this.drafts with the persisted row
+
+    const card = controller.hooks.renderCard({ comment: created, position: { lineNumber: 1, outdated: false } });
+    const textarea = card.querySelector("textarea")!;
+    const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
+
+    // Clearing a persisted card's body and blurring fires deleteDraft(id, true) — unlike a
+    // provisional's synchronous local-only branch, a persisted draft's auto-discard runs a real
+    // `reviewCommentDelete` RPC. Let it run to completion (nothing held) before the click lands, the
+    // same as a press-gate `setTimeout(0)` deferring the click past the delete's own natural
+    // completion rather than past an explicitly held-open one (round-16 Fix 3's coalescing tests
+    // above hold the RPC open so the click's `pendingDeleteById` lookup still finds it in flight —
+    // this test instead lets it fully settle first, closing that coalescing window).
+    textarea.value = "";
+    textarea.dispatchEvent(new Event("input"));
+    textarea.dispatchEvent(new Event("blur"));
+    // `bridge.drafts.delete(id)` inside the mocked RPC lands synchronously with the call itself, so
+    // `vi.waitFor`'s FIRST synchronous check of that flag would already pass before `doDeleteDraft`'s
+    // own continuation (local `this.drafts` cleanup) or `deleteDraft`'s `finally` (clearing
+    // `pendingDeleteById`) have had a chance to run — those need a few more microtask hops. A
+    // macrotask tick guarantees the whole microtask chain, finally block included, has drained.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.drafts.has(created.id)).toBe(false); // the auto-discard's RPC has fully landed
+
+    const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
+    deleteBtn.click(); // reaches the still-mounted (stale) card for an id already fully deleted
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    const banner = container.querySelector(".banner") as HTMLElement;
+    expect(banner.style.display).not.toBe("flex");
+    expect(controller.collectStateForFlush()).toBeNull();
+  });
+});
+
 describe("CommentsController — round-17 Fix 3: a delete registered under a provisional id follows a persist's re-key to the server id", () => {
   function setup() {
     const bridge = makeBridge();
@@ -2675,12 +2767,20 @@ describe("CommentsController — round-17 Fix 3: a delete registered under a pro
     });
     expect(deleteSpy).toHaveBeenCalledTimes(1); // both coalesced calls still share the one failed RPC
 
-    // A third, independent delete for the same row must not reuse run 1's dead, already-settled entry.
+    // A third, independent delete for the same row must not reuse run 1's dead, already-settled
+    // entry — if it did, `deleteDraft`'s `existing` lookup would return that already-rejected
+    // promise directly, propagating an unhandled rejection instead of starting a fresh run. It does
+    // start fresh here (proven by not throwing), but that fresh run now lands on the same-id-gone
+    // guard `doDeleteDraft` runs first: `reconcileMirrorAfterRejection` above already confirmed via
+    // relist that this row is gone from `this.drafts`, so the fresh run cleans up locally and skips
+    // the RPC entirely rather than asking the daemon to delete a row it's already been told doesn't
+    // exist.
     const thirdCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
     const thirdDeleteBtn = [...thirdCard.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     thirdDeleteBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    await vi.waitFor(() => expect(deleteSpy).toHaveBeenCalledTimes(2)); // a fresh RPC was issued, not coalesced onto the dead run
+    expect(deleteSpy).toHaveBeenCalledTimes(1); // no second RPC — the row is already known gone
   });
 });
 

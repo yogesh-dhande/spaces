@@ -28,8 +28,8 @@ never requires node — only editing this web bundle does, which then requires r
 
 `npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) instead of the real
 WKWebView bridge, seeded with a realistic fixture diff (`src/bridge/fixtures.ts`: a modified
-file, a rename, an addition, a deletion, an untracked file, and a binary file). A floating
-"Simulate remote change" button
+file, a rename, an addition, a deletion, an untracked file, a binary file, and a submodule
+gitlink entry). A floating "Simulate remote change" button
 (`src/dev/harnessControls.ts`) fires a `spaces:diffSignature` event so the live-refresh path
 (preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. The
 harness controls and the mock bridge/fixtures are dev-only: `src/bridge/index.ts` dynamically
@@ -44,10 +44,14 @@ production build.
   requested `DiffScope`, plus its `manifestID` and `scopeSignature`. The initial page creates the
   manifest; later pages echo its id and semantic file-index cursor until no next cursor remains. The
   manifest freezes the file enumeration and comparison plan for one refresh; it does not contain patch bytes.
+  A manifest entry's `isSubmodule` flags a git submodule (gitlink) change.
 - `workspaceDiffFileChunk(scope, {manifestID, relativePath, byteOffset, transferID?})` — one bounded
   raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
   later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
-  transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers.
+  transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers. A binary or
+  submodule entry sends no patch bytes at all: its `file` metadata (`isBinary`, or `submodule` with
+  the pointer commits, dirty flag, and unmerged flag) arrives on the first reply and the transfer
+  completes there.
 - `workspaceFileRead(path, purpose, comparison?)` — content, `sha256`, size. `editor` makes the
   native host's single file-signature watcher follow the standalone editor; `inlineDiff` does not
   retarget that watcher. An inline-diff request with an immutable `comparison.baseRevision` also
@@ -174,7 +178,12 @@ complete `workspaceDiffManifestChunk` metadata sequence paints the sidebar and q
 then arrive through per-file `workspaceDiffFileChunk` transfers: one file streams at a time in
 bounded 4 MiB chunks, the selected queued file can be promoted, and incoming UTF-8 bytes are
 decoded incrementally. A binary entry has an explicit non-commentable placeholder; textual
-patches have no daemon truncation or aggregate UI cap. Untracked files render as additions with
+patches have no daemon truncation or aggregate UI cap. A submodule (gitlink) entry renders the
+same way: a read-only pointer row naming its old/new commit shas (and whether the submodule's own
+worktree was dirty, or its pointer was left unresolved by a conflicting merge), with no gutter,
+comments, or edit affordance; the Changes list marks it with
+a "submodule" badge instead of a +/- stat, and selecting it in Editor mode is a no-op rather than
+opening it (it names a directory, not a file). Untracked files render as additions with
 no old side. Scope/signature refreshes release the old manifest and replace it with a new
 metadata-first generation while preserving the relevant selection and scroll context.
 

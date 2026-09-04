@@ -1215,10 +1215,14 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
     /// The immutable target revision that owns `path`, when this file came from a tracked revision-to-revision diff.
     /// A client can use it to read the post-change file without consulting the mutable working tree.
     public let targetRevision: String?
+    /// Set instead of a text patch when `path` is a submodule pointer (a gitlink, not file content) — see
+    /// `SpacesDeviceWorkspaceDiffSubmoduleChange`. Mirrors `isBinary`: mutually exclusive with a streamed
+    /// patch body.
+    public let submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
 
     public init(
         path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, isBinary: Bool = false, oldSHA: String? = nil,
-        newSHA: String? = nil, targetRevision: String? = nil
+        newSHA: String? = nil, targetRevision: String? = nil, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
@@ -1227,6 +1231,7 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
         self.oldSHA = oldSHA
         self.newSHA = newSHA
         self.targetRevision = targetRevision
+        self.submodule = submodule
     }
 }
 
@@ -1238,12 +1243,35 @@ public struct SpacesDeviceWorkspaceDiffManifestFile: Codable, Sendable, Equatabl
     public let status: SpacesDeviceWorkspaceDiffFileStatus
     /// Immutable old-side tree for on-demand Git-filtered inline-edit hydration.
     public let comparisonBaseRevision: String?
+    /// True when `path` is a submodule pointer (a gitlink, not file content), so the client can render it
+    /// as a read-only submodule summary from the manifest alone, before its metadata-only patch chunk
+    /// arrives.
+    public let isSubmodule: Bool
 
-    public init(path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, comparisonBaseRevision: String? = nil) {
+    public init(
+        path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, comparisonBaseRevision: String? = nil,
+        isSubmodule: Bool = false
+    ) {
         self.path = path
         self.oldPath = oldPath
         self.status = status
         self.comparisonBaseRevision = comparisonBaseRevision
+        self.isSubmodule = isSubmodule
+    }
+
+    private enum CodingKeys: String, CodingKey { case path, oldPath, status, comparisonBaseRevision, isSubmodule }
+
+    /// Custom decode so an older-shaped chunk that omits `isSubmodule` (rather than sending it explicitly)
+    /// still decodes correctly: absent `isSubmodule` decodes as `false`, matching `init`'s default. Encode
+    /// stays the compiler-synthesized `Encodable` (always emits the field); only decode needs to be
+    /// tolerant.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        oldPath = try container.decodeIfPresent(String.self, forKey: .oldPath)
+        status = try container.decode(SpacesDeviceWorkspaceDiffFileStatus.self, forKey: .status)
+        comparisonBaseRevision = try container.decodeIfPresent(String.self, forKey: .comparisonBaseRevision)
+        isSubmodule = try container.decodeIfPresent(Bool.self, forKey: .isSubmodule) ?? false
     }
 }
 

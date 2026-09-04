@@ -184,6 +184,10 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         let isBinary: Bool
         let oldSHA: String?
         let newSHA: String?
+        /// Mirrors the manifest chunk's `isSubmodule` (derived from the plan, before any patch is fetched).
+        let isSubmodule: Bool
+        /// Mirrors the patch chunk's `submodule` metadata (derived from the fetched patch text).
+        let submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
     }
 
     private struct DiffResult {
@@ -229,11 +233,15 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
             else { return nil }
             // Match the chunk contract: a refused/non-produced body has no payload, not an empty text
             // patch. This is distinct from a generated patch whose textual contents happen to be empty.
+            // A submodule pointer is metadata-only exactly like a binary file — see the server's patch
+            // chunk guard (`transfer.file.submodule == nil`) that this ternary mirrors.
             let patch =
-                transfer.file.isBinary || transfer.patchByteCount == 0 ? nil : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
+                transfer.file.isBinary || transfer.file.submodule != nil || transfer.patchByteCount == 0
+                ? nil : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
             return DiffFile(
                 path: transfer.file.path, oldPath: transfer.file.oldPath, status: transfer.file.status, patch: patch,
-                isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA)
+                isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA, isSubmodule: plan.isSubmodule,
+                submodule: transfer.file.submodule)
         }
         return DiffResult(scopeSignature: snapshot.scopeSignature, files: files)
     }
@@ -499,6 +507,486 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         #expect(file.patch?.contains("yyyy") == true)
     }
 
+    // A modified regular file and a staged rename-with-score (`Rnnn`, not the bare `R100` a pure
+    // no-content-change rename would produce) are the two non-gitlink shapes `--raw -z` reports; both
+    // sides of the `:<srcmode> <dstmode> ...` header are ordinary file modes here, so neither must be
+    // flagged as a submodule pointer. The gitlink-flagged shapes (added/modified) are covered by the
+    // submodule-specific tests below, each of which asserts `isSubmodule == true` on its own gitlink entry.
+    @Test func rawDiffParsingLeavesRegularFileEntriesUnflaggedAsSubmodules() throws {
+        let repo = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+
+        try "line1\nline2\nline3\nline4\nline5\n".write(to: repo.appendingPathComponent("MULTI.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "MULTI.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add multi"], cwd: repo.path)
+
+        try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+        try FileManager.default.moveItem(at: repo.appendingPathComponent("MULTI.md"), to: repo.appendingPathComponent("RENAMED.md"))
+        try "line1\nline2\nline3\nline4\nline5\nline6\n".write(to: repo.appendingPathComponent("RENAMED.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "-A"], cwd: repo.path)
+
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+        let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
+
+        let modified = try #require(byPath["README.md"])
+        #expect(modified.status == .modified)
+        #expect(modified.isSubmodule == false)
+        #expect(modified.submodule == nil)
+
+        let renamed = try #require(byPath["RENAMED.md"])
+        #expect(renamed.status == .renamed)
+        #expect(renamed.oldPath == "MULTI.md")
+        #expect(renamed.isSubmodule == false)
+        #expect(renamed.submodule == nil)
+    }
+
+    // `git status --untracked-files=all` still reports a wholly untracked, un-`submodule add`ed nested
+    // git repository as one collapsed `?? dir/` record (see `scopeSnapshot`'s untracked-path filter) —
+    // there is no product representation for "an entire nested repository, untracked", so it must not
+    // appear in the diff at all, gitlink or otherwise.
+    @Test func anUntrackedNestedGitRepositoryDoesNotAppearInTheDiff() throws {
+        let repo = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let nested = repo.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: nested.path)
+        try "hi".write(to: nested.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "f.txt"], cwd: nested.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested initial"], cwd: nested.path)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try buildDiff(workspaceDir: repo.path, refName: nil, gitClient: client)
+
+        #expect(!result.files.contains { $0.path.hasPrefix("nested") })
+    }
+
+    // `submodule add` records the submodule's clone-time `HEAD` as the gitlink's pointer; the commit that
+    // adds it has no prior pointer to compare against.
+    @Test func submoduleAddedInTheLastCommitReportsNoOldCommit() throws {
+        let (superRoot, _, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, lastCommit: true, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .added)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == nil)
+        #expect(change.newCommit == subrepoSHA1)
+        #expect(change.dirty == false)
+
+        // `.gitmodules` is an ordinary tracked text file alongside the gitlink, not itself a pointer.
+        let gitmodules = try #require(result.files.first { $0.path == ".gitmodules" })
+        #expect(gitmodules.isSubmodule == false)
+        #expect(gitmodules.submodule == nil)
+    }
+
+    // Replacing a submodule with a regular file at the same path is a git type change (`T`, modes
+    // `160000` -> `100644`). Only one side is a gitlink, so the entry stays an ordinary text patch that
+    // shows the file's content instead of a pointer row that would hide it.
+    @Test func submoduleReplacedByARegularFileIsListedAsAnOrdinaryTextPatch() throws {
+        let (superRoot, _, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try runGit(["rm", "-q", "sub"], cwd: superRoot.path)
+        try "vendored content\n".write(to: superRoot.appendingPathComponent("sub"), atomically: true, encoding: .utf8)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.isSubmodule == false)
+        #expect(sub.submodule == nil)
+        let patch = try #require(sub.patch)
+        #expect(patch.contains("+vendored content"))
+    }
+
+    // The reverse type change: a regular file replaced by a submodule at the same path (`T`, modes
+    // `100644` -> `160000`). The destination side is the gitlink here, so this lands on the same pointer
+    // row as an ordinary submodule add, not a text patch the Editor would try to read as a directory.
+    // `baseCommit` is nil because the source side is a blob, not a commit; the patch's lone
+    // `+Subproject commit` line supplies the new commit.
+    @Test func aRegularFileReplacedByASubmoduleIsListedAsAPointerRow() throws {
+        let (superRoot, subrepo, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try "vendored content\n".write(to: superRoot.appendingPathComponent("vendored"), atomically: true, encoding: .utf8)
+        try runGit(["add", "vendored"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add vendored file"], cwd: superRoot.path)
+
+        try runGit(["rm", "-q", "vendored"], cwd: superRoot.path)
+        try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", subrepo.path, "vendored"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let vendored = try #require(result.files.first { $0.path == "vendored" })
+        #expect(vendored.status == .modified)
+        #expect(vendored.isSubmodule == true)
+        #expect(vendored.patch == nil)
+        let change = try #require(vendored.submodule)
+        #expect(change.oldCommit == nil)
+        #expect(change.newCommit == subrepoSHA1)
+        #expect(change.dirty == false)
+    }
+
+    // A submodule renamed without moving its pointer (`git mv sub renamed-sub`, nothing else changed) is a
+    // pure rename: git's raw listing reports `R100`, but the per-file patch carries NO `Subproject commit`
+    // lines at all — confirmed empirically, `--submodule=short` only prints those lines when the pointer
+    // itself changed. The patch alone can therefore never supply either commit id for this case;
+    // `parsePatchMetadata` falls back to `--raw`'s base-side commit (`Gitlink.baseCommit`, always real
+    // except for an add) and reports it on both sides, since `R100` means the pointer is unchanged.
+    @Test func submoduleRenamedWithoutMovingItsPointerKeepsBothCommitIds() throws {
+        let (superRoot, _, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try runGit(["mv", "sub", "renamed-sub"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "renamed-sub" })
+        #expect(sub.status == .renamed)
+        #expect(sub.oldPath == "sub")
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA1)
+        #expect(change.dirty == false)
+    }
+
+    // The submodule's own worktree can be dirty (edited, uncommitted) without its checked-out commit ever
+    // moving away from the pointer recorded in the superproject's `HEAD`. Verified empirically: git's raw
+    // listing reports identical src/dst gitlink shas in this case, and the patch's `+Subproject commit`
+    // line alone carries the `-dirty` suffix — there is no `index` line at all, which is why
+    // `parsePatchMetadata` must gate submodule parsing on the plan's `gitlink` value (known from `--raw`
+    // before the patch is even fetched) rather than sniffing for an `index` line as the binary/text path does.
+    @Test func submoduleDirtyWorktreeWithNoPointerBumpReportsTheSameOldAndNewCommit() throws {
+        let (superRoot, _, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try "sub v1 - dirty edit".write(to: superRoot.appendingPathComponent("sub/FILE.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .modified)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA1)
+        #expect(change.dirty == true)
+        // Pins the default: an ordinary dirty-but-unmoved pointer is not a merge conflict.
+        #expect(change.unmerged == false)
+    }
+
+    // An unstaged pointer move (`git checkout <sha>` inside the submodule, with no `git add sub` in the
+    // superproject) is the case `--raw`'s own object ids cannot represent: verified empirically, the raw
+    // destination-side id comes back all zeros, identical to an absent side, which is why this engine never
+    // reads it for a gitlink. The patch's `Subproject commit` lines report the real old/new commits
+    // correctly regardless of whether the bump was staged, so `dirty == false` and both endpoints resolve.
+    @Test func submoduleCheckedOutAtAnotherCommitWithoutStagingReportsBothCommits() throws {
+        let (superRoot, subrepo, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let subrepoSHA2 = try commitSecondSubrepoRevision(subrepo: subrepo)
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before the second source commit existed; fetch it in before switching.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .modified)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA2)
+        #expect(change.dirty == false)
+    }
+
+    // The top-level submodule directory's own size/mtime/mode do not move when a checkout only rewrites
+    // files below a nested directory, and the porcelain letter stays ` M`, so `scopeSignature` must carry
+    // the submodule's worktree pointer itself, not just the directory's stat.
+    @Test func scopeSignatureChangesWhenASubmoduleCheckoutMovesToACommitThatOnlyTouchesNestedFiles() throws {
+        let (superRoot, subrepo, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try FileManager.default.createDirectory(at: subrepo.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try "deep v2".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v2"], cwd: subrepo.path)
+        let subrepoSHA2 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try "deep v3".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v3"], cwd: subrepo.path)
+        let subrepoSHA3 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before these source commits existed; fetch them in before switching.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        try runGit(["checkout", "-q", subrepoSHA3], cwd: subCheckout.path)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
+    // The dirty marker on the pointer row comes from the submodule's own worktree state, which the
+    // superproject's directory stat cannot see: an edit to a file nested inside an already pointer-bumped
+    // submodule checkout changes neither the `sub` directory's size/mtime/mode nor its porcelain letter.
+    @Test func scopeSignatureChangesWhenAFileNestedInsideASubmoduleIsEdited() throws {
+        let (superRoot, subrepo, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try FileManager.default.createDirectory(at: subrepo.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try "deep v2".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v2"], cwd: subrepo.path)
+        let subrepoSHA2 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before this source commit existed; fetch it in before switching. This
+        // leaves the pointer differing from the recorded one, so the row is `Submodule <sha1> -> <sha2>`.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        // An uncommitted edit inside the submodule, which turns the row's `(dirty)` suffix on.
+        try "deep edited".write(to: subCheckout.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
+    // With the pointer staged both times, porcelain reads `M  sub` before and after, the directory stat
+    // does not move, and an index-to-worktree diff is empty both times (the worktree pointer equals the
+    // staged pointer in both snapshots). Only a HEAD-to-worktree diff sees the pointer change, which is why
+    // `scopeSnapshot` names `headSHA` as the revision rather than leaving the comparison at git's default.
+    @Test func scopeSignatureChangesWhenAStagedSubmodulePointerIsRestagedAtAnotherCommit() throws {
+        let (superRoot, subrepo, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try FileManager.default.createDirectory(at: subrepo.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try "deep v2".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v2"], cwd: subrepo.path)
+        let subrepoSHA2 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try "deep v3".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v3"], cwd: subrepo.path)
+        let subrepoSHA3 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before these source commits existed; fetch them in before switching.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        try runGit(["checkout", "-q", subrepoSHA3], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
+    // The unborn-HEAD variant of the restaging case: a superproject with no commits yet, whose submodule is
+    // staged (`A  sub`) and then restaged at another commit. There is no HEAD to diff against, and an
+    // index-to-worktree diff is empty both times, so `scopeSnapshot` must compare against the empty tree,
+    // the same base the plan builder renders that state against (`Submodule added <sha>`).
+    @Test func scopeSignatureChangesWhenASubmoduleStagedInAnUnbornRepoIsRestagedAtAnotherCommit() throws {
+        let (committedSuperRoot, subrepo, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: committedSuperRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try FileManager.default.createDirectory(at: subrepo.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try "deep v2".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v2"], cwd: subrepo.path)
+        let subrepoSHA2 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try "deep v3".write(to: subrepo.appendingPathComponent("nested/deep.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "nested/deep.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "nested v3"], cwd: subrepo.path)
+        let subrepoSHA3 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let unbornRoot = committedSuperRoot.deletingLastPathComponent().appendingPathComponent("unborn-super", isDirectory: true)
+        try FileManager.default.createDirectory(at: unbornRoot, withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: unbornRoot.path)
+        try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", subrepo.path, "sub"], cwd: unbornRoot.path)
+        let subCheckout = unbornRoot.appendingPathComponent("sub")
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: unbornRoot.path)
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: unbornRoot.path, gitClient: client)
+        try runGit(["checkout", "-q", subrepoSHA3], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: unbornRoot.path)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: unbornRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
+    // A rename combined with a dirty (but not moved) submodule worktree: `git mv sub renamed-sub` followed
+    // by an uncommitted edit inside the renamed checkout. Git's raw listing still reports `R100`, but this
+    // time the patch DOES carry `Subproject commit` lines — confirmed empirically, only a pointer-preserving
+    // rename with a CLEAN worktree omits them — so the real commits and the dirty flag come from the patch,
+    // not from the rename fallback in `submoduleRenamedWithoutMovingItsPointerKeepsBothCommitIds` above.
+    @Test func submoduleRenamedWithADirtyWorktreeReportsDirty() throws {
+        let (superRoot, _, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try runGit(["mv", "sub", "renamed-sub"], cwd: superRoot.path)
+        try "renamed sub - dirty edit".write(
+            to: superRoot.appendingPathComponent("renamed-sub/FILE.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "renamed-sub" })
+        #expect(sub.status == .renamed)
+        #expect(sub.oldPath == "sub")
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA1)
+        #expect(change.dirty == true)
+    }
+
+    // A pointer bump (staged, via `git add sub` inside the superproject) with further uncommitted edits on
+    // top of the newly checked-out commit reports both endpoints plus `dirty`: the old side is the clean
+    // pointer recorded in `HEAD` (never dirty — it is a fixed commit id, not a worktree), the new side is
+    // the submodule's current checkout with its own `-dirty` suffix.
+    @Test func submodulePointerBumpedAndDirtyInTheUncommittedScopeReportsBothCommitsAndDirty() throws {
+        let (superRoot, subrepo, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let subrepoSHA2 = try commitSecondSubrepoRevision(subrepo: subrepo)
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before the second source commit existed; fetch it in before switching.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        try "sub v2 - dirty edit".write(to: subCheckout.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .modified)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA2)
+        #expect(change.dirty == true)
+    }
+
+    // Once the pointer bump is itself committed in the superproject, the `lastCommit` scope reports it as
+    // an ordinary committed change: both endpoints set, `dirty == false` (the submodule worktree at commit
+    // time was clean — nothing uncommitted survives into a commit).
+    @Test func submodulePointerBumpCommittedIsReportedInTheLastCommitScope() throws {
+        let (superRoot, subrepo, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let subrepoSHA2 = try commitSecondSubrepoRevision(subrepo: subrepo)
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // The checkout was cloned before the second source commit existed; fetch it in before switching.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump submodule"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, lastCommit: true, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .modified)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA2)
+        #expect(change.dirty == false)
+    }
+
+    // A conflicting merge of two superproject branches that each bump the same submodule pointer to
+    // DIVERGING subrepo commits (siblings, neither a fast-forward of the other) leaves `sub` in git's
+    // unresolved-conflict index state (`git status` reports `UU sub`). Verified empirically: the raw
+    // listing's destination side comes back all zeros for this case (exactly like an unstaged pointer
+    // move), and the per-file patch is EMPTY (exactly like a pointer-preserving rename's, see `Gitlink`'s
+    // doc comment). Without `unmerged`, `submoduleChange`'s rename fallback would misreport this as an
+    // unchanged pointer, hiding the conflict from the Editor entirely.
+    @Test func submodulePointerLeftUnmergedByAConflictingMergeIsReportedUnmerged() throws {
+        let (superRoot, subrepo, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        // Two diverging children of S1 in the standalone subrepo: S2 on a side branch, S3 back on main.
+        try runGit(["checkout", "-q", "-b", "b2"], cwd: subrepo.path)
+        try "sub v2 on b2".write(to: subrepo.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "FILE.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "sub v2 on b2"], cwd: subrepo.path)
+        let subrepoSHA2 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try runGit(["checkout", "-q", "main"], cwd: subrepo.path)
+        try "sub v3 on main".write(to: subrepo.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "FILE.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "sub v3 on main"], cwd: subrepo.path)
+        let subrepoSHA3 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        // One fetch of the local "origin" (the standalone subrepo) brings in both new commits, since they
+        // sit on two different branches there.
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+
+        // Superproject branch "left" bumps the pointer to S2.
+        try runGit(["checkout", "-q", "-b", "left"], cwd: superRoot.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        try runGit(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump sub to S2 on left"], cwd: superRoot.path)
+
+        // "main" bumps the same pointer to the diverging S3 instead.
+        try runGit(["checkout", "-q", "main"], cwd: superRoot.path)
+        try runGit(["checkout", "-q", subrepoSHA3], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        try runGit(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump sub to S3 on main"], cwd: superRoot.path)
+
+        // Neither side is an ancestor of the other, so git cannot resolve the gitlink on its own: the
+        // merge is expected to stop with a conflict, not to succeed.
+        let mergeStatus = try runGitAllowingFailure(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"],
+            cwd: superRoot.path)
+        #expect(mergeStatus != 0)
+        let status = try runGit(["status", "--porcelain"], cwd: superRoot.path)
+        #expect(status.contains("UU sub"))
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let sub = try #require(result.files.first { $0.path == "sub" })
+        #expect(sub.status == .modified)
+        #expect(sub.isSubmodule == true)
+        #expect(sub.patch == nil)
+        let change = try #require(sub.submodule)
+        #expect(change.unmerged == true)
+        // HEAD (still "main", since the failed merge never committed) has sub at S3; that is the pointer
+        // the worktree currently holds and what the fallback reports on both sides.
+        #expect(change.oldCommit == subrepoSHA3)
+        #expect(change.newCommit == subrepoSHA3)
+        #expect(change.dirty == false)
+    }
+
     // Round-9 fix 3: `buildDiff` now tracks a 45s request-wide deadline (`diffBuildDeadline`) alongside the
     // existing per-file/total-byte caps, reusing the same `truncated` shape once elapsed time crosses it.
     // There is no seam to inject a shorter deadline without adding test-only surface area to the engine's
@@ -511,7 +999,7 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
     // Round-12: the per-loop-iteration check is now `remainingTimeout(start:)` itself (via `try?`), which
     // both re-checks the deadline and computes the shrunk-to-the-remaining-budget timeout that `buildFile`/
     // `buildUntrackedFile` pass into their own git captures — round 10 only threaded the budget into
-    // `buildDiff`'s up-front commands (merge-base, name-status, the untracked status scan); round 12 extends
+    // `buildDiff`'s up-front commands (merge-base, the raw diff listing, the untracked status scan); round 12 extends
     // the same threading to each file's own patch capture, so a file whose git only starts near the end of
     // the 45s budget gets a correspondingly shrunk timeout instead of a fresh flat 30s. Same seam problem as
     // rounds 9/10 applies here too: proving a per-file capture actually receives a shrunk timeout requires
@@ -827,9 +1315,9 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
     }
 
     // The signature/status snapshot is intentionally reused by buildDiff. Model an agent staging an
-    // untracked file immediately before the later name-status command: the newer enumeration reports the
+    // untracked file immediately before the later raw diff listing: the newer enumeration reports the
     // file as tracked while the older snapshot still says `??`, but the response must keep one identity.
-    @Test func aFileStagedBetweenStatusAndNameStatusIsNotReturnedTwice() throws {
+    @Test func aFileStagedBetweenStatusAndRawListingIsNotReturnedTwice() throws {
         let repo = try makeRepo()
         defer { try? FileManager.default.removeItem(at: repo) }
         try "raced content\n".write(to: repo.appendingPathComponent("raced.txt"), atomically: true, encoding: .utf8)
@@ -839,7 +1327,7 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         try """
         #!/bin/sh
         case " $* " in
-          *" --name-status "*)
+          *" --raw "*)
             if [ ! -e "$SPACES_RACE_MARKER" ]; then
               git -C "$SPACES_RACE_REPO" add raced.txt
               : > "$SPACES_RACE_MARKER"
@@ -1090,6 +1578,48 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         return root
     }
 
+    /// A superproject with a submodule already added via `git submodule add` and committed, pointing `sub`
+    /// at the returned source repo's first commit. `protocol.file.allow=always` is required for a local
+    /// filesystem submodule URL since git 2.38.1 (CVE-2022-39253 hardening); real users add submodules from
+    /// https/ssh remotes, where this default does not apply — only this fixture's local-path source needs
+    /// the override. Returns the superproject root, the submodule's own (separate, still-clonable) source
+    /// repo, and the pointer commit recorded by the add — the value every "no pointer bump yet" test
+    /// compares against.
+    private func makeRepoWithSubmodule() throws -> (superRoot: URL, subrepo: URL, subrepoSHA1: String) {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-diff-engine-submodule-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+
+        let subrepo = container.appendingPathComponent("subrepo-source", isDirectory: true)
+        try FileManager.default.createDirectory(at: subrepo, withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: subrepo.path)
+        try "sub v1".write(to: subrepo.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "FILE.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "sub initial"], cwd: subrepo.path)
+        let subrepoSHA1 = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let superRoot = container.appendingPathComponent("super", isDirectory: true)
+        try FileManager.default.createDirectory(at: superRoot, withIntermediateDirectories: true)
+        try runGit(["init", "--initial-branch", "main"], cwd: superRoot.path)
+        try "root".write(to: superRoot.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "ROOT.md"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "root initial"], cwd: superRoot.path)
+        try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", subrepo.path, "sub"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add submodule"], cwd: superRoot.path)
+
+        return (superRoot, subrepo, subrepoSHA1)
+    }
+
+    /// Advances a `makeRepoWithSubmodule` source repo by one more commit, returning its sha. A test that
+    /// wants a "pointer bump" fixture calls this and then re-points the superproject's checkout at the
+    /// result (`git checkout <sha>` inside `sub`, then `git add sub` to stage the bump).
+    @discardableResult private func commitSecondSubrepoRevision(subrepo: URL) throws -> String {
+        try "sub v2".write(to: subrepo.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "FILE.txt"], cwd: subrepo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "sub v2"], cwd: subrepo.path)
+        return try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// A repo whose `packages/app` directory is added as its own workspace — the monorepo-subpackage
     /// configuration `Orchestrator.normalizeDir` accepts. Returns both the repo root (to make out-of-subtree
     /// changes under `other/` or `ROOT.md`) and the workspace directory itself (`packages/app` — the value
@@ -1147,6 +1677,23 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
             throw GitFixtureError(description: "git \(arguments.joined(separator: " ")) failed: \(message)")
         }
         return String(data: outputData, encoding: .utf8) ?? ""
+    }
+
+    /// Like `runGit`, but for a command whose non-zero exit is itself the expected outcome (e.g. a
+    /// deliberately conflicting `git merge`): returns the exit status instead of throwing on it.
+    @discardableResult private func runGitAllowingFailure(_ arguments: [String], cwd: String) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        var environment = ProcessInfo.processInfo.environment
+        removeGitRepositoryEnvironment(from: &environment)
+        process.environment = environment
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
 

@@ -105,8 +105,17 @@ export function updateFileListRow(container: HTMLElement, file: DiffFileEntry): 
     status.className = `status ${file.status}`;
     status.textContent = STATUS_LABEL[file.status];
   }
+  // Every span appendFileProgress can produce is cleared first, the badge included: a gitlink row
+  // is updated once per patch-state step (queued, streaming, ready) and would otherwise stack one
+  // badge per step.
   for (const child of [...row.children]) {
-    if (child.classList.contains("transfer") || child.classList.contains("st")) child.remove();
+    if (
+      child.classList.contains("transfer") ||
+      child.classList.contains("st") ||
+      child.classList.contains("submodule-badge")
+    ) {
+      child.remove();
+    }
   }
   appendFileProgress(row, file);
   return "updated";
@@ -266,6 +275,17 @@ function renderFileNode(
 }
 
 function appendFileProgress(row: HTMLElement, file: DiffFileEntry): void {
+  if (file.isSubmodule === true || file.submodule !== undefined) {
+    // A gitlink has no patch to transfer or count +/- lines from, so it never shows a transfer
+    // spinner or a stat count — just a fixed badge marking the row as a submodule pointer. The
+    // manifest flag alone is enough: the badge must not wait for the metadata-only chunk that
+    // carries the pointer detail.
+    const badge = document.createElement("span");
+    badge.className = "submodule-badge";
+    badge.textContent = "submodule";
+    row.appendChild(badge);
+    return;
+  }
   if (file.patchState !== undefined && file.patchState !== "ready") {
     const transfer = document.createElement("span");
     transfer.className = `transfer ${file.patchState}`;

@@ -561,6 +561,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       diffView.scrollToFile(path);
       pushWorkspaceState();
     } else {
+      // A submodule (gitlink) row points at another repository's commit, not a file in this
+      // workspace — there is nothing for the standalone Editor to open. `openInEditor` would
+      // otherwise start a `workspaceFileRead` for the submodule's directory path and surface a
+      // read-error banner; staying a no-op here just leaves the Changes list selection as-is.
+      // The manifest flag is checked too so a click before the metadata-only chunk lands behaves
+      // the same as one after it.
+      const selected = files.find((file) => file.path === path);
+      if (selected?.isSubmodule === true || selected?.submodule !== undefined) return;
       openInEditor(path);
     }
   }
@@ -1406,7 +1414,11 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         if (trailingDecoded) patchChunks.push(trailingDecoded);
         decodeElapsedMs += Math.max(performance.now() - trailingDecodeStartedAt, 0);
         const joinStartedAt = performance.now();
-        const patch = finalFile.isBinary ? undefined : patchChunks.join("");
+        // A submodule (gitlink) entry, like a binary file, has no patch bytes: the daemon sends
+        // its `submodule` pointer metadata on the first (and only) chunk reply and no
+        // `patchBase64Data`, so `patchChunks` stays empty here — treat it the same as `isBinary`
+        // rather than joining an empty chunk list into a spurious `""` patch.
+        const patch = finalFile.isBinary || finalFile.submodule !== undefined ? undefined : patchChunks.join("");
         decodeElapsedMs += Math.max(performance.now() - joinStartedAt, 0);
         const completed: DiffFileEntry = {
           ...files[next.index],

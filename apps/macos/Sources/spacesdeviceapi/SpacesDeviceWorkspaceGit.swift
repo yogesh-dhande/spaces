@@ -234,7 +234,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     private static let diffBuildDeadline: TimeInterval = 45
 
     /// Caps one of the manifest plan's up-front commands (`scopeSignature`'s own probes, the merge-base, the
-    /// `--name-status` enumeration, the untracked `status` scan) to whatever remains of `diffBuildDeadline`
+    /// `--raw` enumeration, the untracked `status` scan) to whatever remains of `diffBuildDeadline`
     /// from `start`, never more than `gitCommandTimeout`. `gitCommandTimeout` alone only guards a single
     /// hung git process; without this, several up-front commands each stalling for most of their own 30s
     /// budget could hold the workspace's serial queue for minutes before the per-file loop's own deadline
@@ -453,11 +453,18 @@ enum SpacesDeviceWorkspaceDiffEngine {
         }
 
         let fileManager = FileManager.default
+        // Paths whose porcelain entry stats as a directory, collected alongside the per-entry stat loop
+        // below so the gitlink diff after the loop can name exactly those paths without a second pass over
+        // `scopedEntries`.
+        var gitlinkCandidatePaths: [String] = []
         for entry in scopedEntries {
             let fullPath = (workspaceDir as NSString).appendingPathComponent(entry.path)
             if let attributes = try? fileManager.attributesOfItem(atPath: fullPath), let size = attributes[.size] as? Int,
                 let modified = attributes[.modificationDate] as? Date
             {
+                if attributes[.type] as? FileAttributeType == .typeDirectory {
+                    gitlinkCandidatePaths.append(entry.path)
+                }
                 // `mode` (raw POSIX permission bits, -1 if unavailable) is folded in alongside size/mtime
                 // because a chmod (e.g. flipping the executable bit) on an already-dirty tracked file changes
                 // none of HEAD, the porcelain status letter, size, or mtime (chmod only touches ctime, which
@@ -496,10 +503,93 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 input.append(Data("\(entry.path)|missing\n".utf8))
             }
         }
+
+        // With `--untracked-files=all` above, the only porcelain entries that are directories are gitlinks
+        // (submodule checkouts) and wholly untracked nested repositories; an ordinary untracked directory is
+        // expanded to its individual files by that flag, so it never reaches here as a directory entry.
+        //
+        // The per-entry stat line above is blind to a submodule's own worktree: a checkout inside it that
+        // only rewrites files under a nested directory, or an uncommitted edit to such a file, changes
+        // neither the `sub` directory's size/mtime/mode nor the porcelain letter (` M` either way), yet it
+        // changes the pointer row's reported commit or its `(dirty)` marker. So a HEAD-to-worktree `git diff
+        // --submodule=short` for exactly those directory entries is folded in here, rather than the default
+        // index-to-worktree comparison: the rendered pointer row is always compare-ref-to-worktree (HEAD, or
+        // the merge-base for a vs-ref scope, either way already hashed above as `headSHA`/`merge-base:...`),
+        // and an index-to-worktree diff goes empty the moment the pointer is staged (`git add sub`), which
+        // would miss a further `git checkout <sha>` + `git add sub` restaging the pointer at yet another
+        // commit: porcelain stays `M  sub`, the directory stat does not move, and an index-to-worktree diff
+        // is empty before and after, yet the rendered row moves from `Submodule S1 -> S2` to `Submodule S1 ->
+        // S3`. Naming `headSHA` here gets the same `Subproject commit <sha>[-dirty]` lines the pointer row's
+        // rendering reads regardless of what is currently staged; the index side of a pointer move is
+        // already covered by the porcelain letters above. On an unborn HEAD (`headSHA` empty) the comparison
+        // is git's empty tree, computed the same way `buildDiffPlanSnapshot` computes its own compare ref
+        // for that state (see the comment there for why it is not a hardcoded constant): a submodule staged
+        // in a repo with no commits renders as `Submodule added <sha>`, and restaging it at another commit
+        // keeps porcelain at `A  sub` with an empty index-to-worktree diff, so only a diff against the empty
+        // tree sees that pointer move. A gitlink left unmerged by a conflicting merge produces an empty diff here
+        // (git has no merged content to diff against), which is fine: the row for an unmerged pointer does
+        // not report worktree dirtiness in the first place (see `submoduleChange(from:gitlink:)`'s doc
+        // comment), so there is nothing this diff would need to surface for that case. A wholly untracked
+        // nested repository (also a directory entry here) contributes nothing to this diff either, since it
+        // is on neither side of a HEAD-to-worktree comparison.
+        //
+        // This only runs when such an entry exists, so a workspace without submodules pays nothing extra on
+        // this signature's 2s poll tick. `--submodule=short` is passed for the same reason as every other
+        // `diff` invocation in this file: it pins the patch format against a user's `diff.submodule` config
+        // rather than letting it collapse to a one-line summary. `diff.ignoreSubmodules` /
+        // `submodule.<name>.ignore` are deliberately left in force here too, matching
+        // `buildDiffPlanSnapshot`'s own accepted behavior of honoring that per-submodule suppression.
+        if !gitlinkCandidatePaths.isEmpty {
+            var arguments = [
+                "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+                "--submodule=short", "--relative",
+            ]
+            let compareRevision: String
+            if headSHA.isEmpty {
+                compareRevision = try gitClient.runGitAndCapture(
+                    ["-C", workspaceDir, "hash-object", "-t", "tree", "/dev/null"],
+                    timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                compareRevision = headSHA
+            }
+            arguments.append(compareRevision)
+            arguments.append("--")
+            arguments.append(contentsOf: gitlinkCandidatePaths.map { ":(literal)\($0)" })
+            let submoduleOutput = try gitClient.runGitAndCapture(
+                arguments, timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
+            input.append(Data("submodules:\n\(submoduleOutput)".utf8))
+        }
+
         return ScopeSnapshot(signature: SpacesDeviceWorkspaceGitHashing.sha256Hex(input), headSHA: headSHA, scopedEntries: scopedEntries)
     }
 
-    /// One file identified by `git diff -M --name-status -z` (tracked) or by a `??` record in `git status
+    /// The gitlink's commit id on the comparison-base (source) side of `git diff --raw --no-abbrev`, present
+    /// only when the source side is itself a gitlink (git object mode `160000`). That excludes an add
+    /// (source absent, mode `000000`) and a file-to-submodule type change (source is a regular file, i.e. a
+    /// blob id, not a commit) — for both, `baseCommit` is nil and the patch's `+Subproject commit` line
+    /// alone supplies the new commit.
+    ///
+    /// The raw record's destination (worktree) side is never read for a gitlink, because it is unreliable
+    /// in exactly the cases where it would matter: an unstaged pointer move (`git checkout <sha>` inside
+    /// the submodule with no `git add`) prints an all-zero destination, identical to an absent side, and a
+    /// rename combined with an unstaged pointer move makes git split the entry into an add plus a delete
+    /// whose add-side id is a stale index value rather than the worktree's actual pointer (both confirmed
+    /// empirically). A submodule's real old/new commit ids come from the per-file patch's `Subproject
+    /// commit` lines instead, which git prints correctly for every one of those cases — see
+    /// `parsePatchMetadata`. The one case the patch is silent on is a pointer-preserving rename (`git mv sub
+    /// renamed-sub` with no pointer change): its `R100` status means the pointer is identical on both sides,
+    /// so `baseCommit` names that unchanged pointer directly.
+    ///
+    /// An unmerged pointer left behind by a conflicting merge (superproject index status `UU`/`AA`/`DD`/
+    /// `AU`/`UA`/`DU`/`UD`) produces an EMPTY per-file patch too, exactly like a pointer-preserving rename:
+    /// git has no merged content to diff, so `--submodule=short` prints nothing. The patch alone therefore
+    /// cannot tell the two cases apart; only the porcelain status snapshot `buildDiffPlanSnapshot` already
+    /// reads for this scope names the conflict, which is why `unmerged` is threaded through here rather than
+    /// re-derived from the patch.
+    struct Gitlink: Sendable { let baseCommit: String?, unmerged: Bool }
+
+    /// One file identified by `git diff -M --raw -z` (tracked) or by a `??` record in `git status
     /// --porcelain -z` (untracked). The plan intentionally retains only file identity and immutable git
     /// references, not a patch body or full command array, so a short-lived manifest session is compact.
     struct DiffFilePlan: Sendable {
@@ -508,7 +598,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             /// working tree (uncommitted/base-ref scopes).
             case tracked(baseRef: String, targetRef: String?)
             case untracked
-            /// A path `--name-status` reports `.deleted` relative to `compareRef` but that `git status`
+            /// A path `--raw` reports `.deleted` relative to `compareRef` but that `git status`
             /// ALSO reports untracked (`git rm --cached f` followed by editing `f`; or, ref-scoped, a base
             /// branch deleting a file the working branch later recreated without staging it). Coalesced
             /// into one modified-file entry — see `buildCoalescedDeletedButUntrackedFile` — instead of
@@ -519,6 +609,29 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let oldPath: String?
         let status: SpacesDeviceWorkspaceDiffFileStatus
         let source: Source
+        /// Non-nil when the destination side of the change is a gitlink (git object mode `160000`), or the
+        /// destination is absent and the source was a gitlink (a delete), i.e. `path` is a submodule
+        /// pointer, not file content — see `parseRawZ`'s classification comment. Carries only the gitlink's
+        /// base-side commit id (see `Gitlink`); the pointer's actual old/new commits come from the per-file
+        /// patch's `Subproject commit` lines in `parsePatchMetadata`, with this value used only as the
+        /// fallback for a pointer-preserving rename, whose patch has none. Only `--raw`'s tracked entries
+        /// can set this; an untracked or coalesced-deleted-but-untracked plan is always a plain file (a
+        /// wholly untracked nested repository is filtered out before it ever becomes a plan — see
+        /// `buildDiffPlanSnapshot`).
+        let gitlink: Gitlink?
+
+        /// True when `gitlink` is present, i.e. `path` is a submodule pointer rather than file content.
+        var isSubmodule: Bool { gitlink != nil }
+
+        init(
+            path: String, oldPath: String?, status: SpacesDeviceWorkspaceDiffFileStatus, source: Source, gitlink: Gitlink? = nil
+        ) {
+            self.path = path
+            self.oldPath = oldPath
+            self.status = status
+            self.source = source
+            self.gitlink = gitlink
+        }
 
         var comparisonBaseRevision: String? {
             switch source {
@@ -626,26 +739,53 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // `GIT_EXTERNAL_DIFF` config (e.g. difftastic) or a `.gitattributes` textconv driver could substitute
         // or rewrite the patch content entirely — or, for the external-diff case, make the whole request fail
         // or return arbitrary non-unified output. Applied uniformly to every `git diff` invocation below,
-        // including `--name-status` (which no external-diff driver fires for anyway), so a future argument
+        // including `--raw` (which no external-diff driver fires for anyway), so a future argument
         // edit can't reintroduce the hole on one call and not another.
+        // `--submodule=short` pins the patch-body format `parsePatchMetadata` parses for a gitlink
+        // (`-Subproject commit X` / `+Subproject commit Y[-dirty]`) against a user's `diff.submodule`
+        // config: set to `log` (or `diff`), that config replaces the whole gitlink patch body with a
+        // one-line commit-log/full-diff summary instead — confirmed empirically — which would make a
+        // submodule change silently unparseable. `--raw`'s own listing format is unaffected by
+        // `diff.submodule` either way (confirmed empirically), so this is applied here purely for
+        // uniformity with the patch-producing calls below rather than because this call needs it.
         // `--relative`: a workspace can be rooted below its repository's root (a monorepo subpackage
         // added as its own project — `Orchestrator.normalizeDir` accepts any dir where `rev-parse
-        // --is-inside-work-tree` succeeds). Without it, `--name-status` reports repo-root-relative paths
+        // --is-inside-work-tree` succeeds). Without it, `--raw` reports repo-root-relative paths
         // while every per-file pathspec below is workspace-relative, so nothing matches; with it, git both
         // limits this enumeration to the CWD's subtree (out-of-workspace changes are correctly excluded —
         // the pane reviews THIS workspace) and reports every path relative to that subtree, including in
         // `diff --git`/`---`/`+++` headers, which is what keeps patch-header paths aligned with entry paths
         // for client anchoring. A no-op, byte-for-byte, when `workspaceDir` IS the repo root (empirically
         // confirmed).
-        let nameStatusOutput = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", compareRef],
-            timeout: try remainingTimeout(start: start))
-        var plans = parseNameStatusZ(nameStatusOutput).map { entry -> DiffFilePlan in
+        //
+        // `--raw` (rather than `--name-status`) is the enumeration format: it is the only -z listing that
+        // reports each side's git object mode, which is how a submodule pointer (gitlink, mode `160000`) is
+        // told apart from an ordinary tracked file — `--name-status` gives no way to see that. `-c
+        // submodule.recurse=0` is deliberately NOT added here: per `git help config`, `submodule.recurse`
+        // only affects `checkout`/`fetch`/`grep`/`pull`/`push`/`read-tree`/`reset`/`restore`/`switch` (and
+        // `branch`, gated on `submodule.propagateBranches`) — `diff` and `status` are not in that list, and
+        // empirically a `submodule.recurse=true` workspace produces byte-identical `--raw`/`--submodule=short`
+        // output to one without it.
+        //
+        // `--ignore-submodules=none` is deliberately NOT added either, so `diff.ignoreSubmodules` and
+        // `submodule.<name>.ignore` (commonly `ignore = dirty` in `.gitmodules`, to stop a submodule's own
+        // untracked/modified worktree content from showing as a pointer change) stay in force: that
+        // configuration exists precisely to suppress those entries from the repository's own diffs, git and
+        // other tools honor it, and `git status` honors the same per-submodule setting, so overriding it here
+        // would list an entry `git status` does not show and the listing's git-poll membership detector (which
+        // is itself status-derived) would never agree with. A submodule change the repository configured git
+        // to ignore is therefore not listed.
+        let rawOutput = try gitClient.runGitAndCapture(
+            [
+                "-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--relative", "--raw",
+                "--no-abbrev", "-z", compareRef,
+            ], timeout: try remainingTimeout(start: start))
+        var plans = parseRawZ(rawOutput).map { entry -> DiffFilePlan in
             // `:(literal)` forces git to match each pathspec argument as an exact path rather than parsing
             // it for magic: a legal tracked filename that happens to start with `:` (e.g. `:foo` or
             // `:(glob)x`) would otherwise be interpreted as pathspec magic itself, silently matching nothing
-            // (an empty patch, even though `--name-status` above correctly identified it as changed) or, for
-            // other magic keywords, unrelated files. `--name-status -z` above takes no per-file pathspec, so
+            // (an empty patch, even though `--raw` above correctly identified it as changed) or, for
+            // other magic keywords, unrelated files. `--raw -z` above takes no per-file pathspec, so
             // it is unaffected and stays the source of truth for which paths actually changed.
             //
             // `entry.path`/`entry.oldPath` are already workspace-relative (from `--relative` above), and
@@ -654,7 +794,9 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // out workspace-relative rather than repo-root-relative (confirmed empirically: the pathspec
             // match succeeds either way, but only `--relative` also relativizes the `diff --git a/... b/...`
             // header text).
-            return DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: compareRef, targetRef: nil))
+            return DiffFilePlan(
+                path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: compareRef, targetRef: nil),
+                gitlink: entry.gitlink)
         }
 
         // The signature has already read and subtree-scoped the same porcelain snapshot this request needs
@@ -662,15 +804,42 @@ enum SpacesDeviceWorkspaceDiffEngine {
         guard let scopedStatusEntries = snapshot.scopedEntries else {
             preconditionFailure("A working-tree diff snapshot must contain scoped status entries.")
         }
-        // `--untracked-files=all` should mean every `??` record is already a file, never a directory, but
-        // the filter costs nothing and defends against any edge git itself has not been audited against
-        // (e.g. a submodule or other non-regular-file entry reported with a trailing slash).
+
+        // A submodule pointer left in an unresolved-conflict index state by a conflicting merge produces an
+        // EMPTY per-file patch, exactly like a pointer-preserving rename's: `parseRawZ` alone cannot tell
+        // the two cases apart (see `Gitlink`'s doc comment). The porcelain status snapshot already read
+        // above is what names the conflict, so remap every gitlink plan whose path it marks unmerged before
+        // patches are ever fetched.
+        //
+        // Accepted: this only remaps gitlinks the raw listing already produced. A submodule that BOTH sides
+        // of a merge added at the same path (porcelain `AA`, HEAD has no entry) yields no raw record, so it
+        // has no plan and is absent from the manifest until the conflict is resolved. Synthesizing a plan
+        // from the status entry alone would need a source for its pointer that the raw listing does not
+        // supply; the state is transient and the conflict is visible in `git status`, so the row is not
+        // worth a second listing path.
+        let unmergedPaths = Set(scopedStatusEntries.filter { isUnmergedPorcelainStatus($0.status) }.map(\.path))
+        if !unmergedPaths.isEmpty {
+            plans = plans.map { plan in
+                guard let gitlink = plan.gitlink, unmergedPaths.contains(plan.path) else { return plan }
+                return DiffFilePlan(
+                    path: plan.path, oldPath: plan.oldPath, status: plan.status, source: plan.source,
+                    gitlink: Gitlink(baseCommit: gitlink.baseCommit, unmerged: true))
+            }
+        }
+
+        // `--untracked-files=all` normally means every `??` record is already a file, never a directory —
+        // except a nested, un-added git repository (`git init`'d inside the workspace but never `git
+        // submodule add`ed): git status does not descend across that repository boundary even with `all`,
+        // so it reports the whole thing as one directory record, `?? dir/`, trailing slash included.
+        // Skipped here (no plan is created for it) because `writeUntrackedPatch` below reads the path as a
+        // regular file and would fail trying to diff a directory; there is also no product representation
+        // for "an entire nested repository, untracked" to give it.
         let untrackedPaths = scopedStatusEntries.filter { $0.status == "??" && !$0.path.hasSuffix("/") }.map(\.path)
 
-        // A path can legitimately appear in both snapshots when `--name-status` reports it `.deleted`
+        // A path can legitimately appear in both snapshots when `--raw` reports it `.deleted`
         // relative to `compareRef` while the earlier status snapshot reports it untracked (`??`, present on
         // disk). That is one content change and is coalesced below. A non-deleted overlap is a race: an agent
-        // staged the file after the status snapshot but before the newer name-status enumeration. In that
+        // staged the file after the status snapshot but before the newer raw enumeration. In that
         // case the newer tracked plan is authoritative and the stale untracked plan must be suppressed, or
         // the response contains duplicate file IDs. A rename's recreated `oldPath` remains distinct because
         // the tracked plan is keyed by the rename's new `path`.
@@ -700,7 +869,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
     /// Builds exactly one file patch from a plan retained by the manifest session. It deliberately accepts
     /// the already-enumerated plan rather than rebuilding it: K streamed files therefore do one workspace
-    /// status/name-status walk plus K per-file diffs, not K complete workspace walks.
+    /// status/raw-diff walk plus K per-file diffs, not K complete workspace walks.
     static func writeDiffFilePatch(
         snapshot: DiffPlanSnapshot, workspaceDir: String, relativePath: String, outputURL: URL, gitClient: RemoteWorkspaceGitClient,
         deadlineStart: Date
@@ -710,13 +879,14 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let wrotePatch = try writePatch(
             for: plan, workspaceDir: workspaceDir, outputURL: outputURL, gitClient: gitClient, deadlineStart: deadlineStart)
         let patchByteCount = wrotePatch ? fileByteCount(at: outputURL) : 0
-        let metadata = wrotePatch ? patchMetadata(at: outputURL) : (isBinary: false, oldSHA: nil, newSHA: nil)
+        let metadata =
+            wrotePatch ? patchMetadata(at: outputURL, gitlink: plan.gitlink) : (isBinary: false, oldSHA: nil, newSHA: nil, submodule: nil)
         let file = SpacesDeviceWorkspaceDiffFileMetadata(
             path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA,
             targetRevision: {
                 guard case .tracked(_, let targetRef?) = plan.source else { return nil }
                 return targetRef
-            }()
+            }(), submodule: metadata.submodule
         )
         return FilePatchTransfer(scopeSignature: snapshot.scopeSignature, file: file, patchByteCount: patchByteCount)
     }
@@ -748,7 +918,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     {
         var arguments = [
             "-C", workspaceDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "-M", "--no-color", "--no-ext-diff",
-            "--no-textconv", "--relative", baseRef,
+            "--no-textconv", "--submodule=short", "--relative", baseRef,
         ]
         if let targetRef { arguments.append(targetRef) }
         arguments.append("--")
@@ -759,14 +929,17 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
     private static func fileByteCount(at url: URL) -> Int64 { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0 }
 
-    /// Git's `index` and `Binary files ... differ` header lines always precede any hunk body. Sampling a
-    /// fixed prefix keeps binary/SHA classification bounded even when the textual patch is hundreds of MB.
-    private static func patchMetadata(at url: URL) -> (isBinary: Bool, oldSHA: String?, newSHA: String?) {
-        guard let handle = FileHandle(forReadingAtPath: url.path) else { return (false, nil, nil) }
+    /// Git's `index`/`Binary files ... differ`/`Subproject commit` header lines always precede any hunk
+    /// body. Sampling a fixed prefix keeps binary/SHA/submodule classification bounded even when the
+    /// textual patch is hundreds of MB.
+    private static func patchMetadata(at url: URL, gitlink: Gitlink?) -> (
+        isBinary: Bool, oldSHA: String?, newSHA: String?, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
+    ) {
+        guard let handle = FileHandle(forReadingAtPath: url.path) else { return (false, nil, nil, nil) }
         defer { try? handle.close() }
         let prefix: Data
-        do { prefix = try handle.read(upToCount: 128 * 1024) ?? Data() } catch { return (false, nil, nil) }
-        return parsePatchMetadata(String(decoding: prefix, as: UTF8.self))
+        do { prefix = try handle.read(upToCount: 128 * 1024) ?? Data() } catch { return (false, nil, nil, nil) }
+        return parsePatchMetadata(String(decoding: prefix, as: UTF8.self), gitlink: gitlink)
     }
 
     /// The transfer path retains the old untracked safety rules but intentionally removes the old visible
@@ -876,11 +1049,15 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // Same flags as every other diff invocation in this engine — see the manifest plan's comment block above
         // for the full rationale for each one. Two explicit positional refs (`parent headSHA`), not a single
         // `compareRef` against the working tree, is what makes this diff committed-only.
-        let nameStatusOutput = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--name-status", "-z", parent, headSHA],
-            timeout: try remainingTimeout(start: deadlineStart))
-        let plans = parseNameStatusZ(nameStatusOutput).map { entry in
-            DiffFilePlan(path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: parent, targetRef: headSHA))
+        let rawOutput = try gitClient.runGitAndCapture(
+            [
+                "-C", workspaceDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--relative", "--raw",
+                "--no-abbrev", "-z", parent, headSHA,
+            ], timeout: try remainingTimeout(start: deadlineStart))
+        let plans = parseRawZ(rawOutput).map { entry in
+            DiffFilePlan(
+                path: entry.path, oldPath: entry.oldPath, status: entry.status, source: .tracked(baseRef: parent, targetRef: headSHA),
+                gitlink: entry.gitlink)
         }
 
         return DiffPlanSnapshot(scopeSignature: signature, plans: plans)
@@ -892,6 +1069,15 @@ enum SpacesDeviceWorkspaceDiffEngine {
         let status: String
         let path: String
         let origPath: String?
+    }
+
+    /// Whether a `git status --porcelain` two-letter `XY` code names an index entry a merge left in an
+    /// unresolved-conflict state, per `git status`'s own documented short-format table: both sides touched
+    /// it (`UU`), both added it (`AA`), both deleted it (`DD`), or one side deleted while the other side
+    /// changed it (`AU`/`UA`/`DU`/`UD`). Used to flag a submodule gitlink whose per-file patch git prints
+    /// empty because there is no merged content to diff (see `Gitlink`'s doc comment).
+    private static func isUnmergedPorcelainStatus(_ status: String) -> Bool {
+        ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].contains(status)
     }
 
     /// Parses NUL-delimited `git status --porcelain -z` output. Each record is `XY PATH`, except for a
@@ -933,7 +1119,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     ///
     /// A rename crossing the boundary the OTHER way (moved OUT of the subtree) is dropped entirely: its
     /// current path is outside `prefix`, even though the file did disappear from inside the workspace. This
-    /// differs from the *diff* side (`--name-status --relative`), where git itself auto-demotes such a
+    /// differs from the *diff* side (`--raw --relative`), where git itself auto-demotes such a
     /// rename into a plain deletion of the inside path — porcelain has no equivalent demotion, and
     /// reconstructing "the old half was inside, so treat this as a delete" is not attempted here. Accepted
     /// narrow gap: it only matters for a *staged* rename that also happens to cross this exact subtree
@@ -963,55 +1149,102 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return data
     }
 
-    // MARK: - `git diff --name-status -z` parsing
+    // MARK: - `git diff --raw -z` parsing
 
-    private struct NameStatusEntry {
+    private struct RawEntry {
         let status: SpacesDeviceWorkspaceDiffFileStatus
         let path: String
         let oldPath: String?
+        /// Non-nil when `path` is a submodule pointer rather than file content, per `parseRawZ`'s
+        /// destination-decides classification; carries that gitlink's base-side commit id (see `Gitlink`).
+        let gitlink: Gitlink?
     }
 
-    /// Parses `git diff -M --name-status -z <ref>` output: NUL-delimited records, `STATUS\0PATH\0` for an
-    /// add/modify/delete, or `STATUS\0OLDPATH\0NEWPATH\0` for a rename/copy (`R100`, `C75`, ...) — the old
-    /// path comes first, matching `--name-status`'s tab-separated "old TAB new" ordering. This -z output is
-    /// the one and only source of `path`/`oldPath`/`status` on every returned file: it is exact bytes
-    /// (never C-quoted), unlike `git diff`'s human-readable `diff --git a/... b/...` header.
-    private static func parseNameStatusZ(_ output: String) -> [NameStatusEntry] {
+    /// Parses `git diff -M --raw --no-abbrev -z <ref>` output: NUL-delimited records of the form
+    /// `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0PATH\0` for an add/modify/delete, or
+    /// `...<status>\0OLDPATH\0NEWPATH\0` for a rename/copy (`R100`, `C75`, ...) — the old path comes first,
+    /// matching `--name-status`'s tab-separated "old TAB new" ordering, which `--raw` otherwise mirrors
+    /// exactly. This -z output is the one and only source of `path`/`oldPath`/`status` on every returned
+    /// file: it is exact bytes (never C-quoted), unlike `git diff`'s human-readable `diff --git a/... b/...`
+    /// header.
+    ///
+    /// `--raw` rather than `--name-status` because it is the only -z listing format that also reports each
+    /// side's git object mode, which is how a submodule pointer (gitlink, mode `160000`) is told apart from
+    /// an ordinary tracked file before ever reading its patch body — see the classification comment below
+    /// for exactly which side decides. `--no-abbrev` (added at both call sites) makes the `srcsha`/`dstsha`
+    /// fields full 40-char object ids instead of git's default abbreviation; for a gitlink entry this parser
+    /// keeps only the base (src) side, as `Gitlink.baseCommit` — the destination side is unreliable for a
+    /// gitlink (see that type's doc comment) and is never read.
+    private static func parseRawZ(_ output: String) -> [RawEntry] {
         let tokens = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
-        var entries: [NameStatusEntry] = []
+        var entries: [RawEntry] = []
         var index = 0
         while index < tokens.count {
-            let statusToken = tokens[index]
+            let header = tokens[index]
             index += 1
-            guard let statusLetter = statusToken.first else { continue }
+            guard header.hasPrefix(":") else { continue }
+            let fields = header.dropFirst().split(separator: " ")
+            guard fields.count >= 5 else { continue }
+            // The destination side decides whether this row is a read-only pointer or an editable text
+            // patch, because that is the state the Editor would actually act on: a destination mode of
+            // `160000` is a gitlink, whether the source was an existing gitlink (an ordinary pointer move)
+            // or a regular file (`T`, a file replaced by a submodule at the same path) — both land the user
+            // on the same pointer row. A destination that is an ordinary file, even one replacing a removed
+            // submodule (source `160000`, a reverse `T`), is ordinary file content, not a pointer row that
+            // would hide it. The one entry with no destination at all is a delete, where the removed
+            // gitlink's own mode (source `160000`) is what makes it a pointer row.
+            let isSubmodule = fields[1] == "160000" || (fields[0] == "160000" && fields[1] == "000000")
+            // `baseCommit` (see `Gitlink`) exists only when the source side is itself a gitlink: a
+            // file-to-submodule type change's source is a regular file, i.e. a blob id, not a commit, so
+            // `baseCommit` is nil there and the patch's `+Subproject commit` line alone supplies the new
+            // commit (`Submodule added <sha>`).
+            // `unmerged` is not knowable from `--raw` alone; `buildDiffPlanSnapshot` remaps it to `true` for
+            // a gitlink whose path the porcelain status snapshot reports as unresolved-conflict, once that
+            // snapshot is in hand.
+            let gitlink: Gitlink? =
+                isSubmodule ? Gitlink(baseCommit: fields[0] == "160000" ? String(fields[2]) : nil, unmerged: false) : nil
+            guard let statusLetter = fields[4].first else { continue }
             switch statusLetter {
             case "R", "C":
                 guard index + 1 < tokens.count else { continue }
                 let oldPath = tokens[index]
                 let newPath = tokens[index + 1]
                 index += 2
-                entries.append(NameStatusEntry(status: .renamed, path: newPath, oldPath: oldPath))
+                entries.append(RawEntry(status: .renamed, path: newPath, oldPath: oldPath, gitlink: gitlink))
             case "A":
                 guard index < tokens.count else { continue }
-                entries.append(NameStatusEntry(status: .added, path: tokens[index], oldPath: nil))
+                entries.append(RawEntry(status: .added, path: tokens[index], oldPath: nil, gitlink: gitlink))
                 index += 1
             case "D":
                 guard index < tokens.count else { continue }
-                entries.append(NameStatusEntry(status: .deleted, path: tokens[index], oldPath: nil))
+                entries.append(RawEntry(status: .deleted, path: tokens[index], oldPath: nil, gitlink: gitlink))
                 index += 1
             default:  // M, T, and anything else git reports as a plain content change.
                 guard index < tokens.count else { continue }
-                entries.append(NameStatusEntry(status: .modified, path: tokens[index], oldPath: nil))
+                entries.append(RawEntry(status: .modified, path: tokens[index], oldPath: nil, gitlink: gitlink))
                 index += 1
             }
         }
         return entries
     }
 
-    /// Extracts just the "Binary files ... differ" marker and the `index <old>..<new>` blob SHAs from one
-    /// file's `git diff` output — the only pieces of a patch body this engine still parses, now that
-    /// identity comes from `--name-status -z`.
-    private static func parsePatchMetadata(_ patchText: String) -> (isBinary: Bool, oldSHA: String?, newSHA: String?) {
+    /// Extracts just the "Binary files ... differ" marker, the `index <old>..<new>` blob SHAs, or — for a
+    /// submodule pointer — its old/new commit ids and dirty flag, from one file's `git diff` output.
+    ///
+    /// A gitlink's commit ids come from the patch body's `Subproject commit` lines (`submoduleChange`
+    /// below), because git resolves the submodule's actual worktree state there in every case that matters:
+    /// an unstaged pointer move, a staged pointer move, and a dirty-but-unmoved worktree all print the
+    /// correct ids (with a `-dirty` suffix on whichever side is dirty), while `--raw`'s own object ids are
+    /// unreliable for those same cases (see `Gitlink`'s doc comment) and so are never used for this. The one
+    /// case the patch body is silent on is a pointer-preserving rename (`git mv sub renamed-sub` with no
+    /// pointer change): its `R100` status means the pointer is identical on both sides, so `gitlink`'s
+    /// base-side id from `--raw` names that unchanged pointer directly.
+    private static func parsePatchMetadata(_ patchText: String, gitlink: Gitlink?) -> (
+        isBinary: Bool, oldSHA: String?, newSHA: String?, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
+    ) {
+        if let gitlink {
+            return (false, nil, nil, submoduleChange(from: patchText, gitlink: gitlink))
+        }
         var isBinary = false
         var oldSHA: String?
         var newSHA: String?
@@ -1027,7 +1260,51 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 }
             }
         }
-        return (isBinary, oldSHA, newSHA)
+        return (isBinary, oldSHA, newSHA, nil)
+    }
+
+    /// Parses a gitlink patch body's `Subproject commit` lines under `--submodule=short`: `-Subproject
+    /// commit <sha>[-dirty]` is the old commit, `+Subproject commit <sha>[-dirty]` is the new one, and a
+    /// `-dirty` suffix on either line means the submodule's own worktree has uncommitted changes. When the
+    /// patch has at least one such line, these are the pointer's real old/new commits (an added submodule
+    /// has only a `+` line and no old commit, a removed one only a `-` line and no new commit). When it has
+    /// none, the pointer is either a pointer-preserving rename or an unmerged pointer left by a conflicting
+    /// merge (see `Gitlink`'s doc comment): both print an empty patch, and are told apart only by
+    /// `gitlink.unmerged`, never by the patch itself. Either way `gitlink.baseCommit` is reported as both
+    /// the old and new commit: for a rename it names the unchanged pointer, and for an unmerged pointer it
+    /// names the pointer the worktree currently holds (HEAD's side). Dirtiness is not derived for either
+    /// case, so `dirty` is always false here: a rename with a dirty worktree takes the patch-parsing path
+    /// above instead (see `submoduleRenamedWithADirtyWorktreeReportsDirty`), and an unmerged pointer's
+    /// combined diff carries no `Subproject commit` line for this parser to read a `-dirty` suffix from.
+    private static func submoduleChange(from patchText: String, gitlink: Gitlink) -> SpacesDeviceWorkspaceDiffSubmoduleChange {
+        var oldCommit: String?
+        var newCommit: String?
+        var dirty = false
+        var sawSubprojectLine = false
+        for line in patchText.split(separator: "\n", omittingEmptySubsequences: false) {
+            let isOld = line.hasPrefix("-Subproject commit ")
+            let isNew = line.hasPrefix("+Subproject commit ")
+            guard isOld || isNew else { continue }
+            sawSubprojectLine = true
+            let prefix = isOld ? "-Subproject commit " : "+Subproject commit "
+            var sha = String(line.dropFirst(prefix.count))
+            if sha.hasSuffix("-dirty") {
+                sha.removeLast("-dirty".count)
+                dirty = true
+            }
+            if isOld { oldCommit = sha } else { newCommit = sha }
+        }
+        // Accepted: for an unmerged gitlink (`gitlink.unmerged`), git's combined diff never carries a
+        // `Subproject commit` line even when the checkout itself also has uncommitted changes, so `dirty`
+        // can never be reported true while `unmerged` is true. Probing the submodule's own worktree state
+        // separately (e.g. running `git status` inside it) to surface that combination is not worth it: the
+        // state is transient by nature (the user's next step is resolving the conflict), and once resolved
+        // the normal patch-parsing path above reports dirtiness again as usual.
+        guard sawSubprojectLine else {
+            return SpacesDeviceWorkspaceDiffSubmoduleChange(
+                oldCommit: gitlink.baseCommit, newCommit: gitlink.baseCommit, dirty: false, unmerged: gitlink.unmerged)
+        }
+        return SpacesDeviceWorkspaceDiffSubmoduleChange(oldCommit: oldCommit, newCommit: newCommit, dirty: dirty, unmerged: gitlink.unmerged)
     }
 
 }
