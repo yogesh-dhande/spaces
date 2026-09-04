@@ -36,6 +36,7 @@ function makeBridge(result: WorkspaceFileReadResult): SpacesBridge {
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
+    notifyEditsFlushed: vi.fn(),
     reviewCommentList: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),

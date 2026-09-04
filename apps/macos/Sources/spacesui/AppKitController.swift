@@ -417,13 +417,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func deferTerminationUntilEditorStateIsDurable(_ application: NSApplication) -> NSApplication.TerminateReply {
         isFinalizingEditorStateForTermination = true
-        panelCoordinator.closeAllContentForTermination { [weak self, weak application] in
-            // The no-pane case settles synchronously inside `applicationShouldTerminate`; reply on
-            // the following main-queue turn so AppKit has observed `.terminateLater` first.
-            DispatchQueue.main.async {
-                guard let self, let application else { return }
-                self.isFinalizingEditorStateForTermination = false
-                application.reply(toApplicationShouldTerminate: true)
+        // The autosave debounce lives in the page, so an edit typed moments before quitting can have
+        // no write RPC on the Swift side yet for `closeAllContentForTermination`'s fence to wait on.
+        // Draining the page's pending writes first is what puts them inside that fence.
+        panelCoordinator.flushAllCodePaneEditsForTermination { [weak self, weak application] in
+            guard let self, let application else { return }
+            self.panelCoordinator.closeAllContentForTermination { [weak self, weak application] in
+                // The no-pane case settles synchronously inside `applicationShouldTerminate`; reply on
+                // the following main-queue turn so AppKit has observed `.terminateLater` first.
+                DispatchQueue.main.async {
+                    guard let self, let application else { return }
+                    self.isFinalizingEditorStateForTermination = false
+                    application.reply(toApplicationShouldTerminate: true)
+                }
             }
         }
         return .terminateLater

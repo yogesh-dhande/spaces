@@ -192,7 +192,7 @@ export interface CodePaneRenderMetric {
     | "workspaceStateRestored"
     | "diffEdit"
     | "diffEditSave"
-    | "diffEditCancel";
+    | "diffEditEnd";
   elapsedMs: number;
   /** Time through the workspace data response, before DOM/model work. Present for diff metrics. */
   fetchElapsedMs?: number;
@@ -411,6 +411,10 @@ export interface SpacesBridge {
   /** Reports completion after browser layout/paint has had two animation frames to settle. The
    *  native host validates and records this only when DEBUG performance logging is enabled. */
   notifyRenderMetric(metric: CodePaneRenderMetric): void;
+  /** Answers the host's `spaces:flushEdits` request, echoing its token, once every unsaved edit
+   *  this page owns has been written (or has failed and stopped retrying). The host holds a quit
+   *  or teardown until this arrives, so it is sent exactly once per token and never awaited. */
+  notifyEditsFlushed(token: string): void;
   /** All of this workspace's draft comments, ordered by `createdAt` (server-enforced). Called once
    *  on mount to rehydrate the comment surface — see `root.ts` and `reviewComments.ts`'s doc
    *  comments for why this is not re-fetched on every diff refresh. */
@@ -470,6 +474,14 @@ export interface CodePaneEditorState {
   content: string;
   dirty: boolean;
   conflict: boolean;
+  /** The CAS target an explicit Keep mine confirmed: the exact disk snapshot the user compared, or
+   * `null` for a file deleted on disk, which the write must recreate rather than overwrite. Absent
+   * while no such decision is outstanding. `baseSHA256` is a plain string and cannot express "no
+   * baseline", and a Keep mine write that fails may not be retried before the pane is retargeted or
+   * restarted, so the decision travels in the durable document rather than in page memory: without
+   * it a restore re-reads the still-missing file and asks the user to confirm the same deletion
+   * again. */
+  confirmedBaseSHA256?: string | null;
 }
 
 /** Diff mode's editable-file snapshot. A conflict must retain the exact CAS target that matches
@@ -597,6 +609,13 @@ export interface CodePaneAgentsChangedEvent {
  *  navigation gesture). */
 export interface CodePaneSetModeEvent {
   mode: CodePaneMode;
+}
+
+/** Detail of the `spaces:flushEdits` event (see README.md): the host is about to quit or tear this
+ *  pane down and is holding for every unsaved edit to be written. The page answers exactly once
+ *  with `notifyEditsFlushed(token)`, echoing this token so the host can match the reply. */
+export interface CodePaneFlushEditsEvent {
+  token: string;
 }
 
 declare global {

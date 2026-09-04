@@ -914,5 +914,81 @@ extension ProcessProfileEnvironmentSuites {
             #expect(PanelLayoutEngine.allPanes(in: splitOffLayout).map(\.id) == ["code-2"])
             #expect(splitOffRow.frame?.x == 34, "the split-off window's frame is cascaded off the original rather than stacking exactly on it")
         }
+
+        // MARK: - Termination edits flush fan-out
+
+        /// Reads the token `flushAllCodePaneEditsForTermination` dispatched to one pane, so the test can
+        /// answer as that exact page would.
+        private func flushEditsToken(_ evaluator: RecordingCodePaneScriptEvaluator) throws -> String {
+            let script = try #require(evaluator.evaluatedScripts.first { $0.contains(CodePaneBridge.flushEditsEventName) })
+            let prefix = "window.dispatchEvent(new CustomEvent(\"\(CodePaneBridge.flushEditsEventName)\", {detail: "
+            struct Detail: Decodable { let token: String }
+            return try JSONDecoder().decode(Detail.self, from: Data(script.dropFirst(prefix.count).dropLast("}));".count).utf8)).token
+        }
+
+        /// Every open code pane gets the kick, and quitting proceeds only once all of them have
+        /// reported: one pane answering must not release the fence while another still holds unsaved
+        /// edits in its autosave debounce.
+        @Test func flushingAllCodePaneEditsForTerminationWaitsForEveryPaneToReport() async throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .editor, in: scope1))
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .editor, in: scope2))
+            let paneID1 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).first?.id)
+            let paneID2 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope2)).first?.id)
+            let pane1 = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID1) as? CodePaneContentController)
+            let pane2 = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID2) as? CodePaneContentController)
+            let evaluator1 = RecordingCodePaneScriptEvaluator()
+            let evaluator2 = RecordingCodePaneScriptEvaluator()
+            for (pane, evaluator) in [(pane1, evaluator1), (pane2, evaluator2)] {
+                pane.activate(focus: false)
+                pane.scriptEvaluator = evaluator
+                pane.handleReady()
+            }
+            var completed = false
+
+            controller.panelCoordinator.flushAllCodePaneEditsForTermination { completed = true }
+
+            let webView1 = try #require(pane1.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+            let webView2 = try #require(pane2.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+            pane1.handleScriptMessage(
+                name: "spacesBridge", body: ["method": "editsFlushed", "params": ["token": try flushEditsToken(evaluator1)]], senderWebView: webView1)
+            await settle()
+            #expect(!completed, "the fence stays closed while a second pane's page has not reported")
+
+            pane2.handleScriptMessage(
+                name: "spacesBridge", body: ["method": "editsFlushed", "params": ["token": try flushEditsToken(evaluator2)]], senderWebView: webView2)
+
+            await waitUntil { completed }
+            #expect(completed)
+        }
+
+        /// Polls `predicate` until true or `timeout` elapses; the fan-out's completion is delivered on
+        /// the main queue, so it can never be observed synchronously.
+        private func waitUntil(
+            timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: @MainActor () -> Bool
+        ) async {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            while !predicate(), clock.now < deadline {
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            if !predicate() { Issue.record("waitUntil timed out after \(timeout)", sourceLocation: sourceLocation) }
+        }
+
+        /// Waits out a window without asserting, so a "this must NOT happen yet" check gives the
+        /// main queue a fair chance to (wrongly) deliver first.
+        private func settle(_ duration: Duration = .milliseconds(100)) async {
+            let deadline = ContinuousClock().now.advanced(by: duration)
+            while ContinuousClock().now < deadline {
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
     }
 }

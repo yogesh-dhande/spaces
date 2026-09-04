@@ -473,7 +473,7 @@ describe("DiffView inline edit", () => {
     expect(control.setItemsCalls.at(-1)?.[0]).toBe(unchangedItem);
   });
 
-  it("keeps a detached dirty edit as a reachable Save/Cancel surface when the refreshed manifest no longer names its path", () => {
+  it("keeps a detached dirty edit as a reachable editing surface when the refreshed manifest no longer names its path", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([], true);
 
@@ -487,9 +487,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/omitted.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
   });
 
   it("keeps a dirty editor reachable when a diff refresh fails", () => {
@@ -514,9 +513,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
 
     host.remove();
   });
@@ -543,9 +541,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
 
     expect(control.items.has("src/stale.ts")).toBe(false);
     // A successful replacement adopts the real manifest without dropping the active editor, and a
@@ -568,24 +565,88 @@ describe("DiffView inline edit", () => {
     host.remove();
   });
 
-  it("keeps Save and Cancel available while waiting to discard edits and open another file", () => {
-    const onDiscardAndOpenDiffEdit = vi.fn();
-    const diffView = new DiffView(document.createElement("div"), "unified", {
-      ...makeHooks(),
-      onDiscardAndOpenDiffEdit,
-    });
+  it("offers no Save or Cancel action in any inline edit state", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
-    diffView.requestOpenAfterDiscard("src/bar.ts");
+    const render = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!;
 
-    const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
-      name: "src/foo.ts",
-    })!;
-    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
-    const discard = [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Discard edits and open")!;
-    discard.click();
-    expect(onDiscardAndOpenDiffEdit).toHaveBeenCalledWith("src/foo.ts", "src/bar.ts");
+    for (const status of [
+      { kind: "idle" } as const,
+      { kind: "dirty" } as const,
+      { kind: "saving" } as const,
+      { kind: "saved" } as const,
+      { kind: "failed", reason: "daemon unavailable", retryInMs: 2000 } as const,
+      { kind: "blocked", reason: "File changed on disk" } as const,
+    ]) {
+      diffView.setEditStatus("src/foo.ts", status);
+      const header = render();
+      expect(header.querySelector("#code-pane-diff-edit-save")).toBeNull();
+      expect(header.querySelector("#code-pane-diff-edit-cancel")).toBeNull();
+      expect([...header.querySelectorAll("button")].map((button) => button.textContent)).not.toContain("Discard edits and open");
+    }
+  });
+
+  it("reports each autosave status as the header's save chip", () => {
+    const onRetryDiffEditSave = vi.fn();
+    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onRetryDiffEditSave });
+    diffView.setFiles([file()], false);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
+    const chip = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!.querySelector<HTMLElement>("#code-pane-diff-edit-status");
+
+    // Idle is the one status with nothing to report: nothing typed, nothing written.
+    expect(chip()).toBeNull();
+
+    diffView.setEditStatus("src/foo.ts", { kind: "dirty" });
+    expect(chip()?.textContent).toBe("Unsaved");
+    expect(chip()?.dataset.state).toBe("dirty");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saving" });
+    expect(chip()?.textContent).toBe("Saving…");
+    expect(chip()?.dataset.state).toBe("saving");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saved" });
+    expect(chip()?.textContent).toBe("Saved");
+    expect(chip()?.dataset.state).toBe("saved");
+
+    // The countdown rounds up, so a backoff that is still running never reads "retry in 0 s".
+    diffView.setEditStatus("src/foo.ts", { kind: "failed", reason: "daemon unavailable", retryInMs: 1500 });
+    expect(chip()?.textContent).toBe("Save failed: daemon unavailable · retry in 2 s");
+    expect(chip()?.dataset.state).toBe("failed");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "blocked", reason: "File deleted on disk" });
+    expect(chip()?.textContent).toBe("Save blocked: File deleted on disk");
+    expect(chip()?.dataset.state).toBe("blocked");
+    expect(onRetryDiffEditSave).not.toHaveBeenCalled();
+  });
+
+  it("offers Retry now only while a save is failing", () => {
+    const onRetryDiffEditSave = vi.fn();
+    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onRetryDiffEditSave });
+    diffView.setFiles([file()], false);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
+    const render = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!;
+
+    diffView.setEditStatus("src/foo.ts", { kind: "dirty" });
+    expect(render().querySelector("#code-pane-diff-edit-retry")).toBeNull();
+
+    diffView.setEditStatus("src/foo.ts", { kind: "failed", reason: "daemon unavailable", retryInMs: 1000 });
+    const retry = render().querySelector<HTMLButtonElement>("#code-pane-diff-edit-retry")!;
+    expect(retry.className).toBe("btn ghost");
+    retry.click();
+    expect(onRetryDiffEditSave).toHaveBeenCalledWith("src/foo.ts");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saving" });
+    expect(render().querySelector("#code-pane-diff-edit-retry")).toBeNull();
   });
 
   it("uses the supplied workspace content for the editable right-side item instead of the patch's partial new side", () => {
@@ -632,8 +693,7 @@ describe("DiffView inline edit", () => {
       edit: true,
     });
     expect(header?.textContent).toContain("Editing");
-    expect(header?.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).toBeNull();
-    expect([...header!.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toEqual(["Cancel"]);
+    expect([...header!.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toEqual([]);
   });
 
   it("replaces a dirty inline editor with a read-only disk-versus-buffer comparison until an explicit conflict action", () => {
@@ -662,6 +722,8 @@ describe("DiffView inline edit", () => {
     expect(header?.textContent).toContain("Workspace changed");
     expect(header?.querySelector("#code-pane-diff-edit-save")).toBeNull();
     expect(header?.querySelector("#code-pane-diff-edit-cancel")).toBeNull();
+    // Take disk and Keep mine are the only actions a conflict offers: there is nothing to "save"
+    // until one of them says which side wins.
     const actions = [...((header?.querySelectorAll("button") ?? []) as NodeListOf<HTMLButtonElement>)];
     expect(actions.map((button) => button.textContent)).toEqual(["Take disk", "Keep mine"]);
     actions[0]!.click();

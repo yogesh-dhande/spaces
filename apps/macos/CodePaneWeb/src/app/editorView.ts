@@ -11,29 +11,22 @@ import {
   WorkspaceFileWriteResult,
 } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
+import { AutosaveScheduler, AutosaveStatus, retryDelayMs, SaveOutcome } from "./autosave";
 import { afterBrowserPaint } from "./renderMetrics";
 
 /** Trailing debounce for recovery-state pushes on buffer edits (see `scheduleEditorStatePush`). */
 const EDITOR_STATE_DEBOUNCE_MS = 500;
 /** A broken editor attach must not leave a frame callback alive for the pane's lifetime. */
 const RESTORED_FOCUS_ATTACH_MAX_FRAMES = 120;
-/** Bounded-backoff floor/cap for `handleExternalChange`'s execution-failure retry (see
- *  `scheduleExternalChangeRetry`'s doc comment) — identical values to root.ts's
- *  `DIFF_RETRY_FLOOR_MS`/`DIFF_RETRY_CAP_MS`, mirrored here rather than imported: root.ts keeps
- *  that retry state as private closures inside `mountRoot` with no exported reusable helper. */
-const EXTERNAL_CHANGE_RETRY_FLOOR_MS = 1000;
-const EXTERNAL_CHANGE_RETRY_CAP_MS = 30000;
-
 export interface EditorViewCallbacks {
   /** Fired exactly when `loadFile()` completes a load that actually replaces the buffer with
-   *  `path`'s content — the one seam every real open funnels through, whether it arrived via a
-   *  direct `open()` call or via the discard-consent banner's own `loadFile(path, {
-   *  discardConsentEditGeneration })` re-invocation. Deliberately NOT fired for: a refused open
-   *  (`open()`'s dirty-buffer gate, which returns before ever calling `loadFile()`), a failed read
-   *  (the catch branch), a re-raised discard banner (a stale consent), or a superseded load (an
-   *  `openGeneration` bump already won) — see `loadFile`'s own branches for each. root.ts uses this
-   *  to record `path` into recents and move the Files-tree selection (see its `openInEditor`),
-   *  which is what keeps a refused or failed open from polluting either. */
+   *  `path`'s content: the one seam every real open funnels through. Deliberately NOT fired for a
+   *  refused open (`open()`'s flush gate, or `loadFile()`'s own completion-time recheck, when the
+   *  buffer that has to be written first is blocked or its write fails), a failed read (the catch
+   *  branch), or a superseded load (an `openGeneration` bump already won); see `loadFile`'s own
+   *  branches for each. root.ts uses this to record `path` into recents and move the Files-tree
+   *  selection (see its `openInEditor`), which is what keeps a refused or failed open from
+   *  polluting either. */
   onFileOpened?(path: string): void;
   /** Fires only after CodeView has received the file and the browser has crossed two paint frames,
    *  making it the real-system visible-render endpoint rather than the earlier read completion.
@@ -72,6 +65,26 @@ export function diff3MergeLines(mine: string, base: string, theirs: string): { m
   return { merged: merged.join("\n") };
 }
 
+/** The chip's wording for each save state (docs/spec.md's Editor section owns this copy). The failed
+ *  state names both the reason and when the scheduler retries on its own, since the "Retry now"
+ *  action beside it only skips that wait. */
+function saveStatusText(status: AutosaveStatus): string {
+  switch (status.kind) {
+    case "idle":
+      return "";
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "failed":
+      return `Save failed: ${status.reason} · retry in ${Math.round(status.retryInMs / 1000)} s`;
+    case "blocked":
+      return `Save blocked: ${status.reason}`;
+  }
+}
+
 /**
  * Editor mode: a single-file `@pierre/diffs` `CodeView` in edit mode, saved through the CAS
  * `workspaceFileWrite` call. This class owns no file-picking UI of its own — every file this view
@@ -79,18 +92,25 @@ export function diff3MergeLines(mine: string, base: string, theirs: string): { m
  * mode's Files tree, or the Changes list (see quickOpen.ts/editorSidebar.ts/README.md's "Editor
  * mode" section for the three entry points and how root.ts routes between them). The top bar this
  * view renders is just the open file's path (or a "⌘P to open a file" hint when none is open) and
- * the Save button.
+ * the autosave status chip.
+ *
+ * Saving is automatic: every buffer edit notes itself with an `AutosaveScheduler` (autosave.ts),
+ * which coalesces a burst of keystrokes into one CAS write, never overlaps two writes, backs off on
+ * a failed write, and stops writing while this view reports a block only the user can clear. This
+ * class supplies that scheduler's whole view of the world through the `AutosaveHost` methods below
+ * (`isDirty`/`blockedReason`/`performSave`) and paints its status into the top bar's chip.
  *
  * External-change handling (disk changing under an open file) is a single shared path,
  * `handleExternalChange`, driven by two triggers — a `spaces:fileSignature` push event and a
- * `save()` CAS rejection — implementing four cases:
+ * `performSave()` CAS rejection, implementing four cases:
  *   - clean buffer + disk changed: silently reload, adopt the new baseline.
  *   - clean buffer + file deleted: swap in a "deleted on disk" placeholder.
  *   - dirty buffer + disk changed, non-overlapping edits: auto-merge via `diff3MergeLines`, with a
  *     dismissible "Merged external changes" indicator offering Undo.
  *   - dirty buffer + disk changed, overlapping edits (or Undo of an auto-merge) + dirty buffer with
- *     the file deleted: conflict state — Save blocked, a read-only compare view (buffer vs. disk)
- *     with "Keep mine" / "Take disk" (or "Close without saving" when deleted) actions.
+ *     the file deleted: conflict state, which blocks autosave and shows a read-only compare view
+ *     (buffer vs. disk) with "Keep mine" / "Take disk" (or "Close without saving" when deleted)
+ *     actions.
  *
  * Every open/edit/save/external-change transition updates the unified workspace recovery document
  * through root's callback, so this view's state can be rebuilt after a hibernation cycle.
@@ -101,7 +121,13 @@ export class EditorView {
    *  is open (Design O; see this class's doc comment). Not an input: there is nothing to type into
    *  it, only to read. */
   private readonly pathLabel: HTMLElement;
-  private readonly saveBtn: HTMLButtonElement;
+  /** The top bar's autosave status pill: the one place a save's state is reported (see
+   *  `renderSaveStatus`). There is no Save button anywhere in Editor mode. */
+  private readonly saveStatusChip: HTMLElement;
+  /** Shown only while a write has failed and the scheduler is counting down to its own retry;
+   *  clicking it runs that retry immediately instead of waiting out the backoff. */
+  private readonly retrySaveBtn: HTMLButtonElement;
+  private readonly scheduler: AutosaveScheduler;
   private readonly codeHost: HTMLElement;
   private readonly banner: HTMLElement;
   private codeView: CodeView | undefined;
@@ -124,24 +150,37 @@ export class EditorView {
    *  the "changed" wording (see `restoreState`'s doc comment), so this always starts `false` and is
    *  only ever set by `enterConflictState` within a live session. */
   private diskMissing = false;
-  /** The buffer's content immediately before a diff3 auto-merge was applied, kept only long enough
-   *  to offer "Undo" on the merge indicator. Cleared (and the indicator hidden) the moment any of:
-   *  another edit lands on top of the merge (undo would silently discard it), the file is saved, a
-   *  new file is opened, or a real conflict is entered. Deliberately NOT part of
+  /** The CAS target an explicit "Keep mine" confirmed, mirroring `CodePaneEditorState`'s field of
+   *  the same name (see it for why the decision has to be durable). Editor mode only ever records
+   *  the deleted case, `null` = create-if-missing: every other Keep mine confirms a real disk hash,
+   *  which `baseSHA256` already carries and a fresh read reproduces, while a file that is still
+   *  missing would otherwise re-derive a deleted-file conflict from every reconcile and ask the user
+   *  to confirm the same deletion again. */
+  private confirmedBaseSHA256: string | null | undefined;
+  /** The buffer's content immediately before a diff3 auto-merge was applied, kept to offer "Undo"
+   *  on the merge indicator. A merged buffer is dirty, so autosave writes it within the debounce
+   *  window; that write deliberately does NOT retire the offer, because the merge result reaching
+   *  disk is exactly the state the offer exists to undo. Cleared (and the indicator hidden) the
+   *  moment any of: another edit lands on top of the merge (undo would silently discard it), an
+   *  external change replaces the buffer, a new file is opened, or a real conflict is entered.
+   *  Deliberately NOT part of
    *  `CodePaneEditorState` (see its doc comment) — a hibernation cycle simply drops the Undo offer,
    *  which is an accepted, cheap-to-lose affordance rather than a data-loss risk. */
   private pendingMergeUndo: string | undefined;
-  /** Monotonic count of buffer edits, bumped once per `onItemEditChange` firing. Used only to
-   *  detect whether an edit landed between a discard consent (the "Discard edits and open" button
-   *  click) and that discard's `loadFile()` call completing — see `showDiscardBanner`'s click
-   *  handler and `loadFile()`'s completion check. Not persisted, not part of `CodePaneEditorState`:
-   *  it only ever needs to compare two values captured within the same live session. */
-  private bufferEditGeneration = 0;
   private editGeneration = 0;
   /** Bumped at the start of every `loadFile()` call; a call whose token has been superseded by a
    *  later `loadFile()` drops its result (success or failure) instead of clobbering whatever that
    *  later call already loaded. Same latest-wins shape as `root.ts`'s `diffRequestToken`. */
   private openGeneration = 0;
+  /** Bumped by every `open()` call, before it waits on the flush that has to land first, and by a
+   *  re-pick of the file already open (which loads nothing). Every step of `loadFile` that runs after
+   *  an await is guarded by it and by nothing else. Separate from `openGeneration` on purpose: this
+   *  says "a newer open has claimed this pane", which is what makes an earlier open drop its load
+   *  once its own flush or read resolves, while `openGeneration` says
+   *  "the buffer has actually been replaced", which is what a settling write checks before adopting
+   *  a baseline. Conflating them would make an in-flight write stand down for an open that has not
+   *  replaced anything yet, leaving the buffer dirty against a baseline the write already moved. */
+  private openRequestGeneration = 0;
   /** Bumped at the start of every `handleExternalChange` fetch; a fetch superseded by a later one
    *  (two external-change triggers arriving close together) drops its result — same latest-wins
    *  shape as `openGeneration`, but scoped to this one flow since it must survive within a single
@@ -154,17 +193,18 @@ export class EditorView {
    *  whenever a `handleExternalChange` run reaches a decoded outcome (a successful read or an
    *  authoritative `notFound`) or by a successful `loadFile()`; the pending timer is
    *  additionally cleared at the very top of every `handleExternalChange` call (see its doc
-   *  comment), so a fresh trigger — a live signature event or `save()`'s CAS-conflict arm —
+   *  comment), so a fresh trigger (a live signature event or `performSave()`'s CAS-conflict arm)
    *  supersedes whatever retry was pending without needing a separate reset path. */
   private externalChangeRetryFailures = 0;
   private externalChangeRetryTimer: ReturnType<typeof setTimeout> | undefined;
-  /** True for the duration of one `save()` call. `saveBtn.disabled` alone doesn't stop re-entrancy:
-   *  a second click already queued (or a programmatic `save()`) can still run before the first
-   *  await yields control back to the DOM, and two overlapping CAS writes racing the same baseline
-   *  would let the second silently win with a hash the first's in-flight write invalidates. */
+  /** True for the duration of one `performSave()` call. The scheduler already guarantees it never
+   *  starts a second write while one is in flight; this flag keeps that invariant true for the one
+   *  write that does not come from the scheduler's loop, since two overlapping CAS writes racing the
+   *  same baseline would let the second silently win with a hash the first's in-flight write
+   *  invalidates. */
   private saveInFlight = false;
-  /** The exact content an in-flight `save()` submitted, set just before the write await and cleared
-   *  in `save()`'s `finally`. Exists ONLY so `handleExternalChange` can recognize disk content that
+  /** The exact content an in-flight `performSave()` submitted, set just before the write await and cleared
+   *  in `performSave()`'s `finally`. Exists ONLY so `handleExternalChange` can recognize disk content that
    *  is this pane's own in-flight write when `latestContent` has already moved past it — the
    *  `disk.content === this.latestContent` branch above it covers the not-moved-on case (see that
    *  branch's own comment for the full mechanism). */
@@ -200,6 +240,8 @@ export class EditorView {
   /** Unsubscribes the previous `subscribeFileSignature` listener; replaced (not layered) every time
    *  a new path becomes "the currently open file" — see `subscribeToFileSignature`. */
   private fileSignatureUnsubscribe: Unsubscribe | undefined;
+  /** Set by `dispose()`; see its doc comment for what this guards that a token bump cannot. */
+  private disposed = false;
 
   constructor(
     container: HTMLElement,
@@ -216,14 +258,26 @@ export class EditorView {
     this.setPathLabel(undefined);
     openBar.appendChild(this.pathLabel);
 
-    this.saveBtn = document.createElement("button");
-    this.saveBtn.type = "button";
-    this.saveBtn.className = "btn primary";
-    this.saveBtn.textContent = "Save";
-    this.saveBtn.disabled = true;
-    this.saveBtn.addEventListener("click", () => void this.save());
+    this.saveStatusChip = document.createElement("span");
+    this.saveStatusChip.className = "save-status";
+    this.saveStatusChip.id = "code-pane-editor-save-status";
+    openBar.appendChild(this.saveStatusChip);
 
-    openBar.appendChild(this.saveBtn);
+    this.retrySaveBtn = document.createElement("button");
+    this.retrySaveBtn.type = "button";
+    this.retrySaveBtn.className = "btn ghost";
+    this.retrySaveBtn.id = "code-pane-editor-retry-save";
+    this.retrySaveBtn.textContent = "Retry now";
+    this.retrySaveBtn.addEventListener("click", () => void this.scheduler.flush());
+    openBar.appendChild(this.retrySaveBtn);
+
+    this.scheduler = new AutosaveScheduler({
+      isDirty: () => this.dirty,
+      blockedReason: () => this.blockedReason(),
+      performSave: () => this.performSave(),
+      onStatus: (status) => this.renderSaveStatus(status),
+    });
+    this.renderSaveStatus(this.scheduler.status);
 
     const codeArea = document.createElement("div");
     codeArea.className = "diff-area";
@@ -270,9 +324,9 @@ export class EditorView {
         onItemEditChange: (_item, file) => {
           this.latestContent = file.contents;
           this.dirty = true;
-          this.bufferEditGeneration += 1;
           this.focusedLine = this.readFocusedLine() ?? this.focusedLine;
-          this.saveBtn.disabled = this.conflict;
+          // The keystroke seam: one debounced write per burst of typing, arranged by the scheduler.
+          this.scheduler.noteEdit();
           // A merge indicator's Undo only makes sense against the exact pre-merge buffer: an edit
           // made on top of the merge result would be silently discarded by an Undo that reverts to
           // that snapshot, so any further edit retires the offer instead of leaving it live.
@@ -449,83 +503,127 @@ export class EditorView {
   }
 
   /**
-   * Public entry point for every way a file can be opened in Editor mode — the ⌘P quick-open
+   * Public entry point for every way a file can be opened in Editor mode: the ⌘P quick-open
    * overlay, the Files tree, and the Changes list (see this class's doc comment) all call this and
-   * nothing else. `loadFile()` itself stays ungated, since `restoreState`'s clean branch calls it
-   * directly with nothing at risk (that path only ever follows a fresh restore, never an
-   * in-progress edit).
+   * nothing else.
    *
-   * Silently replacing the buffer here would violate the spec's unsaved-edit
-   * promise (README.md: "only quitting and reopening the app loses an unsaved edit") — a save-in-
-   * progress buffer must not vanish just because a different file was opened. A modal confirmation
-   * is out per this codebase's design rules (no new modal surfaces), so the existing non-blocking
-   * banner carries the explicit discard consent instead: clicking its action is the one deliberate
-   * way to abandon the current edit, distinct from the silent replace this gate refuses to do on
-   * its own.
-   *
-   * This upfront check is a fast path only, not the whole contract. It
-   * runs before the read starts, so it cannot see dirty state that arises WHILE that read is in
-   * flight (the user typing into the currently-open file during a slow remote read) —
-   * `loadFile()` itself re-checks dirty at completion and raises the identical banner if the race
-   * occurred (see the completion-check comment inside `loadFile()`). And the banner's discard
-   * button no longer clears `dirty` at click time: it commits the discard only once `loadFile()`
-   * actually succeeds, via `loadFile(path, { discardConsentEditGeneration })`, so a read that fails
-   * after a discard click leaves the old buffer correctly marked dirty rather than lying about it
-   * having been abandoned. The generation carried by that option additionally scopes the consent to
-   * the buffer as it stood at the click, not whatever the buffer becomes while the read is still in
-   * flight — see `loadFile()`'s completion check.
-   *
-   * A standing conflict is dirty by construction (`this.dirty` stays true throughout), so it falls
-   * through the same gate as any other unsaved buffer — opening a different file is one of the
-   * ways to leave a conflict, alongside the compare view's own "Keep mine"/"Take disk" actions.
+   * Opening another file while the current buffer has unsaved edits writes them first and only then
+   * loads the new file, which is what keeps the spec's promise that an edit is never discarded by an
+   * open. A flush that ends blocked (a standing conflict, which only "Keep mine" / "Take disk" can
+   * clear) or failed refuses the open and says why, leaving the current buffer exactly where it is.
    */
-  open(path: string): void {
+  async open(path: string): Promise<void> {
+    // Claimed BEFORE anything else, the same-path return below included: a second open arriving
+    // while an earlier one is still waiting on its flush supersedes it, so the earlier open drops
+    // its own load instead of replacing the buffer the newer open is about to fill. Re-picking the
+    // currently-open file is just as much a claim on the pane as picking a different one: it is the
+    // user's latest selection, so a pending open of some other file must stand down rather than
+    // swap that file in once its flush settles.
+    const request = ++this.openRequestGeneration;
     // Re-picking the file already open (its own row in Files/Changes, or ⌘P again) must not fall
-    // into the discard gate below: the file is already on screen, so there is nothing to open that
-    // isn't already showing, and accepting the banner would reread disk and destroy the very edits
-    // it claims to be protecting. A standing conflict is dirty by construction and never clears
-    // `currentPath` (see this method's doc comment), so re-picking the same path mid-conflict also
-    // lands here and just stays put, same as any other dirty same-path reopen.
+    // into the flush gate below: the file is already on screen, so there is nothing to open that
+    // isn't already showing, and re-reading disk would destroy the very edits the flush is trying to
+    // protect. A standing conflict is dirty by construction and never clears `currentPath`, so
+    // re-picking the same path mid-conflict also lands here and just stays put.
     if (path === this.currentPath && this.dirty) return;
     if (this.dirty && this.currentPath !== undefined) {
-      this.showDiscardBanner(path);
-      return;
+      const outcome = await this.scheduler.flush();
+      if (request !== this.openRequestGeneration) return; // a later open() already won
+      if (outcome === "failed") {
+        this.showSaveIssueBanner();
+        return;
+      }
+      // A blocked flush is a standing conflict, and the conflict compare view on screen holds the
+      // only two controls that can clear it. Its reason is already on the chip ("Save blocked: ..."),
+      // so the refusal says nothing more rather than replacing those controls with plain text.
+      if (outcome === "blocked") return;
     }
-    void this.loadFile(path);
+    await this.loadFile(path, request);
   }
 
-  /** Renders the non-blocking discard-consent banner used by `open`'s gate and by `loadFile()`'s
-   *  own completion-time recheck (see both call sites' comments). Only ever called when
-   *  `this.currentPath !== undefined` already holds, so reading it directly here is safe. */
-  private showDiscardBanner(targetPath: string): void {
-    const from = this.currentPath;
-    const text = document.createElement("span");
-    text.textContent = `Unsaved changes in ${from}. Save them first, or discard them to open ${targetPath}.`;
-    const discardBtn = document.createElement("button");
-    discardBtn.type = "button";
-    discardBtn.className = "btn";
-    discardBtn.textContent = "Discard edits and open";
-    discardBtn.addEventListener("click", () => {
-      // Captured here, inside the listener, not hoisted out to banner-render time: the consent this
-      // click gives only covers the buffer AS IT STANDS RIGHT NOW. Reading `bufferEditGeneration` at
-      // click time (rather than whatever value it happened to have when the banner was first shown)
-      // is what lets `loadFile()`'s completion check detect an edit that lands during this call's own
-      // read — see that check's comment.
-      void this.loadFile(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration });
-    });
-    this.banner.className = "banner conflict";
-    this.banner.replaceChildren(text, discardBtn);
+  /** ⌘S and the host's teardown flush: writes any pending edit immediately instead of waiting out
+   *  the debounce, and reports what the buffer ended up as. */
+  flushNow(): Promise<"clean" | "blocked" | "failed"> {
+    return this.scheduler.flush();
+  }
+
+  /** The autosave state the top bar's chip is showing. */
+  saveStatus(): AutosaveStatus {
+    return this.scheduler.status;
+  }
+
+  /**
+   * Pane teardown: once this returns the view schedules nothing further, holds no subscription, and
+   * never calls back into the host again. Beyond the explicit cancels, every latest-wins token the
+   * view owns is bumped, which is what makes the work already in flight stand down at the guard it
+   * already has rather than growing a teardown branch of its own: a load mid-read
+   * (`openRequestGeneration`, which `loadFile` alone answers to, with `openGeneration` bumped
+   * alongside it for the writes and reconciles that answer to that one), a reconcile mid-fetch
+   * (`externalChangeFetchToken`), and the requestAnimationFrame polls that
+   * complete an editor attach or restore focus (`editGeneration`, `focusRestoreGeneration`).
+   * `disposed` covers the two entry points a token cannot reach: a signature event that beat the
+   * unsubscribe, and the continuation of a write that was already in flight.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.scheduler.cancel();
+    this.fileSignatureUnsubscribe?.();
+    this.fileSignatureUnsubscribe = undefined;
+    clearTimeout(this.externalChangeRetryTimer);
+    clearTimeout(this.editorStatePushTimer);
+    this.openRequestGeneration += 1;
+    this.openGeneration += 1;
+    this.externalChangeFetchToken += 1;
+    this.editGeneration += 1;
+    this.focusRestoreGeneration += 1;
+  }
+
+  /** Paints the top bar's chip, the single surface for save state (Option C). Idle is the absence of
+   *  the chip: a file nobody has typed into has nothing to report. The "Retry now" action rides
+   *  alongside the failed state only, since it is the only state with a wait to skip. */
+  private renderSaveStatus(status: AutosaveStatus): void {
+    this.saveStatusChip.dataset.state = status.kind;
+    this.saveStatusChip.textContent = saveStatusText(status);
+    this.saveStatusChip.style.display = status.kind === "idle" ? "none" : "inline-flex";
+    this.retrySaveBtn.style.display = status.kind === "failed" ? "inline-flex" : "none";
+  }
+
+  /** The scheduler's `blockedReason`: what stops this view from writing at all until the user
+   *  resolves it. `diskMissing` is only ever set alongside `conflict` (see `enterConflictState`), so
+   *  it is checked first to give the deleted case its own wording. */
+  private blockedReason(): string | undefined {
+    if (this.diskMissing) return "File deleted on disk";
+    if (this.conflict) return "File changed on disk";
+    return undefined;
+  }
+
+  /** The refusal notice for an open whose mandatory flush failed. Only the `failed` outcome reaches
+   *  here (a block keeps its own compare view on screen), and the chip's wording for that failure is
+   *  exactly the reason to show. */
+  private showSaveIssueBanner(): void {
+    this.banner.className = "banner error";
+    this.banner.textContent = saveStatusText(this.scheduler.status);
     this.banner.style.display = "flex";
   }
 
-  private async loadFile(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
+  /**
+   * `request` is the `openRequestGeneration` token its caller in `open()` claimed the pane with, and
+   * it is the only thing every step after an await here is guarded by. It is the request token
+   * rather than `openGeneration` because the two answer different questions: `openGeneration` says
+   * "the buffer has actually been replaced", which is what an in-flight write or reconcile checks
+   * before adopting anything, while the token says "this open is still the user's latest selection",
+   * which is the only thing that decides whether this load may proceed. Re-picking the file already
+   * open claims the pane without loading anything, so it moves the token and not `openGeneration`,
+   * and a load already in flight for some other file has to stand down on it.
+   */
+  private async loadFile(path: string, request: number): Promise<void> {
     const renderStartedAt = performance.now();
-    const generation = ++this.openGeneration;
+    this.openGeneration += 1;
     let result: WorkspaceFileReadResult;
     try {
       result = await this.bridge.workspaceFileRead(path, "editor");
     } catch (err) {
-      if (generation !== this.openGeneration) return; // a later loadFile() already won
+      if (request !== this.openRequestGeneration) return; // a later open() already claimed the pane
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
       this.banner.className = "banner error";
       this.banner.textContent = message;
@@ -541,39 +639,27 @@ export class EditorView {
       if (this.currentPath !== undefined) void this.handleExternalChange();
       return; // leave the previous file's path label as-is; the failed target was never adopted
     }
-    if (generation !== this.openGeneration) return; // a later loadFile() already won
-    const isStaleConsent =
-      opts?.discardConsentEditGeneration === undefined || opts.discardConsentEditGeneration !== this.bufferEditGeneration;
-    if (isStaleConsent && this.dirty && this.currentPath !== undefined) {
-      // Bug A fix (round-15): a DIFFERENT open (`open`'s own upfront check, which ran before
-      // this read started) cannot see dirty state that arises WHILE this read is in flight — the
-      // user may type into the currently-open file during the seconds a remote read can take.
-      // Rechecking here, at completion, is what actually closes that race, showing the identical
-      // consent banner instead of silently replacing the buffer.
-      //
-      // A discard consent only ever covers the buffer AS OF THE CLICK, not whatever the buffer
-      // becomes while this call's own read is still in flight (a later fix, tracked via
-      // `bufferEditGeneration`). Without the generation check, a discard-open's completion would
-      // see `this.dirty === true` (never cleared before the call — that's Bug B's fix, deferring
-      // the clear to this function's own success path below) and treat its OWN replacement as a
-      // conflict, re-raising the very banner the user just dismissed — but ONLY re-raising it when
-      // an edit actually landed after the click is what makes that re-raise correct rather than a
-      // repeat of Bug B: a second click with `discardConsentEditGeneration` still matching the
-      // current `bufferEditGeneration` (no edit landed in between) is exactly the "resolution
-      // already given, do not re-litigate it" case Bug B's fix protects, and `isStaleConsent` is
-      // false for it, so the buffer is replaced below and this cannot loop forever — each re-raise
-      // requires the user to have typed something new, which is new unsaved work the original
-      // consent never covered.
-      this.showDiscardBanner(path);
-      // Same reconcile as the catch block above, for the same reason: this refusal leaves the
-      // previously-open file (`this.currentPath`, guaranteed defined by this branch's own condition, so
-      // no guard needed here unlike the catch block) current, and any of its own in-flight reconcile was
-      // just discarded by the generation bump. This also repairs a Swift-side wrinkle: the successful
-      // read for `path` already retargeted the device's file-signature subscription to `path`, so this
-      // reconcile's own `workspaceFileRead(this.currentPath)` reaches Swift as a path change and its
-      // success arm resubscribes the signature stream back to `this.currentPath` as a byproduct.
-      void this.handleExternalChange();
-      return;
+    if (request !== this.openRequestGeneration) return; // a later open() already claimed the pane
+    if (this.dirty && this.currentPath !== undefined) {
+      // The buffer went dirty WHILE this read was in flight: the user typing into the currently-open
+      // file during the seconds a remote read can take. `open()`'s own flush ran before the read
+      // started and cannot see those edits, so this is the only place that can. Edits belong to the
+      // file they were typed into, so they are written before the swap rather than carried into it.
+      const outcome = await this.scheduler.flush();
+      if (request !== this.openRequestGeneration) return; // a later open() already claimed the pane
+      if (outcome !== "clean") {
+        // Only a failure needs saying: a block already owns the banner with the compare view that
+        // resolves it, and the chip carries its reason (see `open()`'s own refusal).
+        if (outcome === "failed") this.showSaveIssueBanner();
+        // Same reconcile as the catch block above, for the same reason: this refusal leaves the
+        // previously-open file current, and any of its own in-flight reconcile was just discarded by
+        // the generation bump. This also repairs a Swift-side wrinkle: the successful read for `path`
+        // already retargeted the device's file-signature subscription to `path`, so this reconcile's
+        // own `workspaceFileRead(this.currentPath)` reaches Swift as a path change and its success arm
+        // resubscribes the signature stream back to `this.currentPath` as a byproduct.
+        void this.handleExternalChange();
+        return;
+      }
     }
     this.setPathLabel(path);
     this.currentPath = path;
@@ -583,35 +669,38 @@ export class EditorView {
     this.dirty = false;
     this.conflict = false;
     this.diskMissing = false;
+    this.confirmedBaseSHA256 = undefined;
     this.pendingMergeUndo = undefined;
     this.banner.style.display = "none";
     // Fix 3 (round-24, P2): the flag scopes an unreadable-file error banner to the file that raised
     // it (see the flag's own doc comment). A successful open establishes a fresh file context, so it
     // must not leak into the next file's first decoded `handleExternalChange` reconcile, whose
-    // unconditional-on-this-flag clear (around line 582) would otherwise hide an unrelated banner
-    // (discard consent, merge indicator) that file put up, using state left over from a DIFFERENT
-    // file.
+    // unconditional-on-this-flag clear would otherwise hide an unrelated banner (the merge
+    // indicator, say) that file put up, using state left over from a DIFFERENT file.
     this.unreadableBannerVisible = false;
-    this.saveBtn.disabled = true;
     // A successful open establishes a fresh file context: any execution-failure retry still
     // pending for the PREVIOUS file is already neutralized by the `openGeneration` bump above (its
     // fire-time check no-ops), but clearing it here too avoids a dangling timer and lets this new
     // file's own retry backoff (if it ever needs one) start at the floor.
     clearTimeout(this.externalChangeRetryTimer);
     this.externalChangeRetryFailures = 0;
+    // Every part of the scheduler's state describes the file being replaced here: its "Saved" is not
+    // true of this one (which has never been edited), and its backoff is not this one's to inherit.
+    // After the flush above, so the previous file's own pending write is never dropped by this.
+    this.scheduler.reset();
 
     this.loadIntoCodeView(path, result.content);
     afterBrowserPaint(() => {
-      if (generation !== this.openGeneration || this.currentPath !== path) return;
+      if (request !== this.openRequestGeneration || this.currentPath !== path) return;
       this.callbacks.onFileRendered?.(path, Math.max(performance.now() - renderStartedAt, 0), result.content.length);
     });
     this.subscribeToFileSignature(path);
     // Immediate, not debounced: a file open is a discrete transition, not a buffer edit.
     this.pushEditorStateNow();
     // The one place a load actually completes (see `EditorViewCallbacks.onFileOpened`'s doc
-    // comment) — every earlier return in this method (the catch branch, the stale-consent
-    // re-raise, the generation checks) skips this line, which is what keeps a refused or failed
-    // open from firing it.
+    // comment): every earlier return in this method (the catch branch, the flush refusal, the
+    // generation checks) skips this line, which is what keeps a refused or failed open from firing
+    // it.
     this.callbacks.onFileOpened?.(path);
   }
 
@@ -631,7 +720,7 @@ export class EditorView {
 
   /**
    * The one shared handler for "disk changed under the open file", called both by the
-   * file-signature listener above (a push event) and by `save()`'s CAS-conflict arm (a rejected
+   * file-signature listener above (a push event) and by `performSave()`'s CAS-conflict arm (a rejected
    * write is itself evidence disk moved). Always does its own fresh `workspaceFileRead` rather than
    * trusting whatever triggered it: a `FileSignatureEvent` is deliberately just a "go look" signal
    * with no content payload (see its doc comment), and a save conflict's `currentSHA256` can already
@@ -646,6 +735,7 @@ export class EditorView {
    * state — there is no separate "already conflicted" branch to maintain.
    */
   private async handleExternalChange(): Promise<void> {
+    if (this.disposed) return; // a signature event racing the unsubscribe, or a settling write's conflict arm
     const path = this.currentPath;
     if (!path) return; // no open file — a stray/late event after the pane moved on
     const generation = this.openGeneration;
@@ -676,8 +766,8 @@ export class EditorView {
         // scheduling a retry, and WITHOUT tearing down the open-file state or the signature
         // subscription: recovery is left to the next signature-change event naturally re-entering
         // this method (e.g. the file shrinking back under the cap, or being rewritten as valid
-        // UTF-8), not a retry loop of our own. A dirty buffer's own Save stays CAS-guarded (see
-        // `save()`), so nothing here risks silently overwriting unsaved local edits.
+        // UTF-8), not a retry loop of our own. A dirty buffer's own write stays CAS-guarded (see
+        // `performSave()`), so nothing here risks silently overwriting unsaved local edits.
         this.externalChangeRetryFailures = 0;
         this.unreadableBannerVisible = true;
         this.banner.className = "banner error";
@@ -726,11 +816,20 @@ export class EditorView {
     if (disk === undefined) {
       if (!this.dirty) {
         this.showDeletedPlaceholder(path);
+      } else if (this.confirmedBaseSHA256 === null) {
+        // Still gone, and the user has already said to recreate it with this buffer. Re-entering the
+        // conflict here would throw that decision away and ask for it again, once per reconcile, for
+        // as long as the create write keeps failing. `baseSHA256` is still the create sentinel, so
+        // the write the scheduler is already retrying carries the right target.
+        this.scheduler.reevaluate();
       } else {
         this.enterConflictState({ content: "", sha256: undefined, missing: true });
       }
       return;
     }
+    // The file exists again, so nothing about a deleted file is still true: whoever recreated it,
+    // every branch below re-derives this pane's relationship to disk from the content just read.
+    this.confirmedBaseSHA256 = undefined;
 
     if (disk.sha256 === this.baseSHA256) return; // spurious: disk already matches what this pane holds
 
@@ -741,9 +840,13 @@ export class EditorView {
       this.baseContent = disk.content;
       this.latestContent = disk.content;
       this.loadIntoCodeView(path, disk.content);
-      // Explicit, not left over from whatever triggered this: a save() CAS conflict disables Save
-      // before routing here, and a clean buffer must leave it disabled (nothing unsaved exists).
-      this.saveBtn.disabled = true;
+      // A live Undo offer names the exact buffer this reload just replaced, so it goes with it:
+      // reverting to a pre-merge snapshot of content that is no longer on screen would discard the
+      // disk-side change this reload just adopted.
+      if (this.pendingMergeUndo !== undefined) {
+        this.pendingMergeUndo = undefined;
+        this.banner.style.display = "none";
+      }
       this.pushEditorStateNow();
       return;
     }
@@ -754,7 +857,8 @@ export class EditorView {
       // holds exactly what's showing in the editor, so there is nothing to merge and nothing unsaved
       // — routing this into `diff3MergeLines` below would merge ours == theirs, which is a no-op on
       // content but still flips on the "Merged external changes." banner and (per the dirty branch's
-      // own rule) leaves `dirty` true with Save enabled for a merge that never actually happened.
+      // own rule) leaves `dirty` true, so autosave would write again, for a merge that never
+      // actually happened.
       //
       // Canonical trigger: this pane's OWN save. The CAS write lands on disk, the 2s file-signature
       // poll picks it up and pushes an external-change event, and this read completes before the
@@ -764,14 +868,16 @@ export class EditorView {
       // whatever `handleExternalChange` decides. An external writer that coincidentally writes exactly
       // the buffer's content reconciles identically through this same branch.
       //
-      // Banner-hide and `pendingMergeUndo` clear mirror the save-success arm (:1085-1086): buffer ==
-      // disk == baseline leaves nothing to undo and nothing to report.
+      // The banner hide mirrors the save-success arm, and is what clears the conflict compare view
+      // in the dissolve case below (where `pendingMergeUndo` is always undefined already, since
+      // `enterConflictState` clears it). It is gated on the merge offer for the same reason the
+      // save-success arm is: the canonical trigger here is this pane's own write of a merged buffer
+      // landing, and retiring the offer on that would make Undo unreachable a poll interval after
+      // every auto-merge.
       this.baseSHA256 = disk.sha256;
       this.baseContent = disk.content;
       this.dirty = false;
-      this.saveBtn.disabled = true;
-      this.pendingMergeUndo = undefined;
-      this.banner.style.display = "none";
+      if (this.pendingMergeUndo === undefined) this.banner.style.display = "none";
       if (this.conflict) {
         // Disk now holds exactly the frozen buffer `enterConflictState` adopted, so the disagreement
         // the conflict latched no longer exists. Canonical trigger: `resolveConflictKeepMine`'s own
@@ -783,6 +889,9 @@ export class EditorView {
         this.diskMissing = false;
         this.loadIntoCodeView(path, this.latestContent ?? "");
       }
+      // Nothing left to write, and any block this dissolved is gone: settle the chip (and drop a
+      // pending retry) rather than leaving it reporting a save that no longer has to happen.
+      this.scheduler.reevaluate();
       this.pushEditorStateNow();
       return;
     }
@@ -791,7 +900,7 @@ export class EditorView {
       // Disk holds exactly what this pane's own in-flight save submitted — the write landed and the
       // signature poll beat the write response back, while the user kept typing during the flight
       // (`latestContent` has already moved past `submitted`, so the branch above this one didn't
-      // fire). This mirrors the save success arm's own rules (see `save()`'s success arm): adopt the
+      // fire). This mirrors the save success arm's own rules (see `performSave()`'s success arm): adopt the
       // write's content/hash as the new CAS baseline, but the buffer stays dirty because
       // `latestContent` moved past `submitted` during the flight — that extra content was never
       // written, and its next save CAS-checks correctly against this newly-adopted baseline.
@@ -800,18 +909,24 @@ export class EditorView {
       // diverged from the same old baseline on the same lines (the further typing landed on top of
       // what was just submitted), latching a false conflict for our own write — with no way to
       // correct it later, since the save's late arms stand down on their own fetch-token guard (see
-      // `save()`'s `fetchToken` comment) once this reconcile has already run.
+      // `performSave()`'s `fetchToken` comment) once this reconcile has already run.
       //
-      // Save stays enabled: `dirty` is true by construction here (we're inside the dirty path and
-      // disk !== latestContent). A CAS-rejected save can also reach this branch with
+      // The buffer stays dirty by construction here (we're inside the dirty path and
+      // disk !== latestContent), so the scheduler writes the rest of it next. A CAS-rejected save
+      // can also reach this branch with
       // `pendingSaveSubmitted` still set — the conflict arm awaits `handleExternalChange` before
       // `finally` runs — but it only fires if disk coincidentally equals the submitted content,
       // which is still the correct outcome to adopt in that case too.
       this.baseSHA256 = disk.sha256;
       this.baseContent = disk.content;
+      // Unlike the two branches above, this one clears a live merge offer unconditionally: reaching
+      // it means the buffer moved past what the write submitted, which only a keystroke does, and a
+      // keystroke has already retired the offer. The clear is the belt-and-braces half of that.
       this.pendingMergeUndo = undefined;
       this.banner.style.display = "none";
-      this.saveBtn.disabled = false;
+      // The buffer moved past what the in-flight write submitted, so what is left still has to be
+      // written, now against the baseline just adopted.
+      this.scheduler.reevaluate();
       this.pushEditorStateNow();
       return;
     }
@@ -821,7 +936,7 @@ export class EditorView {
       // disk). Routing a further disk-side write through the auto-merge below would diff3 against the
       // base `enterConflictState` adopted — the conflicting disk snapshot itself — so any follow-up
       // edit outside the disputed hunk would read as a clean merge whose disputed hunk is "ours",
-      // silently re-enabling Save and letting it overwrite the other writer's version with no
+      // silently resuming autosave and letting it overwrite the other writer's version with no
       // Keep-mine. Re-entering instead refreshes the compare view against the newest disk state and
       // keeps Keep-mine's CAS baseline current — the same treatment the first conflicting write got.
       // The buffer==disk branch above is the one way a conflict dissolves without explicit resolution,
@@ -841,22 +956,22 @@ export class EditorView {
     this.latestContent = merge.merged;
     this.loadIntoCodeView(path, merge.merged);
     this.showMergeIndicator(path);
-    // Explicit, not left over from whatever triggered this: a save() CAS conflict disables Save
-    // before routing here, and the merged buffer is still dirty (the original edit is still
-    // present, now recombined with disk's change) so Save must stay available.
-    this.saveBtn.disabled = false;
+    // The merged buffer is still dirty (the original edit is still there, now recombined with disk's
+    // change) and nothing on disk holds it yet, so it has to be written again, against the baseline
+    // this merge just adopted.
+    this.scheduler.reevaluate();
     this.pushEditorStateNow();
   }
 
   /**
    * Schedules the next attempt for a `handleExternalChange` read that failed to run to a decodable
-   * conclusion (see the catch branch above) — same floor/doubling/cap backoff shape as root.ts's
-   * `scheduleDiffRetry`.
+   * conclusion (see the catch branch above), on the same bounded backoff autosave.ts uses for a
+   * failed write: `retryDelayMs`'s floor, doubling, and cap, shared rather than restated here.
    *
    * Guarded by `fetchToken`/`generation` at fire time (not just captured at schedule time), each
    * covering a different racer:
    *   - `fetchToken`: a fresh `spaces:fileSignature` push event firing its own `handleExternalChange`
-   *     call, OR `save()`'s CAS-conflict arm doing the same — either one bumps
+   *     call, OR `performSave()`'s CAS-conflict arm doing the same; either one bumps
    *     `externalChangeFetchToken` the same way this retry's own re-invocation would, since both
    *     routes funnel through this same function.
    *   - `generation`: a newer `loadFile()` moving this pane on to a different file entirely, independent
@@ -864,11 +979,8 @@ export class EditorView {
    * Either makes this fire a no-op instead of re-fetching for content nobody is looking at anymore.
    */
   private scheduleExternalChangeRetry(fetchToken: number, generation: number): void {
-    const delay = Math.min(
-      EXTERNAL_CHANGE_RETRY_FLOOR_MS * 2 ** this.externalChangeRetryFailures,
-      EXTERNAL_CHANGE_RETRY_CAP_MS,
-    );
     this.externalChangeRetryFailures += 1;
+    const delay = retryDelayMs(this.externalChangeRetryFailures);
     clearTimeout(this.externalChangeRetryTimer);
     this.externalChangeRetryTimer = setTimeout(() => {
       if (fetchToken !== this.externalChangeFetchToken || generation !== this.openGeneration) return; // superseded while this retry was pending
@@ -877,11 +989,9 @@ export class EditorView {
   }
 
   /** The dismissible "Merged external changes" indicator shown after a clean diff3 auto-merge.
-   *  "Dismiss" just hides it (the merge already stands, nothing to undo any more). "Undo" reverts
-   *  the buffer to its pre-merge content and enters conflict state against the same disk snapshot
-   *  the merge used — "I don't want this decision made for me, let me resolve it manually by hand"
-   *  — rather than silently discarding the merge and leaving the buffer's relationship to disk
-   *  unresolved. */
+   *  "Dismiss" just hides it (the merge already stands, nothing to undo any more). "Undo" puts the
+   *  pre-merge buffer back. Both stay reachable across the autosave that follows the merge, which is
+   *  the whole point of the offer surviving a successful write. */
   private showMergeIndicator(path: string): void {
     const text = document.createElement("span");
     text.textContent = "Merged external changes.";
@@ -903,17 +1013,26 @@ export class EditorView {
     this.banner.style.display = "flex";
   }
 
+  /** Undo is an ordinary buffer edit: it puts the pre-merge content back and lets autosave write it
+   *  against whatever baseline the pane holds now (the merge's disk snapshot, or the hash of the
+   *  merged write if that already landed). Disk therefore ends up back at the user's own content,
+   *  which is what "undo this merge" means once the merge is already on disk. */
   private undoMerge(path: string): void {
     if (this.pendingMergeUndo === undefined || path !== this.currentPath) return;
-    this.latestContent = this.pendingMergeUndo;
+    const restored = this.pendingMergeUndo;
     this.pendingMergeUndo = undefined;
-    this.enterConflictState({ content: this.baseContent ?? "", sha256: this.baseSHA256, missing: false });
+    this.latestContent = restored;
+    this.dirty = true;
+    this.banner.style.display = "none";
+    this.loadIntoCodeView(path, restored);
+    this.scheduler.noteEdit();
+    this.pushEditorStateNow();
   }
 
   /**
-   * Common entry point into conflict state from every trigger: an overlapping diff3 result, an
-   * explicit Undo of a prior auto-merge, or a dirty buffer whose file was deleted on disk. Freezes
-   * the buffer (`this.latestContent`) as "mine" and adopts `disk` as the new CAS baseline
+   * Common entry point into conflict state from every trigger: an overlapping diff3 result, a
+   * further disk-side write while a conflict stands, or a dirty buffer whose file was deleted on
+   * disk. Freezes the buffer (`this.latestContent`) as "mine" and adopts `disk` as the new CAS baseline
    * (`baseSHA256`/`baseContent`) even though the buffer itself is left untouched — so "Keep mine"'s
    * write CAS-checks against the exact disk state shown in the compare view, and so a second
    * disk-side write while this conflict is still unresolved is detected the same way the first one
@@ -921,14 +1040,16 @@ export class EditorView {
    */
   private enterConflictState(disk: { content: string; sha256: string | undefined; missing: boolean }): void {
     this.diskMissing = disk.missing;
-    // Sentinel for "no real disk hash to CAS against" while missing — inert during conflict (Save
-    // is disabled, and `resolveConflictKeepMine` passes `undefined`, the create convention, directly
-    // rather than reading this field back).
+    // Sentinel for "no real disk hash to CAS against" while missing: no write can run while the
+    // conflict blocks the scheduler, and `performSave` reads this empty string back as the CAS
+    // create convention once "Keep mine" clears the block (see `resolveConflictKeepMine`).
     this.baseSHA256 = disk.sha256 ?? "";
     this.baseContent = disk.content;
     this.conflict = true;
     this.pendingMergeUndo = undefined; // Undo only applies to a standing auto-merge, not a real conflict
-    this.saveBtn.disabled = true;
+    // Stops autosave dead: the disagreement is the user's to resolve, and every further write would
+    // be refused until they do.
+    this.scheduler.reevaluate();
     this.renderConflictCompareView();
     this.pushEditorStateNow();
   }
@@ -936,9 +1057,8 @@ export class EditorView {
   /** Builds the read-only two-way compare (buffer vs. disk) shown while `this.conflict` is true,
    *  reusing the shared `CodeView` instance in its non-edit `"diff"` mode via `parseDiffFromFile`
    *  (which diffs two raw strings directly, unlike diffView.ts's `processFile`, which needs an
-   *  existing unified-patch string). `statusOverride` lets a failed "Keep mine" retry refresh just
-   *  the banner's status text without rebuilding the diff or the buttons' click handlers. */
-  private renderConflictCompareView(statusOverride?: string): void {
+   *  existing unified-patch string). */
+  private renderConflictCompareView(): void {
     const path = this.currentPath;
     if (!path) return;
     const mineFile: FileContents = {
@@ -957,7 +1077,7 @@ export class EditorView {
     codeView.setItems([{ id: path, type: "diff", fileDiff, version: this.editGeneration }]);
 
     const text = document.createElement("span");
-    text.textContent = statusOverride ?? (this.diskMissing ? `${path} was deleted on disk.` : `${path} changed on disk.`);
+    text.textContent = this.diskMissing ? `${path} was deleted on disk.` : `${path} changed on disk.`;
     const keepMineBtn = document.createElement("button");
     keepMineBtn.type = "button";
     keepMineBtn.className = "btn primary";
@@ -967,91 +1087,38 @@ export class EditorView {
     takeDiskBtn.className = "btn";
     takeDiskBtn.textContent = this.diskMissing ? "Close without saving" : "Take disk";
     takeDiskBtn.addEventListener("click", () => this.resolveConflictTakeDisk());
-    // Once this write is issued it cannot be recalled: disk WILL hold the buffer's content when it
-    // settles, so "Take disk" stops being a real option the moment this click starts. Leaving it
-    // clickable would let a slow write's success arm reverse a later Take-disk choice — disable both
-    // buttons synchronously rather than adding a generation/token guard, which would instead let the
-    // UI adopt the disk snapshot while the in-flight write replaces disk out from under it (the
-    // write's own signature event would then flip the pane back to "mine" ~2s later anyway).
-    // `resolveConflictKeepMine`'s `generation`/`fetchToken` guards are right not to catch this case:
-    // nothing about a Take-disk click changes either token, by design — it is a pure local adoption.
-    // Every settle path re-renders or hides this banner, so the disabled state never outlives the
-    // flight: the failure arm re-renders via `renderConflictCompareView` (fresh, enabled buttons),
-    // the CAS-conflict arm re-enters via `handleExternalChange` (fresh banner), and the success arm
-    // hides the banner.
-    keepMineBtn.addEventListener("click", () => {
-      keepMineBtn.disabled = true;
-      takeDiskBtn.disabled = true;
-      void this.resolveConflictKeepMine();
-    });
+    keepMineBtn.addEventListener("click", () => void this.resolveConflictKeepMine());
 
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, keepMineBtn, takeDiskBtn);
     this.banner.style.display = "flex";
   }
 
-  /** Conflict compare view's "Keep mine": force-writes the frozen buffer over disk, CAS-checked
-   *  against the exact disk snapshot the compare view is showing (or the "create" convention —
-   *  `baseSHA256: undefined` — when that snapshot is "deleted", to recreate the file). */
+  /** Conflict compare view's "Keep mine": the user's decision to overwrite disk with the frozen
+   *  buffer. Clearing the conflict is the whole decision, and the ordinary autosave write is what
+   *  carries it out, CAS-checked against the exact disk snapshot the compare view was showing (or
+   *  the create convention when that snapshot is "deleted", to recreate the file: see
+   *  `enterConflictState`'s empty-string sentinel and `performSave`'s reading of it).
+   *
+   *  The buffer is dirty by construction here, since every route into conflict state comes from a
+   *  dirty buffer, so the flush always has something to write. Dismissing the compare view before
+   *  the write settles is deliberate: it is what makes "Take disk" unreachable the moment this
+   *  decision is taken, rather than leaving a stale second option on screen that a slow write could
+   *  race. A write that CAS-conflicts again re-enters conflict against the newest disk state through
+   *  `handleExternalChange`, which puts a fresh compare view (and both actions) back up. */
   private async resolveConflictKeepMine(): Promise<void> {
     const path = this.currentPath;
     if (!path) return;
-    const generation = this.openGeneration;
-    // Fix 2 (round-5): `generation` alone only guards against a NEWER loadFile() — it says nothing about
-    // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
-    // flight. `handleExternalChange` runs unchanged while already in conflict (see its doc comment),
-    // so an external writer changing the file again before this write's response arrives can push a
-    // fresh signature event whose reconcile re-enters conflict against that newer disk state (or
-    // auto-merges) BEFORE this call's own arms below run — those late arms must not clobber whatever
-    // that reconcile already decided. Captured here, alongside `generation`, and re-checked after the
-    // write settles (see the arms below). Mirrors `save()`'s identical `fetchToken` guard.
-    const fetchToken = this.externalChangeFetchToken;
-    const content = this.latestContent ?? "";
-    const baseSHA256 = this.diskMissing ? undefined : this.baseSHA256;
-    let result: WorkspaceFileWriteResult;
-    try {
-      result = await this.bridge.workspaceFileWrite(path, content, { baseSHA256, purpose: "editor" });
-    } catch (err) {
-      if (generation !== this.openGeneration) return; // a later loadFile() already won
-      // Fix 2 (round-5): a `handleExternalChange` reconcile for this same file completed while this
-      // write was in flight and already decided this file's UI state — this failure is for a write
-      // now superseded by that decision, so it must not repaint the compare view over whatever the
-      // reconcile already decided. Mirrors `save()`'s equivalent guard.
-      if (fetchToken !== this.externalChangeFetchToken) return;
-      const message = err instanceof SpacesBridgeError ? err.message : "Failed to save file.";
-      this.renderConflictCompareView(message);
-      return;
-    }
-    if (generation !== this.openGeneration) return; // a later loadFile() already won
-    if ("conflict" in result) {
-      // Deliberately NOT guarded by `fetchToken` (mirrors `save()`'s equivalent arm): this only
-      // re-invokes `handleExternalChange()`, which is idempotent against whatever an already-in-flight
-      // reconcile did — it always does its own fresh read and re-derives state from scratch, so
-      // calling it again here (superseded or not) is harmless.
-      //
-      // Disk moved again while this conflict was unresolved. Re-run the exact same fresh-read
-      // decision this conflict itself came from (see `handleExternalChange`'s doc comment) rather
-      // than building a bespoke retry path: it re-fetches disk and re-enters conflict against the
-      // newest state, keeping the buffer ("mine") exactly as it was.
-      await this.handleExternalChange();
-      return;
-    }
-    // Fix 2 (round-5): a `handleExternalChange` reconcile against newer disk already ran while this
-    // write was in flight — committing the older submitted content as clean here would leave the
-    // pane stale with no future signature event to correct it (the reconcile consumed the latest
-    // one; disk's hash won't change again on its own). The write itself was still a valid CAS write —
-    // disk history is correct; there is just newer UI state that owns the pane now. Mirrors `save()`'s
-    // equivalent guard.
-    if (fetchToken !== this.externalChangeFetchToken) return;
-    this.baseSHA256 = result.sha256;
-    this.baseContent = content;
-    this.latestContent = content;
-    this.dirty = false;
+    // Recorded before the flags are cleared, and pushed below with the rest of the state: the write
+    // this releases can fail, and the file stays missing until one lands, so a reconcile or a
+    // restart in between must find the decision already made rather than re-derive the conflict.
+    if (this.diskMissing) this.confirmedBaseSHA256 = null;
     this.conflict = false;
     this.diskMissing = false;
     this.banner.style.display = "none";
-    this.loadIntoCodeView(path, content);
+    this.loadIntoCodeView(path, this.latestContent ?? "");
     this.pushEditorStateNow();
+    await this.scheduler.flush();
   }
 
   /** Conflict compare view's "Take disk" ("Close without saving" when the file is missing):
@@ -1068,8 +1135,11 @@ export class EditorView {
     this.latestContent = content;
     this.dirty = false;
     this.conflict = false;
+    this.confirmedBaseSHA256 = undefined; // the buffer is disk's now; there is nothing left to confirm
     this.banner.style.display = "none";
     this.loadIntoCodeView(path, content);
+    // The block is gone and the buffer now matches disk: nothing left to write.
+    this.scheduler.reevaluate();
     this.pushEditorStateNow();
   }
 
@@ -1096,10 +1166,14 @@ export class EditorView {
     this.dirty = false;
     this.conflict = false;
     this.diskMissing = false;
+    this.confirmedBaseSHA256 = undefined;
     this.pendingMergeUndo = undefined;
-    this.saveBtn.disabled = true;
     this.banner.style.display = "none";
     this.setPathLabel(path);
+    // The file this session was saving is gone from disk, and there is no buffer or baseline left to
+    // write against: the session is over, so the chip reports nothing rather than a "Saved" about a
+    // file that no longer exists.
+    this.scheduler.reset();
 
     const codeView = this.ensureCodeView();
     this.editGeneration += 1;
@@ -1164,9 +1238,9 @@ export class EditorView {
       this.dirty = false;
       this.conflict = false;
       this.diskMissing = false;
+      this.confirmedBaseSHA256 = undefined;
       this.pendingMergeUndo = undefined;
       this.banner.style.display = "none";
-      this.saveBtn.disabled = true; // mirrors a freshly opened clean file: nothing unsaved exists
       this.loadIntoCodeView(state.path, state.content);
       this.subscribeToFileSignature(state.path);
       // No push here: this is a same-value echo of the snapshot the host already holds, not a new
@@ -1184,12 +1258,16 @@ export class EditorView {
     this.baseContent = state.baseContent;
     this.latestContent = state.content;
     this.dirty = true;
+    // A confirmed Keep mine outstanding when the pane went away: the reconcile fired below must not
+    // ask for that decision again (see the field's doc comment).
+    this.confirmedBaseSHA256 = state.confirmedBaseSHA256;
     this.pendingMergeUndo = undefined;
     this.subscribeToFileSignature(state.path);
     if (state.conflict) {
       this.diskMissing = false;
       this.conflict = true;
-      this.saveBtn.disabled = true;
+      // A restored conflict is still a block: the chip must say so without waiting for an edit.
+      this.scheduler.reevaluate();
       this.renderConflictCompareView();
       // Reconciles against whatever happened on disk during hibernation and re-arms the host's
       // file-signature stream (see this method's doc comment) — fired after the compare view is
@@ -1200,7 +1278,9 @@ export class EditorView {
     this.conflict = false;
     this.diskMissing = false;
     this.banner.style.display = "none";
-    this.saveBtn.disabled = false; // mirrors onItemEditChange's post-edit state: unsaved edits exist
+    // The restored buffer holds edits disk has never seen, so it autosaves on the same debounce a
+    // live keystroke would arm: hibernating a pane must not be a way to leave an edit unwritten.
+    this.scheduler.noteEdit();
     this.loadIntoCodeView(state.path, state.content);
     // No push here: this is a same-value echo of the snapshot the host already holds, not a new
     // state transition — pushing it back would be a no-op round trip.
@@ -1229,6 +1309,9 @@ export class EditorView {
       content: this.latestContent,
       dirty: this.dirty,
       conflict: this.conflict,
+      // Present only while a decision is outstanding: absent and `null` mean different things to the
+      // restore below, so the key is omitted rather than written as undefined.
+      ...(this.confirmedBaseSHA256 !== undefined ? { confirmedBaseSHA256: this.confirmedBaseSHA256 } : {}),
     };
   }
 
@@ -1241,6 +1324,9 @@ export class EditorView {
    *  structured-clone cost on every edit is accepted as cheap relative to losing the user's buffer
    *  or its diff3 merge base. */
   private pushEditorStateNow(): void {
+    // The host has torn its own state down; re-arming its persistence from a settling write's
+    // continuation would resurrect a document for a pane that is gone.
+    if (this.disposed) return;
     clearTimeout(this.editorStatePushTimer);
     this.callbacks.onStateChanged?.(this.collectEditorState());
     this.callbacks.onStateTransition?.();
@@ -1267,19 +1353,30 @@ export class EditorView {
     return this.collectEditorState();
   }
 
-  private async save(): Promise<void> {
-    if (!this.currentPath || this.latestContent === undefined || !this.baseSHA256) return;
-    // Re-entrancy guard: a second save() (a queued click, or a programmatic call) can still start
-    // before this call's first await yields control back to the DOM, which would submit two CAS
-    // writes against the same baseline from the same tab. Disabling the button is the visible half
-    // of this; the flag is the half that actually blocks it.
-    if (this.saveInFlight) return;
+  /**
+   * The scheduler's `performSave`: one CAS write of the live buffer, reporting what happened rather
+   * than painting it (the chip is `renderSaveStatus`'s job). The scheduler never starts this while a
+   * previous call is in flight, and never at all while `blockedReason()` says the user has something
+   * to resolve first.
+   *
+   * `clean` covers every "there is nothing to write" case, including the late arms that stand down
+   * because a newer open or a newer external-change reconcile already owns this pane's state; a
+   * `conflict` result routes into the same `handleExternalChange` ladder a live signature push uses
+   * and reports whatever that ladder decided (a merged buffer is still dirty, so the scheduler writes
+   * again immediately; a real conflict is a block); and a rejected write is `failed`, which the
+   * scheduler retries on its own backoff.
+   */
+  private async performSave(): Promise<SaveOutcome> {
+    // `baseSHA256 === ""` is `enterConflictState`'s "disk holds no file" sentinel, which is the CAS
+    // create convention below, so it is a writable baseline here rather than a missing one.
+    if (!this.currentPath || this.latestContent === undefined || this.baseSHA256 === undefined) return "clean";
+    if (!this.dirty) return "clean";
+    if (this.saveInFlight) return "clean";
     this.saveInFlight = true;
-    this.saveBtn.disabled = true;
     // Captured before the await, alongside `submitted` below: identifies which file this save
     // belongs to. If the user opens a different file before this write resolves, `openGeneration`
-    // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner/
-    // `saveBtn` — all of those now describe the newly opened file, not this one.
+    // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner:
+    // all of those now describe the newly opened file, not this one.
     const generation = this.openGeneration;
     // Fix 2 (round-2): `generation` alone only guards against a NEWER loadFile() — it says nothing about
     // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
@@ -1300,43 +1397,39 @@ export class EditorView {
       let result: WorkspaceFileWriteResult;
       try {
         result = await this.bridge.workspaceFileWrite(this.currentPath, submitted, {
-          baseSHA256: this.baseSHA256,
+          baseSHA256: this.baseSHA256 === "" ? undefined : this.baseSHA256,
           purpose: "editor",
         });
       } catch (err) {
-        if (generation !== this.openGeneration) return; // a later loadFile() already won; this failure is moot
+        if (generation !== this.openGeneration) return "clean"; // a later loadFile() already won; this failure is moot
         // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
         // write was in flight and already decided this file's UI state (merge indicator, conflict
         // compare, or a silent clean reload) — this failure is for a write that's now superseded by
-        // that decision, so it must not overwrite the banner or re-enable/disable Save out from under
-        // it. See `fetchToken`'s doc comment above.
-        if (fetchToken !== this.externalChangeFetchToken) return;
+        // that decision, so reporting it would back off a write the reconcile has already reshaped.
+        // See `fetchToken`'s doc comment above.
+        if (fetchToken !== this.externalChangeFetchToken) return "clean";
         // A rejected write (offline device, timeout, daemon error — e.g. a `SpacesBridgeError` with
         // code `unavailable`) never got a decodable answer from the daemon at all, unlike the
         // `conflict` branch below which is a durable CAS rejection the daemon *did* decode and
-        // apply its rules to. Treat it as transient: surface it factually but do NOT set
-        // `this.conflict` — a real conflict routes through `handleExternalChange`'s conflict state
-        // until the user resolves it; this must not latch the same way, since a retry of the exact
-        // same write can still succeed.
+        // apply its rules to. Treat it as transient: report it factually, with the buffer left
+        // dirty, so the scheduler retries the same write rather than latching the way a real
+        // conflict does.
         const message = err instanceof SpacesBridgeError ? err.message : "Failed to save file.";
-        // "error" styling (not "conflict") keeps this visually distinct from a real CAS conflict.
-        this.banner.className = "banner error";
-        this.banner.textContent = message;
-        this.banner.style.display = "flex";
-        // Re-enable Save iff the buffer is still dirty, mirroring the success arm's own rule —
-        // `saveInFlight`/`saveBtn.disabled` were both set at entry, so this is what undoes that.
-        this.saveBtn.disabled = !this.dirty;
-        // Immediate: a save failure is a discrete transition, not a buffer edit.
-        this.pushEditorStateNow();
-        return;
+        // No state push: a write that never landed leaves the snapshot (path, baseline, buffer,
+        // dirty, conflict) exactly as it was, and a backoff that keeps failing would otherwise push
+        // that same unchanged document over and over.
+        return { failed: message };
       }
       if (generation !== this.openGeneration) {
         // A newer loadFile() already moved this pane on to a different file. The write above was still
         // a valid CAS write for the superseded file's own content against its own baseline, so
         // disk is correct either way; there is just no in-memory editor state left for it to update.
-        return;
+        return "clean";
       }
       if ("conflict" in result) {
+        // Captured so the arm below can tell a reconcile that actually moved this pane's CAS
+        // baseline from one that could not.
+        const refusedBaseline = this.baseSHA256;
         // Deliberately NOT guarded by `fetchToken` (Fix 2, round-2): this only re-invokes
         // `handleExternalChange()`, which is idempotent against whatever an already-in-flight
         // reconcile did — it always does its own fresh read and re-derives state from scratch, so
@@ -1344,15 +1437,27 @@ export class EditorView {
         // handling a live file-signature push uses: a CAS rejection is itself evidence disk moved
         // since this save's baseline, and `handleExternalChange` always does its own fresh read
         // rather than trusting this result's (possibly already-stale-again)
-        // `currentSHA256`/`fileMissing` — see its doc comment. This is the locked auto-merge/
-        // conflict-compare model replacing a permanent "save disabled until reopen" latch.
+        // `currentSHA256`/`fileMissing`, see its doc comment. That ladder either merges (leaving a
+        // dirty buffer the scheduler writes again straight away, against the baseline it adopted) or
+        // enters conflict, which is the block reported here.
         await this.handleExternalChange();
-        return;
+        if (this.blockedReason() !== undefined) return "blocked";
+        // The ladder reached no new baseline: its own read could not run to a decodable answer (it
+        // has scheduled its own retry) or disk went back to the very hash this write was just
+        // refused against. Writing the same content against the same baseline again, which is what
+        // reporting "clean" on a still-dirty buffer would do immediately, could only be refused the
+        // same way, so this is reported as a failure and waits out the scheduler's backoff instead.
+        if (this.dirty && this.baseSHA256 === refusedBaseline) {
+          return { failed: "The file changed on disk and could not be re-read." };
+        }
+        return "clean";
       }
       // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
       // write was in flight and already decided this file's UI state — this plain-success path must
-      // not overwrite it with a now-stale baseline/dirty/banner. See `fetchToken`'s doc comment above.
-      if (fetchToken !== this.externalChangeFetchToken) return;
+      // not overwrite it with a now-stale baseline/dirty/banner. See `fetchToken`'s doc comment
+      // above. The write itself did land on disk, so it is still reported as saved: the reconcile
+      // owns the pane's state, not the question of whether anything was written.
+      if (fetchToken !== this.externalChangeFetchToken) return "saved";
       // The pair (submitted, write hash) is self-consistent by construction — adopt the write's own
       // hash as the next CAS baseline directly rather than re-reading the file. A re-read here would
       // instead race whatever else might write the file (e.g. an agent) between this save and the
@@ -1361,19 +1466,24 @@ export class EditorView {
       // silently overwrite it.
       this.baseSHA256 = result.sha256;
       this.baseContent = submitted;
+      // The write landed, so the file exists with a real baseline and the create decision is spent.
+      this.confirmedBaseSHA256 = undefined;
       // NOT unconditionally clean: the buffer showing in the editor right now is only guaranteed to
       // match disk if nothing was typed during the await. A keystroke that landed while this save was
       // in flight left `latestContent` ahead of `submitted` — that content was never written, so the
-      // buffer must stay dirty against the baseline just adopted above (its own next save CAS-checks
-      // against this save's hash, which is correct: it is the disk state that content hasn't seen yet).
+      // buffer must stay dirty against the baseline just adopted above (the scheduler writes it again
+      // immediately, CAS-checked against this save's hash, which is correct: it is the disk state
+      // that content hasn't seen yet).
       this.dirty = this.latestContent !== submitted;
-      this.saveBtn.disabled = !this.dirty;
-      // Clears a save-failure banner (or a standing merge indicator, now moot) left over from
-      // before this successful save.
-      this.banner.style.display = "none";
-      this.pendingMergeUndo = undefined;
+      // Clears a banner left over from before this successful save (a refused open's notice), but
+      // NOT a live merge indicator: the write that just landed is usually the merged buffer's own
+      // autosave, and the Undo offer is precisely the offer to take that back, so a successful write
+      // never retires it. It is retired by a keystroke, an external change that replaces the buffer,
+      // a conflict, or opening another file.
+      if (this.pendingMergeUndo === undefined) this.banner.style.display = "none";
       // Immediate: a successful save is a discrete transition (new baseline, dirty possibly changed).
       this.pushEditorStateNow();
+      return "saved";
     } finally {
       this.saveInFlight = false;
       this.pendingSaveSubmitted = undefined;

@@ -1251,6 +1251,90 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(content.contentView.subviews.isEmpty)
     }
 
+    // MARK: - Termination edits flush
+
+    /// The page's autosave debounce holds a write for up to ~800ms before its RPC is issued, so
+    /// quitting has to kick the page and wait for it. These cover the host half of that contract:
+    /// the dispatched `spaces:flushEdits` token, and completing exactly once on either the page's
+    /// answer or the bound.
+    private func flushEditsToken(_ evaluator: RecordingCodePaneScriptEvaluator) throws -> String {
+        let script = try #require(evaluator.evaluatedScripts.first { $0.contains(CodePaneBridge.flushEditsEventName) })
+        let prefix = "window.dispatchEvent(new CustomEvent(\"\(CodePaneBridge.flushEditsEventName)\", {detail: "
+        let suffix = "}));"
+        #expect(script.hasPrefix(prefix) && script.hasSuffix(suffix))
+        struct Detail: Decodable { let token: String }
+        return try JSONDecoder().decode(Detail.self, from: Data(script.dropFirst(prefix.count).dropLast(suffix.count).utf8)).token
+    }
+
+    /// `"spacesBridge"` is the message handler's own (private) name; a test drives
+    /// `handleScriptMessage` directly because `WKScriptMessage` has no public initializer.
+    private func sendEditsFlushed(token: String, to content: CodePaneContentController, from webView: WKWebView) {
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "editsFlushed", "params": ["token": token]], senderWebView: webView)
+    }
+
+    private func readyPaneWithRecordingEvaluator() throws -> (
+        content: CodePaneContentController, webView: WKWebView, evaluator: RecordingCodePaneScriptEvaluator
+    ) {
+        let content = makeController()
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+        return (content, webView, evaluator)
+    }
+
+    @Test func flushingEditsCompletesWhenThePageAnswersWithTheDispatchedToken() throws {
+        let pane = try readyPaneWithRecordingEvaluator()
+        var completions = 0
+
+        pane.content.flushEditsBeforeTermination { completions += 1 }
+        let token = try flushEditsToken(pane.evaluator)
+        #expect(completions == 0, "the flush waits for the page rather than completing on dispatch")
+
+        sendEditsFlushed(token: token, to: pane.content, from: pane.webView)
+
+        #expect(completions == 1)
+    }
+
+    @Test func flushingEditsCompletesAfterItsTimeoutWhenThePageNeverAnswers() async throws {
+        let pane = try readyPaneWithRecordingEvaluator()
+        var completed = false
+
+        pane.content.flushEditsBeforeTermination(timeout: 0.05) { completed = true }
+
+        await waitUntil { completed }
+        #expect(completed, "a wedged page must not hold the quit open past the flush's bound")
+    }
+
+    /// A token that isn't this flush's own is a torn-down page's late answer; completing on it would
+    /// let quitting proceed while the live page still holds the user's edits.
+    @Test func aMismatchedEditsFlushedTokenLeavesTheFlushPendingAndTheMatchingOneCompletesItOnce() throws {
+        let pane = try readyPaneWithRecordingEvaluator()
+        var completions = 0
+
+        pane.content.flushEditsBeforeTermination { completions += 1 }
+        let token = try flushEditsToken(pane.evaluator)
+        sendEditsFlushed(token: "some-other-token", to: pane.content, from: pane.webView)
+        #expect(completions == 0, "an answer carrying another flush's token must not complete this one")
+
+        sendEditsFlushed(token: token, to: pane.content, from: pane.webView)
+        sendEditsFlushed(token: token, to: pane.content, from: pane.webView)
+
+        #expect(completions == 1, "a duplicate answer must not complete the flush a second time")
+    }
+
+    /// A pane with no page installed has no debounce to drain, so quitting with only hibernated
+    /// panes never waits on a round trip that can't happen.
+    @Test func flushingEditsCompletesSynchronouslyWithNoWebViewInstalled() {
+        let content = makeController()
+        var completed = false
+
+        content.flushEditsBeforeTermination { completed = true }
+
+        #expect(completed)
+    }
+
     // MARK: - Resource bundle layout
 
     /// Regression guard for the `.copy("Resources/CodePane")` resource declaration: SwiftPM keeps

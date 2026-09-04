@@ -142,6 +142,10 @@ branch on `.code`.
 - **Render metrics (JS -> Swift, fire-and-forget):** `{method:"renderMetric", params}` reports
   validated post-render diagnostics to the native DEBUG performance log. It contains only bounded
   timing and aggregate-size metadata, not source text.
+- **Edit flush (Swift -> JS, then JS -> Swift, fire-and-forget):** the host dispatches
+  `spaces:flushEdits` with `{token}` when it is about to quit or tear the pane down; the page
+  writes whatever is still unsaved and answers on the same message handler with
+  `{method:"editsFlushed", params:{token}}`, once per token and with no `id`.
 - **Teardown pull (Swift -> JS, synchronous):**
   `window.__spacesCollectWorkspaceState` returns the current complete workspace-state document as
   JSON text. The host uses it before hibernation or close to capture edits inside the debounce window;
@@ -162,6 +166,8 @@ branch on `.code`.
     command remains available to retry and is shown as not detected.
   - `spaces:setMode` when the native host asks the page to switch modes, and `spaces:theme`
     when effective appearance changes.
+  - `spaces:flushEdits` when the host needs unsaved edits written before it quits or tears the
+    pane down; the page answers with `editsFlushed` (see the edit-flush entry above).
   - `spaces:diffSignature` when the active scope's git signature changes. The page refreshes by
     requesting a new manifest; stale responses are ignored and transient typed/untyped failures use
     the bounded retry path, while durable request errors remain visible.
@@ -189,15 +195,29 @@ The shared tree state and selected file are restored from the workspace document
 
 The ⌘P quick-open overlay, Files tree, and Changes list all call `EditorView.open(path)`.
 Opening a file already in the current Changes set keeps the Changes view and focuses that file;
-opening any other file uses Editor mode. A different-file open while the buffer is dirty shows
-discard consent, while reselecting the already-open file is a no-op. Successful opens update the
-most-recent-first recent-path list.
+opening any other file uses Editor mode. A different-file open while the buffer is dirty flushes
+the pending save first and proceeds once the buffer is clean; a save that fails or is blocked
+refuses the open and reports that reason, so there is no discard consent to give. Reselecting the
+already-open file is a no-op. Successful opens update the most-recent-first recent-path list.
 
-The new/right side of a changed file is editable through the library's line editor. Save and
-Cancel are explicit. Save uses the captured CAS baseline and adopts the returned hash on success.
+The new/right side of a changed file is editable through the library's line editor, and edits
+save themselves. `src/app/autosave.ts` schedules a write 800 ms after the last keystroke, keeps a
+single write in flight, and retries a failed write with exponential backoff between 1 s and 30 s.
+A write uses the captured CAS baseline, adopts the returned hash on success, and leaves the edit
+session open. There are no Save or Cancel buttons: the one save affordance is a status chip in
+the inline edit header and in Editor mode's top bar, reading `Unsaved`, `Saving…`, `Saved`,
+`Save blocked: <reason>`, or `Save failed: <reason> · retry in <N> s` with a Retry now action,
+and absent while there is nothing to report. ⌘S flushes the pending write immediately. Esc ends
+the edit session, saving first when the buffer is dirty. Clicking into another file's lines
+flushes the open session and switches once it is clean. Quitting is one event pair: the host
+dispatches `spaces:flushEdits` with a token, the page awaits the flush in flight and answers with
+`editsFlushed` carrying that token.
+
 A concurrent change produces the merge/conflict UI without discarding the user's buffer: clean
 buffers reload, non-overlapping edits merge with Undo, overlapping or deleted-file edits show
-the compare view with Keep mine and Take disk/Close without saving actions.
+the compare view with Keep mine and Take disk/Close without saving actions. A standing conflict
+blocks autosave with that reason, and because the autosave that follows a merge keeps the session
+open, the merge's Undo offer stays available after the merged content is written.
 
 The complete workspace document is collected through `window.__spacesCollectWorkspaceState` and
 persisted by the host per `(deviceID, workspaceID)`; it includes mode, scope, layout, tree and
@@ -329,14 +349,20 @@ correlation (including out-of-order replies), unknown-error-code normalization t
 `internalError`, dropped replies for untracked ids, `unavailable` when the WKWebView handler
 isn't installed, and the mock bridge's CAS conflict/success shapes and signature-event
 subscribe/unsubscribe/dedup behavior. `test/state.test.ts` covers `codePaneReducer` for all five
-actions and `initialState`. `test/fuzzyMatch.test.ts` covers the ⌘P overlay's scorer directly:
+actions and `initialState`. `test/autosave.test.ts` covers `AutosaveScheduler`
+(`src/app/autosave.ts`) in isolation: the 800 ms debounce, coalescing edits made during a write
+into one follow-up write, the backoff schedule and its countdown, a blocked host writing nothing,
+and `flush`/`cancel`. `test/fuzzyMatch.test.ts` covers the ⌘P overlay's scorer directly:
 subsequence matching (including the empty-query and no-match cases), case-insensitive matching
 with indices reported into the original text, and that a consecutive run, a path/word
 segment-start match, and a basename match each score higher than an equivalent match without that
-property. `test/editorView.test.ts` covers the public `open(path)` entry point's dirty-buffer
-discard-consent gating (including a second `open()` call while already dirty re-targeting the
-banner to the newer path); re-picking the file already open while dirty is a no-op instead — no
-banner, no re-read, the edit left intact — the same way during a standing conflict; its error
+property. `test/editorView.test.ts` covers autosave in Editor mode: one write 800 ms after the last
+keystroke against the load's hash with the chip stepping through dirty, saving, and saved; a
+failed write reporting its countdown and retrying on its own backoff, with Retry now writing
+immediately; no Save button in any state; and the public `open(path)` entry point flushing the
+dirty buffer before it reads the new file, with a failed or conflict-blocked write refusing the
+open and reporting that reason. Re-picking the file already open while dirty is a no-op, no
+re-read, the edit left intact, the same way during a standing conflict. It also covers its error
 surfacing on a rejected read via the `.banner.error` element,
 a save adopting the write result's own hash as the next CAS baseline with no intervening file
 read, the unified `workspaceStateChanged` snapshot being updated immediately for discrete changes
@@ -411,9 +437,9 @@ tree records it as `recentPaths`' sole entry and updates the unified workspace-s
 opening a second, different file puts it first without dropping the one already recorded; re-opening
 an already-recent path moves it to the front instead of duplicating it; the list is capped at 12
 entries, dropping the oldest; toggling Files/Changes pushes the updated `sidebarMode` independent of
-`recentPaths`; a refused (dirty-buffer) open and a failed read both record nothing, while clicking
-the discard-consent banner's own action records the target path only once that open actually
-succeeds; and a Diff-mode ⌘P jump to a file already in the diff records it into `recentPaths` just
+`recentPaths`; an open refused by a failed write and a failed read both record nothing, while an
+open the pending write clears records the target path once that open actually succeeds; and a
+Diff-mode ⌘P jump to a file already in the diff records it into `recentPaths` just
 as an Editor-mode open does. `test/toolbar.test.ts` covers the "vs base branch" option's
 disabled/enabled state and label based on whether `baseBranch` is present, that a click reaching a
 disabled button never fires `onScopeChange`, and the agent slot's three renderings (single-agent

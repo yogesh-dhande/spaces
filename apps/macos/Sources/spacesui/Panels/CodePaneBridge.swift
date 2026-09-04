@@ -65,14 +65,64 @@ enum CodePaneBridge {
         let content: String
         let dirty: Bool
         let conflict: Bool
+        /// The CAS target an explicit Keep mine confirmed, in the same three states (and for the same
+        /// reason) as `DiffEditorState`'s field of the same name: `nil` means no decision is
+        /// outstanding, `.some(nil)` means the user chose to recreate a file that is deleted on
+        /// disk, and `.some(sha)` names the exact snapshot they compared. Editor mode only produces
+        /// the deletion marker, and only until the recreating write lands: without it a restart
+        /// between that decision and a failed write re-reads the still-missing file and makes the
+        /// user confirm the same deletion again.
+        let confirmedBaseSHA256: String??
 
-        init(path: String, baseSHA256: String, baseContent: String, content: String, dirty: Bool, conflict: Bool = false) {
+        init(
+            path: String, baseSHA256: String, baseContent: String, content: String, dirty: Bool, conflict: Bool = false,
+            confirmedBaseSHA256: String?? = nil
+        ) {
             self.path = path
             self.baseSHA256 = baseSHA256
             self.baseContent = baseContent
             self.content = content
             self.dirty = dirty
             self.conflict = conflict
+            self.confirmedBaseSHA256 = confirmedBaseSHA256
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case path, baseSHA256, baseContent, content, dirty, conflict, confirmedBaseSHA256
+        }
+
+        /// Hand-written for `confirmedBaseSHA256` alone: absent and explicitly null are different
+        /// instructions to the next write, and `decodeIfPresent` maps both to nil. Every other field
+        /// is decoded exactly as the synthesized conformance would, so a malformed snapshot is still
+        /// rejected whole rather than partly invented.
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            path = try container.decode(String.self, forKey: .path)
+            baseSHA256 = try container.decode(String.self, forKey: .baseSHA256)
+            baseContent = try container.decode(String.self, forKey: .baseContent)
+            content = try container.decode(String.self, forKey: .content)
+            dirty = try container.decode(Bool.self, forKey: .dirty)
+            conflict = try container.decode(Bool.self, forKey: .conflict)
+            confirmedBaseSHA256 = container.contains(.confirmedBaseSHA256)
+                ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256))
+                : .none
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(path, forKey: .path)
+            try container.encode(baseSHA256, forKey: .baseSHA256)
+            try container.encode(baseContent, forKey: .baseContent)
+            try container.encode(content, forKey: .content)
+            try container.encode(dirty, forKey: .dirty)
+            try container.encode(conflict, forKey: .conflict)
+            if let confirmedBaseSHA256 {
+                if let confirmedTarget = confirmedBaseSHA256 {
+                    try container.encode(confirmedTarget, forKey: .confirmedBaseSHA256)
+                } else {
+                    try container.encodeNil(forKey: .confirmedBaseSHA256)
+                }
+            }
         }
     }
 
@@ -91,10 +141,17 @@ enum CodePaneBridge {
         let dirty: Bool
         let conflict: Bool
         let conflictBaseSHA256: String?
+        /// The CAS target an explicit Keep mine confirmed, which outranks `baseSHA256` until a write
+        /// adopts a new baseline. Three states, hence the double optional: `nil` (key absent) means
+        /// no such decision is outstanding, `.some(nil)` means the file was deleted and the write
+        /// must recreate it, and `.some(sha)` names the exact disk snapshot the user compared. The
+        /// page persists it so a retarget or restart between the decision and a failed write cannot
+        /// drop it and silently CAS against the pre-deletion hash.
+        let confirmedBaseSHA256: String??
 
         init(
             path: String, baseSHA256: String, baseContent: String, comparisonOldContent: String?, content: String, dirty: Bool, conflict: Bool = false,
-            conflictBaseSHA256: String? = nil
+            conflictBaseSHA256: String? = nil, confirmedBaseSHA256: String?? = nil
         ) {
             self.path = path
             self.baseSHA256 = baseSHA256
@@ -104,10 +161,11 @@ enum CodePaneBridge {
             self.dirty = dirty
             self.conflict = conflict
             self.conflictBaseSHA256 = conflictBaseSHA256
+            self.confirmedBaseSHA256 = confirmedBaseSHA256
         }
 
         private enum CodingKeys: String, CodingKey {
-            case path, baseSHA256, baseContent, comparisonOldContent, content, dirty, conflict, conflictBaseSHA256
+            case path, baseSHA256, baseContent, comparisonOldContent, content, dirty, conflict, conflictBaseSHA256, confirmedBaseSHA256
         }
 
         /// This bridge accepts one persisted snapshot shape: these fields are required-nullable.
@@ -123,6 +181,12 @@ enum CodePaneBridge {
             dirty = try container.decode(Bool.self, forKey: .dirty)
             conflict = try container.decode(Bool.self, forKey: .conflict)
             conflictBaseSHA256 = try container.decode(String?.self, forKey: .conflictBaseSHA256)
+            // The one optional key in this snapshot: absent and explicitly null mean different
+            // things here (no Keep mine decision vs. one that recreates a deleted file), which
+            // `decodeIfPresent` cannot tell apart since it maps both to nil.
+            confirmedBaseSHA256 = container.contains(.confirmedBaseSHA256)
+                ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256))
+                : .none
         }
 
         func encode(to encoder: any Encoder) throws {
@@ -142,6 +206,13 @@ enum CodePaneBridge {
                 try container.encode(conflictBaseSHA256, forKey: .conflictBaseSHA256)
             } else {
                 try container.encodeNil(forKey: .conflictBaseSHA256)
+            }
+            if let confirmedBaseSHA256 {
+                if let confirmedTarget = confirmedBaseSHA256 {
+                    try container.encode(confirmedTarget, forKey: .confirmedBaseSHA256)
+                } else {
+                    try container.encodeNil(forKey: .confirmedBaseSHA256)
+                }
             }
         }
     }
@@ -258,6 +329,11 @@ enum CodePaneBridge {
             default: return false
             }
         }
+        if let editorState = state.editorState {
+            // Same rule the inline editor's confirmed target follows below: a real hash or the
+            // deletion marker, never an empty string that would CAS against nothing at all.
+            if let confirmedTarget = editorState.confirmedBaseSHA256, confirmedTarget?.isEmpty == true { return false }
+        }
         if let diffEditorState = state.diffEditorState {
             // A non-nil target means the conflict comparison read a particular disk version, and
             // Keep mine must CAS against that exact version. A nil target is reserved for a
@@ -266,6 +342,9 @@ enum CodePaneBridge {
             guard diffEditorState.conflictBaseSHA256?.isEmpty != true, diffEditorState.conflict || diffEditorState.conflictBaseSHA256 == nil else {
                 return false
             }
+            // A confirmed Keep mine target is either a real hash or the deletion marker; an empty
+            // string would CAS against nothing at all.
+            if let confirmedTarget = diffEditorState.confirmedBaseSHA256, confirmedTarget?.isEmpty == true { return false }
         }
         return true
     }
@@ -301,6 +380,18 @@ enum CodePaneBridge {
         return state
     }
 
+    /// Decodes the page's answer to a `spaces:flushEdits` request, returning the token it echoes
+    /// back. Mirrors `decodeWorkspaceStateChanged` above: a notification (no `id`), dropped silently
+    /// when malformed, since the flush's own timeout is what bounds a page that never answers
+    /// properly. The token is what tells this answer apart from a stale page's late one, see
+    /// `CodePaneContentController.flushEditsBeforeTermination`.
+    static func decodeEditsFlushed(body: Any) -> String? {
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "editsFlushed",
+            let params = dict["params"] as? [String: Any], let token = params["token"] as? String, !token.isEmpty
+        else { return nil }
+        return token
+    }
+
     /// One locally pending review-comment entry, carried as part of the complete workspace recovery
     /// document rather than through a separate notification or collector.
     struct ReviewCommentEntryPayload: Codable, Equatable, Sendable {
@@ -320,7 +411,7 @@ enum CodePaneBridge {
         enum Kind: String { case diff, editor }
         enum Trigger: String {
             case initial, scope, workspaceChange, fileOpen
-            case manifest, filePatch, complete, workspaceStateRestored, diffEdit, diffEditSave, diffEditCancel
+            case manifest, filePatch, complete, workspaceStateRestored, diffEdit, diffEditSave, diffEditEnd
         }
 
         let kind: Kind
@@ -910,6 +1001,16 @@ enum CodePaneBridge {
     }
 
     struct WorkspaceStatePayload: Encodable, Equatable { let workspaceState: WorkspaceState }
+
+    /// The event asking a live page to issue every file write its editor autosave debounce is still
+    /// holding, so quitting cannot drop edits the user already typed. Unlike the other push events,
+    /// whose names live privately on `CodePaneContentController`, this one is named here beside the
+    /// `editsFlushed` decoder that completes it: the request and its answer are one contract.
+    static let flushEditsEventName = "spaces:flushEdits"
+
+    /// `spaces:flushEdits`'s detail. The page echoes `token` back in its `editsFlushed` notification
+    /// once the writes it was holding have been issued.
+    struct FlushEditsPayload: Encodable, Equatable { let token: String }
 
     /// Builds the JS the host evaluates to dispatch one of the push events above. `nil` only if
     /// `detail` somehow fails to encode.

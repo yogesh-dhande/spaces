@@ -2436,6 +2436,74 @@ APPLESCRIPT
   fail "timed out sending Page Down to code-pane editor: $identifier"
 }
 
+# Sends Escape to the current code-pane editor with the same activate-focus-key retry as the Page
+# Down helper. Esc is how an inline diff edit session ends once autosave has written it.
+ui_press_escape_code_pane_editor() {
+  local identifier="$1"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    activate_spaces_pid "$SPACES_PID"
+    if osascript - "$SPACES_PID" "$identifier" >/dev/null 2>&1 <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+    try
+      if ((value of attribute "AXDOMIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on focusAndEscape(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      set focused of targetElement to true
+      key code 53
+    end tell
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my focusAndEscape(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my focusAndEscape(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end focusAndEscape
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      repeat with targetWindow in windows of proc
+        try
+          perform action "AXRaise" of targetWindow
+        end try
+        if my focusAndEscape(targetWindow, targetID) then return
+      end repeat
+    end repeat
+  end tell
+  error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out sending Escape to code-pane editor: $identifier"
+}
+
 # Reads an accessibility property from one WebKit-backed control. Keeping this at the AX boundary
 # makes the Editor lanes assert the user-visible state (including disabled/focused controls) rather
 # than reaching into the page's private JavaScript state.
@@ -7606,7 +7674,7 @@ wait_for_code_pane_persisted_diff_scroll_line() {
   fail "timed out waiting for a deep persisted diff scroll line: $workspace_id"
 }
 
-wait_for_code_pane_persisted_editor_dirty() {
+wait_for_code_pane_persisted_editor_path() {
   local workspace_id="$1" expected_path="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
@@ -7632,7 +7700,7 @@ if row is None:
     raise SystemExit(1)
 state = json.loads(row[0])
 editor = state.get("editorState")
-if not isinstance(editor, dict) or editor.get("path") != expected_path or editor.get("dirty") is not True:
+if not isinstance(editor, dict) or editor.get("path") != expected_path:
     raise SystemExit(1)
 PY
     then
@@ -7640,7 +7708,23 @@ PY
     fi
     sleep 0.2
   done
-  fail "timed out waiting for a persisted dirty Editor state: $workspace_id $expected_path"
+  fail "timed out waiting for a persisted Editor path: $workspace_id $expected_path"
+}
+
+# Autosave writes an edited Editor buffer to disk on its own; the state-recovery lane therefore
+# proves the bytes landed rather than that a dirty buffer persisted.
+wait_for_code_pane_autosaved_line() {
+  local workspace_dir="$1" relative_path="$2" expected_line="$3" remote="$4" label="$5"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$remote" == "1" ]]; then
+      if remote_device_ssh "grep -Fqx $(shell_quote "$expected_line") $(shell_quote "$workspace_dir/$relative_path")"; then return 0; fi
+    elif grep -Fqx "$expected_line" "$workspace_dir/$relative_path"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for autosave to write $label: $relative_path"
 }
 
 assert_no_code_pane_stream_metric() {
@@ -7831,29 +7915,23 @@ exercise_code_pane_inline_diff_edit() {
   start_line=$(( $(app_log_line_count) + 1 ))
   ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-edit.txt-1"
   wait_for_code_pane_stream_metric "$workspace_id" diffEdit "$start_line" >/dev/null
-  ui_replace_code_pane_editor_value "code-pane-diff-edit-input" "const editable = 'cancelled';"
-  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "$host cancelled inline edit"
-  ui_click_identifier "code-pane-diff-edit-cancel"
-  wait_for_code_pane_stream_metric "$workspace_id" diffEditCancel "$start_line" >/dev/null
-  wait_for_ui_identifier_absent "code-pane-diff-edit-input" "$host inline edit after Cancel"
-
-  start_line=$(( $(app_log_line_count) + 1 ))
-  ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-edit.txt-1"
-  wait_for_code_pane_stream_metric "$workspace_id" diffEdit "$start_line" >/dev/null
   ui_replace_code_pane_editor_value "code-pane-diff-edit-input" "const editable = 'saved';"
-  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "$host saved inline edit"
-  ui_click_identifier "code-pane-diff-edit-save"
+  # Autosave writes shortly after the last edit with no Save control; the session stays open
+  # until Esc ends it, so the input must still be there once the write has landed.
   local save_line
   save_line="$(wait_for_code_pane_stream_metric "$workspace_id" diffEditSave "$start_line")"
-  wait_for_ui_identifier_absent "code-pane-diff-edit-input" "$host inline edit after Save"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "$host inline edit open after autosave"
   record_code_pane_stream_metric "$save_line" "code_pane.diff_inline_edit_save" "$host" "single-line"
   if [[ "$remote" == "1" ]]; then
     remote_device_ssh "grep -Fqx $(shell_quote "const editable = 'saved';") $(shell_quote "$workspace_dir/.spaces-e2e-stream/stream-edit.txt")" \
-      || fail "$host inline diff Save did not write the new/right side"
+      || fail "$host inline diff autosave did not write the new/right side"
   else
     grep -Fqx "const editable = 'saved';" "$workspace_dir/.spaces-e2e-stream/stream-edit.txt" \
-      || fail "$host inline diff Save did not write the new/right side"
+      || fail "$host inline diff autosave did not write the new/right side"
   fi
+  ui_press_escape_code_pane_editor "code-pane-diff-edit-input"
+  wait_for_code_pane_stream_metric "$workspace_id" diffEditEnd "$start_line" >/dev/null
+  wait_for_ui_identifier_absent "code-pane-diff-edit-input" "$host inline edit after Esc"
 }
 
 # State recovery intentionally uses the same singleton Editor retargeting path as ⌘⌥↑/⌘⌥↓ rather
@@ -7867,17 +7945,17 @@ open_streaming_workspace_for_state_recovery() {
   wait_for_code_pane_stream_metric "$workspace_id" complete "$start_line" >/dev/null
 }
 
-make_dirty_diff_state_and_scroll() {
+make_diff_edit_state_and_scroll() {
   local input_id="$1"
   local content
   # Keep the edit compact enough for AX transport while providing enough logical lines for an
   # unambiguous Page Down restoration check. The command substitution removes only the final newline.
   content="$(python3 - <<'PY'
-print("".join(f"unsaved state line {index:03d}\n" for index in range(1, 241)), end="")
+print("".join(f"autosaved state line {index:03d}\n" for index in range(1, 241)), end="")
 PY
 )"
   ui_replace_code_pane_editor_value "$input_id" "$content"
-  wait_for_ui_identifier_attribute "code-pane-diff-edit-save" "AXEnabled" "true" "workspace A dirty diff editor"
+  wait_for_ui_identifier "code-pane-diff-edit-status" "workspace A diff edit status"
   ui_page_down_code_pane_editor "$input_id"
 }
 
@@ -7909,8 +7987,11 @@ exercise_code_pane_workspace_state_recovery() {
   start_line=$(( $(app_log_line_count) + 1 ))
   ui_click_identifier "code-pane-diff-new-line-.spaces-e2e-stream%2Fstream-state.txt-1"
   wait_for_code_pane_stream_metric "$workspace_a_id" diffEdit "$start_line" >/dev/null
-  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty diff editor"
-  make_dirty_diff_state_and_scroll "code-pane-diff-edit-input"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A diff editor"
+  make_diff_edit_state_and_scroll "code-pane-diff-edit-input"
+  # Autosave lands before the retarget, so every restoration below expects a clean (dirty=0)
+  # session whose buffer is already on disk; waiting here removes the debounce from the race.
+  wait_for_code_pane_autosaved_line "$workspace_a_dir" ".spaces-e2e-stream/stream-state.txt" "autosaved state line 240" 0 "workspace A inline edit"
   ui_click_identifier "code-pane-layout-split"
 
   open_streaming_workspace_for_state_recovery "$workspace_b_id" "state-b-initial"
@@ -7921,23 +8002,24 @@ exercise_code_pane_workspace_state_recovery() {
   open_code_pane_file ".spaces-e2e-stream/stream-state.txt"
   wait_for_ui_identifier "code-pane-mode-editor" "workspace B Editor mode"
   wait_for_ui_identifier "code-pane-editor-input" "workspace B editor input"
-  ui_replace_code_pane_editor_value "code-pane-editor-input" "workspace B unsaved editor state\n"
-  wait_for_code_pane_persisted_editor_dirty "$workspace_b_id" ".spaces-e2e-stream/stream-state.txt"
+  ui_replace_code_pane_editor_value "code-pane-editor-input" "workspace B autosaved editor state\n"
+  wait_for_code_pane_persisted_editor_path "$workspace_b_id" ".spaces-e2e-stream/stream-state.txt"
+  wait_for_code_pane_autosaved_line "$workspace_b_dir" ".spaces-e2e-stream/stream-state.txt" "workspace B autosaved editor state" 0 "workspace B editor"
   workspace_a_scroll_line="$(wait_for_code_pane_persisted_diff_scroll_line "$workspace_a_id")"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-restored.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A recovery"
   assert_code_pane_restored_scroll_line "$restored" "workspace A recovery" "$workspace_a_scroll_line"
-  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A restored dirty buffer"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A restored edit session"
   assert_ui_identifier_attribute "code-pane-diff-directory-.spaces-e2e-stream" "AXExpanded" "true" "workspace A diff tree"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_b_id" >"$TMP_ROOT/open-code-pane-state-b-restored.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$workspace_b_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$workspace_b_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace B recovery"
   wait_for_ui_identifier "code-pane-mode-editor" "workspace B restored Editor mode"
 
@@ -7947,7 +8029,7 @@ exercise_code_pane_workspace_state_recovery() {
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-before-remote.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A before remote retarget"
   assert_code_pane_restored_scroll_line "$restored" "workspace A before remote retarget" "$workspace_a_scroll_line"
 
@@ -7959,20 +8041,21 @@ exercise_code_pane_workspace_state_recovery() {
   ui_click_identifier "code-pane-layout-unified"
   open_code_pane_file ".spaces-e2e-stream/stream-state.txt"
   wait_for_ui_identifier "code-pane-editor-input" "remote workspace editor input"
-  ui_replace_code_pane_editor_value "code-pane-editor-input" "remote workspace unsaved editor state\n"
-  wait_for_code_pane_persisted_editor_dirty "$remote_workspace_id" ".spaces-e2e-stream/stream-state.txt"
+  ui_replace_code_pane_editor_value "code-pane-editor-input" "remote workspace autosaved editor state\n"
+  wait_for_code_pane_persisted_editor_path "$remote_workspace_id" ".spaces-e2e-stream/stream-state.txt"
+  wait_for_code_pane_autosaved_line "$remote_workspace_dir" ".spaces-e2e-stream/stream-state.txt" "remote workspace autosaved editor state" 1 "remote workspace editor"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-after-remote.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A after remote retarget"
   assert_code_pane_restored_scroll_line "$restored" "workspace A after remote retarget" "$workspace_a_scroll_line"
 
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$remote_workspace_id" >"$TMP_ROOT/open-code-pane-state-remote-restored.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$remote_workspace_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$remote_workspace_id" editor lastCommit unified ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "remote workspace recovery"
   wait_for_ui_identifier "code-pane-mode-editor" "remote workspace restored Editor mode"
 
@@ -7984,10 +8067,10 @@ exercise_code_pane_workspace_state_recovery() {
   start_line=$(( $(app_log_line_count) + 1 ))
   "$SPACES_E2E_CLI" open-workspace-editor --workspace-id "$workspace_a_id" >"$TMP_ROOT/open-code-pane-state-a-restart.json"
   restored="$(wait_for_code_pane_restored_state \
-    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 1 "$start_line")"
+    "$workspace_a_id" diff uncommitted split ".spaces-e2e-stream/stream-state.txt" 0 "$start_line")"
   assert_code_pane_restored_scroll_and_focus "$restored" "workspace A app-restart recovery"
   assert_code_pane_restored_scroll_line "$restored" "workspace A app-restart recovery" "$workspace_a_scroll_line"
-  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A dirty buffer after app restart"
+  wait_for_ui_identifier "code-pane-diff-edit-input" "workspace A edit session after app restart"
 }
 
 remove_code_pane_membership_fixture() {
@@ -8091,9 +8174,9 @@ exercise_code_pane_start_agent_requirements() {
   # moves do not reach WKWebView as a mouse PointerEvent, and Pierre intentionally ignores those
   # synthetic moves; this lane therefore starts at the real agent controls.
   local before_agents after_agents agent_session
-  # The preceding restart assertion intentionally leaves A's recovered buffer open. Cancel only
-  # after that proof so the ordinary diff surface is available for the independent agent flow.
-  ui_click_identifier "code-pane-diff-edit-cancel"
+  # The preceding restart assertion intentionally leaves A's recovered edit session open. End it
+  # with Esc only after that proof so the ordinary diff surface is available for the agent flow.
+  ui_press_escape_code_pane_editor "code-pane-diff-edit-input"
   local cancel_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < cancel_deadline )); do
     if ! ui_identifier_exists "code-pane-diff-edit-input"; then break; fi

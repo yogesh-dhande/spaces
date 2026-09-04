@@ -367,6 +367,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// resume tracking from the replacement pane or after app restart.
     private var outstandingStartWorkspaceCommandCount = 0
 
+    /// The termination edits flush in flight: the token dispatched to the page and the completion
+    /// waiting for it. Non-nil only between `flushEditsBeforeTermination` and whichever of the page's
+    /// `editsFlushed` answer or the flush's timeout lands first. A single slot rather than a keyed
+    /// set: termination issues exactly one flush per pane, and the pane is closing right after it.
+    private var pendingEditsFlush: (token: String, completion: () -> Void)?
+
     /// Owner release has the same recovery ordering requirement as `ready`: the final WebKit
     /// collection and every mutation that can refine it must settle before a replacement may restore
     /// the workspace or termination may drain persistence.
@@ -523,6 +529,55 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// page collection has applied and enqueued the final document, never before it. The fence is
     /// app-wide because a retarget may already have detached another controller with a live collector.
     func closeForTermination(completion: @escaping () -> Void) { beginClose { CodePaneWorkspaceStatePersistence.finishTermination(completion) } }
+
+    /// Asks the live page to issue every file write its editor autosave debounce is still holding,
+    /// then calls `completion`. Termination is the only caller: `close()` already fences every write
+    /// RPC that has reached Swift, but a write still sitting in the page's debounce timer has not
+    /// reached Swift at all and would die with the web process. Hibernation and retarget need no
+    /// flush - they take the page's complete-state collection, which carries the unsaved buffer
+    /// itself, so nothing is lost there.
+    ///
+    /// `completion` runs exactly once, on whichever comes first: the page's `editsFlushed` carrying
+    /// this flush's token, or `timeout`. The bound is what keeps a wedged page from holding the quit
+    /// open indefinitely. A page that is not ready has no debounce to drain (its JS never ran) and
+    /// completes synchronously, so a hibernated or just-installed pane costs quitting nothing.
+    ///
+    /// The bound covers only the page's answer, not a write RPC the page issued while flushing:
+    /// once that write is in flight it has incremented `outstandingFileWriteCount`, and
+    /// `close()`'s fence still waits for it after this timeout fires. That is deliberate. The fence
+    /// predates autosave and exists so a quit never drops bytes the daemon has already been asked
+    /// to write; cancelling it here would trade a slow quit on an unreachable remote for silent data
+    /// loss, and the user's alternative (force quit) stays available. Accepted: a quit can outlast
+    /// the 2 s while a termination write settles against a slow daemon.
+    ///
+    /// A hibernated pane (no web view) is also accepted as "nothing to flush" even when its
+    /// persisted snapshot is dirty, which happens when the pane hibernated inside the 800 ms
+    /// debounce after a keystroke. That edit is not lost: the snapshot is the recovery path, and
+    /// the restored buffer re-arms autosave and writes on the next open. Writing it from here
+    /// would need Swift to reimplement the page's compare-and-swap, merge, and conflict rules
+    /// against the persisted baseline, which is not worth a sub-second window.
+    func flushEditsBeforeTermination(timeout: TimeInterval = 2, completion: @escaping () -> Void) {
+        let token = UUID().uuidString
+        guard webView != nil, isReady, let scriptEvaluator,
+            let script = CodePaneBridge.dispatchEventScript(
+                name: CodePaneBridge.flushEditsEventName, detail: CodePaneBridge.FlushEditsPayload(token: token))
+        else {
+            completion()
+            return
+        }
+        pendingEditsFlush = (token: token, completion: completion)
+        scriptEvaluator.evaluateCodePaneScript(script)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in self?.completeEditsFlush(token: token) }
+    }
+
+    /// Settles the in-flight flush exactly once. A token that doesn't match the in-flight one is
+    /// ignored: it is either a torn-down page's late answer or the timeout of a flush the page
+    /// already answered, and neither has a completion left to call.
+    private func completeEditsFlush(token: String) {
+        guard let pending = pendingEditsFlush, pending.token == token else { return }
+        pendingEditsFlush = nil
+        pending.completion()
+    }
 
     private func beginClose(finalizer: (() -> Void)?) {
         if let finalizer {
@@ -917,6 +972,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
         if let state = CodePaneBridge.decodeWorkspaceStateChanged(body: body) {
             handleWorkspaceStateChanged(state, senderWebView: senderWebView)
+            return
+        }
+        if let token = CodePaneBridge.decodeEditsFlushed(body: body) {
+            completeEditsFlush(token: token)
             return
         }
         guard let request = CodePaneBridge.decodeRequest(body: body) else { return }

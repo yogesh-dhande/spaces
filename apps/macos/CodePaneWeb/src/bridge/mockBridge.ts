@@ -75,6 +75,8 @@ export class MockSpacesBridge implements SpacesBridge {
   /** Start Agent readiness has one native-minted absolute deadline; resume must reuse it rather
    * than silently granting another window to the same command. */
   private readonly agentStartDeadlines = new Map<string, number>();
+  /** Every `spaces:flushEdits` token this page has answered, in order. */
+  readonly editsFlushedTokens: string[] = [];
   private nextManifestID = 0;
   private nextPatchTransferID = 0;
 
@@ -356,6 +358,12 @@ export class MockSpacesBridge implements SpacesBridge {
   notifyWorkspaceStateChanged(_state: CodePaneWorkspaceState): void {}
 
   notifyRenderMetric(_metric: CodePaneRenderMetric): void {}
+
+  /** Recorded rather than posted: the dev harness has no host waiting on a quit flush, and tests
+   * assert on the tokens the page answered with. */
+  notifyEditsFlushed(token: string): void {
+    this.editsFlushedTokens.push(token);
+  }
 
   async startWorkspaceCommand(_command: string): Promise<StartWorkspaceCommandResult> {
     const sessionId = `mock-command-${Date.now()}`;

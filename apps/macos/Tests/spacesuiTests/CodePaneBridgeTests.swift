@@ -168,6 +168,36 @@ import spacesterminalcore
         #expect((try? JSONDecoder().decode(CodePaneBridge.EditorState.self, from: Data(partial.utf8))) == nil)
     }
 
+    @Test func editorKeepMineTargetSurvivesTheWireStateInEachOfItsThreeStates() throws {
+        func state(confirmed: String??) -> CodePaneBridge.EditorState {
+            CodePaneBridge.EditorState(
+                path: "a.swift", baseSHA256: "", baseContent: "", content: "mine", dirty: true, conflict: false, confirmedBaseSHA256: confirmed)
+        }
+        let undecided = state(confirmed: .none)
+        let recreate = state(confirmed: .some(nil))
+        let overwrite = state(confirmed: .some("disk-sha"))
+
+        // Absent, null, and a hash are three different instructions to the next write, so the wire
+        // shape has to keep them apart: no key at all, an explicit null, and the hash. Editor mode
+        // writes the deletion marker, which is what lets a restart retry the create the user already
+        // confirmed instead of re-deriving the deleted-file conflict.
+        let undecidedJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(undecided)) as? [String: Any])
+        #expect(undecidedJSON.keys.contains("confirmedBaseSHA256") == false)
+        let recreateJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(recreate)) as? [String: Any])
+        #expect(recreateJSON["confirmedBaseSHA256"] is NSNull)
+        let overwriteJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(overwrite)) as? [String: Any])
+        #expect(overwriteJSON["confirmedBaseSHA256"] as? String == "disk-sha")
+
+        for original in [undecided, recreate, overwrite] {
+            let data = try JSONEncoder().encode(workspaceState(mode: "editor", editorState: original))
+            #expect(try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: data).editorState == original)
+        }
+
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(mode: "editor", editorState: recreate)))
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(mode: "editor", editorState: overwrite)))
+        #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(mode: "editor", editorState: state(confirmed: .some("")))))
+    }
+
     @Test func diffEditorConflictPreservesItsExactCASTargetAcrossTheStrictWireState() throws {
         let changed = CodePaneBridge.DiffEditorState(
             path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true, conflict: true,
@@ -205,6 +235,35 @@ import spacesterminalcore
         #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: invalidEmptyTarget)))
         #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: changed)))
         #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: deleted)))
+    }
+
+    @Test func diffEditorKeepMineTargetSurvivesTheWireStateInEachOfItsThreeStates() throws {
+        func state(confirmed: String??) -> CodePaneBridge.DiffEditorState {
+            CodePaneBridge.DiffEditorState(
+                path: "a.swift", baseSHA256: "base-sha", baseContent: "base", comparisonOldContent: nil, content: "mine", dirty: true,
+                conflict: false, conflictBaseSHA256: nil, confirmedBaseSHA256: confirmed)
+        }
+        let undecided = state(confirmed: .none)
+        let recreate = state(confirmed: .some(nil))
+        let overwrite = state(confirmed: .some("disk-sha"))
+
+        // Absent, null, and a hash are three different instructions to the next write, so the wire
+        // shape has to keep them apart: no key at all, an explicit null, and the hash.
+        let undecidedJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(undecided)) as? [String: Any])
+        #expect(undecidedJSON.keys.contains("confirmedBaseSHA256") == false)
+        let recreateJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(recreate)) as? [String: Any])
+        #expect(recreateJSON["confirmedBaseSHA256"] is NSNull)
+        let overwriteJSON = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(overwrite)) as? [String: Any])
+        #expect(overwriteJSON["confirmedBaseSHA256"] as? String == "disk-sha")
+
+        for original in [undecided, recreate, overwrite] {
+            let data = try JSONEncoder().encode(workspaceState(diffEditorState: original))
+            #expect(try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: data).diffEditorState == original)
+        }
+
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: recreate)))
+        #expect(CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: overwrite)))
+        #expect(!CodePaneBridge.isValidWorkspaceState(workspaceState(diffEditorState: state(confirmed: .some("")))))
     }
 
     @Test func workspaceStateRoundTripPreservesTheDiffEditorsComparisonSide() throws {

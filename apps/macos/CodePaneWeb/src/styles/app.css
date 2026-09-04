@@ -7,6 +7,13 @@
  * tokens.css instead of hand-written line/token CSS.
  */
 
+/* Derived from the shared --orange rather than authored once per theme, so the tint follows
+   whatever orange the active theme in tokens.css defines. Backs the attention-seeking states of
+   the editor's save-status chip. */
+:root {
+  --orange-tint: color-mix(in srgb, var(--orange) 16%, transparent);
+}
+
 .pane {
   position: relative; /* anchors the ⌘P quick-open overlay's absolutely-positioned backdrop */
   flex: 1;

@@ -4,6 +4,7 @@ import { Editor } from "@pierre/diffs/edit";
 import { applyPatch, parsePatch, reversePatch } from "diff";
 import { DiffFileEntry, ReviewCommentSide } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
+import type { AutosaveStatus } from "./autosave";
 import {
   AnchoredComment,
   canonicalizeContextAnchor,
@@ -12,6 +13,13 @@ import {
   toAnnotationSide,
 } from "./reviewComments";
 import { DiffLayout } from "./state";
+
+/** Identifier `DiffView` puts on Pierre's contenteditable while an inline edit session is live.
+ *  Exported because the pane scopes its Escape shortcut to keystrokes that came from inside this
+ *  element (`root.ts`), which is the same element this file names. */
+export const DIFF_EDIT_INPUT_ID = "code-pane-diff-edit-input";
+import "../styles/editHeader.css";
+import editHeaderCSS from "../styles/editHeader.css?inline";
 
 /** DOM/data hooks `DiffView` calls into for the comment surface — kept as a small interface
  *  rather than a direct `CommentsController` dependency so this file stays a thin adapter to
@@ -27,10 +35,10 @@ export interface DiffCommentHooks {
   /** Clicking a right/new diff line starts the one active inline edit. */
   onRequestEdit?(path: string): void;
   onDiffEditChange?(path: string, content: string): void;
-  onSaveDiffEdit?(path: string): void;
-  onCancelDiffEdit?(path: string): void;
   onResolveDiffEdit?(path: string, action: "keepMine" | "takeDisk" | "closeWithoutSaving"): void;
-  onDiscardAndOpenDiffEdit?(currentPath: string, nextPath: string): void;
+  /** The "Retry now" control on a failed autosave: write again immediately instead of waiting out
+   *  the scheduler's backoff. */
+  onRetryDiffEditSave?(path: string): void;
   /** Source-line focus moved within the diff; root coalesces its recovery-state update. */
   onPositionChange?(): void;
 }
@@ -122,6 +130,8 @@ export class DiffView {
         path: string;
         content: string;
         dirty: boolean;
+        /** The owning scheduler's latest autosave status, rendered as this file's header chip. */
+        status: AutosaveStatus;
         session: number;
         fileDiff: FileDiffMetadata;
         oldContent: string | null;
@@ -129,12 +139,11 @@ export class DiffView {
       }
     | undefined;
   /** A dirty editor is user data, not merely a rendering detail. If a live manifest no longer
-   * names its path, keep this synthetic file in the CodeView until Save or Cancel resolves it. */
+   * names its path, keep this synthetic file in the CodeView until its edit session ends. */
   private recoveryEditFile: DiffFileEntry | undefined;
   /** Changes only when externally supplied content replaces an edit document. It gives Pierre a
    * new file cache key for disk adoption while ordinary typing keeps the active document intact. */
   private editSessionGeneration = 0;
-  private pendingEditPath: string | undefined;
   private focusedLocation: { path: string; line: number; side: ReviewCommentSide } | undefined;
   /** The initial workspace snapshot names a source location, while a selected manifest row names
    * only a file. Keep the former through patch streaming so revealing the selected row cannot
@@ -331,7 +340,7 @@ export class DiffView {
       this.codeView.setup(this.root);
     }
     if (this.editing?.path !== undefined && this.editing.path !== path) this.endEdit(this.editing.path);
-    this.editing = { path, content, dirty, fileDiff, oldContent, session: ++this.editSessionGeneration };
+    this.editing = { path, content, dirty, status: { kind: "idle" }, fileDiff, oldContent, session: ++this.editSessionGeneration };
     this.syncRecoveryEditFile();
     this.emptyEl.style.display = "none";
     this.root.style.display = "";
@@ -406,24 +415,17 @@ export class DiffView {
     this.clearEditorIdentifier();
   }
 
-  requestOpenAfterDiscard(path: string): void {
-    if (this.editing?.path === undefined || !this.codeView) return;
-    this.pendingEditPath = path;
-    this.generation += 1;
-    this.itemVersions.set(this.editing.path, this.generation);
-    const file = this.filesByPath.get(this.editing.path);
-    if (!file) return;
-    this.codeView.updateItem(this.cacheItem(file));
-  }
-
-  /** Restores the normal editor actions when the requested replacement file could not be read. */
-  clearPendingOpen(path: string): void {
-    if (this.editing?.path !== path || this.pendingEditPath === undefined) return;
-    this.pendingEditPath = undefined;
+  /** Publishes the owning autosave scheduler's status into this file's header. Only the header
+   * changes, so this bumps that one file's item version and pushes a single `updateItem` rather
+   * than rebuilding the rendered item set. */
+  setEditStatus(path: string, status: AutosaveStatus): void {
+    if (this.editing?.path !== path || !this.codeView) return;
+    this.editing = { ...this.editing, status };
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     const file = this.filesByPath.get(path);
-    if (file) this.codeView?.updateItem(this.cacheItem(file));
+    if (!file) return;
+    this.codeView.updateItem(this.cacheItem(file));
   }
 
   endEdit(path: string): void {
@@ -433,7 +435,6 @@ export class DiffView {
     const wasRecoveryEdit = this.recoveryEditFile?.path === path;
     this.recoveryEditFile = undefined;
     if (wasRecoveryEdit) this.filesByPath.delete(path);
-    this.pendingEditPath = undefined;
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     // Leaving edit returns the active complete-side diff to its patch-backed review diff.
@@ -535,8 +536,8 @@ export class DiffView {
     this.pendingScrollPosition = undefined;
     this.lastDurableScrollPosition = undefined;
     // The failed manifest must not strand an active editor. Re-promote it as a synthetic file so
-    // the user can still inspect the unsaved buffer and explicitly Save or Cancel it while the
-    // fetch error remains visible above the editor.
+    // the user can still see the unsaved buffer, and its autosave status, while the fetch error
+    // remains visible above the editor.
     this.syncRecoveryEditFile();
     this.emptyEl.textContent = message;
     this.emptyEl.classList.add("error");
@@ -774,32 +775,33 @@ export class DiffView {
         ? "File deleted on disk"
         : this.editing.conflict?.kind === "changed"
           ? "Workspace changed"
-          : this.editing.dirty
-            ? "Unsaved changes"
-            : "Editing";
+          : "Editing";
       header.appendChild(state);
       const spacer = document.createElement("span");
       spacer.className = "sp";
       header.appendChild(spacer);
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.className = "btn";
-      cancel.id = "code-pane-diff-edit-cancel";
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => this.hooks.onCancelDiffEdit?.(path));
-      const save = document.createElement("button");
-      save.type = "button";
-      save.className = "btn primary";
-      save.id = "code-pane-diff-edit-save";
-      save.textContent = "Save";
-      save.disabled = !this.editing.dirty || this.editing.conflict !== undefined;
-      save.addEventListener("click", () => this.hooks.onSaveDiffEdit?.(path));
+      // Edits are written by the autosave scheduler, so the header reports what that scheduler is
+      // doing instead of offering a Save action. Idle is the one status with nothing to say: the
+      // buffer matches disk and this session has not written anything yet.
+      const status = this.editing.status;
+      if (status.kind !== "idle") {
+        const chip = document.createElement("span");
+        chip.className = "save-status";
+        chip.id = "code-pane-diff-edit-status";
+        chip.dataset.state = status.kind;
+        chip.textContent = statusChipText(status);
+        header.appendChild(chip);
+        if (status.kind === "failed") {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "btn ghost";
+          retry.id = "code-pane-diff-edit-retry";
+          retry.textContent = "Retry now";
+          retry.addEventListener("click", () => this.hooks.onRetryDiffEditSave?.(path));
+          header.appendChild(retry);
+        }
+      }
       if (this.editing.conflict !== undefined) {
-        const keepMine = document.createElement("button");
-        keepMine.type = "button";
-        keepMine.className = "btn primary";
-        keepMine.textContent = "Keep mine";
-        keepMine.addEventListener("click", () => this.hooks.onResolveDiffEdit?.(path, "keepMine"));
         const takeDisk = document.createElement("button");
         takeDisk.type = "button";
         takeDisk.className = "btn";
@@ -807,28 +809,27 @@ export class DiffView {
         takeDisk.addEventListener("click", () =>
           this.hooks.onResolveDiffEdit?.(path, this.editing?.conflict?.kind === "deleted" ? "closeWithoutSaving" : "takeDisk"),
         );
+        const keepMine = document.createElement("button");
+        keepMine.type = "button";
+        keepMine.className = "btn primary";
+        keepMine.textContent = "Keep mine";
+        keepMine.addEventListener("click", () => this.hooks.onResolveDiffEdit?.(path, "keepMine"));
         header.append(takeDisk, keepMine);
-      } else {
-        header.append(cancel);
-        if (this.editing.dirty) header.append(save);
-        if (this.pendingEditPath === undefined) return header;
-        const discard = document.createElement("button");
-        discard.type = "button";
-        discard.className = "btn";
-        discard.textContent = "Discard edits and open";
-        discard.addEventListener("click", () => this.hooks.onDiscardAndOpenDiffEdit?.(path, this.pendingEditPath!));
-        header.append(discard);
       }
       return header;
     };
     return {
       theme: CODE_PANE_THEME_NAME,
       diffStyle: this.layout,
-      // CodeView enables its native gutter utility for all renderer types. File placeholders use
-      // the file renderer and inline-edit diffs have no stable patch anchors, so hide their no-op
-      // utility in Pierre's supported shadow-root stylesheet while retaining the native callback
+      // Pierre's shadow root adopts only its own stylesheet, so everything the inline edit header
+      // needs has to travel through this option: editHeader.css styles that header, and the rule
+      // after it hides the native gutter utility. CodeView enables that utility for all renderer
+      // types, but file placeholders use the file renderer and inline-edit diffs have no stable
+      // patch anchors, so the no-op utility is hidden there while the native callback stays live
       // for ordinary read-only diffs.
-      unsafeCSS: "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
+      unsafeCSS:
+        editHeaderCSS +
+        "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
       enableGutterUtility: true,
       createEditor: (options) => new Editor(options),
       onItemEditChange: (item, file) => {
@@ -1005,7 +1006,7 @@ export class DiffView {
     // semantic surface that is stable in both the browser and WKWebView DOMs.
     const editorElement = this.renderedElements<HTMLElement>(`[role="textbox"][aria-multiline="true"]`, root)[0];
     if (!editorElement) return false;
-    editorElement.id = "code-pane-diff-edit-input";
+    editorElement.id = DIFF_EDIT_INPUT_ID;
     return true;
   }
 
@@ -1013,7 +1014,7 @@ export class DiffView {
    * Pierre may retain a detached/reused contenteditable while replacing a FileDiff, so clear our
    * identifier before a read-only transition even when that DOM node is not removed immediately. */
   private clearEditorIdentifier(root: HTMLElement = this.root): void {
-    for (const editorElement of this.renderedElements<HTMLElement>("#code-pane-diff-edit-input", root)) {
+    for (const editorElement of this.renderedElements<HTMLElement>(`#${DIFF_EDIT_INPUT_ID}`, root)) {
       editorElement.removeAttribute("id");
     }
   }
@@ -1201,7 +1202,7 @@ export class DiffView {
   /** Returns the manifest entries plus the one recovery-only editor, which deliberately stays out
    * of the sidebar/manifest scheduler. It is placed first so a refresh cannot strand unsaved text
    * below a long streamed diff. A queued replacement patch also uses this item: its prior verified
-   * comparison can still render Save/Cancel after that transfer aborts. */
+   * comparison can still render the live editor after that transfer aborts. */
   private displayedFiles(): readonly DiffFileEntry[] {
     return this.recoveryEditFile === undefined ? this.files : [this.recoveryEditFile, ...this.files];
   }
@@ -1260,4 +1261,24 @@ function annotationListEquals(a: readonly AnchoredComment[] | undefined, b: read
     const other = b[index]!;
     return ac.comment === other.comment && ac.position!.lineNumber === other.position!.lineNumber && ac.position!.outdated === other.position!.outdated;
   });
+}
+
+/** The inline editor's one-line autosave report. `failed` names both the reason and how long the
+ * scheduler will wait before writing again, so the "Retry now" button beside it is a shortcut
+ * rather than the only way back. */
+function statusChipText(status: AutosaveStatus): string {
+  switch (status.kind) {
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "failed":
+      return `Save failed: ${status.reason} · retry in ${Math.ceil(status.retryInMs / 1000)} s`;
+    case "blocked":
+      return `Save blocked: ${status.reason}`;
+    case "idle":
+      return "";
+  }
 }

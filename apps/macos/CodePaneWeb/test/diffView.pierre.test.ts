@@ -157,13 +157,12 @@ describe("DiffView with the real Pierre renderer", () => {
     view.setFiles([file()], false);
     await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "const value = newValue;\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-cancel")).toHaveLength(1));
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
 
     view.endEdit("src/example.txt");
     await vi.waitFor(() => {
       expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0);
-      expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-cancel")).toHaveLength(0);
-      expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-save")).toHaveLength(0);
+      expect(queryOpenShadowRoots(container, ".diff-edit-header")).toHaveLength(0);
     });
 
     view.beginEdit("src/example.txt", "const value = newValue;\n");

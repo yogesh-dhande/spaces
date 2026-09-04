@@ -4,6 +4,7 @@ import {
   CodePaneAgentStartStatusEvent,
   CodePaneDiffEditorState,
   CodePaneEditorUIState,
+  CodePaneFlushEditsEvent,
   CodePaneInitPayload,
   CodePaneSetModeEvent,
   CodePaneThemeChangedEvent,
@@ -15,8 +16,9 @@ import {
   WorkspaceRevisionFileReadResult,
   type DiffScope,
 } from "../bridge/types";
+import { AutosaveScheduler, type AutosaveHost, type AutosaveStatus, type SaveOutcome } from "./autosave";
 import { CommentsController, CommentsToolbarState } from "./commentsController";
-import { DiffView, type PreparedDiffEdit } from "./diffView";
+import { DIFF_EDIT_INPUT_ID, DiffView, type PreparedDiffEdit } from "./diffView";
 import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
 import { diff3MergeLines } from "./editorView";
@@ -45,6 +47,18 @@ const THEME_EVENT = "spaces:theme";
 const AGENTS_EVENT = "spaces:agents";
 const AGENT_START_STATUS_EVENT = "spaces:agentStartStatus";
 const SET_MODE_EVENT = "spaces:setMode";
+const FLUSH_EDITS_EVENT = "spaces:flushEdits";
+/** How often a quit flush re-reads a failing surface's autosave status while its scheduler works
+ *  through its own retry backoff. Short enough to answer the host promptly once a retry lands,
+ *  and free of I/O: it only reads a field. */
+const QUIT_FLUSH_WATCH_MS = 100;
+
+/** What `mountRoot` hands back: the page's teardown seam. A mounted pane owns window listeners, a
+ * live signature subscription, retry timers, and two autosave schedulers, none of which are reachable
+ * from the DOM it rendered; `dispose()` is the one way to retire all of it. */
+export interface CodePaneRootHandle {
+  dispose(): void;
+}
 
 /** Keep performance milestones tied to the comparison that produced them.  The native E2E
  * harness uses this to distinguish a selected scope from an older refresh still draining. */
@@ -62,7 +76,7 @@ function renderMetricScope(scope: DiffScope): string {
  * synchronously in response to "ready" can never race past a listener that
  * isn't there yet.
  */
-export async function mountRoot(container: HTMLElement): Promise<void> {
+export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHandle> {
   const bridge = await createBridge();
 
   const initPayload = await new Promise<CodePaneInitPayload>((resolve) => {
@@ -77,10 +91,29 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   document.documentElement.dataset.theme = initPayload.theme;
   window.spaces = bridge;
 
+  /** Everything `dispose()` has to undo, in registration order: window listeners, subscriptions,
+   * and timers all outlive the mount that installed them, so a retired pane would otherwise keep
+   * writing files, answering the host, and pulling diffs from behind a surface nobody can see. */
+  const teardown: Array<() => void> = [];
+
+  /** Set by `dispose()`. Loops that outlive a single turn read this to stop: a retired pane must not
+   * keep ticking, and cancelling the schedulers is not enough on its own, since a scheduler that
+   * failed its last write stays in `failed` after `cancel()` drops the retry. */
+  let disposed = false;
+
+  /** Every window listener this root installs goes through here, so none can be forgotten by
+   * `dispose()`. The one exception is the `spaces:init` listener above, which is `{once: true}` and
+   * has already fired by the time this line runs. */
+  function addWindowListener<E extends Event = Event>(type: string, listener: (event: E) => void, capture = false): void {
+    const handler = listener as EventListener;
+    window.addEventListener(type, handler, capture);
+    teardown.push(() => window.removeEventListener(type, handler, capture));
+  }
+
   // Kept separate from the one-shot `spaces:init` listener above: appearance changes after
   // startup arrive on `spaces:theme` instead (see README.md), since a `{once: true}` listener
   // has nothing left attached to receive a second `spaces:init`.
-  window.addEventListener(THEME_EVENT, (event) => {
+  addWindowListener(THEME_EVENT, (event) => {
     document.documentElement.dataset.theme = (event as CustomEvent<CodePaneThemeChangedEvent>).detail.theme;
   });
 
@@ -125,7 +158,18 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   let diffEditSaveInFlightSession: number | undefined;
   /** A signature read can prove an in-flight save landed before its RPC settles. */
   let diffEditDiskConfirmedSave: { session: number; contentGeneration: number } | undefined;
+  /** The session a hibernation suspended, if one is suspended. Hibernation unmounts the editor but
+   * keeps its buffer as the pane's durable state, so unlike `endDiffEditSession` it does not
+   * dispose of what a write in flight is writing: that write's result still belongs to this
+   * snapshot, and dropping it would leave the restored session dirty against a superseded baseline
+   * and write the same bytes a second time. */
+  let suspendedDiffEditSession: number | undefined;
   let diffEditRequestToken = 0;
+  /** Counts only the user's own inline-edit requests (a line click on a file). `diffEditRequestToken`
+   * also moves for the pane's own bookkeeping, so a handover that awaits a write cannot use it to
+   * ask "did the user move on?": the write's success refreshes the diff, and in Last Commit that
+   * refresh hibernates the editor and bumps that token before the flush even resolves. */
+  let diffEditUserRequestToken = 0;
   /** Advances only for user typing in the inline diff editor. A successful CAS write adopts its
    * returned baseline only when this value still matches the content it sent. */
   let diffEditContentGeneration = 0;
@@ -265,13 +309,41 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       diffEditContentGeneration += 1;
       diffEditorState = { ...diffEditorState, content, dirty: true, conflict: false, conflictBaseSHA256: null };
       scheduleWorkspaceStatePush();
+      diffAutosave.noteEdit();
     },
-    onSaveDiffEdit: (path) => void saveDiffEdit(path, diffEditorState?.baseSHA256),
-    onCancelDiffEdit: (path) => cancelDiffEdit(path),
     onResolveDiffEdit: (path, action) => void resolveDiffEdit(path, action),
+    onRetryDiffEditSave: () => void diffAutosave.flush(),
     onPositionChange: () => scheduleWorkspaceStatePush(),
-    onDiscardAndOpenDiffEdit: (currentPath, nextPath) => void discardAndOpenDiffEdit(currentPath, nextPath),
   });
+  /** Reads the live inline-edit state rather than owning any of it: the scheduler decides only
+   * when a write runs, while `diffEditorState` remains the single source of what gets written. */
+  const diffAutosaveHost: AutosaveHost = {
+    isDirty: () => diffEditorState?.dirty === true,
+    blockedReason: () => {
+      const edit = diffEditorState;
+      if (edit === undefined || !edit.conflict) return undefined;
+      // `conflictBaseSHA256 === null` is the durable "the disk side was gone" marker (see
+      // `CodePaneDiffEditorState`), which is the one conflict a user resolves by recreating the file.
+      return edit.conflictBaseSHA256 === null ? "File deleted on disk" : "File changed on disk";
+    },
+    performSave: () => {
+      const edit = diffEditorState;
+      if (edit === undefined) return Promise.resolve<SaveOutcome>("clean");
+      // A Keep mine decision outranks the session's own baseline until a write adopts a new one:
+      // `null` there means the user chose to recreate a file that is gone, which no SHA can say.
+      if (edit.confirmedBaseSHA256 !== undefined) {
+        return saveDiffEdit(edit.path, edit.confirmedBaseSHA256 ?? undefined);
+      }
+      return saveDiffEdit(edit.path, edit.baseSHA256);
+    },
+    onStatus: (status) => {
+      const path = diffEditorState?.path;
+      if (path !== undefined) diffView.setEditStatus(path, status);
+    },
+  };
+  /** Re-created for every edit session: `cancel()` permanently retires a scheduler, and the next
+   * session needs its own debounce, backoff, and "has saved once" state. */
+  let diffAutosave = new AutosaveScheduler(diffAutosaveHost);
   // Seed the inactive diff view before any initialization await. A pane can be torn down while it
   // starts in Editor mode, or while its first diff manifest is still loading; the hibernation
   // collector must retain the saved logical location even though no diff line is mounted yet.
@@ -381,6 +453,99 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       onSelect: (refName) => dispatch({ type: "setScope", scope: { kind: "ref", refName } }),
     },
   );
+
+  /** Both overlays park themselves on a shared backdrop element that is only displayed while they
+   * are open. Reading that is what keeps the pane-level shortcuts below from acting on an Escape or
+   * a ⌘S that belongs to whichever overlay currently owns the keyboard. */
+  function isOverlayOpen(): boolean {
+    return [...pane.querySelectorAll<HTMLElement>(".quick-open-backdrop")].some((backdrop) => backdrop.style.display !== "none");
+  }
+
+  // Pane-level editing shortcuts, on the capture phase: `@pierre/diffs`' editor calls
+  // `preventDefault()` on Escape inside its own contenteditable (it collapses the selection), so a
+  // bubble-phase listener would never see the Escape that matters most, the one typed while the
+  // user is editing. Capture runs before any target handler, so the pane decides first and the
+  // `defaultPrevented` check below only defers to another capture listener closer to the window.
+  // The overlays are the one surface that must keep winning, and they are skipped explicitly.
+  addWindowListener<KeyboardEvent>("keydown", (event) => {
+    if (event.defaultPrevented || isOverlayOpen()) return;
+    if (event.metaKey && event.key === "s") {
+      // Autosave already writes on its own; ⌘S only means "do not wait for the debounce".
+      event.preventDefault();
+      if (state.mode === "editor") void editorView.flushNow();
+      else void diffAutosave.flush();
+      return;
+    }
+    if (event.key !== "Escape" || state.mode !== "diff" || diffEditorState === undefined) return;
+    // Escape belongs to whatever the user is actually inside. Every other surface that uses it (the
+    // compare menu, the overlays) is a sibling of the editor, so rather than enumerating them, the
+    // pane claims Escape only when the keystroke came from the inline editor itself. The composed
+    // path is what makes that answerable through Pierre's shadow root.
+    if (!event.composedPath().some((target) => target instanceof HTMLElement && target.id === DIFF_EDIT_INPUT_ID)) return;
+    const path = diffEditorState.path;
+    event.preventDefault();
+    if (!diffEditorState.dirty) {
+      endDiffEditSession(path);
+      return;
+    }
+    // Escape leaves the editor, it never discards: a dirty buffer is written first, and a write
+    // that cannot land keeps the session (and the chip explaining why) on screen.
+    void (async () => {
+      const outcome = await diffAutosave.flush();
+      if (outcome !== "clean" || diffEditorState?.path !== path) return;
+      endDiffEditSession(path);
+    })();
+  }, true);
+
+  /** One surface's quit flush: settled once it is written, blocked, or has nothing to write.
+   *
+   * Acknowledging a failed write would be a lie the host acts on: it tears the page down on the
+   * reply, taking the scheduler's armed retry with it, and the buffer is lost even though the
+   * host's window still had time. So a failure is not an answer. The scheduler already retries on
+   * its own backoff, so this watches that rather than issuing writes on top of it, which would put
+   * two attempts into every backoff period. The bound is the host's own timeout, not a page-side
+   * attempt cap: a page that can never write simply never answers. `blocked` settles the surface,
+   * since a conflict is the user's to resolve and quitting writes nothing on their behalf. A
+   * retired scheduler reports `clean`, so a disposed page never starts this loop, and a pane
+   * disposed while the loop is already watching drops out at the next tick without answering the
+   * host: `cancel()` retires the retry but leaves the status at `failed`, which would otherwise
+   * watch forever. */
+  async function flushSurfaceForQuit(
+    flush: () => Promise<"clean" | "blocked" | "failed">,
+    status: () => AutosaveStatus,
+  ): Promise<void> {
+    if (await flush() !== "failed") return;
+    for (;;) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, QUIT_FLUSH_WATCH_MS);
+      });
+      if (disposed) return;
+      const current = status();
+      // `dirty` and `saving` are the states a retry passes through; only these three mean the
+      // scheduler has nothing left it intends to write.
+      if (current.kind === "saved" || current.kind === "idle" || current.kind === "blocked") return;
+    }
+  }
+
+  // The host holds its quit/teardown until this reply, so answer exactly once per token and only
+  // after every surface that can hold unsaved work has written it. Both can be dirty at once: a
+  // mode switch before either debounce fires leaves the hidden surface's buffer pending, so the
+  // visible mode is not a safe way to pick one. The two flushes start together rather than in
+  // sequence: the host's window is bounded, and a slow remote write on one surface must not spend
+  // it before the other surface's write is even issued. Each flush resolves immediately when its
+  // surface has nothing to write.
+  addWindowListener(FLUSH_EDITS_EVENT, (event) => {
+    const { token } = (event as CustomEvent<CodePaneFlushEditsEvent>).detail;
+    void (async () => {
+      await Promise.all([
+        flushSurfaceForQuit(() => editorView.flushNow(), () => editorView.saveStatus()),
+        flushSurfaceForQuit(() => diffAutosave.flush(), () => diffAutosave.status),
+      ]);
+      // A pane retired mid-flush has nothing to answer for, and its buffer went with it.
+      if (disposed) return;
+      bridge.notifyEditsFlushed(token);
+    })();
+  });
 
   /** Records `path` as most-recently-opened (dedupe, cap `RECENT_PATHS_CAP`) and pushes the
    *  updated `editorUIState` to the host. Called by every successful open, from any of the three
@@ -568,12 +733,12 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // A running agent set changes independently of any diff refresh or user action in this pane
   // (an agent can start or exit from elsewhere in the app), so this listens for the whole
   // lifetime of the pane rather than being read once at startup like `initPayload.agents`.
-  window.addEventListener(AGENTS_EVENT, (event) => {
+  addWindowListener(AGENTS_EVENT, (event) => {
     const agents = (event as CustomEvent<CodePaneAgentsChangedEvent>).detail.agents;
     comments.onAgentsChanged(agents, pendingStartingAgentSessionId());
   });
 
-  window.addEventListener(AGENT_START_STATUS_EVENT, (event) => {
+  addWindowListener(AGENT_START_STATUS_EVENT, (event) => {
     const detail = (event as CustomEvent<CodePaneAgentStartStatusEvent>).detail;
     const launch = pendingAgentLaunch;
     if (!launch || launch.sessionId === null || detail.sessionId !== launch.sessionId) return;
@@ -603,7 +768,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     focusCodeSurface();
   });
 
-  window.addEventListener(SET_MODE_EVENT, (event) => {
+  addWindowListener(SET_MODE_EVENT, (event) => {
     const { mode } = (event as CustomEvent<CodePaneSetModeEvent>).detail;
     // The host doesn't know this pane's live JS state before pushing (see `currentMode`'s doc
     // comment in the Swift host); redundantly dispatching the mode it's already in would still
@@ -958,17 +1123,23 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     if (pendingLastCommitDiffEditorRestore) return;
     pendingLastCommitDiffEditorRestore = true;
     if (pendingScopeTransitionDiffEditorRestore) return;
-    diffEditRequestToken += 1;
-    diffEditSessionToken += 1;
+    suspendDiffEditSession();
     diffView.endEdit(diffEditorState.path);
   }
 
   function hibernateDiffEditorForScopeTransition(): void {
     if (diffEditorState === undefined || pendingScopeTransitionDiffEditorRestore) return;
     pendingScopeTransitionDiffEditorRestore = true;
-    diffEditRequestToken += 1;
-    diffEditSessionToken += 1;
+    suspendDiffEditSession();
     diffView.endEdit(diffEditorState.path);
+  }
+
+  /** Retires the tokens an unmounted editor's pending opens and reconciles answer to, while
+   * remembering the session so a write already in flight for it can still report its result. */
+  function suspendDiffEditSession(): void {
+    diffEditRequestToken += 1;
+    suspendedDiffEditSession = diffEditSessionToken;
+    diffEditSessionToken += 1;
   }
 
   /** A failed Last Commit manifest has not supplied a new immutable revision to validate, so the
@@ -993,6 +1164,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     }
     pendingLastCommitDiffEditorRestore = false;
     diffEditSessionToken += 1;
+    resumeDiffAutosave();
   }
 
   /** A Last Commit edit is saveable only after this page has verified its immutable target. If a
@@ -1020,8 +1192,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     }
     const wasHibernatedForScopeTransition = pendingScopeTransitionDiffEditorRestore;
     restoreScopeTransitionDiffEditorAfterFailedRefresh(saved.path, error);
-    // The scope recovery already explains that Save/Cancel remains available. Retain that more
-    // actionable wording; an ordinary same-scope refresh still needs the generic transport error.
+    // The scope recovery already explains that the edits are kept. Retain that more actionable
+    // wording; an ordinary same-scope refresh still needs the generic transport error.
     if (!wasHibernatedForScopeTransition) diffView.showEditError(message);
   }
 
@@ -1048,7 +1220,8 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     diffEditorState = restored;
     pendingScopeTransitionDiffEditorRestore = false;
     diffEditSessionToken += 1;
-    diffView.showEditError(`Couldn't update ${path}'s comparison. Save or Cancel this edit, then try again.`);
+    resumeDiffAutosave();
+    diffView.showEditError(`Couldn't update ${path}'s comparison. Your edits are kept here; try again.`);
     pushWorkspaceState();
   }
 
@@ -1110,6 +1283,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
           };
       pendingScopeTransitionDiffEditorRestore = false;
       diffEditSessionToken += 1;
+      resumeDiffAutosave();
       pushWorkspaceState();
     } catch (error) {
       if (restoreToken !== diffRequestToken || diffEditorState !== saved) return;
@@ -1268,6 +1442,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
         // than trusting the persisted buffer or requiring the manifest to contain this path.
         void reconcileDiffEditWithDisk(diffEditorState.path);
       }
+      reattachDiffAutosave();
     }
     comments.setFiles(files);
     // The manifest gives comments stable queued anchors immediately. Do not hold the workspace
@@ -1463,7 +1638,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       }
       // A scope may legitimately omit the edited path (for example, a clean worktree after a
       // Last Commit draft). Its recovery editor has no patch left side, so compare the preserved
-      // dirty buffer against the newly-read disk baseline rather than leaving Save/Cancel dormant.
+      // dirty buffer against the newly-read disk baseline rather than leaving the editor dormant.
       if (pendingScopeTransitionDiffEditorRestore && diffEditorState !== undefined && !files.some((file) => file.path === diffEditorState!.path)) {
         void restoreScopeTransitionDiffEditor(diffEditorState.path, token);
       }
@@ -1546,7 +1721,23 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       if (error instanceof SpacesBridgeError && error.code === "notFound") return { kind: "worktreeDiverged" };
       throw error;
     }
-    if (revision.isWorktreeEquivalentToRevision !== true) return { kind: "worktreeDiverged" };
+    if (revision.isWorktreeEquivalentToRevision !== true) {
+      // The gate above exists to stop a historical review from being written onto a file someone
+      // else moved away from the commit. This pane's own autosave is the one divergence that is not
+      // that: the session that produced it keeps editing the bytes it just wrote, the same
+      // adopt-own-write rule `reconcileDiffEditWithDisk` applies. Anything else on disk is a real
+      // divergence and still hibernates the editor behind the guard message.
+      const session = diffEditorState;
+      if (session?.path !== path) return { kind: "worktreeDiverged" };
+      const worktree = await bridge.workspaceFileRead(path, "inlineDiff");
+      if (worktree.sha256 !== session.baseSHA256) return { kind: "worktreeDiverged" };
+      return {
+        kind: "ready",
+        disk: worktree,
+        comparisonOldContent: revision.comparisonOldContent,
+        fetchElapsedMs: Math.round(Math.max(performance.now() - startedAt, 0)),
+      };
+    }
     const disk: WorkspaceFileReadResult = { content: revision.content, sha256: revision.sha256, size: revision.size };
     return {
       kind: "ready", disk, comparisonOldContent: revision.comparisonOldContent,
@@ -1660,6 +1851,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       pendingScopeTransitionDiffEditorRestore = false;
       lastCommitDiffEditorVerified = true;
       diffEditSessionToken += 1;
+      resumeDiffAutosave();
       pushWorkspaceState();
     } catch {
       if (
@@ -1722,21 +1914,72 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     return true;
   }
 
+  /** Re-arms autosave for a session rebuilt from persisted state (a hibernation or scope-transition
+   * restore) rather than from a keystroke: the scheduler has no memory of the buffer that was
+   * already typed, so a dirty restore has to be told there is a pending write, and a restored
+   * conflict has to be told it is blocked. */
+  function resumeDiffAutosave(): void {
+    const edit = diffEditorState;
+    if (edit === undefined) return;
+    // The session is mounted again, so nothing is suspended. A write still in flight from before
+    // the hibernation is dropped from here on: this restore re-read the file, and that reading of
+    // disk is newer than the one the write was issued against.
+    suspendedDiffEditSession = undefined;
+    if (edit.conflict) diffAutosave.reevaluate();
+    else if (edit.dirty) diffAutosave.noteEdit();
+    republishDiffEditStatus();
+  }
+
+  /** Re-attaches a still-live session to a freshly rendered diff. Unlike a restore, the scheduler
+   * here is the same one that has been driving this buffer all along, possibly mid-failure-backoff,
+   * and a workspace refresh is not a keystroke: `noteEdit` would cancel that backoff and replace it
+   * with an 800ms debounce, so a daemon refusing writes during agent churn would be retried once
+   * per refresh. `reevaluate` only re-derives the status and arms a write when nothing is already
+   * pending. */
+  function reattachDiffAutosave(): void {
+    if (diffEditorState === undefined) return;
+    diffAutosave.reevaluate();
+    republishDiffEditStatus();
+  }
+
+  /** A re-attached editor starts with a blank header while the scheduler suppresses repeats of a
+   * status it has already reported, so the two can disagree after a re-render. Re-publish what the
+   * scheduler is actually showing rather than leaving the header empty. */
+  function republishDiffEditStatus(): void {
+    const edit = diffEditorState;
+    if (edit !== undefined) diffView.setEditStatus(edit.path, diffAutosave.status);
+  }
+
   async function beginDiffEdit(path: string): Promise<void> {
+    // Claimed before the same-path bail below, so a request for the file already being edited
+    // retires a handover still waiting on that file's write instead of letting it open the other
+    // file once the write settles. DiffView swallows a line click on the file it is already
+    // editing, so today only this function's own consistency depends on the ordering; it is written
+    // this way so that swallow is not the only thing standing between a stale handover and the
+    // user's screen.
+    const userRequest = ++diffEditUserRequestToken;
     if (diffEditorState?.path === path) return;
-    if (diffEditorState?.dirty) {
-      diffView.requestOpenAfterDiscard(path);
-      return;
-    }
-    if (diffEditorState !== undefined) {
+    const previous = diffEditorState;
+    if (previous !== undefined) {
+      if (previous.dirty) {
+        // A dirty session is written before it is handed over, so switching files never silently
+        // drops keystrokes. The flush is awaited under the same token every other inline-edit
+        // request uses, since a newer line click can win the surface while the write is in flight.
+        const outcome = await diffAutosave.flush();
+        // The write replaces the session's state object with the adopted baseline, so identity is
+        // meaningless here; only the path still names the session this handover started from.
+        if (userRequest !== diffEditUserRequestToken || diffEditorState?.path !== previous.path) return;
+        // A blocked or failed write keeps the user on the file they still have to resolve; the
+        // status chip in that file's header already says which of the two it is.
+        if (outcome !== "clean") return;
+      }
       // A clean file still owns a live Pierre editor. End it before awaiting B's disk read so a
       // slow read cannot leave two contenteditables attached to one CodeView.
-      diffView.endEdit(diffEditorState.path);
-      diffEditorState = undefined;
-      diffEditSessionToken += 1;
-      pushWorkspaceState();
+      endDiffEditSession(previous.path);
     }
-    const requestToken = ++diffEditRequestToken;
+    // Ending a session bumps the request token, so the read phase below takes a fresh one rather
+    // than the entry claim above, which that bump has already retired.
+    const readToken = ++diffEditRequestToken;
     const refreshToken = diffRequestToken;
     const startedAt = performance.now();
     diffView.clearEditError();
@@ -1744,14 +1987,14 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       const result = await readDiffEditBaseline(path, startedAt);
       // File reads are asynchronous. A newer line click or a fresh diff generation owns the one
       // edit surface, even when this older read happens to resolve after it.
-      if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
+      if (readToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       if (result.kind !== "ready") {
         showLastCommitEditGuardError(result);
       } else if (!activateDiffEdit(path, result.disk, startedAt, result.fetchElapsedMs, result.comparisonOldContent)) {
         diffView.showEditError(`Couldn't open ${path} for editing. Try again.`);
       }
     } catch (error) {
-      if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
+      if (readToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
       // A deleted target is expected under agent churn: the rendered comparison remains reviewable
       // and a subsequent refresh owns its metadata. Any other failed read leaves the user with no
       // edit surface, so make that retryable failure explicit rather than silently ignoring it.
@@ -1761,96 +2004,68 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     }
   }
 
-  /** Reads the replacement before ending a dirty edit. A failed read leaves the original buffer
-   * and its Save/Cancel actions intact, while a successful read atomically hands the surface to B. */
-  async function discardAndOpenDiffEdit(currentPath: string, nextPath: string): Promise<void> {
-    if (diffEditorState?.path !== currentPath || !diffEditorState.dirty) return;
-    const requestToken = ++diffEditRequestToken;
-    const refreshToken = diffRequestToken;
-    const startedAt = performance.now();
-    diffView.clearEditError();
-    try {
-      const result = await readDiffEditBaseline(nextPath, startedAt);
-      if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
-      if (diffEditorState?.path !== currentPath) return;
-      if (result.kind !== "ready") {
-        diffView.clearPendingOpen(currentPath);
-        showLastCommitEditGuardError(result);
-        return;
-      }
-      const prepared = diffView.prepareEdit(nextPath, result.disk.content, result.comparisonOldContent);
-      if (prepared === undefined) {
-        diffView.clearPendingOpen(currentPath);
-        diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
-        return;
-      }
-      diffView.endEdit(currentPath);
-      diffEditorState = undefined;
-      diffEditSessionToken += 1;
-      pushWorkspaceState();
-      if (!activatePreparedDiffEdit(prepared, result.disk, startedAt, result.fetchElapsedMs)) {
-        diffView.showEditError(`Couldn't open ${nextPath} for editing. Try again.`);
-      }
-    } catch (error) {
-      if (requestToken !== diffEditRequestToken || refreshToken !== diffRequestToken) return;
-      if (diffEditorState?.path !== currentPath) return;
-      diffView.clearPendingOpen(currentPath);
-      diffView.showEditError(
-        error instanceof SpacesBridgeError && error.code !== "notFound"
-          ? error.message
-          : `Couldn't open ${nextPath} for editing. Try again.`,
-      );
-    }
-  }
-
-  function cancelDiffEdit(path: string): void {
+  /** Tears down the one live inline edit session: Escape on a clean (or just-written) buffer, an
+   * explicit conflict resolution, and the handover to another file all end here. The scheduler is
+   * retired with it and replaced, since a cancelled scheduler never writes again. */
+  function endDiffEditSession(path: string): void {
     if (diffEditorState?.path !== path) return;
     diffEditRequestToken += 1;
     const contentBytes = diffEditorState.content.length;
     diffEditorState = undefined;
     diffEditSessionToken += 1;
+    suspendedDiffEditSession = undefined;
+    diffAutosave.cancel();
+    diffAutosave = new AutosaveScheduler(diffAutosaveHost);
     diffView.endEdit(path);
     diffView.clearEditError();
     pushWorkspaceState();
     afterBrowserPaint(() => {
-      bridge.notifyRenderMetric({ kind: "diff", trigger: "diffEditCancel", elapsedMs: 0, fileCount: files.length, contentBytes, path });
+      bridge.notifyRenderMetric({ kind: "diff", trigger: "diffEditEnd", elapsedMs: 0, fileCount: files.length, contentBytes, path });
     });
   }
 
-  async function saveDiffEdit(path: string, baseSHA256: string | undefined, resolvingConflict = false): Promise<void> {
+  /** One CAS write of the live inline buffer, driven exclusively by `diffAutosave`. It reports the
+   * outcome the scheduler needs rather than acting on it: the session deliberately stays open on
+   * success so the user keeps typing into the same editor, and stays open on failure so the buffer
+   * survives until a retry lands or the user resolves whatever is blocking it. */
+  async function saveDiffEdit(path: string, baseSHA256: string | undefined): Promise<SaveOutcome> {
     const edit = diffEditorState;
     const editSession = diffEditSessionToken;
-    if (!edit || edit.path !== path || !edit.dirty || (edit.conflict && !resolvingConflict) || diffEditSaveInFlightSession === editSession) return;
+    if (!edit || edit.path !== path || !edit.dirty) return "clean";
+    if (edit.conflict) return "blocked";
     const savedContentGeneration = diffEditContentGeneration;
     const startedAt = performance.now();
+    // Only read back by reconciliation, to recognize that a disk snapshot matching the live buffer
+    // is this very write landing early. The scheduler is the sole caller here and never overlaps
+    // two writes, so this is never a mutual-exclusion guard.
     diffEditSaveInFlightSession = editSession;
-    const ownsEdit = () => diffEditSessionToken === editSession && diffEditorState?.path === path;
+    // A suspended session is the same buffer, just unmounted, so its write still owns the state it
+    // submitted. A session that was ended and replaced is not, and fails both checks.
+    const ownsEdit = () =>
+      (diffEditSessionToken === editSession || suspendedDiffEditSession === editSession) && diffEditorState?.path === path;
     try {
       const outcome = await bridge.workspaceFileWrite(path, edit.content, { baseSHA256, purpose: "inlineDiff" });
-      // A cancel/discard-and-open can install another editor while this CAS write is in flight.
-      // Its reply belongs only to the original session and may not clear, conflict, refresh, or
-      // otherwise mutate the replacement editor.
+      // Ending a session can install another editor while this CAS write is in flight. Its reply
+      // belongs only to the original session and may not clear, conflict, refresh, or otherwise
+      // mutate the replacement editor.
       const currentEdit = diffEditorState;
-      if (!currentEdit || !ownsEdit()) return;
+      if (!currentEdit || !ownsEdit()) return "clean";
       if ("ok" in outcome && outcome.ok) {
-        if (diffEditContentGeneration !== savedContentGeneration) {
-          // The user kept typing while the CAS write was in flight. The returned hash belongs to
-          // `edit.content`, not the newer live buffer, so retain that buffer as dirty against the
-          // saved contents and hash rather than closing the editor and discarding keystrokes.
-          diffEditorState = {
-            ...currentEdit,
-            baseSHA256: outcome.sha256,
-            baseContent: edit.content,
-            dirty: true,
-            conflict: false,
-          };
-          pushWorkspaceState();
-          void refreshDiff(true, "workspaceChange");
-          return;
-        }
-        diffEditorState = undefined;
-        diffEditSessionToken += 1;
-        diffView.endEdit(path);
+        // The returned hash belongs to `edit.content`, which is the live buffer only when nothing
+        // was typed while the write was in flight. Either way the editor adopts the written
+        // baseline and stays open; a newer buffer simply remains dirty against it and is written
+        // by the scheduler's next pass.
+        diffEditorState = {
+          ...currentEdit,
+          baseSHA256: outcome.sha256,
+          baseContent: edit.content,
+          dirty: diffEditContentGeneration !== savedContentGeneration,
+          conflict: false,
+          conflictBaseSHA256: null,
+          // The adopted baseline supersedes whatever Keep mine confirmed: from here the ordinary
+          // CAS target is correct again.
+          confirmedBaseSHA256: undefined,
+        };
         diffView.clearEditError();
         pushWorkspaceState();
         afterBrowserPaint(() => {
@@ -1863,34 +2078,64 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
             path,
           });
         });
-        void refreshDiff(true, "workspaceChange");
-      } else if ("conflict" in outcome) {
-        await reconcileDiffEditWithDisk(path);
+        // Hibernation only ever happens as part of a refresh (a scope switch, or a Last Commit
+        // manifest), so a suspended session's write has one running already.
+        if (suspendedDiffEditSession !== editSession) void refreshDiff(true, "workspaceChange");
+        return "saved";
       }
+      if ("conflict" in outcome) {
+        // Captured so the arm below can tell a reconcile that moved this session's CAS baseline
+        // from one that could not move it at all.
+        const refusedBaseline = currentEdit.baseSHA256;
+        await reconcileDiffEditWithDisk(path);
+        // Reconciliation decides what the rejection actually meant: an explicit conflict the user
+        // has to resolve, or a merge/adoption the scheduler can simply write again.
+        const reconciled = diffEditorState;
+        if (reconciled?.path !== path) return "clean";
+        if (reconciled.conflict) return "blocked";
+        // The ladder reached no new baseline: its own read could not run to a decodable answer, or
+        // disk went back to the very hash this write was refused against. Reporting "clean" on a
+        // still-dirty buffer would send the scheduler straight back into the same write against
+        // the same baseline with no delay, so this is a failure that waits out the backoff.
+        if (reconciled.dirty && reconciled.baseSHA256 === refusedBaseline) {
+          return { failed: "The file changed on disk and could not be re-read." };
+        }
+        return "clean";
+      }
+      return "clean";
     } catch (error) {
-      if (!ownsEdit()) return;
+      // The live editor, which is what every arm below has to reason about: `edit` is the snapshot
+      // submitted to the write, and typing continues freely while that write is in flight.
+      const liveEdit = diffEditorState;
+      if (!liveEdit || !ownsEdit()) return "clean";
       if (
         diffEditDiskConfirmedSave?.session === editSession &&
         diffEditDiskConfirmedSave.contentGeneration === diffEditContentGeneration &&
-        diffEditorState?.content === edit.content &&
-        diffEditorState.dirty === false &&
-        diffEditorState.conflict === false
+        liveEdit.content === edit.content &&
+        liveEdit.dirty === false &&
+        liveEdit.conflict === false
       ) {
         // The signature read already proved this exact submitted buffer is on disk. A lost or
-        // rejected RPC response is therefore superseded; preserve the clean editor and avoid a
-        // misleading save error. A later edit changes the generation and cannot take this path.
+        // rejected RPC response is therefore superseded; report the write that demonstrably landed
+        // rather than a misleading failure. A later edit changes the generation and cannot take
+        // this path.
         diffView.clearEditError();
-        return;
+        return "saved";
       }
       if (error instanceof SpacesBridgeError && error.code === "notFound") {
-        diffEditorState = { ...edit, conflict: true, conflictBaseSHA256: null };
+        // Only the conflict fields change: rebuilding from the submitted snapshot would hand Keep
+        // mine and the persisted recovery state a buffer missing every keystroke typed during the
+        // request.
+        diffEditorState = { ...liveEdit, conflict: true, conflictBaseSHA256: null };
         diffView.setEditConflict(path, { kind: "deleted" });
         pushWorkspaceState();
-      } else {
-        // The edit state and its CAS baseline stay intact, so the same explicit Save action can
-        // retry after a transient daemon/transport/permission failure.
-        diffView.showEditError(error instanceof SpacesBridgeError ? error.message : `Couldn't save ${path}. Try again.`);
+        return "blocked";
       }
+      // The edit state and its CAS baseline stay intact, so the scheduler's backoff (or an explicit
+      // Retry now) can write the same buffer again after a transient daemon/transport/permission
+      // failure. The reason is reported through the header's status chip, not the error banner:
+      // an automatic write that fails and retries on its own must not take over the review surface.
+      return { failed: error instanceof SpacesBridgeError ? error.message : `Couldn't save ${path}. Try again.` };
     } finally {
       if (diffEditSaveInFlightSession === editSession) diffEditSaveInFlightSession = undefined;
     }
@@ -1912,9 +2157,20 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     try {
       const disk = await bridge.workspaceFileRead(path, "inlineDiff");
       if (reconcileToken !== diffEditReconcileToken || diffEditSessionToken !== editSession) return;
-      const edit = diffEditorState;
+      let edit = diffEditorState;
       if (!edit || edit.path !== path) return;
       if (edit.baseSHA256 !== startingBaseSHA256 || edit.baseContent !== startingBaseContent) return;
+      // The read found the file, so a standing "recreate it" decision describes a world that is
+      // gone: the next write has to CAS against what exists rather than insist the path is free.
+      // This has to happen before the same-hash return below, which is the one exit that leaves the
+      // rest of this function unrun: if something recreated the file with exactly the pre-deletion
+      // bytes, a create-only write would be refused for existing, reconcile back to here, and retry
+      // forever. The push is explicit for the same reason, since that return skips the tail's.
+      if (edit.confirmedBaseSHA256 === null) {
+        edit = { ...edit, confirmedBaseSHA256: undefined };
+        diffEditorState = edit;
+        pushWorkspaceState();
+      }
       if (disk.sha256 === edit.baseSHA256) return;
       if (disk.content === edit.content) {
         // The workspace write can land before its CAS reply reaches this pane. Disk already holds
@@ -2000,11 +2256,27 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       const edit = diffEditorState;
       if (!edit || edit.path !== path) return;
       if (edit.baseSHA256 !== startingBaseSHA256 || edit.baseContent !== startingBaseContent) return;
-      if (error instanceof SpacesBridgeError && error.code === "notFound") {
+      // A confirmed create-if-missing target means the user already looked at this exact situation
+      // and chose to recreate the file, so finding it still missing is not news to raise a second
+      // time: the decision stands, the buffer stays editable, and the pending write keeps its
+      // create target. Only an undecided session turns a deletion into a conflict.
+      if (error instanceof SpacesBridgeError && error.code === "notFound" && edit.confirmedBaseSHA256 !== null) {
         diffEditContentGeneration += 1;
         diffEditorState = { ...edit, conflict: true, conflictBaseSHA256: null };
         diffView.setEditConflict(path, { kind: "deleted" });
       }
+    }
+    // Reconciliation is the one path that changes dirty/conflict without a keystroke, so the
+    // scheduler has to be told the world moved under it: an adopted own write leaves it clean, an
+    // auto-merge leaves it dirty and due for a write, and entering (or refreshing) a conflict
+    // blocks it until the user decides. A moved baseline also retires any Keep mine target, since
+    // the snapshot that decision was made against is no longer what is on disk.
+    const reconciled = diffEditorState;
+    if (reconciled?.path === path) {
+      if (reconciled.baseSHA256 !== startingBaseSHA256 && reconciled.confirmedBaseSHA256 !== undefined) {
+        diffEditorState = { ...reconciled, confirmedBaseSHA256: undefined };
+      }
+      diffAutosave.reevaluate();
     }
     pushWorkspaceState();
   }
@@ -2016,15 +2288,24 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     if (diffEditorState?.path !== path) return;
     if (action === "keepMine") {
       const edit = diffEditorState;
-      const conflictBaseSHA256 = edit.conflictBaseSHA256 === null ? undefined : edit.conflictBaseSHA256;
-      // The explicit conflict action is the only path that may overwrite a newer disk baseline.
-      // Keep the frozen conflict state through the write: a transient failure must retry against
-      // the disk snapshot the user confirmed, rather than exposing a normal Save with an older
-      // baseline. A refreshed conflict replaces that snapshot with the newer disk state.
-      await saveDiffEdit(path, conflictBaseSHA256, true);
+      // The explicit conflict action is the only path that may overwrite a newer disk baseline, so
+      // the confirmed disk snapshot becomes the CAS target: a transient failure retries against
+      // exactly what the user compared, never against an older baseline, and it rides in the
+      // durable document so a hibernation between the decision and the write cannot lose it.
+      // Clearing the conflict returns the frozen comparison to an editable document, which is what
+      // makes this an ordinary autosaved buffer again once the write lands.
+      diffEditorState = {
+        ...edit,
+        conflict: false,
+        conflictBaseSHA256: null,
+        confirmedBaseSHA256: edit.conflictBaseSHA256,
+      };
+      diffView.replaceEditContent(path, edit.content, true);
+      pushWorkspaceState();
+      await diffAutosave.flush();
       return;
     }
-    cancelDiffEdit(path);
+    endDiffEditSession(path);
     if (action === "takeDisk") void refreshDiff(true, "workspaceChange");
   }
 
@@ -2126,7 +2407,13 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     // lines become the inactive view's durable values until the next time it is visible.
     captureViewPositions();
     const enteringLastCommit = action.type === "setScope" && state.scope.kind !== "lastCommit" && action.scope.kind === "lastCommit";
-    if (action.type === "setScope" && diffEditorState !== undefined) hibernateDiffEditorForScopeTransition();
+    if (action.type === "setScope" && diffEditorState !== undefined) {
+      // Hibernation persists the buffer, so a flush that fails or is still in flight loses nothing;
+      // this only gives an already-typed edit its best chance of reaching disk before the pane
+      // stops rendering it.
+      void diffAutosave.flush();
+      hibernateDiffEditorForScopeTransition();
+    }
     if (enteringLastCommit) hibernateLastCommitDiffEditor(true);
     if (action.type === "setScope") {
       configuredBaseSelectionToken += 1;
@@ -2250,12 +2537,13 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // same serial-queue ordering rule `openInEditor` applies (read before the mode dispatch that
   // triggers the listing).
   if (state.mode === "editor") editorSidebar.reattach();
-  bridge.subscribeFileListSignature(() => {
+  const unsubscribeFileListSignature = bridge.subscribeFileListSignature(() => {
     // Workspace membership changes are independent of the active diff scope: non-git workspaces
     // have no diff-signature stream at all, and "Last commit" intentionally ignores plain worktree
     // churn. The shared listing cache therefore owns its own workspace-scoped invalidation signal.
     refreshFileListConsumers();
   });
+  teardown.push(() => unsubscribeFileListSignature());
   // Install the one scope listener before an initial manifest starts streaming. A file patch can
   // take arbitrarily long under agent churn; subscribing after that await drops any signature
   // change that arrives in the visible sidebar/placeholder interval.
@@ -2273,4 +2561,25 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // Workspace-scoped, independent of `state.scope`: the first manifest starts this above so it can
   // overlap patch streaming; this only starts it for panes that have not fetched a manifest yet.
   await loadInitialComments();
+
+  return {
+    dispose() {
+      disposed = true;
+      for (const undo of teardown.splice(0)) undo();
+      unsubscribeSignature?.();
+      unsubscribeSignature = undefined;
+      // Both surfaces schedule their own writes, so both have to be retired, not just whichever one
+      // happens to be on screen.
+      diffAutosave.cancel();
+      editorView.dispose();
+      // Timers that would otherwise keep talking to the host: a queued recovery-state push, the
+      // diff pull's backoff retry, and the Start Agent tracker's own retry.
+      if (workspaceStatePushTimer !== undefined) {
+        clearTimeout(workspaceStatePushTimer);
+        workspaceStatePushTimer = undefined;
+      }
+      clearTimeout(diffRetryTimer);
+      clearAgentResumeTracking();
+    },
+  };
 }
