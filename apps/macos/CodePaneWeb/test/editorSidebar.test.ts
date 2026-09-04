@@ -44,7 +44,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -63,7 +63,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -82,7 +82,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "changes", selectedPath: undefined },
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -101,7 +101,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "changes", selectedPath: undefined },
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -120,7 +120,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       callbacks,
     );
@@ -146,7 +146,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       callbacks,
     );
@@ -163,7 +163,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       onSelectFile,
       makeCallbacks(),
     );
@@ -183,7 +183,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -205,7 +205,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "changes", selectedPath: undefined },
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -224,7 +224,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -258,7 +258,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -288,7 +288,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -310,7 +310,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "changes", selectedPath: undefined },
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -327,7 +327,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -351,7 +351,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -383,7 +383,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -414,7 +414,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -455,7 +455,7 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined },
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -479,5 +479,31 @@ describe("EditorSidebar", () => {
     resolveRevalidation(makeResult(["a.ts", "b.ts"], /* truncated */ true));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(note.hidden).toBe(false);
+  });
+
+  it("carries the Files tree alone and keeps Changes unreachable when changes are unavailable", () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["a.ts"])));
+    const callbacks = makeCallbacks();
+    const changesListEl = makeChangesListEl();
+    const sidebar = new EditorSidebar(
+      changesListEl,
+      cache,
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: false },
+      vi.fn(),
+      callbacks,
+    );
+
+    // Saved state naming the Changes tab is coerced to Files, the segmented toggle is not rendered
+    // at all, and the changed-files list stays out of this sidebar.
+    expect(sidebar.getMode()).toBe("files");
+    expect(sidebar.el.querySelector(".editor-sidebar-hdr")).toBeNull();
+    expect(sidebar.el.contains(changesListEl)).toBe(false);
+
+    // The Changes button lives on that unrendered header, so nothing in the pane can click it; the
+    // guard inside setMode is what makes the tab unreachable rather than merely unclickable.
+    (sidebar as unknown as { changesBtn: HTMLButtonElement }).changesBtn.click();
+    expect(sidebar.getMode()).toBe("files");
+    expect(callbacks.onModeChange).not.toHaveBeenCalled();
+    expect(sidebar.el.contains(changesListEl)).toBe(false);
   });
 });

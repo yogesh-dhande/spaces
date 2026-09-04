@@ -23,6 +23,7 @@ function baseState(overrides: Partial<ToolbarState> = {}): ToolbarState {
     mode: "diff",
     scope: { kind: "uncommitted" },
     layout: "unified",
+    isGitRepository: true,
     agents: [],
     selectedAgentId: undefined,
     draftCount: 0,
@@ -492,6 +493,16 @@ describe("Toolbar — agent slot (Phase 4)", () => {
     expect(btn.disabled).toBe(false);
     btn.click();
     expect(callbacks.onSendBatch).toHaveBeenCalledOnce();
+  });
+
+  it("omits the compare control for a non-git workspace while keeping the mode buttons enabled", () => {
+    const container = document.createElement("div");
+
+    renderToolbar(container, baseState({ isGitRepository: false }), makeCallbacks());
+
+    expect(container.querySelector(".compare-btn")).toBeNull();
+    expect(findButton(container, "Diff").disabled).toBe(false);
+    expect(findButton(container, "Editor").disabled).toBe(false);
   });
 
   it("omits the agent slot's contents entirely in Editor mode", () => {

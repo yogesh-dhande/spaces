@@ -4,6 +4,8 @@ import { Editor } from "@pierre/diffs/edit";
 import { applyPatch, parsePatch, reversePatch } from "diff";
 import { DiffFileEntry, ReviewCommentSide } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
+import { ContextMenu } from "./contextMenu";
+import { editorLineForDiffLine, resolveDiffLineTarget } from "./diffLineTarget";
 import {
   AnchoredComment,
   canonicalizeContextAnchor,
@@ -33,6 +35,9 @@ export interface DiffCommentHooks {
   onDiscardAndOpenDiffEdit?(currentPath: string, nextPath: string): void;
   /** Source-line focus moved within the diff; root coalesces its recovery-state update. */
   onPositionChange?(): void;
+  /** The diff line context menu's "Open in Editor" item was activated. `line` is already mapped to
+   *  the current-side line the editor should land on (see `editorLineForDiffLine`). */
+  onRequestOpenInEditor?(path: string, line: number): void;
 }
 
 type DiffViewPosition = { path: string; line: number; side: ReviewCommentSide };
@@ -69,6 +74,9 @@ export class DiffView {
   /** Transient, retryable inline-edit failures must be visible without replacing the review diff. */
   private readonly editErrorEl: HTMLElement;
   private readonly hooks: DiffCommentHooks;
+  /** Pane-level menu surface shared with the rest of the pane; `DiffView` only ever fills it with
+   *  the diff line menu. */
+  private readonly contextMenu: ContextMenu;
   private layout: DiffLayout;
   /** A scope switch clears CodeView asynchronously. Until its replacement manifest arrives, old
    * virtualized line nodes must not be sampled into the new scope's durable position. */
@@ -164,9 +172,10 @@ export class DiffView {
       }
     | undefined;
 
-  constructor(container: HTMLElement, layout: DiffLayout, hooks: DiffCommentHooks) {
+  constructor(container: HTMLElement, layout: DiffLayout, hooks: DiffCommentHooks, contextMenu: ContextMenu) {
     this.layout = layout;
     this.hooks = hooks;
+    this.contextMenu = contextMenu;
     this.emptyEl = document.createElement("div");
     this.emptyEl.className = "empty-state";
     this.emptyEl.textContent = "No changes";
@@ -182,6 +191,7 @@ export class DiffView {
     container.appendChild(this.emptyEl);
     container.appendChild(this.root);
     container.appendChild(this.editErrorEl);
+    this.root.addEventListener("contextmenu", (event) => this.handleContextMenu(event));
   }
 
   setLayout(layout: DiffLayout): void {
@@ -200,6 +210,10 @@ export class DiffView {
     // old virtualized lines still exist, then hand them to the replacement item's post-render path.
     const preservedScrollPosition = preserveScroll ? this.durableScrollPosition() : undefined;
     const preservedFocusedPosition = preserveScroll ? this.focusedLocation : undefined;
+    // An open right-click menu holds a path and a line mapped from the diff being replaced, so it
+    // goes with that diff (same in `setLoading` and `showNotice`); the user right-clicks again on
+    // the fresh rows.
+    this.contextMenu.hide();
     this.generation += 1;
     this.loading = false;
     this.files = [...files];
@@ -519,6 +533,20 @@ export class DiffView {
    * restores the plain wording.
    */
   setError(message: string): void {
+    this.showNotice(message, { error: true });
+  }
+
+  /**
+   * The same "nothing to show, here's why" surface as `setError`, without the error styling, for a
+   * state that is a fact about the workspace rather than a failure: a workspace whose project is not
+   * a git repository has no diff to fetch, so nothing went wrong and there is nothing to retry.
+   */
+  setNotice(message: string): void {
+    this.showNotice(message, { error: false });
+  }
+
+  private showNotice(message: string, options: { error: boolean }): void {
+    this.contextMenu.hide();
     this.generation += 1;
     this.loading = true;
     this.files = [];
@@ -539,7 +567,7 @@ export class DiffView {
     // fetch error remains visible above the editor.
     this.syncRecoveryEditFile();
     this.emptyEl.textContent = message;
-    this.emptyEl.classList.add("error");
+    this.emptyEl.classList.toggle("error", options.error);
     this.emptyEl.style.display = "flex";
     const renderedFiles = this.renderedFiles();
     if (renderedFiles.length === 0) {
@@ -569,6 +597,7 @@ export class DiffView {
    * path) overwrites this the same way it already overwrites a prior `setError` call.
    */
   setLoading(): void {
+    this.contextMenu.hide();
     this.generation += 1;
     this.loading = true;
     this.files = [];
@@ -867,6 +896,70 @@ export class DiffView {
     };
   }
 
+  /**
+   * Right-click on a rendered diff line: offers "Open in Editor" at the line the row maps to.
+   *
+   * `composedPath()` (not `event.target`) is what reaches the stamped row: pierre renders every
+   * line inside a shadow root, so the event's target is retargeted to that root's host by the time
+   * it reaches this listener.
+   *
+   * The native menu is left alone (no `preventDefault`) whenever this menu has nothing to offer:
+   * a click outside any rendered line, a binary or deleted file (nothing to open on the current
+   * side), a click on selected text, where WebKit's own Copy item is the point of the menu, or a
+   * click inside the file currently being edited inline. Pierre keeps stamping that file's rows
+   * while its contenteditable surface is live, and a caret click there has no selection to detect,
+   * so without this check the menu would replace Paste, Undo, and the rest of WebKit's editing
+   * items. The edit's conflict state stays excluded too: it renders a comparison of the disk copy
+   * against the edited buffer, whose stamped line numbers belong to that comparison rather than to
+   * `file.patch`, so mapping them through the patch would land on the wrong line (or on a file the
+   * deleted-on-disk conflict says is gone).
+   */
+  private handleContextMenu(event: MouseEvent): void {
+    const path = event.composedPath();
+    const target = resolveDiffLineTarget(path);
+    if (target === undefined) return;
+    const file = this.filesByPath.get(target.path);
+    if (file === undefined || file.isBinary || file.status === "deleted" || file.patch === undefined) return;
+    // Not gated on whether the editor can actually open the file: a diff entry carries no size,
+    // and the entry points that already exist (the Changes tab in Editor mode, ⌘P) offer every
+    // changed text file the same way. A file over the daemon's editor limit, or a path that is
+    // not a regular file, is refused by the editor's own read and reported in its banner, exactly
+    // as it is from those entry points.
+    if (this.editing?.path === target.path) return;
+    if (this.pointerIsOnSelection(path)) return;
+    // Old-side rows parse the file's whole patch here, on the click. That is the same parse Pierre
+    // already ran to render the file, done once more only for a right-click on a removed line, and
+    // it is not cached on purpose: a per-file parse cache would have to track every patch
+    // replacement for an interaction that is rare and whose cost tracks the one file's diff size.
+    const line = editorLineForDiffLine(file.patch, target.side, target.line);
+    event.preventDefault();
+    this.contextMenu.show({
+      x: event.clientX,
+      y: event.clientY,
+      header: `${target.path.split("/").pop() ?? target.path}:${line}`,
+      items: [{ label: "Open in Editor", onSelect: () => this.hooks.onRequestOpenInEditor?.(target.path, line) }],
+    });
+  }
+
+  /**
+   * Whether the right-click landed on a live text selection, in which case the native menu must be
+   * kept. WebKit retargets a selection made inside pierre's shadow roots onto the host element, so
+   * this tests every node from the clicked one up to (but not including) the diff root: a range
+   * that intersects any of them counts as a selection under the pointer. Testing the diff root
+   * itself is what is deliberately skipped, since every in-diff selection intersects it. Any
+   * over-reporting only ever yields this menu to the native one, which is the safe direction.
+   */
+  private pointerIsOnSelection(composedPath: readonly EventTarget[]): boolean {
+    const selection = window.getSelection();
+    if (selection === null || selection.isCollapsed) return false;
+    const ranges = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index));
+    for (const entry of composedPath) {
+      if (entry === this.root) return false;
+      if (entry instanceof Node && ranges.some((range) => range.intersectsNode(entry))) return true;
+    }
+    return false;
+  }
+
   private requestNewComment(filePath: string, side: ReviewCommentSide, lineNumber: number): void {
     const file = this.filesByPath.get(filePath);
     const patch = file?.patch ?? "";
@@ -1027,6 +1120,21 @@ export class DiffView {
       line.id = `code-pane-diff-${side}-line-${encodedPath}-${lineNumber}`;
       line.dataset.diffPath = path;
       line.dataset.diffSide = side;
+    }
+    // Pierre lays line numbers out in a separate gutter column, so a right-click on a number lands
+    // on a cell that is a sibling column of the stamped row rather than a descendant of it. The
+    // cell and its row share `data-line-index` inside one `<code>` block (split layout renders one
+    // block per side); the cell borrows the row's stamps, carrying the line as `data-diff-line`
+    // rather than `data-line` so it never picks up a duplicate of the row's id above.
+    for (const cell of this.renderedElements<HTMLElement>("[data-gutter] [data-line-index]", node)) {
+      const block = cell.closest("code");
+      const index = cell.dataset.lineIndex;
+      if (block === null || index === undefined) continue;
+      const row = block.querySelector<HTMLElement>(`[data-content] [data-line-index="${index}"]`);
+      if (row?.dataset.diffPath === undefined || row.dataset.line === undefined) continue;
+      cell.dataset.diffPath = row.dataset.diffPath;
+      cell.dataset.diffSide = row.dataset.diffSide;
+      cell.dataset.diffLine = row.dataset.line;
     }
   }
 

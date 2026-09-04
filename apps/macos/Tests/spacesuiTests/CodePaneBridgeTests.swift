@@ -23,9 +23,11 @@ import spacesterminalcore
             diffEditorState: diffEditorState, pendingReviewComments: nil)
     }
 
-    private func initPayload(baseBranch: String? = nil, state: CodePaneBridge.WorkspaceState? = nil) -> CodePaneBridge.InitPayload {
+    private func initPayload(
+        baseBranch: String? = nil, isGitRepository: Bool = true, state: CodePaneBridge.WorkspaceState? = nil
+    ) -> CodePaneBridge.InitPayload {
         CodePaneBridge.InitPayload(
-            workspaceId: "w1", workspaceName: "My Workspace", theme: "dark", baseBranch: baseBranch,
+            workspaceId: "w1", workspaceName: "My Workspace", theme: "dark", baseBranch: baseBranch, isGitRepository: isGitRepository,
             workspaceState: state ?? workspaceState(), agents: [])
     }
 
