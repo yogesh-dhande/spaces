@@ -12,7 +12,7 @@ import spacesterminalcore
 /// load through to its `ready` handshake.
 @MainActor private final class EmptyCodePaneHostingDouble: CodePaneHosting {
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { nil }
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { nil }
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)? { nil }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}

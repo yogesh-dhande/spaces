@@ -849,6 +849,10 @@ enum CodePaneBridge {
         /// The workspace's configured base branch, nil-omitted when it has none. Drives the toolbar's
         /// one-click "vs <base>" preset and the ref dialog's base badge.
         let baseBranch: String?
+        /// Whether the workspace's project is a git repository. A non-git workspace has no diff to
+        /// show: the page renders a neutral Diff notice, hides the compare control and the sidebar's
+        /// Changes tab, and never fetches a diff or subscribes a diff signature.
+        let isGitRepository: Bool
         /// The client-local, durable recovery state for this workspace. This is the only restore
         /// payload; independently-restored editor/sidebar/comment fields are deliberately not sent
         /// so the page never combines values from different moments.

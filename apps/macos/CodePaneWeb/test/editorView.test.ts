@@ -25,6 +25,10 @@ const fakeCodeViewControl = vi.hoisted(() => ({
   editor: {} as object | undefined,
   editorSelection: undefined as { start: { line: number }; end: { line: number }; direction: number } | undefined,
   updateItemCalls: [] as Array<{ id: string; version: number }>,
+  // Records every `scrollTo` call `restorePosition` makes against the fake CodeView — used by the
+  // reveal-on-open tests below to assert the scroll half of a reveal independently of the
+  // focus-poll half (which needs `getEditor` to return an attached editor first).
+  scrollToCalls: [] as Array<unknown>,
 }));
 
 vi.mock("@pierre/diffs", async (importOriginal) => {
@@ -44,6 +48,9 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     }
     updateItem(item: { id: string; version: number }): void {
       fakeCodeViewControl.updateItemCalls.push({ id: item.id, version: item.version });
+    }
+    scrollTo(options: unknown): void {
+      fakeCodeViewControl.scrollToCalls.push(options);
     }
   }
   return { ...actual, CodeView: FakeCodeView };
@@ -1348,6 +1355,143 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
     expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
     expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Keep mine", "Take disk"]);
+  });
+});
+
+describe("EditorView — open()'s revealLine option", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+    fakeCodeViewControl.scrollToCalls = [];
+  });
+
+  afterEach(() => {
+    // Restore the instant-attach default the rest of this file relies on.
+    fakeCodeViewControl.editor = {};
+  });
+
+  function makePerPathBridge(): { bridge: SpacesBridge; workspaceFileRead: ReturnType<typeof vi.fn> } {
+    const workspaceFileRead = vi.fn((path: string) =>
+      Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 9 }),
+    );
+    const bridge = makeBridge({ workspaceFileRead });
+    return { bridge, workspaceFileRead };
+  }
+
+  it("scrolls to and focuses the requested line once the file finishes loading", async () => {
+    const { bridge, workspaceFileRead } = makePerPathBridge();
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    const view = new EditorView(container, bridge);
+
+    view.open("a.ts", { revealLine: 2 });
+
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await vi.waitFor(() =>
+      expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "a.ts", lineNumber: 2, behavior: "instant" }]),
+    );
+    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 2 }));
+  });
+
+  it("applies a pending reveal once the discard-consent path proceeds", async () => {
+    const { bridge, workspaceFileRead } = makePerPathBridge();
+    const view = new EditorView(container, bridge);
+    view.open("a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a.ts content edited" });
+
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    view.open("b.ts", { revealLine: 3 });
+    const banner = container.querySelector(".banner.conflict") as HTMLElement;
+    const discardBtn = banner.querySelector("button") as HTMLButtonElement;
+    discardBtn.click();
+
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    await vi.waitFor(() =>
+      expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "b.ts", lineNumber: 3, behavior: "instant" }]),
+    );
+    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 3 }));
+  });
+
+  it("keeps a dirty buffer where it is, with no reload and no reveal, when re-picking the same file at a line", async () => {
+    // The diff's line numbers describe the file on disk; the unsaved edits in this buffer have
+    // already moved those lines, so revealing the disk coordinate would land on unrelated content.
+    const { bridge, workspaceFileRead } = makePerPathBridge();
+    const view = new EditorView(container, bridge);
+    view.open("a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a.ts content edited" });
+    workspaceFileRead.mockClear();
+    fakeCodeViewControl.scrollToCalls = [];
+
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    view.open("a.ts", { revealLine: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(workspaceFileRead).not.toHaveBeenCalled(); // same-path short-circuit, no reload
+    expect(fakeCodeViewControl.scrollToCalls).toEqual([]);
+    expect(focus).not.toHaveBeenCalled();
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none"); // no discard gate either
+  });
+
+  it("keeps a consented open's reveal line when a later open hits the dirty gate mid-read", async () => {
+    // Dirty A; open B at line 10 and consent; while B's read is still in flight, open C at line 20,
+    // which lands in the dirty gate (A is still current and dirty) and raises a fresh banner. B's
+    // load must still reveal line 10, not C's 20.
+    const reads = new Map<string, (value: { content: string; sha256: string; size: number }) => void>();
+    const workspaceFileRead = vi.fn(
+      (path: string) =>
+        new Promise<{ content: string; sha256: string; size: number }>((resolve) => {
+          reads.set(path, resolve);
+        }),
+    );
+    const bridge = makeBridge({ workspaceFileRead });
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    const view = new EditorView(container, bridge);
+    view.open("a.ts");
+    await vi.waitFor(() => expect(reads.has("a.ts")).toBe(true));
+    reads.get("a.ts")!({ content: "a.ts content", sha256: "sha-a", size: 12 });
+    await vi.waitFor(() => expect(capturedCodeViewOptions.current).toBeDefined());
+    capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: "a.ts content edited" });
+
+    view.open("b.ts", { revealLine: 10 });
+    (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(reads.has("b.ts")).toBe(true));
+
+    view.open("c.ts", { revealLine: 20 }); // dirty gate again: banner, no read
+    expect(reads.has("c.ts")).toBe(false);
+
+    reads.get("b.ts")!({ content: "b.ts content", sha256: "sha-b", size: 12 });
+    await vi.waitFor(() =>
+      expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "b.ts", lineNumber: 10, behavior: "instant" }]),
+    );
+    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 10 }));
+  });
+
+  it("a failed read leaves no pending reveal for the next open", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"))
+      .mockResolvedValueOnce({ content: "one\ntwo\n", sha256: "sha-1", size: 8 });
+    const bridge = makeBridge({ workspaceFileRead });
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    const view = new EditorView(container, bridge);
+
+    view.open("a.ts", { revealLine: 2 });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await vi.waitFor(() => expect(container.querySelector(".banner.error")).not.toBeNull());
+
+    view.open("b.ts"); // no revealLine on this one
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+
+    expect(fakeCodeViewControl.scrollToCalls).toEqual([]);
+    expect(focus).not.toHaveBeenCalled();
   });
 });
 

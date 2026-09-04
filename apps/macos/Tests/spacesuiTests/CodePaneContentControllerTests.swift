@@ -12,7 +12,7 @@ import spacesterminalcore
 /// service an RPC.
 @MainActor private final class EmptyCodePaneHostingDouble: CodePaneHosting {
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { nil }
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { nil }
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)? { nil }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
@@ -28,12 +28,18 @@ import spacesterminalcore
     private(set) var backgroundCommandOpenRequests: [AppKitController.DeviceTerminalOpenRequest] = []
     var onInstallBackgroundCommandSession: (() -> Void)?
 
+    /// Settable so a test can present the workspace as living in a plain (non-git) project — the
+    /// one fact the pane's seeded mode and its `spaces:init` payload branch on.
+    var isGitRepository = true
+
     init(device: SpacesPairedDeviceRecord, agents: [CodePaneRunningAgent] = []) {
         self.device = device
         self.agents = agents
     }
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { device }
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { (name: "workspace", baseBranch: nil) }
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)? {
+        (name: "workspace", baseBranch: nil, isGitRepository: isGitRepository)
+    }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { agents }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {
@@ -68,7 +74,9 @@ import spacesterminalcore
         }
         return device
     }
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? { (name: "workspace", baseBranch: nil) }
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)? {
+        (name: "workspace", baseBranch: nil, isGitRepository: true)
+    }
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
@@ -1136,6 +1144,15 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     private enum TestParseError: Error { case unexpectedInitScript }
+
+    private func initIsGitRepository(in script: String) throws -> Bool {
+        let prefix = "window.dispatchEvent(new CustomEvent(\"spaces:init\", {detail: "
+        let suffix = "}));"
+        guard script.hasPrefix(prefix), script.hasSuffix(suffix) else { throw TestParseError.unexpectedInitScript }
+        struct InitDetail: Decodable { let isGitRepository: Bool }
+        let detail = String(script.dropFirst(prefix.count).dropLast(suffix.count))
+        return try JSONDecoder().decode(InitDetail.self, from: Data(detail.utf8)).isGitRepository
+    }
 
     private func startedCommandResponse(sessionID: String = "session-start") -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(ok: true, message: "Started.", result: .mutation(.init(sessionID: sessionID)))
@@ -4203,4 +4220,43 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(recovered.pendingAgentLaunch?.status == "failed")
     }
 
+    // MARK: - Non-git workspaces
+
+    @Test func seededModeStartsANonGitWorkspaceInEditorOnlyWhenNothingWasSaved() {
+        // An explicit navigation is authoritative regardless of the project kind.
+        #expect(
+            CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: nil, isGitRepository: false) == .diff)
+        #expect(
+            CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: .editor, isGitRepository: false)
+                == .diff)
+        // A restoration with no saved mode: git keeps the requested default, non-git opens the Editor.
+        #expect(
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: true) == .diff)
+        #expect(
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: false)
+                == .editor)
+        // A saved mode wins over the non-git default in both directions.
+        #expect(
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .editor, restored: .diff, isGitRepository: false)
+                == .diff)
+        #expect(
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: .editor, isGitRepository: true)
+                == .editor)
+    }
+
+    @Test func initPayloadReportsANonGitWorkspaceAndSeedsEditorMode() async throws {
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        hosting.isGitRepository = false
+        let content = makeController(hosting: hosting, workspaceStateStore: MemoryCodePaneWorkspaceStateStorage())
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let script = try #require(evaluator.evaluatedScripts.first { $0.contains("spaces:init") })
+        #expect(try initIsGitRepository(in: script) == false)
+        #expect(try initWorkspaceState(in: script).mode == "editor")
+    }
 }

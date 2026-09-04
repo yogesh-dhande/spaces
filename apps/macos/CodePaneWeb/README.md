@@ -151,7 +151,9 @@ branch on `.code`.
   carries:
   - `spaces:init` once, after the page sends `ready`. Its `CodePaneInitPayload` includes
     `workspaceId`, `workspaceName`, the restored `workspaceState`, current `theme`, optional
-    `baseBranch`, and the workspace's running `agents`. The restored state is applied before the
+    `baseBranch`, `isGitRepository` (false suppresses every diff fetch, the diff-signature
+    subscription, the compare control, and the sidebar's Changes tab), and the workspace's running
+    `agents`. The restored state is applied before the
     initial manifest and file-list requests, so the page can restore selection, tree context,
     scroll/focus, buffers, comments, and agent/launch state while fresh patch bytes stream in.
   - `spaces:agents` whenever the workspace's running-agent set changes; the full replacement
@@ -177,6 +179,19 @@ decoded incrementally. A binary entry has an explicit non-commentable placeholde
 patches have no daemon truncation or aggregate UI cap. Untracked files render as additions with
 no old side. Scope/signature refreshes release the old manifest and replace it with a new
 metadata-first generation while preserving the relevant selection and scroll context.
+
+Right-clicking a rendered diff line, or its number in the gutter, opens the pane's own in-page menu (`src/app/contextMenu.ts`,
+mounted on the pane root so it is neither clipped by nor scrolled with the diff region) carrying a
+`<file>:<line>` header and a single Open in Editor item. `src/app/diffLineTarget.ts` holds that
+flow's DOM-free logic: resolving the stamped row out of the event's composed path (Pierre renders
+lines inside shadow roots, and a gutter cell borrows its row's stamps since it is a sibling column
+rather than a descendant) and mapping the row's diff-side line to the line Editor mode lands the
+caret on, where an old-side line maps to the nearest kept new-side line after the deletion (the
+last kept line when a context-carrying hunk shows the deletion reached the end of the file). In
+Last Commit scope `root.ts` first checks that the worktree file still matches the committed
+revision (the same `workspaceRevisionFileRead` equivalence used to gate inline editing there) and
+opens the file without a reveal when it does not. A right-click on selected text, on a line of the file being edited inline, on a binary or deleted
+file, or off any rendered line is left to WebKit's native menu instead.
 
 ## Editor mode
 
@@ -429,6 +444,13 @@ against a hand-built fake `SpacesBridge`: card create/edit/delete RPC round-trip
 blur-only persistence and silent discard of an empty draft), send-one and send-batch (including a
 rejected send leaving drafts unchanged and surfacing the error banner), the no-running-agent
 disabled state, and `onAgentsChanged` re-running the auto-default rule.
+`test/diffLineTarget.test.ts` covers the diff-line resolution and old-side-to-editor-line mapping
+directly, and `test/contextMenu.test.ts` covers the menu surface itself (clamping inside its host,
+focus on open and restore on close, arrow-key movement, and the focus-move/scroll/blur/resize dismissals);
+`test/diffView.pierre.test.ts` covers a right-click on real rendered old-side and new-side rows,
+and `test/root.test.ts` covers the menu end to end, from the right-click to the file opening in
+Editor mode at the mapped line, including the deleted-file and selected-text cases that keep the
+native menu.
 
 ## Open items
 

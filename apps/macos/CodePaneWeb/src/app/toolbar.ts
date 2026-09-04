@@ -35,6 +35,11 @@ export interface ToolbarState {
    *  `CodePaneInitPayload.baseBranch` (fixed for the pane's lifetime). Drives the compare menu's
    *  "vs <baseBranch>" preset, which is omitted entirely (not disabled) when this is absent. */
   baseBranch?: string;
+  /** Whether the workspace's project is a git repository, same source as
+   *  `CodePaneInitPayload.isGitRepository` (fixed for the pane's lifetime). The compare control is
+   *  omitted entirely when false, since there is no ref list to compare against; the mode buttons
+   *  stay enabled so Diff mode's own "Not a git repository" notice remains reachable. */
+  isGitRepository: boolean;
   /** The exact ref selected by the configured-base preset, if that preset owns the current scope.
    *  This is separate from `baseBranch` because a manually selected `origin/<baseBranch>` is not
    *  the preset when a local base ref is also available. */
@@ -243,87 +248,90 @@ export function renderToolbar(
     el.appendChild(modeSeg);
 
     if (state.mode === "diff") {
-      const kind = state.scope.kind;
+      // The compare control needs a ref list; a non-git workspace has none, so it is omitted
+      // entirely rather than rendered against an RPC that would fail.
+      if (state.isGitRepository) {
+        const kind = state.scope.kind;
+        const compareWrap = document.createElement("span");
+        compareWrap.className = "compare";
 
-      const compareWrap = document.createElement("span");
-      compareWrap.className = "compare";
-
-      const compareBtn = document.createElement("button");
-      compareBtn.type = "button";
-      compareBtn.className = "compare-btn";
-      compareBtn.id = "code-pane-scope-menu";
-      compareBtn.textContent = compareLabel(state.scope);
-      compareBtn.addEventListener("click", () => {
-        compareMenuOpen = !compareMenuOpen;
-        pendingFocus = compareMenuOpen ? "menuItem" : "compareBtn";
-        build(state);
-      });
-      compareWrap.appendChild(compareBtn);
-
-      if (compareMenuOpen) {
-        const menu = document.createElement("div");
-        menu.className = "compare-menu";
-
-        const uncommitted = menuItem("Uncommitted", kind === "uncommitted", () => {
-          closeCompareMenu();
-          callbacks.onScopeChange({ kind: "uncommitted" });
+        const compareBtn = document.createElement("button");
+        compareBtn.type = "button";
+        compareBtn.className = "compare-btn";
+        compareBtn.id = "code-pane-scope-menu";
+        compareBtn.textContent = compareLabel(state.scope);
+        compareBtn.addEventListener("click", () => {
+          compareMenuOpen = !compareMenuOpen;
+          pendingFocus = compareMenuOpen ? "menuItem" : "compareBtn";
+          build(state);
         });
-        uncommitted.id = "code-pane-scope-uncommitted";
-        menu.appendChild(uncommitted);
-        const lastCommit = menuItem("Last commit", kind === "lastCommit", () => {
+        compareWrap.appendChild(compareBtn);
+
+        if (compareMenuOpen) {
+          const menu = document.createElement("div");
+          menu.className = "compare-menu";
+
+          const uncommitted = menuItem("Uncommitted", kind === "uncommitted", () => {
             closeCompareMenu();
-            callbacks.onScopeChange({ kind: "lastCommit" });
+            callbacks.onScopeChange({ kind: "uncommitted" });
           });
-        lastCommit.id = "code-pane-scope-last-commit";
-        menu.appendChild(lastCommit);
-        if (state.baseBranch !== undefined) {
-          const baseBranch = state.baseBranch;
+          uncommitted.id = "code-pane-scope-uncommitted";
+          menu.appendChild(uncommitted);
+          const lastCommit = menuItem("Last commit", kind === "lastCommit", () => {
+              closeCompareMenu();
+              callbacks.onScopeChange({ kind: "lastCommit" });
+            });
+          lastCommit.id = "code-pane-scope-last-commit";
+          menu.appendChild(lastCommit);
+          if (state.baseBranch !== undefined) {
+            const baseBranch = state.baseBranch;
+            menu.appendChild(
+              menuItem(
+                `vs ${baseBranch}`,
+                kind === "ref" && state.scope.refName === state.baseBranchRefName,
+                () => {
+                  closeCompareMenu();
+                  callbacks.onBaseBranchSelect(baseBranch);
+                },
+              ),
+            );
+          }
           menu.appendChild(
-            menuItem(
-              `vs ${baseBranch}`,
-              kind === "ref" && state.scope.refName === state.baseBranchRefName,
-              () => {
-                closeCompareMenu();
-                callbacks.onBaseBranchSelect(baseBranch);
-              },
-            ),
+            menuItem("Branch…", false, () => {
+              closeCompareMenu();
+              callbacks.onOpenRefSearch("branch");
+            }),
           );
+          menu.appendChild(
+            menuItem("Commit or ref…", false, () => {
+              closeCompareMenu();
+              callbacks.onOpenRefSearch("ref");
+            }),
+          );
+          compareWrap.appendChild(menu);
+
+          const onMousedown = (event: MouseEvent): void => {
+            if (compareWrap.contains(event.target as Node)) return;
+            // An outside press may be targeting another toolbar control. Remove only the dropdown so
+            // that control remains connected long enough to receive the matching click.
+            compareMenuOpen = false;
+            menu.remove();
+            disposeMenuListeners?.();
+            disposeMenuListeners = undefined;
+          };
+          const onKeydown = (event: KeyboardEvent): void => {
+            if (event.key === "Escape") closeCompareMenu();
+          };
+          window.addEventListener("mousedown", onMousedown);
+          window.addEventListener("keydown", onKeydown);
+          disposeMenuListeners = () => {
+            window.removeEventListener("mousedown", onMousedown);
+            window.removeEventListener("keydown", onKeydown);
+          };
         }
-        menu.appendChild(
-          menuItem("Branch…", false, () => {
-            closeCompareMenu();
-            callbacks.onOpenRefSearch("branch");
-          }),
-        );
-        menu.appendChild(
-          menuItem("Commit or ref…", false, () => {
-            closeCompareMenu();
-            callbacks.onOpenRefSearch("ref");
-          }),
-        );
-        compareWrap.appendChild(menu);
 
-        const onMousedown = (event: MouseEvent): void => {
-          if (compareWrap.contains(event.target as Node)) return;
-          // An outside press may be targeting another toolbar control. Remove only the dropdown so
-          // that control remains connected long enough to receive the matching click.
-          compareMenuOpen = false;
-          menu.remove();
-          disposeMenuListeners?.();
-          disposeMenuListeners = undefined;
-        };
-        const onKeydown = (event: KeyboardEvent): void => {
-          if (event.key === "Escape") closeCompareMenu();
-        };
-        window.addEventListener("mousedown", onMousedown);
-        window.addEventListener("keydown", onKeydown);
-        disposeMenuListeners = () => {
-          window.removeEventListener("mousedown", onMousedown);
-          window.removeEventListener("keydown", onKeydown);
-        };
+        el.appendChild(compareWrap);
       }
-
-      el.appendChild(compareWrap);
 
       const layoutSeg = document.createElement("span");
       layoutSeg.className = "seg";

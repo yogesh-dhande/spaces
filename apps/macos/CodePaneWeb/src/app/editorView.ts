@@ -479,7 +479,17 @@ export class EditorView {
    * through the same gate as any other unsaved buffer — opening a different file is one of the
    * ways to leave a conflict, alongside the compare view's own "Keep mine"/"Take disk" actions.
    */
-  open(path: string): void {
+  /** `options.revealLine`, when given, scrolls to and focuses that line once `path` is actually
+   *  showing, the diff pane's "open at the clicked line" entry point. The line is a coordinate in
+   *  the file as the diff saw it on disk, so the same-path short-circuit below ignores it: that
+   *  branch only runs for a DIRTY buffer, whose unsaved insertions and deletions have already moved
+   *  the disk's lines, and the file stays where the user left it. Every other branch hands the
+   *  line to the `loadFile()` call that loads `path`, which applies it in its success path. The
+   *  line travels WITH that load rather than through a shared field on purpose: the discard-consent
+   *  gate's own `loadFile()` only happens later, on the banner click, and a second `open()` that
+   *  hits the dirty gate while that consented load is still reading must not redirect the first
+   *  file's reveal to the second open's line. */
+  open(path: string, options?: { revealLine?: number }): void {
     // Re-picking the file already open (its own row in Files/Changes, or ⌘P again) must not fall
     // into the discard gate below: the file is already on screen, so there is nothing to open that
     // isn't already showing, and accepting the banner would reread disk and destroy the very edits
@@ -488,16 +498,16 @@ export class EditorView {
     // lands here and just stays put, same as any other dirty same-path reopen.
     if (path === this.currentPath && this.dirty) return;
     if (this.dirty && this.currentPath !== undefined) {
-      this.showDiscardBanner(path);
+      this.showDiscardBanner(path, options?.revealLine);
       return;
     }
-    void this.loadFile(path);
+    void this.loadFile(path, { revealLine: options?.revealLine });
   }
 
   /** Renders the non-blocking discard-consent banner used by `open`'s gate and by `loadFile()`'s
    *  own completion-time recheck (see both call sites' comments). Only ever called when
    *  `this.currentPath !== undefined` already holds, so reading it directly here is safe. */
-  private showDiscardBanner(targetPath: string): void {
+  private showDiscardBanner(targetPath: string, revealLine?: number): void {
     const from = this.currentPath;
     const text = document.createElement("span");
     text.textContent = `Unsaved changes in ${from}. Save them first, or discard them to open ${targetPath}.`;
@@ -511,14 +521,19 @@ export class EditorView {
       // click time (rather than whatever value it happened to have when the banner was first shown)
       // is what lets `loadFile()`'s completion check detect an edit that lands during this call's own
       // read — see that check's comment.
-      void this.loadFile(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration });
+      void this.loadFile(targetPath, { discardConsentEditGeneration: this.bufferEditGeneration, revealLine });
     });
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, discardBtn);
     this.banner.style.display = "flex";
   }
 
-  private async loadFile(path: string, opts?: { discardConsentEditGeneration?: number }): Promise<void> {
+  /** `opts.revealLine` is the line `open()` was asked to reveal in `path`; it belongs to this
+   *  load alone and is applied only if this load is the one that ends up showing `path`. */
+  private async loadFile(
+    path: string,
+    opts?: { discardConsentEditGeneration?: number; revealLine?: number },
+  ): Promise<void> {
     const renderStartedAt = performance.now();
     const generation = ++this.openGeneration;
     let result: WorkspaceFileReadResult;
@@ -564,7 +579,7 @@ export class EditorView {
       // false for it, so the buffer is replaced below and this cannot loop forever — each re-raise
       // requires the user to have typed something new, which is new unsaved work the original
       // consent never covered.
-      this.showDiscardBanner(path);
+      this.showDiscardBanner(path, opts?.revealLine);
       // Same reconcile as the catch block above, for the same reason: this refusal leaves the
       // previously-open file (`this.currentPath`, guaranteed defined by this branch's own condition, so
       // no guard needed here unlike the catch block) current, and any of its own in-flight reconcile was
@@ -601,6 +616,7 @@ export class EditorView {
     this.externalChangeRetryFailures = 0;
 
     this.loadIntoCodeView(path, result.content);
+    if (opts?.revealLine !== undefined) this.restorePosition(opts.revealLine, opts.revealLine);
     afterBrowserPaint(() => {
       if (generation !== this.openGeneration || this.currentPath !== path) return;
       this.callbacks.onFileRendered?.(path, Math.max(performance.now() - renderStartedAt, 0), result.content.length);

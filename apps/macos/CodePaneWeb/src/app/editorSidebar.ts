@@ -35,6 +35,7 @@ export class EditorSidebar {
   private readonly noteEl: HTMLElement;
 
   private mode: EditorSidebarMode;
+  private readonly changesAvailable: boolean;
   private selectedPath: string | undefined;
   private paths: readonly string[] = [];
   private truncated = false;
@@ -52,11 +53,19 @@ export class EditorSidebar {
   constructor(
     private readonly changesListEl: HTMLElement,
     private readonly fileListCache: WorkspaceFileListCache,
-    initial: { sidebarMode: EditorSidebarMode; selectedPath: string | undefined; expandedPaths?: readonly string[] },
+    initial: {
+      sidebarMode: EditorSidebarMode;
+      selectedPath: string | undefined;
+      expandedPaths?: readonly string[];
+      /** False for a workspace whose project is not a git repository: it has no changed-file list,
+       *  so this sidebar carries the Files tree alone and renders no segmented header at all. */
+      changesAvailable: boolean;
+    },
     private readonly onSelectFile: (path: string) => void,
     private readonly callbacks: EditorSidebarCallbacks,
   ) {
-    this.mode = initial.sidebarMode;
+    this.changesAvailable = initial.changesAvailable;
+    this.mode = initial.changesAvailable ? initial.sidebarMode : "files";
     this.selectedPath = initial.selectedPath;
     this.expandedPaths = initial.expandedPaths ?? [];
 
@@ -89,7 +98,7 @@ export class EditorSidebar {
     this.noteEl.textContent = "File list truncated";
     this.noteEl.hidden = true;
 
-    this.el.appendChild(this.headerEl);
+    if (this.changesAvailable) this.el.appendChild(this.headerEl);
     this.el.appendChild(this.listHostEl);
     this.el.appendChild(this.noteEl);
 
@@ -157,6 +166,9 @@ export class EditorSidebar {
   }
 
   private setMode(mode: EditorSidebarMode): void {
+    // The header these buttons live on isn't rendered at all without a Changes tab; the guard makes
+    // the tab unreachable rather than merely unclickable.
+    if (mode === "changes" && !this.changesAvailable) return;
     if (mode === this.mode) return;
     this.mode = mode;
     this.updateHeaderSelection();

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodeView } from "@pierre/diffs";
 import * as PierreDiffs from "@pierre/diffs";
+import { ContextMenu, createContextMenu } from "../src/app/contextMenu";
 import { DiffView } from "../src/app/diffView";
 import type { DiffCommentHooks } from "../src/app/diffView";
 import type { AnchoredComment } from "../src/app/reviewComments";
@@ -202,6 +203,12 @@ function makeHooks(): DiffCommentHooks {
   };
 }
 
+/** These tests never right-click a rendered line (see diffView.pierre.test.ts for that), so the
+ *  menu `DiffView` is handed here only has to exist. */
+function testContextMenu(): ContextMenu {
+  return createContextMenu(document.createElement("div"));
+}
+
 beforeEach(() => {
   control.items.clear();
   control.scrollCalls = [];
@@ -215,7 +222,7 @@ beforeEach(() => {
 
 describe("DiffView.setComments", () => {
   it("surfaces a newly added comment's annotation in the CodeView item", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
 
     diffView.setComments([anchoredAt(comment())]);
@@ -226,7 +233,7 @@ describe("DiffView.setComments", () => {
   });
 
   it("clears an item's annotation once its comment is removed", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     diffView.setComments([anchoredAt(comment())]);
     expect(control.items.get("src/foo.ts")?.annotations).toBeDefined();
@@ -237,7 +244,7 @@ describe("DiffView.setComments", () => {
   });
 
   it("does not bump an unrelated file's item version when only another file's comments change", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file(), file({ path: "src/bar.ts" })], false);
     const unrelatedVersionBefore = control.items.get("src/bar.ts")?.version;
 
@@ -256,7 +263,7 @@ describe("DiffView.setComments", () => {
   // the `setFiles` reseed and the `setComments` per-file bump — draw a fresh increment of the single
   // `generation` counter, so no issued version can ever repeat.
   it("issues a version for a reseeded file that differs from the version setComments already assigned it (regression: reseed collision)", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
 
     diffView.setComments([anchoredAt(comment())]); // bumps src/foo.ts's own itemVersions entry
@@ -277,7 +284,7 @@ describe("DiffView progressive patch replacement", () => {
   it("keeps the current logical scroll and focus through a queued preserve-scroll refresh until its patch re-renders", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     const current = file({ path: "src/current.ts", patchState: "ready" });
     const queuedReplacement = file({ path: current.path, patch: undefined, patchState: "queued" });
     diffView.setFiles([current], false);
@@ -322,7 +329,7 @@ describe("DiffView progressive patch replacement", () => {
   });
 
   it("leaves queued patches out of CodeView and appends each completed patch once", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const first = file({ path: "src/first.ts", patch: undefined, patchState: "queued" });
     const second = file({ path: "src/second.ts", patch: undefined, patchState: "queued" });
     diffView.setFiles([first, second], false);
@@ -336,7 +343,7 @@ describe("DiffView progressive patch replacement", () => {
   });
 
   it("appends a completed patch and can later replace its renderer type", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const queued = file({ patch: undefined, patchState: "queued" });
     diffView.setFiles([queued], false);
     expect(control.items.get(queued.path)).toBeUndefined();
@@ -349,7 +356,7 @@ describe("DiffView progressive patch replacement", () => {
   });
 
   it("processes only the streamed file while appending it beside an unchanged patch", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const queued = file({ patch: undefined, patchState: "queued" });
     const unchanged = file({ path: "src/unchanged.ts", patchState: "ready" });
     diffView.setFiles([queued, unchanged], false);
@@ -369,7 +376,7 @@ describe("DiffView progressive patch replacement", () => {
   });
 
   it("repairs manifest order once after a priority stream appends completed files out of order", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const first = file({ path: "src/1.ts", patch: undefined, patchState: "queued" });
     const second = file({ path: "src/2.ts", patch: undefined, patchState: "queued" });
     const selected = file({ path: "src/50.ts", patch: undefined, patchState: "queued" });
@@ -386,7 +393,7 @@ describe("DiffView progressive patch replacement", () => {
   it("keeps the current visible line in view while reconciling priority stream order", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     const first = file({ path: "src/1.ts", patch: undefined, patchState: "queued" });
     const selected = file({ path: "src/50.ts", patch: undefined, patchState: "queued" });
     diffView.setFiles([first, selected], false);
@@ -417,7 +424,7 @@ describe("DiffView progressive patch replacement", () => {
 describe("DiffView inline edit", () => {
   it("hydrates a replacement diff once before activating it", () => {
     const path = "src/foo.ts";
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     control.processFileCalls = 0;
 
@@ -435,7 +442,7 @@ describe("DiffView inline edit", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/shadow-editor.ts";
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     let frame: FrameRequestCallback | undefined;
     const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
@@ -460,7 +467,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("removes a recovery-only editor item without rebuilding unchanged diff items", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const unchanged = file({ path: "src/unchanged.ts" });
     diffView.setFiles([unchanged], false);
     const unchangedItem = control.setItemsCalls.at(-1)?.[0];
@@ -474,7 +481,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("keeps a detached dirty edit as a reachable Save/Cancel surface when the refreshed manifest no longer names its path", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([], true);
 
     diffView.beginEdit("src/omitted.ts", "unsaved recovery\n", true, "");
@@ -495,7 +502,7 @@ describe("DiffView inline edit", () => {
   it("keeps a dirty editor reachable when a diff refresh fails", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
@@ -524,7 +531,7 @@ describe("DiffView inline edit", () => {
   it("keeps a dirty editor reachable while a diff refresh is loading", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file(), file({ path: "src/stale.ts" })], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
@@ -573,7 +580,7 @@ describe("DiffView inline edit", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", {
       ...makeHooks(),
       onDiscardAndOpenDiffEdit,
-    });
+    }, testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
     diffView.requestOpenAfterDiscard("src/bar.ts");
@@ -589,7 +596,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("uses the supplied workspace content for the editable right-side item instead of the patch's partial new side", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
 
     expect(diffView.beginEdit("src/foo.ts", EDIT_CONTENT)).toBe(true);
@@ -602,7 +609,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("ends the prior clean edit before opening a different file, leaving one editable item", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file(), file({ path: "src/bar.ts" })], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT);
 
@@ -617,7 +624,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("keeps a clean external adoption clean while replacing the editor document", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT);
 
@@ -640,7 +647,7 @@ describe("DiffView inline edit", () => {
     const onDiffEditChange = vi.fn();
     const onResolveDiffEdit = vi.fn();
     const hooks = { ...makeHooks(), onDiffEditChange, onResolveDiffEdit };
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
 
@@ -679,7 +686,7 @@ describe("DiffView inline edit", () => {
 
   it("offers an explicit close-without-saving resolution when the conflicted file was deleted", () => {
     const onResolveDiffEdit = vi.fn();
-    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onResolveDiffEdit });
+    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onResolveDiffEdit }, testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
     diffView.setEditConflict("src/foo.ts", { kind: "deleted" });
@@ -695,7 +702,7 @@ describe("DiffView inline edit", () => {
   });
 
   it("uses header metadata only while editing so queued, binary, and ordinary files keep Pierre's filename header", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles(
       [
         file(),
@@ -759,7 +766,7 @@ describe("DiffView visible recovery position", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/shadow.ts";
-    const diffView = new DiffView(host, "split", makeHooks());
+    const diffView = new DiffView(host, "split", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     const rendered = renderedShadowContainer(path);
     host.querySelector("#code-pane-diff-scroll")!.appendChild(rendered.host);
@@ -775,7 +782,7 @@ describe("DiffView visible recovery position", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/shadow-visible.ts";
-    const diffView = new DiffView(host, "split", makeHooks());
+    const diffView = new DiffView(host, "split", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     const rendered = renderedShadowContainer(path, 7);
     const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
@@ -793,7 +800,7 @@ describe("DiffView visible recovery position", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/shadow-focus.ts";
-    const diffView = new DiffView(host, "split", makeHooks());
+    const diffView = new DiffView(host, "split", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     const rendered = renderedShadowContainer(path, 9);
     host.querySelector("#code-pane-diff-scroll")!.appendChild(rendered.host);
@@ -816,7 +823,7 @@ describe("DiffView visible recovery position", () => {
   it("pairs the visible source line with its rendered file path rather than sidebar selection state", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
     const line = document.createElement("div");
     line.dataset.line = "42";
@@ -833,7 +840,7 @@ describe("DiffView visible recovery position", () => {
   it("does not treat a preceding line flush with the diff viewport as visible", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
     const preceding = document.createElement("div");
     preceding.dataset.line = "202";
@@ -855,7 +862,7 @@ describe("DiffView visible recovery position", () => {
   it("does not report a rendered line after its scroll root is detached", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
     const line = document.createElement("div");
     line.dataset.line = "42";
@@ -875,7 +882,7 @@ describe("DiffView visible recovery position", () => {
     document.body.appendChild(host);
     const first = file({ path: "src/first.ts", patchState: "ready" });
     const target = file({ path: "src/restored.ts", patch: undefined, patchState: "queued" });
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([first, target], false);
     diffView.restorePosition(target.path, 203, "new", target.path, 1, "new");
     const root = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
@@ -896,7 +903,7 @@ describe("DiffView visible recovery position", () => {
   it("clears a restored source line when a non-preserving scope reset starts loading", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path: "src/old-scope.ts" })], false);
     diffView.restorePosition("src/old-scope.ts", 203, "new", null, null, null);
 
@@ -913,7 +920,7 @@ describe("DiffView visible recovery position", () => {
     document.body.appendChild(host);
     const earlier = file({ path: "src/earlier.ts", patchState: "ready" });
     const target = file({ path: "src/restored.ts", patch: undefined, patchState: "queued" });
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([earlier, target], false);
     diffView.restorePosition(target.path, 203, "new", null, null, null);
     control.scrollCalls = [];
@@ -945,7 +952,7 @@ describe("DiffView visible recovery position", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/restored-live-scroll.ts";
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     diffView.restorePosition(path, 203, "new", null, null, null);
 
@@ -971,7 +978,7 @@ describe("DiffView visible recovery position", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const path = "src/restored-final-reveal.ts";
-    const diffView = new DiffView(host, "unified", makeHooks());
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file({ path })], false);
     diffView.restorePosition(path, 203, "new", null, null, null);
 
@@ -1007,7 +1014,7 @@ describe("DiffView visible recovery position", () => {
   });
 
   it("waits for the persisted target's textual patch post-render before restoring its line and focus", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const queued = file({ path: "src/delayed.ts", patch: undefined, patchState: "queued" });
     diffView.setFiles([queued], false);
 
@@ -1035,7 +1042,7 @@ describe("DiffView visible recovery position", () => {
 
   it("lets explicit file navigation supersede a pending restored line during streaming", () => {
     const target = file({ path: "src/target.ts", patch: undefined, patchState: "queued" });
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([target], false);
     diffView.restorePosition(target.path, 203, "new", null, null, null);
     control.scrollCalls = [];
@@ -1058,7 +1065,7 @@ describe("DiffView visible recovery position", () => {
 
   it("does not infer the additions side from an incomplete recovered position", () => {
     const ready = file({ path: "src/incomplete.ts", patchState: "ready" });
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([ready], false);
 
     diffView.restorePosition(ready.path, 7, null, ready.path, 8, null);
@@ -1076,7 +1083,7 @@ describe("DiffView.setComments forceCardRender", () => {
   // unnecessary re-renders would otherwise skip exactly this case. `forceCardRender: true` bypasses
   // that check.
   it("bumps the version and updates the CodeView item when forceCardRender is true, even though the comment list is unchanged", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     const list = [anchoredAt(comment())];
     diffView.setComments(list);
@@ -1093,7 +1100,7 @@ describe("DiffView.setComments forceCardRender", () => {
   });
 
   it("skips updateItem when the same comment list is passed again without forceCardRender (optimization preserved)", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     const list = [anchoredAt(comment())];
     diffView.setComments(list);
@@ -1113,7 +1120,7 @@ describe("DiffView line clicks", () => {
     const onRequestEdit = vi.fn();
     const hooks = makeHooks();
     hooks.onRequestEdit = onRequestEdit;
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
 
     const onLineClick = control.lastOptions?.onLineClick as
@@ -1146,7 +1153,7 @@ describe("DiffView gutter-utility click", () => {
     const hooks = makeHooks();
     hooks.onRequestNewComment = onRequestNewComment;
     hooks.onRequestEdit = onRequestEdit;
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
 
     invokeUtility();
@@ -1165,7 +1172,7 @@ describe("DiffView gutter-utility click", () => {
     const onRequestNewComment = vi.fn();
     const hooks = makeHooks();
     hooks.onRequestNewComment = onRequestNewComment;
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file(), file({ path: "src/other.ts" })], false);
     expect(diffView.beginEdit("src/foo.ts", EDIT_CONTENT)).toBe(true);
 
@@ -1185,7 +1192,7 @@ describe("DiffView gutter-utility click", () => {
     const onRequestNewComment = vi.fn();
     const hooks = makeHooks();
     hooks.onRequestNewComment = onRequestNewComment;
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
     const onGutterUtilityClick = control.lastOptions?.onGutterUtilityClick as
       | ((range: { start: number; side?: "additions" | "deletions" }, context: { type: string; item: { id: string } }) => void)
@@ -1195,7 +1202,7 @@ describe("DiffView gutter-utility click", () => {
   });
 
   it("does not request comments for non-diff items", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     invokeUtility("file");
     invokeUtility("placeholder");
@@ -1206,7 +1213,7 @@ describe("DiffView gutter-utility click", () => {
   // after the click handler's task has completed.
   it("clears the gutter selection after requesting a new comment", async () => {
     const hooks = makeHooks();
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
 
     invokeUtility();
@@ -1219,7 +1226,7 @@ describe("DiffView gutter-utility click", () => {
     const hooks = makeHooks();
     const onRequestNewComment = vi.fn();
     hooks.onRequestNewComment = onRequestNewComment;
-    const diffView = new DiffView(document.createElement("div"), "unified", hooks);
+    const diffView = new DiffView(document.createElement("div"), "unified", hooks, testContextMenu());
     diffView.setFiles([file()], false);
 
     invokeUtility();
@@ -1230,7 +1237,7 @@ describe("DiffView gutter-utility click", () => {
   });
 
   it("does not pass both mutually-exclusive Pierre gutter APIs", () => {
-    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
 
     expect(control.lastOptions?.onGutterUtilityClick).toBeDefined();

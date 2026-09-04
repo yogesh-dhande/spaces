@@ -137,6 +137,7 @@ let INIT_PAYLOAD: CodePaneInitPayload = {
   // which use the compare menu's "Last commit" item purely as a scope-switch trigger (Fix B is
   // about stale-response ordering, not about which scope is picked).
   baseBranch: "main",
+  isGitRepository: true,
   // No running agents: these tests exercise refreshDiff's own logic, not the comment surface (see
   // test/commentsController.test.ts and test/reviewComments.test.ts for that).
   agents: [],
@@ -5104,5 +5105,310 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
       await vi.waitFor(() => expect(lastPushedState().recentPaths[0]).toBe("b.ts"));
       expect(lastPushedState()).toEqual({ sidebarMode: "files", recentPaths: ["b.ts", "a.ts"] });
     });
+  });
+});
+
+describe("mountRoot for a workspace whose project is not a git repository", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffManifestChunk.mockClear();
+    hoisted.subscribeDiffSignature.mockClear();
+    hoisted.workspaceRefList.mockClear();
+    hoisted.diffSignatureCallbacks.length = 0;
+    INIT_PAYLOAD = { ...defaultInitPayload, isGitRepository: false };
+    container = document.createElement("div");
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    container.remove();
+  });
+
+  it("shows a neutral Diff notice without fetching a diff, subscribing a signature, or offering a compare control", async () => {
+    await mountRoot(container);
+
+    const empty = container.querySelector(".empty-state") as HTMLElement;
+    expect(empty.textContent).toBe("Not a git repository");
+    // Nothing failed here, so the notice carries none of the error surface's styling.
+    expect(empty.classList.contains("error")).toBe(false);
+    expect(hoisted.workspaceDiff).not.toHaveBeenCalled();
+    expect(hoisted.workspaceDiffManifestChunk).not.toHaveBeenCalled();
+    expect(hoisted.subscribeDiffSignature).not.toHaveBeenCalled();
+    expect(hoisted.workspaceRefList).not.toHaveBeenCalled();
+    expect(container.querySelector(".compare-btn")).toBeNull();
+  });
+
+  it("keeps the editor sidebar on Files with no Changes toggle even when the saved state named Changes", async () => {
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      isGitRepository: false,
+      workspaceState: { ...defaultInitPayload.workspaceState, mode: "editor", editorSidebarMode: "changes" },
+    };
+
+    await mountRoot(container);
+
+    expect(container.querySelector(".editor-sidebar-hdr")).toBeNull();
+    expect(hoisted.workspaceDiff).not.toHaveBeenCalled();
+    expect(hoisted.subscribeDiffSignature).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("mountRoot's diff line context menu", () => {
+  const defaultInitPayload = INIT_PAYLOAD;
+  let container: HTMLElement;
+
+  /** Old side 1..4 = alpha, beta, gamma, delta; new side 1..3 = alpha, delta, epsilon — the two
+   *  numberings diverge, so the mapped editor line proves which side a right-click resolved. */
+  const contextFile: DiffFileEntry = {
+    path: "src/app.ts",
+    status: "modified",
+    isBinary: false,
+    patch: "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,4 +1,3 @@\n alpha\n-beta\n-gamma\n delta\n+epsilon\n",
+  };
+
+  /** Stands in for one of the rows `DiffView.decorateRenderedLines` stamps on a real Pierre render
+   *  (these tests run against the fake CodeView, which renders nothing) — see
+   *  diffView.pierre.test.ts for the same right-click against real rendered lines. */
+  function stampLine(side: "old" | "new", line: number, path = contextFile.path): HTMLElement {
+    const row = document.createElement("div");
+    row.dataset.diffPath = path;
+    row.dataset.diffSide = side;
+    row.dataset.line = String(line);
+    const text = document.createElement("span");
+    text.textContent = side === "old" ? "gamma" : "epsilon";
+    row.appendChild(text);
+    container.querySelector("#code-pane-diff-scroll")!.appendChild(row);
+    return text;
+  }
+
+  function rightClick(node: HTMLElement): MouseEvent {
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 30 });
+    node.dispatchEvent(event);
+    return event;
+  }
+
+  async function mountWith(...entries: DiffFileEntry[]): Promise<void> {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, entries, "context-menu-sig");
+    await mounted;
+  }
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22 });
+    hoisted.workspaceFileList.mockReset();
+    hoisted.workspaceFileList.mockResolvedValue({ paths: [contextFile.path], truncated: false });
+    capturedCodeViewOptions.scrollCalls = [];
+    INIT_PAYLOAD = defaultInitPayload;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceRevisionFileRead.mockReset();
+    window.getSelection()?.removeAllRanges();
+    container.remove();
+  });
+
+  it("opens the right-clicked added line in Editor mode at that line", async () => {
+    await mountWith(contextFile);
+
+    const event = rightClick(stampLine("new", 3));
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(".ctx-menu .head")?.textContent).toBe("app.ts:3");
+    const item = container.querySelector(".ctx-menu .item") as HTMLButtonElement;
+    expect(item.textContent).toBe("Open in Editor");
+
+    item.click();
+
+    expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(contextFile.path, "editor");
+    expect(hoisted.notifyModeChanged.mock.calls.at(-1)).toEqual(["editor"]);
+    await vi.waitFor(() =>
+      expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+        type: "line",
+        id: contextFile.path,
+        lineNumber: 3,
+        behavior: "instant",
+      }),
+    );
+  });
+
+  it("lands a right-clicked removed line on the kept line that follows it", async () => {
+    await mountWith(contextFile);
+
+    rightClick(stampLine("old", 3));
+
+    expect(container.querySelector(".ctx-menu .head")?.textContent).toBe("app.ts:2");
+
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+
+    await vi.waitFor(() =>
+      expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+        type: "line",
+        id: contextFile.path,
+        lineNumber: 2,
+        behavior: "instant",
+      }),
+    );
+  });
+
+  it("reveals a Last Commit line only while the worktree still matches the commit", async () => {
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22, isWorktreeEquivalentToRevision: true, comparisonOldContent: null,
+    });
+    await mountWith({ ...contextFile, targetRevision: "d".repeat(40) });
+
+    rightClick(stampLine("new", 3));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceRevisionFileRead).toHaveBeenCalledWith({ path: contextFile.path, revision: "d".repeat(40), oldPath: undefined }),
+    );
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(contextFile.path, "editor"));
+    await vi.waitFor(() =>
+      expect(capturedCodeViewOptions.scrollCalls).toContainEqual({
+        type: "line",
+        id: contextFile.path,
+        lineNumber: 3,
+        behavior: "instant",
+      }),
+    );
+  });
+
+  it("opens a Last Commit file without a reveal once the worktree has diverged from the commit", async () => {
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    hoisted.workspaceRevisionFileRead.mockResolvedValue({
+      content: "alpha\ndelta\n", sha256: "sha-head", size: 12, isWorktreeEquivalentToRevision: false, comparisonOldContent: null,
+    });
+    await mountWith({ ...contextFile, targetRevision: "d".repeat(40) });
+
+    rightClick(stampLine("new", 3));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(contextFile.path, "editor"));
+    expect(hoisted.notifyModeChanged.mock.calls.at(-1)).toEqual(["editor"]);
+    await vi.waitFor(() => expect(container.querySelector(".editor-path")?.textContent ?? "").toContain("app.ts"));
+    expect(capturedCodeViewOptions.scrollCalls.some((call) => (call as { type?: string }).type === "line")).toBe(false);
+  });
+
+  it("lets a newer open win over a Last Commit right-click still awaiting its revision check", async () => {
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    const otherFile: DiffFileEntry = { ...contextFile, path: "src/lib.ts", patch: contextFile.patch!.replaceAll("src/app.ts", "src/lib.ts") };
+    const revision = "d".repeat(40);
+    const matching = { content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22, isWorktreeEquivalentToRevision: true, comparisonOldContent: null };
+    const pendingChecks = new Map<string, (value: typeof matching) => void>();
+    hoisted.workspaceRevisionFileRead.mockImplementation(
+      ({ path }: { path: string }) => new Promise<typeof matching>((resolve) => pendingChecks.set(path, resolve)),
+    );
+    await mountWith({ ...contextFile, targetRevision: revision }, { ...otherFile, targetRevision: revision });
+
+    rightClick(stampLine("new", 3));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+    rightClick(stampLine("new", 2, otherFile.path));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(pendingChecks.size).toBe(2));
+
+    pendingChecks.get(otherFile.path)!(matching);
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(otherFile.path, "editor"));
+    pendingChecks.get(contextFile.path)!(matching);
+    await vi.waitFor(() => expect(container.querySelector(".editor-path")?.textContent ?? "").toContain("lib.ts"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(hoisted.workspaceFileRead).not.toHaveBeenCalledWith(contextFile.path, "editor");
+    expect(container.querySelector(".editor-path")?.textContent ?? "").toContain("lib.ts");
+    await vi.waitFor(() =>
+      expect(capturedCodeViewOptions.scrollCalls).toContainEqual({ type: "line", id: otherFile.path, lineNumber: 2, behavior: "instant" }),
+    );
+    expect(capturedCodeViewOptions.scrollCalls.some((call) => (call as { id?: string }).id === contextFile.path)).toBe(false);
+  });
+
+  it("drops a pending Last Commit right-click open once the user picks another Changes row in Diff mode", async () => {
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    const otherFile: DiffFileEntry = { ...contextFile, path: "src/lib.ts", patch: contextFile.patch!.replaceAll("src/app.ts", "src/lib.ts") };
+    const revision = "d".repeat(40);
+    let finishCheck: ((value: unknown) => void) | undefined;
+    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    await mountWith({ ...contextFile, targetRevision: revision }, { ...otherFile, targetRevision: revision });
+
+    rightClick(stampLine("new", 3));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(finishCheck).toBeDefined());
+    container.querySelector<HTMLElement>(`[data-path="${otherFile.path}"]`)!.click();
+    finishCheck!({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22, isWorktreeEquivalentToRevision: true, comparisonOldContent: null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(hoisted.workspaceFileRead).not.toHaveBeenCalled();
+    expect(hoisted.notifyModeChanged.mock.calls.some((call) => call[0] === "editor")).toBe(false);
+  });
+
+  it("keeps a pending Last Commit right-click open alive across a layout toggle", async () => {
+    INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
+    const revision = "d".repeat(40);
+    let finishCheck: ((value: unknown) => void) | undefined;
+    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    await mountWith({ ...contextFile, targetRevision: revision });
+
+    rightClick(stampLine("new", 3));
+    (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(finishCheck).toBeDefined());
+    const unified = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Unified");
+    expect(unified).toBeDefined();
+    unified!.click();
+    finishCheck!({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22, isWorktreeEquivalentToRevision: true, comparisonOldContent: null });
+
+    await vi.waitFor(() => expect(container.querySelector(".editor-path")?.textContent).toContain(contextFile.path));
+    expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(contextFile.path, "editor");
+    expect(hoisted.notifyModeChanged.mock.calls.some((call) => call[0] === "editor")).toBe(true);
+  });
+
+  it("leaves the native menu alone for a deleted file", async () => {
+    await mountWith({ ...contextFile, status: "deleted" });
+
+    const event = rightClick(stampLine("new", 3));
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(container.querySelector(".ctx-menu")).toBeNull();
+  });
+
+  it("leaves the native menu alone when the right-click lands on selected text", async () => {
+    await mountWith(contextFile);
+    const text = stampLine("new", 3);
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const event = rightClick(text);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(container.querySelector(".ctx-menu")).toBeNull();
+  });
+
+  it("hides the menu on Escape and on a mousedown outside it", async () => {
+    await mountWith(contextFile);
+
+    rightClick(stampLine("new", 3));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(container.querySelector(".ctx-menu")).toBeNull();
+
+    rightClick(stampLine("new", 3));
+    expect(container.querySelector(".ctx-menu")).not.toBeNull();
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(container.querySelector(".ctx-menu")).toBeNull();
   });
 });
