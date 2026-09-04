@@ -11,15 +11,25 @@ import spacesterminalcore
 /// controller itself only ever reads through the injected provider.
 @MainActor final class PersistenceBackedTerminalSessionStateProvider: TerminalSessionStateProviding {
     private let paths: TerminalSessionPaths
-    init(paths: TerminalSessionPaths) { self.paths = paths }
+    /// Settable so a test can drive the pane's connection banner without a device: the on-disk store
+    /// this reads has no notion of a subscription, and the production model owns the tracker.
+    var connectionStageTracker: TerminalConnectionStageTracker
+    private(set) var retryRequestCount = 0
+
+    init(paths: TerminalSessionPaths, connectionStageTracker: TerminalConnectionStageTracker = TerminalConnectionStageTracker()) {
+        self.paths = paths
+        self.connectionStageTracker = connectionStageTracker
+    }
+
     var currentLaunchConfiguration: TerminalSessionLaunchConfiguration? { try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths) }
     var currentRuntimeState: TerminalSessionRuntimeState? { try? TerminalSessionPersistence.readRuntimeState(paths: paths) }
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) }
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) }
-    /// Settable so a test can put the pane's link down without a device: the on-disk store this reads
-    /// has no notion of a subscription, and the production model owns the flag.
-    var isStateStreamDisconnected = false
+    /// Derived from `connectionStageTracker` so the coarse bit and the finer stage/banner reads can
+    /// never disagree, matching the production model.
+    var isStateStreamDisconnected: Bool { connectionStageTracker.stage != .connected }
     func refreshState() {}
+    func retryStateStreamConnection() { retryRequestCount += 1 }
     func startStateStream(
         onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
     ) {}
@@ -33,9 +43,13 @@ import spacesterminalcore
     var currentRuntimeState: TerminalSessionRuntimeState?
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload?
-    var isStateStreamDisconnected = false
+    var connectionStageTracker = TerminalConnectionStageTracker()
+    /// Derived from `connectionStageTracker` so the coarse bit and the finer stage/banner reads can
+    /// never disagree, matching the production model.
+    var isStateStreamDisconnected: Bool { connectionStageTracker.stage != .connected }
     private(set) var refreshStateCallCount = 0
     private(set) var startStateStreamCallCount = 0
+    private(set) var retryStateStreamConnectionCallCount = 0
 
     init(
         launchConfiguration: TerminalSessionLaunchConfiguration? = nil, runtimeState: TerminalSessionRuntimeState? = nil,
@@ -48,6 +62,7 @@ import spacesterminalcore
     }
 
     func refreshState() { refreshStateCallCount += 1 }
+    func retryStateStreamConnection() { retryStateStreamConnectionCallCount += 1 }
     func startStateStream(
         onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
     ) { startStateStreamCallCount += 1 }
@@ -350,6 +365,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
         onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        connectionStageTracker: TerminalConnectionStageTracker = TerminalConnectionStageTracker(),
         sessionHostProvider: (@MainActor @Sendable (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? =
             nil
     ) -> TerminalSessionPaneViewController {
@@ -361,7 +377,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 return host
             }()
         return TerminalSessionPaneViewController(
-            sessionID: sessionID, paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            sessionID: sessionID, paths: paths,
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths, connectionStageTracker: connectionStageTracker),
             preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
             reusableOwnerClientID: reusableOwnerClientID, pasteImageAction: pasteImageAction, pasteboardImageReadAction: pasteboardImageReadAction,
             takeoverAction: takeoverAction, attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
@@ -4236,9 +4253,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     // MARK: - Ended-session banner
 
     /// Seeds a ghostty-embedded session whose final render is available, in the given runtime state.
-    @MainActor private func makeBannerController(sessionID: String, state: TerminalSessionState, root: URL) throws
-        -> TerminalSessionPaneViewController
-    {
+    @MainActor private func makeBannerController(
+        sessionID: String, state: TerminalSessionState, root: URL,
+        connectionStageTracker: TerminalConnectionStageTracker = TerminalConnectionStageTracker()
+    ) throws -> TerminalSessionPaneViewController {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try FileManager.default.createDirectory(atPath: paths.rootDirectory, withIntermediateDirectories: true)
         try TerminalSessionPersistence.writeLaunchConfiguration(
@@ -4250,7 +4268,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
         let host = FakeGhosttySessionHost()
         host.snapshotValue = ghosttySnapshot(text: "final output")
-        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: host, connectionStageTracker: connectionStageTracker)
         controller.showEmbedded(focus: true)
         return controller
     }
@@ -4333,7 +4352,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugBannerVisible)
 
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertTrue(controller.debugBannerVisible)
@@ -4347,11 +4367,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let controller = try makeBannerController(sessionID: "session-banner-recovered", state: .running, root: root)
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
         XCTAssertTrue(controller.debugBannerVisible)
 
-        provider.isStateStreamDisconnected = false
+        provider.connectionStageTracker.frameReceived()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertFalse(controller.debugBannerVisible)
@@ -4367,7 +4388,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = try makeBannerController(sessionID: "session-banner-ended-offline", state: .exited, root: root)
 
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertEqual(controller.debugBannerMessage, TerminalPaneBannerNotice.sessionEnded.message)
@@ -4380,7 +4402,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let controller = try makeBannerController(sessionID: "session-banner-typing-offline", state: .running, root: root)
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
@@ -4388,7 +4411,133 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
     }
 
-    /// The reason left on the input status row is retired when the link returns. The row is what the
+    /// The 1s stage 1 grace (`TerminalConnectionNotice.bannerGraceSeconds`) exists to keep an ordinary
+    /// blip quiet: `isStateStreamDisconnected` goes true the instant the stream is lost, but the banner
+    /// stays hidden until `graceElapsed()` fires (or the device turns out to be unreachable). A keystroke
+    /// typed inside that window must take the same path as one typed on a fully connected pane -- no red
+    /// status row, no banner flash -- since the banner is showing nothing for the row to agree with.
+    /// Regression test: before gating `reportDisconnectedInputAttempt` on `isStateStreamBannerVisible`,
+    /// this wrote the "Reconnecting…" status row (and called `banner.flash()`) the moment the stream was
+    /// lost, well before the banner itself ever appeared.
+    @MainActor func testTypingDuringTheStage1GraceRaisesNoDisconnectedNotice() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-typing-grace", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+
+        // The stream is lost, but the grace has not elapsed: the banner stays hidden.
+        provider.connectionStageTracker.streamLost()
+        controller.debugSimulateStateStreamConnectionDidChange()
+        XCTAssertFalse(controller.debugBannerVisible, "sanity: still inside the grace, banner hidden")
+
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+
+        XCTAssertEqual(
+            controller.debugInputStatus, "",
+            "a keystroke during the grace must not raise the disconnected notice on a banner the user cannot see")
+        XCTAssertFalse(controller.debugShowsInputStatus)
+    }
+
+    /// Stage 1 (grace elapsed, still reconnecting) carries no recovery action: an ordinary blip is not
+    /// evidence the device is actually unreachable, so the banner has nothing for Retry to redial past.
+    @MainActor func testReconnectingBannerCarriesNoRetryAction() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var tracker = TerminalConnectionStageTracker()
+        tracker.streamLost()
+        tracker.graceElapsed()
+        let controller = try makeBannerController(
+            sessionID: "session-banner-reconnecting", state: .running, root: root, connectionStageTracker: tracker)
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, TerminalConnectionNotice.reconnectingText)
+        XCTAssertNil(controller.banner.debugActionTitle)
+    }
+
+    /// The stage 1 banner is informational chrome drawn over a terminal that is still the user's to
+    /// click into: a click that lands in its footprint must reach the pane (focus, selection) rather
+    /// than die on the HUD. Asked of the real AppKit `hitTest` on a laid-out view, not a flag.
+    @MainActor func testReconnectingBannerPassesClicksThroughToTheTerminal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var tracker = TerminalConnectionStageTracker()
+        tracker.streamLost()
+        tracker.graceElapsed()
+        let controller = try makeBannerController(
+            sessionID: "session-banner-reconnecting-clicks", state: .running, root: root, connectionStageTracker: tracker)
+        controller.view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertTrue(
+            controller.banner.debugClickOnLabelPassesThrough,
+            "a banner with nothing to click must not swallow clicks meant for the terminal")
+    }
+
+    /// Stage 2 is the one connection banner with a control (Retry), and even then only the button
+    /// itself takes the click: the label beside it stays transparent so a click there still reaches
+    /// the terminal. The laid-out frame check inside the debug seams guards against a zero-sized
+    /// banner making the pass-through assertion vacuous.
+    @MainActor func testUnreachableBannerTakesClicksOnlyOnItsRetryButton() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var tracker = TerminalConnectionStageTracker()
+        tracker.attemptEndedUnreachable()
+        let controller = try makeBannerController(
+            sessionID: "session-banner-unreachable-clicks", state: .running, root: root, connectionStageTracker: tracker)
+        controller.view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertTrue(controller.banner.debugClickOnActionReachesButton, "the Retry button needs to take its own click")
+        XCTAssertTrue(
+            controller.banner.debugClickOnLabelPassesThrough,
+            "the label beside Retry must not swallow clicks meant for the terminal")
+    }
+
+    /// Stage 2 (every candidate address failed to dial) is the one case with something for the user to
+    /// do about it: the banner carries a Retry action, and tapping it must reach the provider's
+    /// `retryStateStreamConnection()`, exactly as `DeviceTerminalSessionStateModel` wires it in
+    /// production, rather than any built-in banner behavior.
+    @MainActor func testUnreachableBannerShowsRetryActionThatCallsThrough() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var tracker = TerminalConnectionStageTracker()
+        tracker.attemptEndedUnreachable()
+        let controller = try makeBannerController(
+            sessionID: "session-banner-unreachable", state: .running, root: root, connectionStageTracker: tracker)
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, TerminalConnectionNotice.unreachableText)
+        XCTAssertEqual(controller.banner.debugActionTitle, TerminalConnectionNotice.retryActionTitle)
+
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        controller.banner.debugTapAction()
+
+        XCTAssertEqual(provider.retryRequestCount, 1)
+    }
+
+    /// Typing into a pane whose device is unreachable pulses the banner and reports the stage-2 wording,
+    /// same as the ordinary stage-1 disconnected case, and stays unconsumed: the keystroke still falls
+    /// through rather than being swallowed by the notice.
+    @MainActor func testTypingWhileUnreachablePulsesAndIsNotConsumed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var tracker = TerminalConnectionStageTracker()
+        tracker.attemptEndedUnreachable()
+        let controller = try makeBannerController(
+            sessionID: "session-banner-typing-unreachable", state: .running, root: root, connectionStageTracker: tracker)
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        let consumed = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+
+        XCTAssertFalse(consumed, "the keystroke must still fall through, not be swallowed by the notice")
+        XCTAssertEqual(controller.debugInputStatus, TerminalConnectionNotice.unreachableText)
+    }
+
+        /// The reason left on the input status row is retired when the link returns. The row is what the
     /// debug dump reports the pane's input state from, so a stale "connection lost" there describes a
     /// pane that is working again.
     @MainActor func testDisconnectedInputStatusIsRetiredWhenTheLinkReturns() throws {
@@ -4396,16 +4545,44 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let controller = try makeBannerController(sessionID: "session-input-status-recovered", state: .running, root: root)
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
         _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
         XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
 
-        provider.isStateStreamDisconnected = false
+        provider.connectionStageTracker.frameReceived()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertEqual(controller.debugInputStatus, "")
         XCTAssertFalse(controller.debugShowsInputStatus)
+    }
+
+    /// Typing during stage 1 leaves "Reconnecting…" on the row. If the stream then escalates straight to
+    /// stage 2 without another keystroke to refresh it, the row must follow: nothing else revisits a
+    /// message a keystroke wrote, so only the stage-change sync keeps it from reading "Reconnecting…"
+    /// forever on a device that has since gone fully unreachable.
+    @MainActor func testInputStatusFollowsEscalationFromReconnectingToUnreachable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-input-status-escalates", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
+        controller.debugSimulateStateStreamConnectionDidChange()
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
+
+        provider.connectionStageTracker.attemptEndedUnreachable()
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.unreachable.message)
+
+        provider.connectionStageTracker.frameReceived()
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, "")
     }
 
     /// The row holds one message at a time, so the reconnect clears only its own: a status the user is
@@ -4415,11 +4592,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let controller = try makeBannerController(sessionID: "session-input-status-unrelated", state: .running, root: root)
         let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
-        provider.isStateStreamDisconnected = true
+        provider.connectionStageTracker.streamLost()
+        provider.connectionStageTracker.graceElapsed()
         controller.debugSimulateStateStreamConnectionDidChange()
         controller.updateInputStatus(message: "Take over ownership before sending terminal input.", isError: true)
 
-        provider.isStateStreamDisconnected = false
+        provider.connectionStageTracker.frameReceived()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertEqual(controller.debugInputStatus, "Take over ownership before sending terminal input.")
@@ -4427,15 +4605,20 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
     /// Precedence between the two facts a pane's persistent notice reports, as a pure rule.
     @MainActor func testPersistentNoticeSelection() {
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: false))
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .starting, isStateStreamDisconnected: false))
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: false))
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: true), .disconnected)
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .connected, isBannerVisible: true))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .starting, connectionStage: .connected, isBannerVisible: true))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .connected, isBannerVisible: true))
+        // The banner stays down until the tracker says to show it, even mid-outage (the grace window).
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: false))
+        XCTAssertEqual(
+            TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
         // An unreachable device is exactly the case where the session's state is unknown.
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: true), .disconnected)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
+        XCTAssertEqual(
+            TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .unreachable, isBannerVisible: true), .unreachable)
         // A stopped session wins: the process is gone whatever the link is doing.
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, isStateStreamDisconnected: true), .sessionEnded)
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, isStateStreamDisconnected: true), .sessionFailed)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, connectionStage: .unreachable, isBannerVisible: true), .sessionEnded)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, connectionStage: .unreachable, isBannerVisible: true), .sessionFailed)
     }
 
     /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start
@@ -4611,7 +4794,7 @@ final class TerminalPaneBannerTests: XCTestCase {
         let (banner, _) = makeBanner()
         XCTAssertFalse(banner.debugIsVisible)
 
-        banner.showPersistent(.sessionEnded)
+        banner.showPersistent(.sessionEnded, action: nil)
         XCTAssertTrue(banner.debugIsVisible)
         XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
 
@@ -4621,7 +4804,7 @@ final class TerminalPaneBannerTests: XCTestCase {
 
     @MainActor func testTransientBannerOverridesPersistentNoticeAndRestoresItOnDismiss() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(.sessionEnded)
+        banner.showPersistent(.sessionEnded, action: nil)
 
         banner.showProgress(message: "Fetching link…") {}
         XCTAssertEqual(banner.debugMessage, "Fetching link…")
@@ -4629,6 +4812,27 @@ final class TerminalPaneBannerTests: XCTestCase {
         banner.dismiss()
         XCTAssertTrue(banner.debugIsVisible)
         XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
+    }
+
+    /// The trailing action slot is visible exactly when the caller supplies one, sharing the same slot
+    /// the transient Cancel button uses. `.unreachable` is the only kind the pane ever pairs with an
+    /// action (a Retry the user can act on); `.disconnected`'s "Reconnecting…" and every other kind have
+    /// no recovery action to offer and must leave the slot empty.
+    @MainActor func testPersistentActionShowsOnlyWhenTheNoticeCarriesOne() {
+        let (banner, _) = makeBanner()
+
+        banner.showPersistent(.disconnected, action: nil)
+        XCTAssertNil(banner.debugActionTitle)
+
+        var tapped = false
+        banner.showPersistent(.unreachable, action: TerminalPaneBannerAction(title: TerminalConnectionNotice.retryActionTitle) { tapped = true })
+        XCTAssertEqual(banner.debugActionTitle, TerminalConnectionNotice.retryActionTitle)
+
+        banner.debugTapAction()
+        XCTAssertTrue(tapped, "tapping the action button must invoke the handler the caller supplied")
+
+        banner.showPersistent(.sessionEnded, action: nil)
+        XCTAssertNil(banner.debugActionTitle, "a kind with no action must clear whatever action the previous notice showed")
     }
 
     @MainActor func testDismissHidesBannerWhenNoPersistentNoticeIsSet() {
@@ -4644,7 +4848,7 @@ final class TerminalPaneBannerTests: XCTestCase {
     /// banner out from under it.
     @MainActor func testClearingPersistentNoticeLeavesActiveTransientBannerUp() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(.sessionEnded)
+        banner.showPersistent(.sessionEnded, action: nil)
         banner.showProgress(message: "Fetching link…") {}
 
         banner.clearPersistent()

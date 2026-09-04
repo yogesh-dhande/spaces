@@ -7,6 +7,11 @@ import spacesterminalcore
 enum SpacesDeviceAPIClientError: LocalizedError {
     case invalidEndpoint
     case requestFailed(String, code: SpacesDeviceErrorCode? = nil)
+    /// The peer closed the connection before answering: the receive completed with no bytes decoded, so
+    /// this is EOF, not a daemon response. A transport failure, never a daemon answer, unlike
+    /// `.requestFailed`, which is the shape of a decoded rejection (`ok == false`); a caller must not
+    /// treat this one as "the daemon answered and said no" (see `TerminalViewerModel.isConnectionLevelInputTransportError`).
+    case connectionClosed
     case transportAuthenticationFailed
     /// Every candidate in the paired device's `hosts` list was tried and none answered, with no pin
     /// mismatch seen on any of them (a mismatch instead throws `transportAuthenticationFailed`, which
@@ -15,7 +20,17 @@ enum SpacesDeviceAPIClientError: LocalizedError {
     /// most common cause is being away from the device's local network with Tailscale not connected.
     case allCandidatesUnreachable(hosts: [String])
     case missingOverview
+    /// The stream never produced a usable response at all: the client's own wait for the first payload
+    /// ran out, or bytes arrived that failed to decode as either a state event or a response envelope.
+    /// This is the "the daemon never answered" shape, as opposed to `.streamRejected` below (the daemon
+    /// answered, but declined the subscription), see `isStreamHostTransportFailure` for why the two are
+    /// kept apart.
     case streamFailed(String, code: SpacesDeviceErrorCode? = nil)
+    /// A response envelope decoded cleanly off the stream and reported `ok == false`: the daemon
+    /// answered and rejected the subscription (e.g. the session ended, or is not live yet). This proves
+    /// the address itself is good, so it must not count as a failed candidate the way a genuine dial or
+    /// transport failure does, see `isStreamHostTransportFailure`.
+    case streamRejected(String, code: SpacesDeviceErrorCode? = nil)
     /// The stream connection stayed open but stopped delivering bytes for longer than
     /// `TerminalStreamLiveness.silenceTimeoutSeconds`, which the daemon's keepalive rules out for a
     /// healthy link (see `StreamSubscription.start`). Transient: the viewer reconnects on it.
@@ -26,11 +41,13 @@ enum SpacesDeviceAPIClientError: LocalizedError {
         switch self {
         case .invalidEndpoint: "The Device API host or port is invalid."
         case .requestFailed(let message, _): message
+        case .connectionClosed: "The Device API connection closed before it answered."
         case .transportAuthenticationFailed: "The secure Device API transport could not authenticate."
         case .allCandidatesUnreachable(let hosts):
             "Could not reach the device at any of its known addresses (\(hosts.joined(separator: ", "))). If you're away from its network, make sure Tailscale is connected on both devices."
         case .missingOverview: "The Device API did not return a workspace or terminal overview."
         case .streamFailed(let message, _): message
+        case .streamRejected(let message, _): message
         case .streamStalled: "The terminal stream stopped responding."
         case .requestTimedOut: "The Device API request timed out."
         }
@@ -40,16 +57,90 @@ enum SpacesDeviceAPIClientError: LocalizedError {
 extension SpacesDeviceAPIClientError: SpacesDeviceErrorCodeProviding {
     var spacesDeviceErrorCode: SpacesDeviceErrorCode? {
         switch self {
-        case .requestFailed(_, let code), .streamFailed(_, let code): code
+        case .requestFailed(_, let code), .streamFailed(_, let code), .streamRejected(_, let code): code
         default: nil
         }
     }
 }
 
+extension SpacesDeviceAPIClientError {
+    /// Mirrors Mac's `SpacesDeviceAPIStreamEndpoint.isHostTransportFailure`: the address-failure
+    /// classifier that decides whether a stream disconnect is evidence the *address* is bad (worth
+    /// recording against the resolver's per-host failure count) or evidence that the daemon on the other
+    /// end answered (a decoded rejection, or bytes that failed to decode at all), which must not poison
+    /// a candidate that is demonstrably still there. Recording a rejection would let a stream serving a
+    /// stale session on host A read, once combined with a real dial failure on host B, as "every
+    /// candidate is down" (see `openSessionStream`).
+    ///
+    /// Unlike Mac, a pinned-certificate mismatch counts here as a transport failure: this backend folds
+    /// a pin rejection into the same failed-candidate bucket it uses for a dead dial (see
+    /// `SpacesDeviceEndpointResolver.noteStreamFailed`'s doc comment), so this classifier stays
+    /// consistent with the resolver instead of carving out an exception only the stream path would honor.
+    static func isStreamHostTransportFailure(_ error: any Error) -> Bool {
+        if let clientError = error as? SpacesDeviceAPIClientError {
+            switch clientError {
+            case .streamFailed, .streamStalled: return true
+            case .streamRejected: return false
+            default: return false
+            }
+        }
+        if error is TerminalServiceTLSError { return true }
+        if let networkError = error as? NWError {
+            switch networkError {
+            case .posix(let code): return isRetryableStreamHostPOSIXCode(code)
+            // A name that does not resolve, or a handshake the path broke, is evidence about this address just as
+            // a refused dial is. A pin mismatch never reaches here as `.tls` (the verify block surfaces it as
+            // `TerminalServiceTLSError`, handled above), so this does not change how a mismatch is classified.
+            case .dns, .tls: return true
+            default: return false
+            }
+        }
+        if let posixError = error as? POSIXError { return isRetryableStreamHostPOSIXCode(posixError.code) }
+        return false
+    }
+
+    /// The connection-level drop shapes a dial or a subscribe write can surface. `EPIPE` belongs with
+    /// `ECONNRESET`: the peer went away underneath a write, which the input path already treats as a
+    /// lost link, and leaving it out would keep the cached host and redial the same broken address.
+    private static func isRetryableStreamHostPOSIXCode(_ code: POSIXErrorCode) -> Bool {
+        switch code {
+        case .ECONNABORTED, .ECONNREFUSED, .ECONNRESET, .EHOSTDOWN, .EHOSTUNREACH, .ENETDOWN, .ENETUNREACH, .ENOTCONN, .EPIPE, .ETIMEDOUT: return true
+        default: return false
+        }
+    }
+}
+
+/// What a session stream reports when it ends. `dialExhaustedAllCandidates` is the verdict of
+/// `SpacesDeviceEndpointResolver.noteStreamFailed(host:)` for the failed dial that ended this stream,
+/// captured at the moment the failure was recorded and carried with the event itself (not re-queried
+/// off the shared resolver, and not parked on the handle, which the owning model may not have
+/// installed yet when a fast dial failure reports). `false` for a clean close, a decoded rejection
+/// (the daemon answered), and a backend with no such concept (Demo Mode).
+struct SpacesDeviceAPIStreamDisconnect: Sendable {
+    let error: (any Error)?
+    let dialExhaustedAllCandidates: Bool
+
+    init(error: (any Error)?, dialExhaustedAllCandidates: Bool = false) {
+        self.error = error
+        self.dialExhaustedAllCandidates = dialExhaustedAllCandidates
+    }
+}
+
 final class SpacesDeviceAPIStreamHandle: @unchecked Sendable {
+    /// The address this stream actually connected to, for a backend that has one (a real network
+    /// backend; `nil` for Demo Mode, which has no host at all). Distinct from
+    /// `SpacesDeviceAPIClient.currentResolvedHost()`, which reports the *command* path's most recently
+    /// proven address; this stream may be running on a different candidate (see
+    /// `SpacesDeviceEndpointResolver`'s doc comment on why streams and commands pick hosts differently).
+    /// The input-timeout ping-corroboration probe (`TerminalViewerModel.startInputTimeoutCorroborationProbe`)
+    /// needs exactly this stream's own host, not the command path's, to ask the right question.
+    let host: String?
     private let cancelHandler: @Sendable () -> Void
 
-    init(cancelHandler: @escaping @Sendable () -> Void) { self.cancelHandler = cancelHandler }
+    init(host: String? = nil, cancelHandler: @escaping @Sendable () -> Void) {
+        self.host = host
+        self.cancelHandler = cancelHandler
+    }
 
     func cancel() { cancelHandler() }
 }
@@ -642,7 +733,7 @@ struct SpacesDeviceAPIClient: Sendable {
 
     func subscribe(
         sessionID: String, clientID: String, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
+        onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         let request = SpacesDeviceAPIRequest(
             command: .subscribe(.init(sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
@@ -665,6 +756,19 @@ struct SpacesDeviceAPIClient: Sendable {
     /// `close()` so its current connection is dropped and the next send reconnects through the reset
     /// resolver, and must leave any open session stream alone — see `SpacesMobileAppModel.resetActiveConnectionEndpoint()`.
     func resetEndpointResolution() async { await backend.resetEndpointResolution() }
+
+    /// Pings `host` specifically, bypassing the backend's normal multi-candidate address resolution.
+    /// Backs the input-timeout ping-corroboration probe (see
+    /// `TerminalViewerModel.startInputTimeoutCorroborationProbe`): a bare request timeout on an
+    /// otherwise-live stream is inconclusive on its own, so before treating it as a lost connection the
+    /// viewer asks specifically the host the stream already depends on whether the daemon is still
+    /// there: a fresh multi-candidate race would answer a different, less useful question ("is the
+    /// daemon reachable *somewhere*"). Returns `nil` when any response comes back (an error response
+    /// still proves the daemon answered), or the failure otherwise.
+    func sendPinnedPing(host: String, timeout: Duration) async -> (any Error)? {
+        let request = SpacesDeviceAPIRequest(command: .ping, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        return await backend.sendPinnedPing(request: request, host: host, timeout: timeout)
+    }
 
     private func mutation(_ request: SpacesDeviceAPIRequest, commandChannel: SpacesDeviceAPICommandChannel?) async throws -> SpacesDeviceAPIResponse {
         let response = try await sendRequest(request, timeout: .seconds(30), commandChannel: commandChannel)
@@ -869,7 +973,7 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
 
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
+        onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         let label: String
         if case .subscribe(let payload) = request.command {
@@ -897,30 +1001,106 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
         let pinRejection = SpacesPinnedTLSPinRejection()
         let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint, pinRejection: pinRejection)
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-        // A stream that ends with an error means the address it was on may no longer be good (the device
-        // left the network it was reachable on, the daemon restarted somewhere else, etc.) — report the
-        // failure to the resolver here, next to the thing that learned the address, so the next stream
-        // this backend opens (via `nextStreamHost()`) moves on to a different candidate instead of
-        // retrying the same dead one indefinitely. A `nil` error is a clean cancellation (the caller
-        // closed the stream on purpose, e.g. the viewer was dismissed) and must not invalidate an
-        // address that never actually failed.
+        // A stream that ends with a transport-level error means the address it was on may no longer be
+        // good (the device left the network it was reachable on, the daemon restarted somewhere else,
+        // etc.), report the failure to the resolver here, next to the thing that learned the address, so
+        // the next stream this backend opens (via `nextStreamHost()`) moves on to a different candidate
+        // instead of retrying the same dead one indefinitely. A `nil` error is a clean cancellation (the
+        // caller closed the stream on purpose, e.g. the viewer was dismissed) and must not invalidate an
+        // address that never actually failed. Nor must a decoded rejection (`.streamRejected`) or a
+        // decode failure: both prove the daemon on the other end of this address answered, which is the
+        // opposite of address evidence, see `SpacesDeviceAPIClientError.isStreamHostTransportFailure`.
+        // Skipping the resolver call for those also skips `dialExhaustedAllCandidates`, which stays at its
+        // default `false`, so a rejection never contributes to "every candidate is down".
+        //
+        // The failure must land on the resolver, and the verdict it returns must travel with this
+        // `onDisconnect` call itself, not through a property set on `handle` afterward: `connect()`
+        // starts the subscription before it installs the returned handle onto the model
+        // (`TerminalViewerModel.streamHandle = handle` runs only once `subscribe()` resumes), and both
+        // that resumption and a fast dial failure's disconnect callback are ordinary main-actor jobs, so
+        // a failure reported before the handle is installed would otherwise find no handle to stamp the
+        // verdict onto and silently lose it. Carrying the verdict on the event itself, captured here at
+        // the moment the failure is recorded, sidesteps that ordering entirely. Recording the failure,
+        // capturing its verdict, and invoking the callback race in one `Task` on the main actor rather
+        // than several independent ones.
         let resolver = self.resolver
+        let handle = SpacesDeviceAPIStreamHandle(host: host) { connection.cancel() }
         let invalidatingOnDisconnect: @MainActor (Error?) -> Void = { error in
-            if error != nil { Task { await resolver.noteStreamFailed(host: host) } }
-            onDisconnect(error)
+            guard let error else {
+                onDisconnect(SpacesDeviceAPIStreamDisconnect(error: nil))
+                return
+            }
+            guard SpacesDeviceAPIClientError.isStreamHostTransportFailure(error) else {
+                onDisconnect(SpacesDeviceAPIStreamDisconnect(error: error))
+                return
+            }
+            Task { @MainActor in
+                let exhausted = await resolver.noteStreamFailed(host: host)
+                onDisconnect(SpacesDeviceAPIStreamDisconnect(error: error, dialExhaustedAllCandidates: exhausted))
+            }
         }
         StreamSubscription(
             connection: connection, pinRejection: pinRejection, request: request, silenceTimeout: streamSilenceTimeout, onEvent: onEvent,
             onDisconnect: invalidatingOnDisconnect
         ).start(on: queue)
-        return SpacesDeviceAPIStreamHandle { connection.cancel() }
+        return handle
     }
 
     /// The resolver's cached winner, if it has one — see `SpacesDeviceAPIClient.currentResolvedHost()`.
     func currentResolvedHost() async -> String? { await resolver.currentCachedHost() }
 
-    /// Forgets the resolver's cached winner — see `SpacesDeviceAPIClient.resetEndpointResolution()`.
+    /// Forgets the resolver's cached winner (see `SpacesDeviceAPIClient.resetEndpointResolution()`).
     func resetEndpointResolution() async { await resolver.clearCachedWinner() }
+
+    /// Opens a one-shot pinned-TLS connection to `host` specifically (bypassing the resolver's normal
+    /// multi-candidate race, see `SpacesDeviceEndpointResolver.connect(host:timeout:queue:)`), sends
+    /// `request`, and waits for a response. Returns `nil` when any response comes back at all (even a
+    /// rejection proves the daemon answered), or the failure when the connection or round trip itself
+    /// did not complete within `timeout`. Used only for the input-timeout ping-corroboration probe (see
+    /// `SpacesDeviceAPIClient.sendPinnedPing(host:timeout:)`).
+    ///
+    /// `timeout` is one end-to-end deadline across connect, send, and read, not a budget reissued to
+    /// each stage: a link that accepts the dial and then never answers must still fail around one
+    /// `timeout`, not the sum of three. `deadline` is captured once at entry and each stage is handed
+    /// only what remains of it (mirrors `SpacesDeviceAPICommandChannel.send(request:timeout:)`'s
+    /// deadline math). A remainder at or below zero fails immediately with the same `requestTimedOut`
+    /// the transport itself throws on an ordinary timeout, without spending a stage on a connection
+    /// that has no budget left to use.
+    func sendPinnedPing(request: SpacesDeviceAPIRequest, host: String, timeout: Duration) async -> (any Error)? {
+        let queue = DispatchQueue(label: "spaces.device.api.ping.\(host)")
+        let deadline = ContinuousClock.now + timeout
+        func remainingOrTimeout() throws -> Duration {
+            let remaining = deadline - ContinuousClock.now
+            guard remaining > .zero else { throw SpacesDeviceAPIClientError.requestTimedOut }
+            return remaining
+        }
+        do {
+            let connection = try await resolver.connect(host: host, timeout: remainingOrTimeout(), queue: queue)
+            defer { connection.cancel() }
+            try await SpacesDeviceNetworkRequestTransport.send(
+                data: encodeDeviceAPIRequestLine(request), on: connection, timeout: remainingOrTimeout())
+            _ = try await SpacesDeviceNetworkRequestTransport.readLine(from: connection, timeout: remainingOrTimeout())
+            return nil
+        } catch {
+            // A cancelled probe (the caller lost interest: a healthy frame arrived on the stream this
+            // probe was corroborating, or the viewer was dismissed while it was in flight) says nothing
+            // about `host` itself: the probe never got, or stopped waiting for, an answer, which is not
+            // the same as the daemon failing to answer. Recording it anyway would poison an address that
+            // may still be perfectly healthy for the next reconnect, and could even manufacture a false
+            // "every candidate has failed" verdict by combining a merely-cancelled probe with one
+            // genuinely failed candidate. Mirrors the streaming path's own `nil`-error exemption above.
+            //
+            // `error is CancellationError` alone is not enough: a cancellation that lands during
+            // `resolver.connect` never reaches here as `CancellationError` at all, because
+            // `SpacesDeviceEndpointResolver.attempt` catches every failure (cancellation included),
+            // reduces it to a bare pin-mismatch bit, and `connect(host:timeout:queue:)` rethrows that
+            // as a generic `requestFailed`, discarding the original error. `Task.isCancelled` is the
+            // only signal that survives that translation.
+            guard !(error is CancellationError), !Task.isCancelled else { return error }
+            await resolver.noteStreamFailed(host: host)
+            return error
+        }
+    }
 }
 
 /// Test backend: routes request round trips through a closure while session streams keep using the
@@ -938,10 +1118,22 @@ struct SpacesDeviceClosureBackend: SpacesDeviceAPIBackend {
 
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
+        onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         try await networkBackend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
     }
+
+    /// Routes the ping through the same `handler` closure every other request already goes through,
+    /// rather than a bespoke fake: a test controls the ping-corroboration probe's outcome the same way
+    /// it controls every other request: answer `.ping` from `handler` (probe "answered"), or throw
+    /// (probe "failed"), with no separate seam to keep in sync.
+    func sendPinnedPing(request: SpacesDeviceAPIRequest, host: String, timeout: Duration) async -> (any Error)? {
+        do {
+            _ = try await handler(request)
+            return nil
+        } catch { return error }
+    }
+
 }
 
 private struct SpacesDeviceClosureRequestTransport: SpacesDeviceAPIRequestTransport {
@@ -1018,7 +1210,9 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
         return resolved.connection
     }
 
-    private static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
+    /// `fileprivate` (not `private`): `SpacesDeviceNetworkBackend.sendPinnedPing` reuses this to write
+    /// the ping request on a connection it opened itself, rather than duplicating the wire framing.
+    fileprivate static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
         try await SpacesDeviceAPIConnectionSupport.withTimeout(timeout) {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 let resume = OneShotContinuation(continuation)
@@ -1029,7 +1223,8 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
         }
     }
 
-    private static func readLine(from connection: NWConnection, timeout: Duration) async throws -> Data {
+    /// `fileprivate` (not `private`): see `send(data:on:timeout:)` above.
+    fileprivate static func readLine(from connection: NWConnection, timeout: Duration) async throws -> Data {
         try await SpacesDeviceAPIConnectionSupport.withTimeout(timeout) { try await readLineAccumulating(from: connection, data: Data()) }
     }
 
@@ -1050,7 +1245,7 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
                 }
                 if isComplete {
                     if nextData.isEmpty {
-                        resume.resume(throwing: SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled."))
+                        resume.resume(throwing: SpacesDeviceAPIClientError.connectionClosed)
                     } else {
                         resume.resume(returning: nextData)
                     }
@@ -1368,7 +1563,7 @@ private final class StreamSubscription: @unchecked Sendable {
                         Task { @MainActor in onEvent(payload) }
                     } catch {
                         if let response = try? SpacesDeviceAPICodec.decodeResponse(line), !response.ok {
-                            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message, code: response.errorCode))
+                            lifecycle.finish(error: SpacesDeviceAPIClientError.streamRejected(response.message, code: response.errorCode))
                             connection.cancel()
                             return
                         }
@@ -1387,7 +1582,7 @@ private final class StreamSubscription: @unchecked Sendable {
 
             if isComplete {
                 if !decodedState, !buffer.isEmpty, let response = try? SpacesDeviceAPICodec.decodeResponse(buffer), !response.ok {
-                    lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message, code: response.errorCode))
+                    lifecycle.finish(error: SpacesDeviceAPIClientError.streamRejected(response.message, code: response.errorCode))
                 } else {
                     lifecycle.finish(error: nil)
                 }

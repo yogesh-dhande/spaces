@@ -141,7 +141,7 @@
 
         func openSessionStream(
             request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect: @escaping @MainActor (Error?) -> Void
+            onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
         ) async throws -> SpacesDeviceAPIStreamHandle {
             subscribeRequestBox.set(request)
             if let streamPayload { Task { @MainActor in onEvent(streamPayload) } }

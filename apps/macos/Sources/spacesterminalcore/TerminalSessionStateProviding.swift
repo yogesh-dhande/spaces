@@ -40,11 +40,20 @@ import Foundation
     /// provider posts for this session id whenever the value flips.
     var isStateStreamDisconnected: Bool { get }
 
+    /// The stage/banner state behind `isStateStreamDisconnected`: connected, stage 1 (lost and quietly
+    /// retrying), or stage 2 (confirmed unreachable, with Retry). Callers read `stage` and
+    /// `isBannerVisible` from this one value so the two can never observe different mutations.
+    var connectionStageTracker: TerminalConnectionStageTracker { get }
+
     /// Requests a catch-up state fetch so `current*` converge on the device's
     /// current view. The fetch is performed out of band; this call does not block
     /// and applied results surface through the `current*` reads and any active
     /// stream `onUpdate` callback.
     func refreshState()
+
+    /// User-initiated redial from the banner's stage 2 Retry action. Resets the stage 2 backoff ladder,
+    /// drops the cached endpoint, and redials immediately.
+    func retryStateStreamConnection()
 
     /// Starts (or re-attaches to) the live state subscription for this session.
     /// `onUpdate` fires on the main actor for each applied payload; `onDisconnect`

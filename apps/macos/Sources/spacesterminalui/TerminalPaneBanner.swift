@@ -3,6 +3,19 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+/// A single labeled recovery action a persistent notice can carry: one fact, one way to act on it.
+/// `TerminalPaneBanner` renders it as a small text button in the trailing slot the transient banner's
+/// Cancel button uses, so the two are never both on screen at once.
+public struct TerminalPaneBannerAction: Sendable {
+    public let title: String
+    public let handler: @MainActor () -> Void
+
+    public init(title: String, handler: @escaping @MainActor () -> Void) {
+        self.title = title
+        self.handler = handler
+    }
+}
+
 /// The seam pane collaborators drive to surface banner state. Kept as a protocol so
 /// `TerminalLinkOpenCoordinator`'s unit tests can inject a recording fake without building an
 /// AppKit view tree.
@@ -17,9 +30,13 @@ import spacesterminalghostty
     /// Clears the transient banner, falling back to the persistent notice when one is set.
     func dismiss()
     /// Sets the pane's persistent notice — shown whenever no transient banner is up, and never
-    /// auto-dismissed. Replaces any previous persistent notice.
-    func showPersistent(_ notice: TerminalPaneBannerNotice)
-    /// Clears the persistent notice, hiding the banner when no transient banner is up.
+    /// auto-dismissed. Replaces any previous persistent notice and action.
+    ///
+    /// `action`, when non-nil, is the notice's one recovery action (e.g. Retry for
+    /// `TerminalPaneBannerNotice.unreachable`), drawn as a small text button. Nil for a notice with no
+    /// single recovery step, such as `.disconnected`, which is already retrying on its own.
+    func showPersistent(_ notice: TerminalPaneBannerNotice, action: TerminalPaneBannerAction?)
+    /// Clears the persistent notice and action, hiding the banner when no transient banner is up.
     func clearPersistent()
     /// Draws attention to the banner without changing what it says. Used when the user acts on a
     /// pane the banner has already declared non-interactive.
@@ -51,6 +68,24 @@ import spacesterminalghostty
 @MainActor private final class TerminalPaneBannerContainerView: NSVisualEffectView {
     var borderColor: NSColor = .separatorColor { didSet { applyBorderColor() } }
 
+    /// What a click landing in the banner's footprint reaches. `passThrough`: nothing, the terminal
+    /// underneath gets it. `controlsOnly`: only the listed controls (Retry, Cancel); the label and the
+    /// chrome around them stay transparent, so a click beside the button still reaches the terminal.
+    /// `whole`: the entire banner, for a transient notice that dismisses on click. Set by
+    /// `TerminalPaneBanner.render` from what the banner is actually showing.
+    enum ClickPolicy { case passThrough, controlsOnly([NSView]), whole }
+    var clickPolicy: ClickPolicy = .passThrough
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        switch clickPolicy {
+        case .whole: return super.hitTest(point)
+        case .passThrough: return nil
+        case .controlsOnly(let controls):
+            guard let hit = super.hitTest(point), controls.contains(where: { hit.isDescendant(of: $0) }) else { return nil }
+            return hit
+        }
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyBorderColor()
@@ -73,11 +108,13 @@ import spacesterminalghostty
     private let spinner = NSProgressIndicator()
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let actionButton = NSButton()
     private let cancelButton = NSButton()
     private let clickRecognizer = NSClickGestureRecognizer()
 
     private var transientMode: TransientMode?
     private var persistentNotice: TerminalPaneBannerNotice?
+    private var persistentAction: TerminalPaneBannerAction?
     private var onCancel: (@MainActor () -> Void)?
     // `nonisolated(unsafe)` so deinit can cancel without asserting main-actor isolation: the last
     // release of a banner (via its owning pane controller) can land on a background thread when an
@@ -128,13 +165,19 @@ import spacesterminalghostty
         render()
     }
 
-    public func showPersistent(_ notice: TerminalPaneBannerNotice) {
-        guard persistentNotice != notice else { return }
+    public func showPersistent(_ notice: TerminalPaneBannerNotice, action: TerminalPaneBannerAction?) {
+        // The pane calls this on every state or connection notification, so the closure is always
+        // refreshed (a later tap must call the current handler) but the view re-renders only when
+        // something visible changed: the notice, or the action's presence or title.
+        let actionTitleChanged = persistentAction?.title != action?.title
+        persistentAction = action
+        guard persistentNotice != notice || actionTitleChanged else { return }
         persistentNotice = notice
         render()
     }
 
     public func clearPersistent() {
+        persistentAction = nil
         guard persistentNotice != nil else { return }
         persistentNotice = nil
         render()
@@ -170,6 +213,7 @@ import spacesterminalghostty
             if let transientMessage { label.stringValue = transientMessage }
             applyTransientChrome(transientMode)
             container.isHidden = false
+            applyClickPolicy()
             return
         }
         guard let persistentNotice else {
@@ -179,7 +223,23 @@ import spacesterminalghostty
         }
         label.stringValue = persistentNotice.message
         applyPersistentChrome(persistentNotice.kind)
+        applyPersistentAction(persistentAction)
         container.isHidden = false
+        applyClickPolicy()
+    }
+
+    /// The banner takes clicks only on the control that does something with them: Cancel on a
+    /// progress banner, Retry on an unreachable notice. Anywhere else on those banners, including the
+    /// label and the chrome around the button, clicks fall through to the terminal underneath. The one
+    /// exception is a transient notice, which dismisses on a click anywhere in its footprint
+    /// (`handleClick`), so it takes the whole banner.
+    private func applyClickPolicy() {
+        if transientMode == .notice {
+            container.clickPolicy = .whole
+            return
+        }
+        let controls = [actionButton, cancelButton].filter { !$0.isHidden }
+        container.clickPolicy = controls.isEmpty ? .passThrough : .controlsOnly(controls)
     }
 
     private func applyTransientChrome(_ mode: TransientMode) {
@@ -194,6 +254,9 @@ import spacesterminalghostty
         case .notice: applyIcon("info.circle.fill", description: "Notice", tint: .secondaryLabelColor)
         }
         cancelButton.isHidden = mode != .progress
+        // A transient banner's only action is Cancel; a persistent notice's action button lives in the
+        // same trailing slot (see `buildUI`), so the two are never shown together.
+        actionButton.isHidden = true
     }
 
     /// One chrome for every stopped state. The sidebar draws a cleanly-exited target and a crashed
@@ -202,9 +265,14 @@ import spacesterminalghostty
     /// stop/pause mark — a filled square in a circle reads as a button on a pane where nothing is
     /// clickable.
     ///
-    /// A dropped connection is drawn as an ordinary notice instead — neutral glyph, neutral tint,
-    /// hairline border. It is not a failure of the session, it resolves itself on reconnect, and the
-    /// sidebar likewise dims an unreachable device rather than tinting it like a crash.
+    /// A stage 1 dropped connection is drawn as an ordinary notice instead: neutral glyph, neutral
+    /// tint, hairline border. It is not yet a failure, it is expected to resolve itself on reconnect,
+    /// and the sidebar likewise dims a still-retrying device rather than tinting it like a crash.
+    ///
+    /// A stage 2 unreachable connection gets the same emphasized chrome as a stopped session: every
+    /// candidate address has refused to dial, which is worth the eye the way a crash is, but keeps the
+    /// connection glyph (not the warning triangle) so it still reads as a link problem, not a process
+    /// death, matching `TerminalPaneBannerNotice.resolve`'s precedence.
     private func applyPersistentChrome(_ kind: TerminalPaneBannerNotice.Kind) {
         spinner.stopAnimation(nil)
         spinner.isHidden = true
@@ -216,9 +284,19 @@ import spacesterminalghostty
         case .disconnected:
             applyBorder(emphasized: false)
             applyIcon("antenna.radiowaves.left.and.right.slash", description: "Connection lost", tint: .secondaryLabelColor)
+        case .unreachable:
+            applyBorder(emphasized: true)
+            applyIcon("antenna.radiowaves.left.and.right.slash", description: "Device unreachable", tint: .activeTheme(\.statusFailed))
         }
-        // A persistent notice has no action to cancel and no timer to wait out; the pane clears it.
+        // A persistent notice has no timer to wait out; the pane clears it (or its action redials it).
         cancelButton.isHidden = true
+    }
+
+    /// Shows the notice's one recovery action, when it has one, as a small text button in the trailing
+    /// slot the transient banner's Cancel button uses.
+    private func applyPersistentAction(_ action: TerminalPaneBannerAction?) {
+        actionButton.title = action?.title ?? ""
+        actionButton.isHidden = action == nil
     }
 
     /// The stopped banner outlines itself in the same tint as its glyph, so it separates from the
@@ -243,6 +321,8 @@ import spacesterminalghostty
     }
 
     @objc private func cancelAction() { onCancel?() }
+
+    @objc private func persistentActionTapped() { persistentAction?.handler() }
 
     @objc private func handleClick() {
         // Only a transient notice dismisses on click: a progress banner's only click target is
@@ -287,6 +367,18 @@ import spacesterminalghostty
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.setAccessibilityIdentifier("terminal-pane-banner-label")
 
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.bezelStyle = .inline
+        actionButton.isBordered = false
+        actionButton.font = Typography.rowDetail
+        actionButton.contentTintColor = .controlAccentColor
+        actionButton.target = self
+        actionButton.action = #selector(persistentActionTapped)
+        actionButton.setButtonType(.momentaryPushIn)
+        actionButton.setContentHuggingPriority(.required, for: .horizontal)
+        actionButton.setAccessibilityIdentifier("terminal-pane-banner-action")
+        actionButton.isHidden = true
+
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         cancelButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Cancel")
         cancelButton.imagePosition = .imageOnly
@@ -299,7 +391,10 @@ import spacesterminalghostty
         cancelButton.setContentHuggingPriority(.required, for: .horizontal)
         cancelButton.setAccessibilityIdentifier("terminal-pane-banner-cancel")
 
-        let stack = NSStackView(views: [spinner, iconView, label, cancelButton])
+        // `detachesHiddenViews` collapses whichever of `actionButton`/`cancelButton` is hidden, so the
+        // trailing-most visible one always sits at the stack's end: the two never occupy the slot at
+        // once (see `applyTransientChrome`/`applyPersistentAction`).
+        let stack = NSStackView(views: [spinner, iconView, label, actionButton, cancelButton])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -334,4 +429,23 @@ import spacesterminalghostty
     var debugIsVisible: Bool { !container.isHidden }
     var debugMessage: String { container.isHidden ? "" : label.stringValue }
     var debugHasPersistentNotice: Bool { persistentNotice != nil }
+    var debugActionTitle: String? { actionButton.isHidden ? nil : actionButton.title }
+
+    /// Whether a click on the label would reach the view underneath it rather than the banner, asked
+    /// of the real `hitTest` so the test proves the AppKit seam and not a flag.
+    var debugClickOnLabelPassesThrough: Bool { debugHitTest(on: label) == nil }
+    /// Whether a click on the action (Retry) button reaches that button, asked of the real `hitTest`.
+    var debugClickOnActionReachesButton: Bool { debugHitTest(on: actionButton)?.isDescendant(of: actionButton) == true }
+
+    /// Runs the real `hitTest` at the center of `view`'s laid-out frame, converted into the container's
+    /// superview coordinate space (what `hitTest(_:)` takes). Forces layout first so a stale zero-size
+    /// frame can't make either seam vacuous.
+    private func debugHitTest(on view: NSView) -> NSView? {
+        container.superview?.layoutSubtreeIfNeeded()
+        guard let superview = view.superview, let containerSuperview = container.superview else { return nil }
+        let point = superview.convert(NSPoint(x: view.frame.midX, y: view.frame.midY), to: containerSuperview)
+        return container.hitTest(point)
+    }
+
+    func debugTapAction() { persistentActionTapped() }
 }

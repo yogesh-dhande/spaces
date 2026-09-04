@@ -137,6 +137,26 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
         XCTAssertEqual(resolver.nextStreamHost(), "lan")
     }
 
+    /// A live query made after the fact can disagree with what was true the instant the last candidate
+    /// failed: with several panes on the same device reconnecting concurrently, another pane's own
+    /// `nextStreamHost()` call can reset the failed set in the gap between this dial's failure and that
+    /// later query, so a caller re-deriving the verdict from the resolver's current state would wrongly
+    /// read "not every candidate has failed". `noteStreamFailed(host:)`'s return value is what a caller
+    /// must use instead, because it is captured atomically with the recording it describes and so cannot
+    /// be raced out from under the caller that way.
+    func testNoteStreamFailedReturnsTheVerdictAtTheMomentOfRecordingNotAtALaterQuery() {
+        let resolver = makeResolver(hosts: ["lan"], connector: ConnectRecorder())
+
+        // The single candidate just failed: every candidate has now failed, so the verdict is true.
+        XCTAssertTrue(resolver.noteStreamFailed(host: "lan"))
+
+        // A concurrent pane's own reconnect attempt calls `nextStreamHost()` in the meantime, which
+        // self-resets the failed set now that every candidate was in it (see the rotate-and-reset test
+        // above). Proven here by the walk offering "lan" again instead of continuing to skip it, meaning
+        // the failed set a query would see right now is empty, not "every candidate".
+        XCTAssertEqual(resolver.nextStreamHost(), "lan", "the reset handed the candidate back out: a query made now would find nothing failed")
+    }
+
     func testStreamPrefersTheProvenAddressAndFailingItClearsTheCache() {
         let resolver = makeResolver(hosts: ["lan", "tailnet"], activeHost: "tailnet", connector: ConnectRecorder())
 

@@ -757,7 +757,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-            updatePersistentBanner(runtimeState: runtimeState, isStateStreamDisconnected: isStateStreamDisconnected)
+            updatePersistentBanner(runtimeState: runtimeState)
             guard visibleRenderer != .ghosttyOwner else {
                 restoreGhosttyOwnerInputFocusIfReady()
                 completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
@@ -889,9 +889,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     /// Retires the message a failed attach left in the input status once a later attach succeeds.
-    /// Mirrors `clearDisconnectedInputStatusIfResolved`: the row holds one message at a time and every
-    /// writer owns its own, so this clears only its exact text — an unrelated status the user is
-    /// looking at (a send error, an ownership refusal) had no part in the attach and must survive it.
+    /// Mirrors `syncDisconnectedInputStatusWithConnectionStage`: the row holds one message at a time,
+    /// and every writer owns its own, so this clears only its exact text. An unrelated status the user
+    /// is looking at (a send error, an ownership refusal) had no part in the attach and must survive it.
     private func clearAttachErrorStatusIfShowing() {
         guard let attachErrorStatusMessage, inputStatusLabel.stringValue == attachErrorStatusMessage else { return }
         self.attachErrorStatusMessage = nil
@@ -1002,6 +1002,13 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// Read from the provider at use time rather than cached: unlike runtime state, which arrives on
     /// the stream this describes, it changes precisely when there is no stream to carry it.
     var isStateStreamDisconnected: Bool { stateProvider.isStateStreamDisconnected }
+
+    /// The connection stage for the banner, read from the provider's tracker at use time for the same
+    /// reason as `isStateStreamDisconnected`.
+    var stateStreamConnectionStage: TerminalConnectionStage { stateProvider.connectionStageTracker.stage }
+
+    /// Whether the persistent connection banner should be visible right now.
+    var isStateStreamBannerVisible: Bool { stateProvider.connectionStageTracker.isBannerVisible }
 
     func isInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state.isInteractive == true }
 
@@ -1185,9 +1192,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.refreshRuntimeStateFromProvider()
-                    self.updatePersistentBanner(
-                        runtimeState: self.lastObservedRuntimeState, isStateStreamDisconnected: self.isStateStreamDisconnected)
-                    self.clearDisconnectedInputStatusIfResolved()
+                    self.updatePersistentBanner(runtimeState: self.lastObservedRuntimeState)
+                    self.syncDisconnectedInputStatusWithConnectionStage()
                 }
             })
         notificationObservers.tokens.append(

@@ -62,7 +62,7 @@
 
         func openSessionStream(
             request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect: @escaping @MainActor (Error?) -> Void
+            onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
         ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
         func currentResolvedHost() async -> String? { resolvedHost }
@@ -1030,7 +1030,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
                 if request.commandName == "archiveWorkspace" {
-                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                    throw SpacesDeviceAPIClientError.connectionClosed
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
             }
@@ -1084,7 +1084,7 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                throw SpacesDeviceAPIClientError.connectionClosed
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
@@ -1106,7 +1106,7 @@
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                throw SpacesDeviceAPIClientError.connectionClosed
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
@@ -1131,7 +1131,7 @@
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                throw SpacesDeviceAPIClientError.connectionClosed
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
@@ -1159,7 +1159,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 // Every request during the delete fails; the poll that follows it succeeds.
                 guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
-                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                    throw SpacesDeviceAPIClientError.connectionClosed
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
             }
@@ -1184,7 +1184,7 @@
             let counter = SpacesMobilePollCounter()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
-                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                    throw SpacesDeviceAPIClientError.connectionClosed
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
@@ -1207,7 +1207,7 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                throw SpacesDeviceAPIClientError.connectionClosed
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
@@ -1231,7 +1231,7 @@
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 if request.commandName == "archiveWorkspace" {
-                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                    throw SpacesDeviceAPIClientError.connectionClosed
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
@@ -1318,7 +1318,7 @@
                 let call = await counter.increment()
                 // The archive request and every reconciliation refetch fail, deferring the outcome.
                 guard call > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
-                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                    throw SpacesDeviceAPIClientError.connectionClosed
                 }
                 // The next overview still lists the workspace but with its teardown in flight: not a
                 // verdict. The one after that lists it with no teardown queued: a genuine failure.
@@ -1353,7 +1353,7 @@
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 await gate.wait()
-                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                throw SpacesDeviceAPIClientError.connectionClosed
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             let workspace = makeOverview().workspaces[0]

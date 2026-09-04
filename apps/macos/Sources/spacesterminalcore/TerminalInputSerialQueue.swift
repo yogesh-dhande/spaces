@@ -14,9 +14,18 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
     /// an actor — e.g. the render host's link-state model — can `await` straight into it instead of
     /// firing a detached, unobservable hop. This queue's own detached task is already in an `async`
     /// context, so awaiting the callback costs nothing extra here.
+    ///
+    /// `onDiscarded` is invoked exactly once when the queued task returns without ever running
+    /// `operation`: cancelled before its turn came up, or superseded by a `cancelAll()` generation bump
+    /// while it was still waiting behind an earlier task. It never fires once `operation` has run,
+    /// whether that run succeeded, threw, or threw `CancellationError`. An operation that never runs
+    /// cannot run its own completion bookkeeping, so a caller holding a slot open until the operation
+    /// finishes (e.g. `TerminalScrollCoalescer`'s one-batch-in-flight gate, released from inside the
+    /// queued operation's own `onFinished`) needs a way to release that slot even on the discard path,
+    /// or a batch dropped alongside a failed send behind it wedges the coalescer forever.
     public func enqueue(
         priority: TaskPriority? = nil, operation: @escaping @Sendable () async throws -> Void,
-        onError: (@Sendable (Error) async -> Void)? = nil
+        onError: (@Sendable (Error) async -> Void)? = nil, onDiscarded: (@Sendable () async -> Void)? = nil
     ) {
         lock.lock()
         let previousTask = pendingTask
@@ -26,8 +35,14 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
         let nextTask = Task.detached(priority: priority) { [weak self] in
             defer { self?.completeTask(id: taskID) }
             _ = await previousTask?.result
-            guard !Task.isCancelled else { return }
-            guard self?.isCurrentGeneration(taskGeneration) == true else { return }
+            guard !Task.isCancelled else {
+                await onDiscarded?()
+                return
+            }
+            guard self?.isCurrentGeneration(taskGeneration) == true else {
+                await onDiscarded?()
+                return
+            }
             do {
                 try Task.checkCancellation()
                 try await operation()

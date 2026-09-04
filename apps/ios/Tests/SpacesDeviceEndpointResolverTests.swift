@@ -222,8 +222,8 @@
             let disconnected = expectation(description: "stream disconnected with an error")
             _ = try await backend.openSessionStream(
                 request: request, onEvent: makeSentinelEventCallback(recordingInto: sentinelBox),
-                onDisconnect: { error in
-                    XCTAssertNotNil(error)
+                onDisconnect: { disconnect in
+                    XCTAssertNotNil(disconnect.error)
                     disconnected.fulfill()
                 })
 
@@ -258,8 +258,8 @@
             let disconnected = expectation(description: "stream disconnected cleanly")
             let handle = try await backend.openSessionStream(
                 request: request, onEvent: { _ in },
-                onDisconnect: { error in
-                    XCTAssertNil(error)
+                onDisconnect: { disconnect in
+                    XCTAssertNil(disconnect.error)
                     disconnected.fulfill()
                 })
             handle.cancel()
@@ -269,7 +269,123 @@
             XCTAssertEqual(cachedHostAfterCleanClose, "127.0.0.1")
         }
 
-        /// Nothing a stream leaves behind may outlive it. An `NWConnection` holds its handler blocks —
+        /// K3 regression: a stream that ends because the daemon decoded the frame and declined it (the
+        /// session already ended, say) proves the address itself is fine, so it must not be recorded
+        /// against the resolver's shared per-host failure count the way a genuine transport failure is
+        /// (`testStreamDisconnectWithErrorClearsCachedWinner`, above). Mirrors Mac's
+        /// `SpacesDeviceAPIStreamEndpoint.isHostTransportFailure`, which excludes a decoded rejection from
+        /// its transport-failure allowlist for the same reason. Before the fix, every non-nil disconnect
+        /// error, rejection included, was recorded via `noteStreamFailed(host:)`; with the resolver shared
+        /// across every pane's stream, a rejection on this host plus a real dial failure on a second
+        /// candidate would read as "every candidate is down" even though this one plainly answered.
+        /// A broken pipe while writing the subscribe request means the peer vanished underneath the
+        /// connection, the same lost-link evidence as a reset. The input path already classifies `EPIPE`
+        /// that way; the stream classifier must agree so the reconnect records the failed candidate and
+        /// is free to try another address instead of redialing the same broken one.
+        func testBrokenPipeCountsAsAStreamHostTransportFailure() {
+            XCTAssertTrue(SpacesDeviceAPIClientError.isStreamHostTransportFailure(NWError.posix(.EPIPE)))
+            XCTAssertTrue(SpacesDeviceAPIClientError.isStreamHostTransportFailure(POSIXError(.EPIPE)))
+            XCTAssertTrue(SpacesDeviceAPIClientError.isStreamHostTransportFailure(NWError.posix(.ECONNRESET)))
+            XCTAssertFalse(
+                SpacesDeviceAPIClientError.isStreamHostTransportFailure(NWError.posix(.EINVAL)),
+                "a local argument error says nothing about the address")
+        }
+
+        /// A name that fails to resolve (the tailnet MagicDNS name a paired host was recorded under, with
+        /// Tailscale off) and a handshake the path reset or aborted are both evidence about this address,
+        /// the same as a refused dial: left uncounted, the resolver keeps redialing the same broken
+        /// candidate instead of recording it as failed and trying another one.
+        func testDNSAndNonPinTLSFailuresCountAsAStreamHostTransportFailure() {
+            XCTAssertTrue(SpacesDeviceAPIClientError.isStreamHostTransportFailure(NWError.dns(-65554)))
+            XCTAssertTrue(SpacesDeviceAPIClientError.isStreamHostTransportFailure(NWError.tls(-9806)))
+        }
+
+        /// The command path's sibling to the DNS/TLS classifier test above: a peer that closes the
+        /// command connection before answering (accepted the TCP/TLS handshake, then hung up with no
+        /// response line) must surface as `SpacesDeviceAPIClientError.connectionClosed`, the typed EOF
+        /// shape `readLineAccumulating` throws, not `.requestFailed`, which is reserved for a decoded
+        /// daemon answer.
+        func testCommandConnectionClosedByThePeerWithoutAnsweringThrowsConnectionClosed() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+            let transport = SpacesDeviceNetworkRequestTransport(resolver: resolver)
+
+            async let response = transport.send(
+                request: SpacesDeviceAPIRequest(command: .overview, authToken: nil, clientApp: nil), timeout: .seconds(5))
+
+            // The server never speaks the application protocol, so there is nothing to wait on besides
+            // the TCP/TLS handshake completing: give it a moment past the accept to land, then hang up
+            // without ever writing a response line.
+            try await waitForAcceptedConnection(on: server)
+            try await Task.sleep(for: .milliseconds(200))
+            server.stop()
+
+            do {
+                _ = try await response
+                XCTFail("expected connectionClosed when the peer hangs up without answering")
+            } catch SpacesDeviceAPIClientError.connectionClosed {
+                // Expected.
+            } catch {
+                XCTFail("expected connectionClosed, got \(error)")
+            }
+        }
+
+        func testStreamRejectionDoesNotRecordAFailedCandidateOrExhaustDialCandidates() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let backend = SpacesDeviceNetworkBackend(settings: settings)
+
+            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: .main)
+            let cachedHostBeforeRejection = await backend.resolver.currentCachedHost()
+            XCTAssertEqual(cachedHostBeforeRejection, "127.0.0.1")
+
+            let request = SpacesDeviceAPIRequest(
+                command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
+            let disconnected = expectation(description: "stream disconnected with a decoded rejection")
+            let errorBox = StreamDisconnectErrorBox()
+            _ = try await backend.openSessionStream(
+                request: request, onEvent: { _ in },
+                onDisconnect: { disconnect in
+                    errorBox.record(disconnect.error, dialExhaustedAllCandidates: disconnect.dialExhaustedAllCandidates)
+                    disconnected.fulfill()
+                })
+
+            // The resolver `connect` above is the server's first accepted connection; the stream's is the
+            // second, and the rejection must not go out until that one exists.
+            try await waitForAcceptedConnection(on: server, count: 2)
+            server.broadcast(try Self.rejectionLine())
+
+            await fulfillment(of: [disconnected], timeout: 10)
+            guard case SpacesDeviceAPIClientError.streamRejected? = errorBox.error() as? SpacesDeviceAPIClientError else {
+                return XCTFail("expected streamRejected, got \(String(describing: errorBox.error()))")
+            }
+            XCTAssertFalse(
+                errorBox.dialExhaustedAllCandidates(),
+                "a decoded rejection proves the daemon answered and must not read as dial exhaustion")
+
+            let cachedHostAfterRejection = await backend.resolver.currentCachedHost()
+            XCTAssertEqual(cachedHostAfterRejection, "127.0.0.1", "a rejection must not clear the cached winner or record a failed candidate")
+        }
+
+        /// One newline-framed daemon rejection, as a decoded-but-declined subscribe response would arrive.
+        private static func rejectionLine() throws -> Data {
+            try SpacesDeviceAPICodec.encodeResponseLine(
+                SpacesDeviceAPIResponse(ok: false, message: "This terminal session ended.", errorCode: .sessionNotAvailable))
+        }
+
+        /// Nothing a stream leaves behind may outlive it. An `NWConnection` holds its handler blocks,
         /// and those blocks hold `StreamSubscription`, its decode buffer, and the per-stream
         /// `DispatchQueue` — until the connection is cancelled, so cancelling is the only thing that
         /// releases the graph. Every way a stream ends therefore cancels, and this pins the mechanism the
@@ -328,8 +444,8 @@
             _ = try await backend.openSessionStream(
                 request: request,
                 onEvent: makeSentinelEventCallback(recordingInto: sentinelBox, fulfilling: receivedPayload),
-                onDisconnect: { error in
-                    stallErrorBox.record(error)
+                onDisconnect: { disconnect in
+                    stallErrorBox.record(disconnect.error)
                     stalled.fulfill()
                 })
 
@@ -402,10 +518,16 @@
 
         /// Waits until the loopback server has the stream's connection in hand, so bytes written next
         /// actually reach it rather than being broadcast to nobody.
-        private func waitForAcceptedConnection(on server: PinnedTLSLoopbackServer, file: StaticString = #filePath, line: UInt = #line) async throws {
+        /// `count` is the number of accepted connections the test expects once the connection it is about
+        /// to talk to has arrived: a test that already opened a connection of its own (a resolver
+        /// `connect`, for instance) must ask for one more than that, or this returns on the earlier
+        /// connection and the bytes the test then broadcasts go out before the one it meant them for exists.
+        private func waitForAcceptedConnection(
+            on server: PinnedTLSLoopbackServer, count: Int = 1, file: StaticString = #filePath, line: UInt = #line
+        ) async throws {
             let deadline = Date().addingTimeInterval(10)
-            while Date() < deadline, server.acceptedConnectionCount() == 0 { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertGreaterThan(server.acceptedConnectionCount(), 0, "the stream never connected", file: file, line: line)
+            while Date() < deadline, server.acceptedConnectionCount() < count { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertGreaterThanOrEqual(server.acceptedConnectionCount(), count, "the stream never connected", file: file, line: line)
         }
 
         /// Builds an event callback owning a freshly created sentinel, recorded weakly in `box`. Written as
@@ -532,6 +654,32 @@
             XCTAssertEqual(afterFullReset, "10.0.0.5")
         }
 
+        /// A live query made after the fact can disagree with what was true the instant the last
+        /// candidate failed: with several panes on the same device reconnecting concurrently, another
+        /// pane's own `nextStreamHost()` call can reset the failed set in the gap between this dial's
+        /// failure and a later query, so a caller re-deriving the verdict from the resolver's current
+        /// state would wrongly read "not every candidate has failed". `noteStreamFailed(host:)`'s return
+        /// value is what a caller must use instead, because it is captured atomically with the recording
+        /// it describes and so cannot be raced out from under the caller that way. Mirrors the Mac
+        /// resolver's `testNoteStreamFailedReturnsTheVerdictAtTheMomentOfRecordingNotAtALaterQuery`.
+        func testNoteStreamFailedReturnsTheVerdictAtTheMomentOfRecordingNotAtALaterQuery() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5"]
+            settings.certificateFingerprint = "SHA256:atomic-verdict"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            // The single candidate just failed: every candidate has now failed, so the verdict is true.
+            let exhausted = await resolver.noteStreamFailed(host: "10.0.0.5")
+            XCTAssertTrue(exhausted)
+
+            // A concurrent pane's own reconnect attempt calls `nextStreamHost()` in the meantime, which
+            // self-resets the failed set now that every candidate was in it. Proven here by the walk
+            // offering "10.0.0.5" again instead of continuing to skip it, meaning the failed set a query
+            // would see right now is empty, not "every candidate".
+            let next = await resolver.nextStreamHost()
+            XCTAssertEqual(next, "10.0.0.5", "the reset handed the candidate back out: a query made now would find nothing failed")
+        }
+
         /// `nextStreamHost()` prefers a cached winner over the failed-candidate walk, and
         /// `noteStreamFailed` clears that cache when the failure was on the cached address itself — so a
         /// command-channel request racing right after does not trust the same now-suspect address.
@@ -551,6 +699,127 @@
             XCTAssertNil(cachedAfterFailure)
             let nextHost = await resolver.nextStreamHost()
             XCTAssertEqual(nextHost, "100.64.0.5")
+        }
+
+        /// A host `noteStreamFailed` marked dead is not permanently disqualified: a later successful
+        /// connect on that same address (the racing command-channel `connect(timeout:queue:)`, exercised
+        /// here against a genuine pinned-TLS listener) proves the address reachable again just as much as
+        /// a stream's own successful dial would, so it must clear the stream-failure evidence too, or
+        /// `noteStreamFailed(host:)` would keep reporting the whole device unreachable for an address a
+        /// request just proved otherwise. A second, never-dialed candidate makes that observable through
+        /// `noteStreamFailed(host:)`'s own return value without needing a direct query: once the proven
+        /// host is cleared, re-marking only the other candidate failed can no longer read "every
+        /// candidate has failed".
+        func testSuccessfulConnectClearsStreamFailedEvidenceForTheProvenHost() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1", "192.0.2.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let firstCandidateProof = await resolver.noteStreamFailed(host: "127.0.0.1")
+            XCTAssertFalse(firstCandidateProof, "sanity: the other candidate has not failed yet")
+            let beforeProof = await resolver.noteStreamFailed(host: "192.0.2.1")
+            XCTAssertTrue(beforeProof, "sanity: both of the device's candidates are now marked stream-failed")
+
+            let resolved = try await resolver.connect(timeout: .seconds(3), queue: .main)
+            resolved.connection.cancel()
+            XCTAssertEqual(resolved.host, "127.0.0.1")
+
+            // Re-marking the OTHER candidate failed (already true, so this is a no-op on it) reads back
+            // whether "127.0.0.1" is still in the failed set: the connect above must have cleared it, so
+            // this reports "not every candidate has failed" even though the untouched candidate is still
+            // down.
+            let afterProof = await resolver.noteStreamFailed(host: "192.0.2.1")
+            XCTAssertFalse(afterProof, "a successful connect on the same host is proof it is reachable again")
+        }
+
+        // MARK: - sendPinnedPing single deadline
+
+        /// `sendPinnedPing` must spend one end-to-end deadline across connect, send, and read, not a
+        /// fresh `timeout` budget reissued to each stage. A connect that succeeds only after consuming
+        /// most of `timeout` (`PinnedTLSLoopbackServer(acceptDelay:)`, see its doc comment), paired with
+        /// a server that then never answers, is the shape of a half-alive link: the dial finally goes
+        /// through, but nothing useful happens after. The bug this guards against handed connect, send,
+        /// and read each their own full `timeout`, so a connect that used most of one budget still let
+        /// the read that follows burn an entire second one: roughly `connectDelay + timeout` in total.
+        /// Honoring a single deadline instead leaves read almost nothing once connect has spent most of
+        /// it, so the whole call returns close to one `timeout`. A plain "accepts and never answers"
+        /// server with no connect delay cannot distinguish the two: on a fast loopback link connect and
+        /// send both finish near-instantly either way, and the read stage alone (which always uses a
+        /// full `timeout` to fail, bug or no bug) already stays under any generous multiple of `timeout`.
+        /// The connect delay is what makes the pre-fix "fresh budget per stage" behavior actually cost
+        /// something extra.
+        func testSendPinnedPingHonorsOneEndToEndDeadlineNotAFreshBudgetPerStage() async throws {
+            let timeout = Duration.milliseconds(400)
+            let acceptDelay = Duration.milliseconds(280)
+            let server = try PinnedTLSLoopbackServer(acceptDelay: acceptDelay)
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let backend = SpacesDeviceNetworkBackend(settings: settings)
+
+            let request = SpacesDeviceAPIRequest(command: .ping, authToken: nil, clientApp: nil)
+            let start = ContinuousClock.now
+            let failure = await backend.sendPinnedPing(request: request, host: "127.0.0.1", timeout: timeout)
+            let elapsed = ContinuousClock.now - start
+
+            XCTAssertNotNil(failure, "the server never answers, so the probe must report a failure rather than hang forever")
+            // One end-to-end deadline keeps the whole call within about `timeout` (connect ate most of
+            // it, so read only gets whatever remained); three independent budgets would add a second,
+            // separate `timeout` on top of the connect delay. `1.5x` sits clearly between the two
+            // (~1.0x fixed, ~1.7x buggy) with margin on both sides for scheduling jitter.
+            XCTAssertLessThan(
+                elapsed, timeout + timeout / 2,
+                "sendPinnedPing spent more than one end-to-end deadline: \(elapsed) for a \(timeout) timeout plus a \(acceptDelay) connect delay")
+        }
+
+        /// Cancelling a pinned ping mid-flight (the caller lost interest before the daemon answered) must
+        /// not poison the host it was probing: the probe never learned anything about `host`, so recording
+        /// a stream failure for it would distrust a perfectly healthy address, and could even manufacture
+        /// a false "every candidate has failed" verdict alongside one genuinely failed candidate.
+        ///
+        /// The cancellation lands during `resolver.connect` (a long `acceptDelay` holds the TLS handshake
+        /// open, well past the short sleep before `pingTask.cancel()`), the harder of the two stages to get
+        /// right: `SpacesDeviceEndpointResolver.attempt` catches every failure inside `connect`, including a
+        /// cancellation, and reduces it to a bare pin-mismatch bit, so `connect(host:timeout:queue:)`
+        /// rethrows a generic `requestFailed` that no longer carries any trace of `CancellationError`. A fix
+        /// that only checked `error is CancellationError` would still poison the host here; catching this
+        /// gap requires also checking `Task.isCancelled`.
+        func testCancellingAPinnedPingDuringConnectRecordsNothingAgainstTheHost() async throws {
+            let server = try PinnedTLSLoopbackServer(acceptDelay: .seconds(5))
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1", "192.0.2.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let backend = SpacesDeviceNetworkBackend(settings: settings)
+
+            let request = SpacesDeviceAPIRequest(command: .ping, authToken: nil, clientApp: nil)
+            let pingTask = Task {
+                await backend.sendPinnedPing(request: request, host: "127.0.0.1", timeout: .seconds(10))
+            }
+            // Well before the 5s accept delay elapses, so the cancellation is guaranteed to land while the
+            // probe is still inside `resolver.connect`, waiting on the handshake.
+            try await Task.sleep(for: .milliseconds(150))
+            pingTask.cancel()
+            _ = await pingTask.value
+
+            // Nothing was recorded against "127.0.0.1": with a second, never-dialed candidate and no
+            // cached winner, `nextStreamHost()` still hands out the first host rather than skipping past
+            // it, which is what proves the cancelled probe left no stream-failure evidence behind.
+            let nextHost = await backend.resolver.nextStreamHost()
+            XCTAssertEqual(nextHost, "127.0.0.1", "a probe cancelled mid-connect must not record anything against the host it was probing")
         }
 
         private func resetDeviceStorePersistedState() {
@@ -579,15 +848,24 @@
     /// Weak handle to a `StreamLifetimeSentinel`, so a test can observe its deallocation without holding it.
     private final class WeakStreamSentinelBox: @unchecked Sendable { weak var object: StreamLifetimeSentinel? }
 
-    /// Carries the disconnect error out of the stream's main-actor callback to the test, which reads it
-    /// from its own (non-main) frame once the expectation has been fulfilled.
+    /// Carries the disconnect event's error (and, when relevant, its dial-exhaustion verdict) out of the
+    /// stream's main-actor callback to the test, which reads it from its own (non-main) frame once the
+    /// expectation has been fulfilled.
     private final class StreamDisconnectErrorBox: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: (any Error)?
+        private var storedDialExhaustedAllCandidates = false
 
-        func record(_ error: (any Error)?) { lock.withLock { stored = error } }
+        func record(_ error: (any Error)?, dialExhaustedAllCandidates: Bool = false) {
+            lock.withLock {
+                stored = error
+                storedDialExhaustedAllCandidates = dialExhaustedAllCandidates
+            }
+        }
 
         func error() -> (any Error)? { lock.withLock { stored } }
+
+        func dialExhaustedAllCandidates() -> Bool { lock.withLock { storedDialExhaustedAllCandidates } }
     }
 
     /// Counts payloads delivered to the viewer callback, to prove keepalives are not among them.

@@ -201,15 +201,25 @@ extension TerminalSessionPaneViewController {
 
     /// Mirrors the pane's own state into the banner's persistent notice. Both facts it reports leave
     /// a frozen Ghostty render on screen that is otherwise indistinguishable from a live terminal —
-    /// an exited or failed session, and a dropped state subscription to the owning device — so the
-    /// banner is the only thing telling the user why their keystrokes go nowhere.
-    func updatePersistentBanner(runtimeState: TerminalSessionRuntimeState?, isStateStreamDisconnected: Bool) {
-        guard let notice = TerminalPaneBannerNotice.resolve(runtimeState: runtimeState?.state, isStateStreamDisconnected: isStateStreamDisconnected)
+    /// an exited or failed session, and a lost state subscription to the owning device (stage 1
+    /// retrying, or stage 2 unreachable), so the banner is the only thing telling the user why their
+    /// keystrokes go nowhere.
+    func updatePersistentBanner(runtimeState: TerminalSessionRuntimeState?) {
+        guard
+            let notice = TerminalPaneBannerNotice.resolve(
+                runtimeState: runtimeState?.state, connectionStage: stateStreamConnectionStage, isBannerVisible: isStateStreamBannerVisible)
         else {
             banner.clearPersistent()
             return
         }
-        banner.showPersistent(notice)
+        // Retry is stage 2's one recovery step; every other persistent notice (stopped, failed, or
+        // still-retrying stage 1) carries no action.
+        let action: TerminalPaneBannerAction? =
+            notice.kind == .unreachable
+            ? TerminalPaneBannerAction(
+                title: TerminalConnectionNotice.retryActionTitle,
+                handler: { [weak self] in self?.stateProvider.retryStateStreamConnection() }) : nil
+        banner.showPersistent(notice, action: action)
     }
 
     func updateInputStatus(message: String, isError: Bool) {

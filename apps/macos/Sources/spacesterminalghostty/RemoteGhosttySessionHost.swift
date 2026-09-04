@@ -1316,7 +1316,8 @@
                                     scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
-                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) },
+                onDiscarded: { await MainActor.run { onFinished() } })
         }
 
         private func sendCurrentViewportResizeIfNeeded(force: Bool) {

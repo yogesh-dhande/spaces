@@ -258,23 +258,48 @@ extension TerminalSessionPaneViewController {
 
     /// Reports an input attempt made while the device is unreachable. The banner already carries the
     /// notice, so the attempt pulses it rather than raising a second message; the input status row
-    /// records the reason for the debug dump and tests.
+    /// records the reason for the debug dump and tests. The message follows the connection stage:
+    /// stage 2's "Device unreachable" once every candidate has failed, stage 1's "Reconnecting…"
+    /// otherwise, so the row and the banner never disagree about what is going on.
+    ///
+    /// A no-op while the banner is not yet visible: `isStateStreamDisconnected` goes true the instant
+    /// the stream is lost, but the stage 1 grace (`TerminalConnectionStageTracker`) intentionally keeps
+    /// the banner hidden for the first `TerminalConnectionNotice.bannerGraceSeconds` in case the redial
+    /// heals on its own. Without this guard, a keystroke typed during that window wrote the red
+    /// "Reconnecting…" status row and flashed a banner the user cannot see, both proportionate to a
+    /// connection loss the grace exists specifically to keep quiet about. Mirrors iOS's
+    /// `pulseConnectionBannerIfVisible`, which gates its own pulse on `isConnectionBannerVisible` for
+    /// the same reason.
     private func reportDisconnectedInputAttempt() {
+        guard isStateStreamBannerVisible else { return }
+        let message = stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
         // Typing repeats this on every keystroke; re-stating an unchanged message would re-run the
         // header layout pass for nothing.
-        if inputStatusLabel.stringValue != TerminalPaneBannerNotice.disconnected.message {
-            updateInputStatus(message: TerminalPaneBannerNotice.disconnected.message, isError: true)
+        if inputStatusLabel.stringValue != message {
+            updateInputStatus(message: message, isError: true)
         }
         banner.flash()
     }
 
-    /// Retires the message `reportDisconnectedInputAttempt` left behind once the link is back. The row
-    /// holds one message at a time and every other writer owns its own, so this clears only its exact
-    /// text: an unrelated status the user is looking at (a send error, an ownership refusal) says
-    /// nothing about the connection and must survive a reconnect it had no part in.
-    func clearDisconnectedInputStatusIfResolved() {
-        guard !isStateStreamDisconnected, inputStatusLabel.stringValue == TerminalPaneBannerNotice.disconnected.message else { return }
-        updateInputStatus(message: "", isError: false)
+    /// Keeps the message `reportDisconnectedInputAttempt` left behind in step with the connection stage.
+    /// Runs on every `.spacesTerminalStateStreamConnectionDidChange` notification, not only a
+    /// reconnect, because typing during stage 1 and then never typing again while the stream escalates
+    /// to stage 2 would otherwise leave "Reconnecting…" on the row forever: nothing else revisits it,
+    /// since the row only follows a keystroke's own stage read at the moment it was typed. Clears the
+    /// message once the link is back, and otherwise rewrites it to the current stage's message when it
+    /// no longer matches. The row holds one message at a time and every other writer owns its own, so
+    /// this only touches text that is one of the two connection notices: an unrelated status the user is
+    /// looking at (a send error, an ownership refusal) says nothing about the connection and must
+    /// survive a reconnect or a stage change it had no part in.
+    func syncDisconnectedInputStatusWithConnectionStage() {
+        guard TerminalPaneBannerNotice.isConnectionNoticeMessage(inputStatusLabel.stringValue) else { return }
+        guard isStateStreamDisconnected else {
+            updateInputStatus(message: "", isError: false)
+            return
+        }
+        let message = stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
+        guard inputStatusLabel.stringValue != message else { return }
+        updateInputStatus(message: message, isError: true)
     }
 
     private func isImagePasteKeyEvent(_ event: NSEvent) -> Bool {

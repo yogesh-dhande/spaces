@@ -142,6 +142,258 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.isStateStreamDisconnected)
     }
 
+    /// Stage 1 hides the banner during a short grace window: a redial that heals within it must never
+    /// have painted anything. The grace itself is caller-owned (`DeviceTerminalSessionStateModel`), so
+    /// this drives it through `graceDelayForTesting` instead of waiting out the real one-second grace.
+    @MainActor func testStreamLossHidesTheBannerUntilTheGraceElapses() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        model.graceDelayForTesting = .milliseconds(20)
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+
+        model.handleStreamDisconnect(nil, generation: generation)
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible, "a blip must not paint anything before the grace elapses")
+
+        try await Task.sleep(for: .milliseconds(80))
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "the grace elapsing without a frame is what raises the banner")
+    }
+
+    /// A redial that succeeds inside the grace window must never have shown the banner at all: the
+    /// whole point of the grace is to keep ordinary blips invisible, and a frame arriving is what the
+    /// tracker's contract means by the connection being proven healthy again.
+    @MainActor func testStreamHealingWithinTheGraceNeverShowsTheBanner() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.graceDelayForTesting = .milliseconds(50)
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.handleStreamDisconnect(nil, generation: generation)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+
+        let newGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: newGeneration)
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+
+        // Outlive what would have been the grace, to prove the cancelled timer never fires late.
+        try await Task.sleep(for: .milliseconds(90))
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+    }
+
+    /// A frame from a retired stream must never clear the outage it was retired out of. `applyStreamEvent`
+    /// used to guard on `streamClientGeneration`, the ever-increasing counter `openStateStream` bumps on
+    /// every install: `handleStreamDisconnect` clears `streamClient`/`installedStreamClientGeneration` but
+    /// never retires that counter, so a frame the old client already had in flight on the main actor still
+    /// carried a generation equal to it and passed the guard after the disconnect, clearing the banner
+    /// and resetting backoff while no stream was installed, exactly as if the old client were still live.
+    /// The guard must instead be the same one `handleStreamDisconnect` already uses
+    /// (`installedStreamClientGeneration`), which the disconnect path does retire.
+    @MainActor func testFrameFromARetiredStreamCannotClearTheOutage() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.graceDelayForTesting = .milliseconds(20)
+        let oldGeneration = model.installStreamClientForTesting(FakeStreamClient())
+
+        model.handleStreamDisconnect(nil, generation: oldGeneration)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "the grace elapsing without a frame is what raises the banner")
+
+        // A frame the retired client already had in flight lands after the disconnect. It must not clear
+        // the outage: no stream is installed for it to be evidence about.
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: oldGeneration)
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting, "a frame from a retired stream must not resurrect it")
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "a frame from a retired stream must not hide the banner")
+
+        // The replacement client's own frame is real evidence and clears it.
+        let newGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: newGeneration)
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+    }
+
+    /// Stage 2 is entered only on hard evidence (every candidate address refused to dial), with the
+    /// banner visible immediately (no grace) and the next automatic redial paced off the tracker's own
+    /// (slower) ladder instead of the ordinary stage 1 backoff. Retry is the escape hatch: it redials
+    /// immediately and resets the ladder, so the automatic redial that follows a retry starts from the
+    /// ladder's shortest rung again instead of continuing to back off.
+    @MainActor func testAllCandidatesUnreachableEntersStage2ImmediatelyAndRetryResetsTheLadder() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-UNREACHABLE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        // Pin the resolver's only candidate as already failed, reproducing the bookkeeping a real
+        // exhausted dial would have left behind, and capture the verdict `noteStreamFailed(host:)`
+        // returns into the testing seam that stands in for `client.lastDialExhaustedAllCandidates`:
+        // `stateStreamConnectOverrideForTesting` bypasses `client.start()` entirely, so nothing else would
+        // populate it.
+        let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: identity.certificateFingerprint)
+        model.lastDialExhaustedAllCandidatesForTesting = resolver.noteStreamFailed(host: "127.0.0.1")
+        model.stateStreamConnectOverrideForTesting = { false }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "stage 2 shows the banner immediately, with no grace")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "the first stage 2 redial paces off the ladder's shortest rung")
+
+        model.retryStateStreamConnection()
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable, "still unreachable: the stubbed connect fails again")
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible)
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "Retry resets the ladder, so the redial it triggers is the shortest rung again, not the next one up")
+    }
+
+    /// The stage 2 verdict has to come from the failed dial itself, not from a fresh read of the
+    /// resolver's live failed-host set: with one resolver shared per device across every pane's stream, a
+    /// concurrent pane's own `nextStreamHost()` call can reset that set in the gap between this dial's
+    /// failure and a later query, which would wrongly read "not every candidate has failed" even though
+    /// the dial that just failed genuinely was the last one standing. Reproduces exactly that gap (the
+    /// reset lands before `openStateStream` ever looks) and asserts stage 2 is still reached, proving the
+    /// escalation used the verdict captured atomically at failure time rather than re-deriving it later.
+    @MainActor func testEscalatesToStage2FromTheCapturedVerdictEvenAfterTheResolverSetHasSinceReset() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-UNREACHABLE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: identity.certificateFingerprint)
+        // The verdict at the moment this (simulated) dial failed: the resolver's only candidate, so true.
+        model.lastDialExhaustedAllCandidatesForTesting = resolver.noteStreamFailed(host: "127.0.0.1")
+        // A concurrent pane's reconnect attempt lands here, before `openStateStream` looks at anything:
+        // this is the exact race window G1 fixes. A query against the resolver made after this point
+        // would wrongly say "not every candidate has failed", because the walk hands the candidate back
+        // out instead of continuing to skip it.
+        XCTAssertEqual(resolver.nextStreamHost(), "127.0.0.1", "sanity: the reset already happened")
+        model.stateStreamConnectOverrideForTesting = { false }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(
+            model.connectionStageTracker.stage, .unreachable,
+            "the captured verdict from the failed dial itself must decide this, not a fresh (and by now reset) resolver query")
+    }
+
+    /// `SpacesDeviceEndpointResolver.nextStreamHost()` self-resets its failed-host set once every
+    /// candidate has failed (so it can never wedge on a permanently dead one), which means a two-host
+    /// device's very next stream attempt after the one that reached stage 2 can read
+    /// `allCandidatesUnreachable: false` even though nothing has actually improved. That attempt must
+    /// still pace on the stage 2 ladder, not fall back to the ordinary `reconnectBackoff` cadence
+    /// (`scheduleReconnect(after:)`'s `connectionStageTracker.stage == .unreachable` check exists for
+    /// exactly this).
+    @MainActor func testStillUnreachableAttemptWithResetFailedSetStaysOnTheLadder() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1", "127.0.0.2"],
+            port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z",
+            updatedAt: "2026-07-24T00:00:00Z", lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-UNREACHABLE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        // A `reconnectBackoff` this far from the ladder's values (1/2/4/8/15s) makes a fixed-cadence
+        // fallback unmistakable in the assertion below, distinct from every rung the ladder could land on.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // Pin both candidates as already failed, reproducing the bookkeeping a real exhausted dial cycle
+        // would have left behind (mirrors the single-host test above); the verdict only reads true once
+        // the second candidate is also marked.
+        let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: identity.certificateFingerprint)
+        resolver.noteStreamFailed(host: "127.0.0.1")
+        model.lastDialExhaustedAllCandidatesForTesting = resolver.noteStreamFailed(host: "127.0.0.2")
+        model.stateStreamConnectOverrideForTesting = { false }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable, "both candidates already failed: straight to stage 2")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "the first stage 2 redial paces off the ladder's shortest rung")
+
+        // `nextStreamHost()` is what a real `client.start()` calls before dialing, and self-resets the
+        // failed set once every candidate is in it; the stub connect never reaches that call, so it is
+        // reproduced here directly, the same way `noteStreamFailed(host:)` above stands in for the failed
+        // dial itself. This attempt's own dial (against the freshly reset set) would fail on only the
+        // first candidate, so its verdict reads false.
+        _ = resolver.nextStreamHost()
+        model.lastDialExhaustedAllCandidatesForTesting = false
+
+        model.retryStateStreamConnection()
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(
+            model.connectionStageTracker.stage, .unreachable,
+            "nothing has actually improved: the stubbed connect still fails, this attempt just has a freshly reset failed set")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "this attempt's own allCandidatesUnreachable reads false (the failed set just reset), but the "
+                + "tracker is still unreachable, so it must stay on the ladder rather than fall back to reconnectBackoff")
+    }
+
     /// An ended session is not streamable — the daemon refuses to subscribe to one — so its dropped
     /// stream is the expected answer, not an outage. Reporting it would replace the notice that
     /// explains why the pane is read-only with one implying the session might come back.
@@ -595,7 +847,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         await model.drainPendingReconnectForTesting()
 
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
-        XCTAssertFalse(model.isStateStreamDisconnected, "a successful reconnect must clear the disconnected notice")
+        // `openStateStream` deliberately leaves the connection-stage tracker alone on a bare `start()`
+        // success: the link is declared healthy only once a frame actually arrives over the new stream
+        // (`applyStreamEvent`), not merely because the reconnect's blocking connect returned. A stub
+        // stream client delivers no such frame, so the notice is still up here.
+        XCTAssertTrue(model.isStateStreamDisconnected, "a reconnect alone is not proof of a healthy link; only a frame is")
     }
 
     /// A subscriber's handle is the only thing that takes its listener back out of the shared fan-out, and
@@ -661,6 +917,174 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // a retry armed, so re-reporting it must add no notice and no reconnect.
         model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out."))
         XCTAssertEqual(notifiedSessionIDs, [sessionID])
+    }
+
+    /// F3: an input send is a different connection than the state subscription, and the racing
+    /// command-channel connect it uses can exhaust every one of this device's candidate addresses on its
+    /// own, the same hard evidence `openStateStream`'s `StateStreamConnectResult.failed(true)` already
+    /// escalates on (`testAllCandidatesUnreachableEntersStage2ImmediatelyAndRetryResetsTheLadder` above).
+    /// Before the fix, `reportFailedInputSend` routed every conclusive input failure through
+    /// `tearDownStreamAndScheduleReconnect()` with no way to carry that evidence, so this always landed at
+    /// stage 1 no matter how conclusive the input failure was.
+    @MainActor func testInputSendFailingOnEveryCandidateEscalatesStraightToStage2() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "stage 2 shows the banner immediately, with no grace")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "every candidate refusing this input send is stage 2 evidence and paces off the unreachable ladder")
+    }
+
+    /// Negative case for the same evidence: a failure pinned to a single address (the ordinary shape every
+    /// other conclusive input failure takes, e.g. a refused connection) is not the "every candidate"
+    /// evidence stage 2 requires, and must keep the paced stage 1 cadence, proving the escalation above is
+    /// driven specifically by `allCandidatesUnreachable`, not by every conclusive input failure.
+    @MainActor func testInputSendRefusedOnOneAddressStaysAtStage1() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible, "a single-address refusal is stage 1 evidence only")
+    }
+
+    /// Before the fix, `reportFailedInputSend`'s `guard !isStateStreamDisconnected else { return true }` sat
+    /// ahead of the `allCandidatesUnreachable` classification, so a conclusive stage 2 input failure that
+    /// arrived while a reconnect was already armed at stage 1 (a link the model already suspects, but has
+    /// not yet confirmed unreachable) was discarded unread: the guard returned `true` before the error's
+    /// shape was ever looked at, and the tracker stayed at `.reconnecting` no matter how conclusive the new
+    /// evidence was. Every candidate refusing this send is the same hard evidence that escalates straight
+    /// from `.connected` in `testInputSendFailingOnEveryCandidateEscalatesStraightToStage2`, and arriving
+    /// mid-reconnect does not make it any less conclusive.
+    @MainActor func testInputSendFailingOnEveryCandidateEscalatesFromStage1EvenWithAReconnectAlreadyArmed() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        // A single-address refusal first, landing the model at stage 1 with a reconnect already armed:
+        // the same setup as `testInputSendRefusedOnOneAddressStaysAtStage1`.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+
+        // A second, conclusive failure while still disconnected must escalate rather than being discarded
+        // as merely a repeat of already-known news.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        XCTAssertTrue(model.isStateStreamDisconnected)
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertTrue(
+            model.connectionStageTracker.isBannerVisible,
+            "conclusive stage 2 evidence must escalate immediately even when a reconnect is already in flight")
+    }
+
+    /// Escalating to stage 2 from `reportFailedInputSend` has to retire the stale stage 1 timer that was
+    /// already armed (`reconnectTask`, paced by the ordinary `reconnectBackoff` cadence) and rearm on the
+    /// fresh delay the escalation itself computed: `scheduleReconnect(delay:)` no-ops while `reconnectTask
+    /// != nil`, so leaving the stale timer running would waste the ladder's freshly computed rung and
+    /// leave the redial pacing off the wrong cadence entirely until the stale timer eventually fires on
+    /// its own schedule.
+    @MainActor func testAllCandidatesInputFailureRetiresTheStaleStage1TimerAndRearmsOnTheLadder() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        // A distinct, short-but-not-ladder delay makes the stale stage 1 timer unmistakable below: none
+        // of the stage 2 ladder's rungs (1/2/4/8/15s) land on it.
+        model.reconnectBackoff.retryDelay = .seconds(3)
+        model.reconnectBackoff.maxRetryDelay = .seconds(3)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+
+        // A single-address refusal first: stage 1, with a reconnect armed on the stale cadence.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+        XCTAssertEqual(model.lastReconnectDelayForTesting, .seconds(3), "the stale stage 1 timer is armed on the ordinary cadence")
+
+        // Every candidate now refuses this send: conclusive stage 2 evidence, arriving while the stale
+        // stage 1 timer above is still armed.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "escalating to stage 2 must retire the stale stage 1 timer and rearm on the ladder's first rung, "
+                + "not leave the 3s stage 1 timer running underneath it")
+
+        // Let the freshly armed retry fire and fail again with the same conclusive evidence. The next rung
+        // must be the ladder's second one, proving the escalation above consumed the ladder exactly once,
+        // not twice.
+        model.stateStreamConnectOverrideForTesting = { false }
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        await model.drainPendingReconnectForTesting()
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[1]),
+            "the rung after the one the escalation consumed, not the one after that: the ladder must not be double-consumed")
+    }
+
+    /// The escalation in `reportFailedInputSend`'s `isStateStreamDisconnected` branch can fire while an
+    /// automatic redial is already racing: `openStateStream` installs `streamClient` before its blocking
+    /// dial resolves, so a client that dialed but has delivered no frame yet leaves the tracker at
+    /// `.reconnecting`, indistinguishable here from no redial being in flight at all. Before the fix, the
+    /// escalation armed the ladder's fresh redial without retiring that in-flight attempt first, so the
+    /// new `reconnectTask` fired straight into either `ensureSubscriptionStarted()`'s own in-flight guard
+    /// (`streamClient != nil || subscriptionConnectTask != nil`) or the reconnect timer's own
+    /// `streamClient == nil` guard, and returned without ever dialing again: the pane was stuck waiting on
+    /// the stream watchdog, or forever if keepalives kept arriving with no frame.
+    @MainActor func testAllCandidatesInputFailureDuringAnInFlightRedialRetiresItSoTheLadderRedialRuns() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        // A single-address refusal first: stage 1, with a reconnect armed.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
+
+        // Simulate the automatic redial that stage 1 armed having already installed a client that has
+        // delivered no frame: installing a client through this seam does not itself clear the outage, so
+        // the tracker stays exactly where a real in-flight, frame-less redial would leave it.
+        model.installStreamClientForTesting(FakeStreamClient())
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the in-flight redial's client is installed")
+        XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting, "installing the client alone is not a frame, so the tracker does not clear")
+        XCTAssertTrue(model.isStateStreamDisconnected)
+
+        // Every candidate now refuses this send: conclusive stage 2 evidence, arriving while the in-flight
+        // redial's own client above is still installed.
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        XCTAssertFalse(model.hasActiveStreamClientForTesting, "the escalation must retire the in-flight redial's stale client")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "the ladder redial armed by the escalation, not a leftover stage 1 delay")
+
+        // Let the ladder's fresh redial actually run: before the fix it returns without ever calling the
+        // connect override below, because the retired attempt's client (or connect task) was still
+        // occupying the in-flight guard(s) that turn a redial away.
+        var connectOverrideInvoked = false
+        model.stateStreamConnectOverrideForTesting = {
+            connectOverrideInvoked = true
+            return false
+        }
+        await model.drainPendingReconnectForTesting()
+
+        XCTAssertTrue(connectOverrideInvoked, "the ladder redial must actually dial instead of being turned away by a stale in-flight attempt")
     }
 
     /// An ended session wants no stream at all, so a failed send against one reports no outage: its pane
@@ -799,7 +1223,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // Let the armed retry run its course against the real server; it must actually reconnect.
         await model.drainPendingReconnectForTesting()
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
-        XCTAssertFalse(model.isStateStreamDisconnected, "a successful reconnect must clear the disconnected notice")
+        // See the matching comment in `testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe`:
+        // a bare reconnect is deliberately not treated as proof the link is healthy, only a frame is.
+        XCTAssertTrue(model.isStateStreamDisconnected, "a reconnect alone is not proof of a healthy link; only a frame is")
     }
 
     /// `establishStateStreamConnection`'s own failure path (a connect that reports failure) already calls
@@ -855,6 +1281,190 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertEqual(
             model.lastReconnectDelayForTesting, .seconds(600),
             "a second, redundant scheduleReconnect() call must not recompute the backoff and double the armed delay")
+    }
+
+    /// `ensureSubscriptionStarted`'s in-flight guard (`streamClient != nil || subscriptionConnectTask !=
+    /// nil`) exists so a second automatic attempt cannot stack on top of one already running. But an
+    /// automatic reconnect timer can start an attempt moments before the user taps Retry, and that same
+    /// guard then makes Retry itself a no-op: nothing happens until the stale attempt's own connect
+    /// timeout or stream watchdog eventually resolves it. Retry must instead retire that attempt and start
+    /// its own immediately.
+    @MainActor func testRetryDuringAnInFlightConnectStartsAFreshAttemptRatherThanNoOpping() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-RETRY-INFLIGHT-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+
+        var connectCount = 0
+        var resumeFirstConnect: ((Bool) -> Void)?
+        let reachedFirstConnect = expectation(description: "the first connect reached the controlled resolution point")
+        model.stateStreamConnectOverrideForTesting = { [weak model] in
+            connectCount += 1
+            guard connectCount == 1 else {
+                // Retry's own fresh attempt (and anything after it) resolves immediately, against the real
+                // server, so recovery can be observed rather than just that a second attempt got started.
+                model?.stateStreamConnectOverrideForTesting = nil
+                return true
+            }
+            return await withCheckedContinuation { continuation in
+                resumeFirstConnect = { continuation.resume(returning: $0) }
+                reachedFirstConnect.fulfill()
+            }
+        }
+
+        // An automatic reconnect timer's attempt is already in flight when Retry is tapped: this is
+        // reproduced directly (skipping the timer itself) since that is the only fact this test depends
+        // on, not how the attempt was started.
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await fulfillment(of: [reachedFirstConnect], timeout: 5)
+        XCTAssertEqual(connectCount, 1)
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the in-flight connect must have installed its stream client")
+
+        model.retryStateStreamConnection()
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(connectCount, 2, "Retry must start a new connect attempt rather than waiting out the one already in flight")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "Retry's own connect must have installed a fresh stream client")
+
+        // The stale first attempt finally resolves, long after Retry's own connect already installed a
+        // healthy client: it must not be able to act on that installation.
+        resumeFirstConnect?(true)
+        // There is nothing to await the stale task's resumption directly (it is not the current
+        // `subscriptionConnectTask`), so give its continuation a turn to run before asserting nothing
+        // changed as a result.
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(connectCount, 2, "the stale attempt's belated completion must not trigger another connect")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the stale attempt's belated completion must not disturb Retry's healthy client")
+    }
+
+    /// A superseded attempt's belated completion must be dropped, not just harmless to observe once: this
+    /// pins the two consequences a missing `connectAttemptGeneration` gate would have. First, the
+    /// replacement must be free to fully recover (deliver a frame, hide the banner) while the stale
+    /// attempt is still hung. Second, the stale attempt resolving afterward as a hard failure must not
+    /// retroactively drag the tracker into `.unreachable` over that already-healthy stream, and the
+    /// reconnect machinery `ensureSubscriptionStarted`/`retryStateStreamConnection` share must still work
+    /// afterward (a later real stream loss still arms a reconnect).
+    @MainActor func testStaleAttemptResolvingAfterRetryDoesNotClobberTheReplacementsRecoveredState() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        defer { subscriptionServer.stop() }
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-STALE-COMPLETE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+
+        var connectCount = 0
+        var resumeFirstConnect: ((Bool) -> Void)?
+        let reachedFirstConnect = expectation(description: "the first connect reached the controlled resolution point")
+        model.stateStreamConnectOverrideForTesting = { [weak model] in
+            connectCount += 1
+            guard connectCount == 1 else {
+                model?.stateStreamConnectOverrideForTesting = nil
+                return true
+            }
+            return await withCheckedContinuation { continuation in
+                resumeFirstConnect = { continuation.resume(returning: $0) }
+                reachedFirstConnect.fulfill()
+            }
+        }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await fulfillment(of: [reachedFirstConnect], timeout: 5)
+        XCTAssertEqual(connectCount, 1)
+
+        model.retryStateStreamConnection()
+        await model.drainPendingConnectForTesting()
+        XCTAssertEqual(connectCount, 2, "Retry must start a fresh attempt rather than waiting out the hung one")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "Retry's own connect must have installed a fresh stream client")
+
+        // Prove the replacement can fully recover while the first attempt is still hung: deliver a frame
+        // over it, which is what actually clears the banner (`openStateStream` succeeding is not enough,
+        // see its doc comment).
+        guard let replacementGeneration = model.installedStreamClientGenerationForTesting else {
+            return XCTFail("Retry's connect must have installed a stream client with a generation")
+        }
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: replacementGeneration)
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected, "a delivered frame must clear the banner")
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+
+        // The stale first attempt finally resolves as the strongest possible failure evidence (every
+        // candidate address unreachable). Without the generation gate this reaches
+        // `establishStateStreamConnection`'s `scheduleReconnect(after:)` and drags the tracker to
+        // `.unreachable` over the replacement's already-healthy stream.
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        resumeFirstConnect?(false)
+        // Nothing awaits the stale task directly (it is not the current `subscriptionConnectTask`), so
+        // give its continuation's resumption a turn to run to completion before asserting nothing changed.
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(
+            model.connectionStageTracker.stage, .connected,
+            "the stale attempt's belated failure must not clobber the replacement's recovered stage")
+        XCTAssertFalse(
+            model.connectionStageTracker.isBannerVisible,
+            "the stale attempt's belated failure must not bring the banner back over a healthy stream")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the replacement's stream client must still be installed")
+
+        // The reconnect machinery `subscriptionConnectTask` feeds into must still work afterward: a real
+        // stream loss on the (still current) replacement still arms a reconnect.
+        model.handleStreamDisconnect(nil, generation: replacementGeneration)
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "a real disconnect on the replacement must still arm a reconnect")
+    }
+
+    /// A connect attempt's dial can succeed after it has already been superseded (Retry, or a newer
+    /// attempt that already installed its own client): the client it produced is a real, connected
+    /// subscription that must be stopped rather than left connected and forgotten, or installed over the
+    /// replacement that has already taken its place. Exercises `finishSuccessfulConnect` directly (the
+    /// concrete stream client offers no seam to race a real connect's success against supersession), the
+    /// same way `applyStreamEvent`/`handleStreamDisconnect` are tested elsewhere in this file.
+    @MainActor func testSuccessfulConnectSupersededWhileInFlightStopsItsClientInsteadOfInstalling() throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+
+        let replacement = FakeStreamClient()
+        model.installStreamClientForTesting(replacement)
+
+        let staleFromSupersededAttempt = FakeStreamClient()
+        model.finishSuccessfulConnect(staleFromSupersededAttempt, connectedHost: "203.0.113.5")
+
+        XCTAssertEqual(staleFromSupersededAttempt.stopCount, 1, "a superseded attempt's connected client must be stopped, not left connected")
+        XCTAssertEqual(replacement.stopCount, 0, "the replacement client already installed must be left alone")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "only the replacement must remain installed")
     }
 
     /// `reportFailedInputSend`'s return value is the `RemoteGhosttyInputFailureHandler` contract: whether
@@ -1488,8 +2098,12 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 }
 
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as
-/// an installed stream, which is all these tests need.
-private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+/// an installed stream, which is all these tests need. Counts `stop()` calls so a test can tell a
+/// superseded client was released rather than left connected and forgotten.
+private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable {
+    private(set) var stopCount = 0
+    func stop() { stopCount += 1 }
+}
 
 /// Scripts the answers the liveness recheck's own `.state` request comes back with, so a test can drive
 /// that state machine through unreachable attempts and device answers without a device. It also counts how
