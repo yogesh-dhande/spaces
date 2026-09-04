@@ -8,6 +8,10 @@ import spacesterminalcore
 
 struct SelectedTerminalSessionRoute: Identifiable, Hashable {
     let session: SpacesDeviceTerminalSessionSummary
+    /// Where this route was opened from, for the on-device performance log's `terminal_open_begin`
+    /// `source` attribute (`"list"` or `"deep_link"`). Not part of identity or equality below: two routes
+    /// for the same session are the same route regardless of how either was reached.
+    var openSource: String = "list"
 
     var id: String { session.id }
 
@@ -158,7 +162,7 @@ struct TerminalSessionNavigationModifier: ViewModifier {
     func body(content: Content) -> some View {
         content.navigationDestination(item: $selectedSession) { route in
             TerminalDetailView(
-                session: route.session, settings: model.settings, appModel: model,
+                session: route.session, settings: model.settings, appModel: model, openSource: route.openSource,
                 onAuthenticationRequired: { message in
                     pendingAuthenticationMessage = message
                     selectedSession = nil

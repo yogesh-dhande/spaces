@@ -128,6 +128,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// never attempting ownership takeover, and never offering an input affordance — so the recorded
     /// transcript stays visible and scrollable while typing, take-over, and the composer are absent.
     let isDemoMode: Bool
+    /// `"list"` or `"deep_link"`, for `terminal_open_begin`'s `source` attribute: where this open was
+    /// reached from. Carried on the model (rather than read at the emit site) because the route that
+    /// decided it (`SelectedTerminalSessionRoute.openSource`) has already been consumed by the time
+    /// `start()` runs.
+    private let openSource: String
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
 
@@ -271,6 +276,38 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// state event on every successful subscribe, so a stream that dialed successfully always delivers a
     /// frame promptly.
     private var currentStreamDeliveredFrame = false
+    /// `stream_first_frame`'s elapsed time when the frame beat `connect()`'s handle install (see
+    /// `registerLiveStreamFrame`); the event is emitted once the handle names the host it dialed.
+    private var firstFrameElapsedMSAwaitingHost: Int?
+    /// Uptime anchor for this open's `terminal_open_begin`, consumed by `terminal_first_paint`'s
+    /// `elapsedMS`. Uptime rather than wall-clock so a device sleep spanning the open cannot inflate the
+    /// measured first-paint latency. Set at the top of `start()`.
+    private var openBeginUptimeNanoseconds: UInt64?
+    /// Uptime anchor and reconnect metadata for the connect attempt currently in flight, set at the top of
+    /// `connect()`. Feeds `stream_first_frame` (in `registerLiveStreamFrame`), the proven-connected moment
+    /// for this attempt, and `stream_connect_end`'s failure branch in `handleConnectError`, which has no
+    /// access to `connect()`'s own locals, unlike `connect()` itself.
+    private var connectAttemptBeginUptimeNanoseconds: UInt64?
+    private var connectAttemptNumber: UInt64 = 0
+    private var connectAttemptIsSilent = false
+    /// Runs `battery_sample` on a 60-second cadence while this viewer's detail route is on screen. Started
+    /// in `start()`, cancelled in `beginStop()`; `nil` whenever the performance log is disabled, so a
+    /// production run without `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH`/the DEBUG default configured
+    /// never spins up a timer nobody reads.
+    private var batterySampleTimerTask: Task<Void, Never>?
+    /// Uptime anchor + target grid for `viewport_resize_frame_visible`, armed by `noteKeyboardToggled` and
+    /// filled in by the next `updateViewportSize` call the keyboard transition causes. `nil` whenever no
+    /// keyboard-caused resize is outstanding, which is most of the time.
+    private var pendingKeyboardResizeBeginUptimeNanoseconds: UInt64?
+    private var pendingKeyboardResizeTargetSize: (columns: Int, rows: Int)?
+    /// Quiet window for `viewport_resize_frame_visible`: the keyboard animation can produce several
+    /// viewport grids in a row, and a frame for an intermediate grid can arrive before the final
+    /// `updateViewportSize` call, so a frame matching the current target is held here as a candidate rather
+    /// than logged immediately. `pendingKeyboardResizeQuietWindowTask` fires 500 ms later and logs the
+    /// candidate only if nothing has cleared it by then; a later `updateViewportSize` call (a new target)
+    /// clears the candidate and cancels the task, so the new target has to be matched again.
+    private var pendingKeyboardResizeCandidate: (elapsedMS: Int?, columns: Int, rows: Int)?
+    private var pendingKeyboardResizeQuietWindowTask: Task<Void, Never>?
     /// Only a test overrides this (`connectionBannerGraceSecondsForTesting`), so a suite can drive the
     /// grace period to its boundary instead of waiting out the real one.
     var connectionBannerGraceSecondsForTesting: TimeInterval?
@@ -393,7 +430,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             openScreenHold.noteReducedFrame(frame)
             return true
         }, apply: { [weak self] output in self?.applyReducedState(output) },
-        didSubmit: { [openScreenHold] in openScreenHold.releasePendingAfterSubmit() })
+        didSubmit: { [openScreenHold, weak self] in
+            // Off the main actor (this hook is `@Sendable`, not `@MainActor`; see the pipeline's own doc),
+            // so the release itself runs right here, synchronously, exactly as it always has; only the
+            // perf-log emission below hops onto the main actor, and only when this call is the one that
+            // actually released the hold (the ordinary case for a non-barrier payload: see the comment
+            // above `releaseForApplyingMatchingFrame` for why a barrier can instead win that race there).
+            guard let size = openScreenHold.releasePendingAfterSubmit() else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.trace("open_screen_hold_release reason=release_pending_after_submit")
+                self.logFirstPaint(holdReleasedBy: "matching_frame", columns: size.columns, rows: size.rows)
+            }
+        })
     /// The viewer paints once per open, at the phone's grid: see `TerminalViewerOpenScreenHold`.
     @ObservationIgnored private let openScreenHold = TerminalViewerOpenScreenHold()
     /// Bounds the open hold. Armed with the hold and cancelled by whatever releases it.
@@ -492,13 +541,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
-        isDemoMode: Bool = false,
+        isDemoMode: Bool = false, openSource: String = "list",
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
             .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
         self.settings = settings
         self.isDemoMode = isDemoMode
+        self.openSource = openSource
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
@@ -657,6 +707,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func start() {
         guard streamHandle == nil, reconnectTask == nil else { return }
+        // The earliest point in a genuine open with the session id already known: `start()` runs exactly
+        // once per open (guarded above, and re-armed by `beginStop()` on a retained detail's next open),
+        // synchronously from `TerminalDetailView`'s `.task`. Uptime, not wall-clock, so `terminal_first_paint`'s
+        // elapsedMS is not inflated by a device sleep spanning the open.
+        openBeginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        var openBeginAttributes = DevicePerformanceLog.batteryAttributes()
+        openBeginAttributes["source"] = openSource
+        logPerformanceEvent(name: "terminal_open_begin", attributes: openBeginAttributes)
+        startBatterySampleTimerIfNeeded()
         if hasSentStopDetach {
             // A retained navigation destination can disappear with its tab and later reappear. Give
             // that new lifecycle its own channel and client identity so the prior stop task cannot
@@ -675,6 +734,57 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         beginOpenScreenHold()
         scheduleReconnect(after: .zero)
+    }
+
+    /// Arms the 60-second `battery_sample` cadence for as long as this detail stays open (cancelled by
+    /// `beginStop()`). Skipped entirely when the performance log is disabled, so a production run without
+    /// the DEBUG default configured never has a timer running for nobody to read.
+    private func startBatterySampleTimerIfNeeded() {
+        guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
+        batterySampleTimerTask?.cancel()
+        batterySampleTimerTask = Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled, let self else { return }
+                DevicePerformanceLog.emitBatterySample()
+            }
+        }
+    }
+
+    /// Called when `TerminalDetailView` observes the keyboard show/hide notification. Arms
+    /// `viewport_resize_frame_visible`'s anchor: the terminal surface (owned by `spacesterminalmobileghostty`,
+    /// outside this file) resizes in response, and the next `updateViewportSize` call this causes records
+    /// the grid that resize settles at.
+    func noteKeyboardToggled(visible: Bool) {
+        var attributes = DevicePerformanceLog.batteryAttributes()
+        attributes["visible"] = visible ? "1" : "0"
+        logPerformanceEvent(name: "keyboard_toggle", attributes: attributes)
+        pendingKeyboardResizeBeginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        pendingKeyboardResizeTargetSize = nil
+    }
+
+    /// Records a frame matching the current keyboard-resize target as a candidate and (re)starts the 500 ms
+    /// quiet window that confirms it: `updateViewportSize` clears the candidate and cancels this task if a
+    /// later, different target arrives first, so only a candidate nothing has superseded within the window
+    /// gets logged.
+    private func armKeyboardResizeQuietWindow(elapsedMS: Int?, columns: Int, rows: Int) {
+        // First match wins: every later payload at the settled grid carries the same snapshot, and
+        // re-arming on each would push the event out for as long as output keeps flowing. Only a viewport
+        // change clears the candidate (see `updateViewportSize`), and that is what re-arms it.
+        guard pendingKeyboardResizeCandidate == nil else { return }
+        pendingKeyboardResizeCandidate = (elapsedMS, columns, rows)
+        pendingKeyboardResizeQuietWindowTask?.cancel()
+        pendingKeyboardResizeQuietWindowTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self, let candidate = self.pendingKeyboardResizeCandidate else { return }
+            self.logPerformanceEvent(
+                name: "viewport_resize_frame_visible", elapsedMS: candidate.elapsedMS,
+                attributes: ["columns": String(candidate.columns), "rows": String(candidate.rows)])
+            self.pendingKeyboardResizeCandidate = nil
+            self.pendingKeyboardResizeTargetSize = nil
+            self.pendingKeyboardResizeBeginUptimeNanoseconds = nil
+            self.pendingKeyboardResizeQuietWindowTask = nil
+        }
     }
 
     /// Holds this viewer's screen updates until a frame at its own grid has reduced, so opening a
@@ -711,12 +821,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Ends the open hold and the timeout that bounds it. Idempotent, and safe to call after the reduce
-    /// loop has already ended the hold by matching a frame: the timer still has to be retired there.
+    /// loop has already ended the hold by matching a frame: the timer still has to be retired there. Logs
+    /// `terminal_first_paint` when this call is what ended a still-armed hold, except for `"stop"`: that
+    /// reason means the viewer left before any paint, so there is no first paint to report.
     private func releaseOpenScreenHold(reason: String) {
         guard openScreenHoldTimeoutTask != nil || openScreenHold.isHolding else { return }
         cancelOpenScreenHoldTimers()
-        openScreenHold.end()
+        let released = openScreenHold.end()
         trace("open_screen_hold_release reason=\(reason)")
+        if released, reason != "stop" {
+            logFirstPaint(holdReleasedBy: reason, columns: viewportSize?.columns, rows: viewportSize?.rows)
+        }
     }
 
     /// Paints the screen the first-paint gate suppressed, once the hold that suppressed it is over.
@@ -777,6 +892,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard openScreenHold.releaseIfNoMatchingFrameArrived() else { return false }
         cancelOpenScreenHoldTimers()
         trace("open_screen_hold_release reason=handshake_without_frame")
+        logFirstPaint(holdReleasedBy: "handshake_without_frame", columns: viewportSize?.columns, rows: viewportSize?.rows)
         return true
     }
 
@@ -870,6 +986,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func prepareForBackNavigation() async {
         guard let stopContext = beginStop() else { return }
+        // Logged here rather than in `beginStop()`: `stop()` also reaches `beginStop()` from `onDisappear`,
+        // which covers forced teardowns (a device switch, a revoked pairing), and those are not the user
+        // leaving the terminal. Only the back control's own path is a `terminal_back`.
+        logPerformanceEvent(
+            name: "terminal_back", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: openBeginUptimeNanoseconds),
+            attributes: DevicePerformanceLog.batteryAttributes())
         trace("back_detach_begin")
         await detachForStop(
             using: stopContext.channel, clientID: stopContext.clientID, pendingAttachment: stopContext.pendingAttachment,
@@ -883,6 +1005,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         pendingAutomaticTakeover: Task<Void, Never>?, shouldDetach: Bool
     )? {
         guard !hasSentStopDetach else { return nil }
+        batterySampleTimerTask?.cancel()
+        batterySampleTimerTask = nil
+        // A toggle whose frame never arrived before the detail stopped is not a sample: a retained detail's
+        // next lifecycle would otherwise close it out with the time away from the terminal included.
+        pendingKeyboardResizeTargetSize = nil
+        pendingKeyboardResizeBeginUptimeNanoseconds = nil
+        pendingKeyboardResizeCandidate = nil
+        pendingKeyboardResizeQuietWindowTask?.cancel()
+        pendingKeyboardResizeQuietWindowTask = nil
         runState = .stopped(detachSent: true)
         let pendingAttachment = viewerAttachmentOperation
         let pendingAutomaticTakeover = automaticTakeoverTask
@@ -1083,6 +1214,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     func updateViewportSize(columns: Int, rows: Int) {
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
+        // Every viewport change after a keyboard toggle moves the measurement's target to that grid: the
+        // surface can report intermediate grids while the keyboard animates, and the frame that matters is
+        // the one at the grid the transition settles at. `applyReducedState` clears both once the quiet
+        // window closes out a frame at the current target, which also ends the window a later, unrelated
+        // resize could enter. A candidate already armed for the previous target no longer applies to this
+        // one, so it is cleared here too: the new target has to be matched again from scratch.
+        if pendingKeyboardResizeBeginUptimeNanoseconds != nil {
+            pendingKeyboardResizeTargetSize = resolved
+            pendingKeyboardResizeCandidate = nil
+            pendingKeyboardResizeQuietWindowTask?.cancel()
+            pendingKeyboardResizeQuietWindowTask = nil
+        }
         if isDemoMode {
             // Demo Mode never takes ownership, so the owner resize handshake below never runs and the
             // in-memory backend would only ever serve its smallest (phone) recording. Report the viewport
@@ -1115,6 +1258,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         {
             cancelOpenScreenHoldTimers()
             trace("open_screen_hold_release reason=viewport_matches_stored_frame")
+            logFirstPaint(holdReleasedBy: "stored_frame", columns: resolved.columns, rows: resolved.rows)
             paintFirstScreenAfterOpenScreenHoldRelease()
         }
         trace(
@@ -1959,20 +2103,42 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// `connectionStageTracker` directly outside this pair.
     private func syncConnectionStageObservables() {
         let stage = connectionStageTracker.stage
-        if connectionStage != stage {
+        let bannerVisible = connectionStageTracker.isBannerVisible
+        let stageChanged = connectionStage != stage
+        let bannerChanged = isConnectionBannerVisible != bannerVisible
+        if stageChanged {
             connectionStage = stage
             writeE2EEventIfNeeded(kind: "connection_stage", detail: String(describing: stage))
         }
-        let bannerVisible = connectionStageTracker.isBannerVisible
-        if isConnectionBannerVisible != bannerVisible {
+        if bannerChanged {
             isConnectionBannerVisible = bannerVisible
             writeE2EEventIfNeeded(kind: bannerVisible ? "connection_banner_visible" : "connection_banner_hidden", detail: nil)
+        }
+        // One perf event per observable change, banner included: the grace expiry that shows the banner
+        // changes nothing about the stage, and the interval the user actually saw the banner is what the
+        // handoff report reads from this event.
+        if stageChanged || bannerChanged {
+            logPerformanceEvent(name: "connection_stage", attributes: ["stage": String(describing: stage), "banner": bannerVisible ? "1" : "0"])
         }
     }
 
     /// Any frame at all on a live stream is proof the connection is up, called from the stream's
-    /// `onEvent` closure for every payload, not just the first after a loss.
+    /// `onEvent` closure for every payload, not just the first after a loss. The perf event fires only the
+    /// first time for this handle (`currentStreamDeliveredFrame` is reset to `false` for every new handle
+    /// in `connect()`), which is what makes it `stream_first_frame` rather than a per-payload event.
     private func registerLiveStreamFrame() {
+        if !currentStreamDeliveredFrame {
+            // The very first frame can arrive on this actor before `connect()` resumes from `subscribe`
+            // and installs the handle that names the dialed host. The elapsed time is taken here, at the
+            // frame; the event waits for the handle (`connect()` emits it), since guessing the host would
+            // mislabel a failover to a secondary address in the handoff report.
+            let elapsedMS = DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: connectAttemptBeginUptimeNanoseconds)
+            if let host = streamConnectedHost {
+                logPerformanceEvent(name: "stream_first_frame", elapsedMS: elapsedMS, attributes: ["host": host])
+            } else {
+                firstFrameElapsedMSAwaitingHost = elapsedMS
+            }
+        }
         currentStreamDeliveredFrame = true
         clearConnectionOutage()
     }
@@ -2182,6 +2348,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
 
         let reconnectSilently = shouldReconnectSilently
+        // Anchors this attempt's timing events. `handleConnectError` has no parameters of its own to carry
+        // `reconnectAttempt`/`reconnectSilently` forward, so it reads these back off the model instead.
+        connectAttemptBeginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        connectAttemptNumber = reconnectAttempt
+        connectAttemptIsSilent = reconnectSilently
         trace("connect_begin silent=\(reconnectSilently ? 1 : 0) attach_before_subscribe=\(shouldAttachBeforeSubscribing ? 1 : 0)")
         connectionState = reconnectSilently ? .idle : .connecting
         do {
@@ -2195,6 +2366,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // on this actor while this call is still suspended awaiting the handle, so an assignment placed
             // after `subscribe` returns could stomp a delivery that already landed for this same attempt.
             currentStreamDeliveredFrame = false
+            firstFrameElapsedMSAwaitingHost = nil
+            // Also the host: a retained detail's stop leaves the previous stream's host behind, and a first
+            // frame that beats this attempt's handle must not be labeled with it.
+            streamConnectedHost = nil
             let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID) { [weak self] payload in
                 guard let self else { return }
                 guard self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
@@ -2220,8 +2395,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             streamHandle = handle
             streamConnectedHost = handle.host
+            if let elapsedMS = firstFrameElapsedMSAwaitingHost {
+                firstFrameElapsedMSAwaitingHost = nil
+                logPerformanceEvent(name: "stream_first_frame", elapsedMS: elapsedMS, attributes: ["host": handle.host ?? ""])
+            }
             errorMessage = nil
             reconnectTask = nil
+            // `subscribe` returning is only proof the dial and TLS handshake completed; it is not proof
+            // the connection is actually usable, so no `stream_connect_end` success event is logged here.
+            // `stream_first_frame` (in `registerLiveStreamFrame`) is the proven-connected moment, since
+            // it fires only once the daemon has actually sent data back over this connection.
             trace("connect_subscribe_success")
             // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
             // here on a reconnect — at first connect `latestState` is nil and the fallback snapshot cannot
@@ -2424,6 +2607,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let error = disconnect.error
         let reconnectSilently = shouldReconnectSilently
         trace("disconnect error=\(sanitizedTraceDetail(error?.localizedDescription ?? "nil")) silent=\(reconnectSilently ? 1 : 0)")
+        logPerformanceEvent(
+            name: "stream_disconnect",
+            attributes: [
+                "error": error.map { DevicePerformanceLog.sanitized($0.localizedDescription) } ?? "clean",
+                "delivered_frame": currentStreamDeliveredFrame ? "1" : "0", "exhausted": dialExhaustedAllCandidates ? "1" : "0",
+            ])
         // Captured before the stream state below is cleared: this is evidence about the stream that just
         // ended, not about whatever connect() installs next. `dialExhaustedAllCandidates` in particular
         // arrives as part of this disconnect event rather than being read off `streamHandle` or
@@ -2535,6 +2724,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
+        logPerformanceEvent(
+            name: "stream_connect_end", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: connectAttemptBeginUptimeNanoseconds),
+            attributes: [
+                "attempt": String(connectAttemptNumber), "silent": connectAttemptIsSilent ? "1" : "0", "success": "0",
+                "error": DevicePerformanceLog.sanitized(error.localizedDescription),
+            ])
         let isTransient = Self.isTransientReconnectError(error)
         // Transient first, for the same reason as `handleDisconnect`: a connect that failed on a network
         // still settling after a foreground resume is retried, not read as revocation.
@@ -3471,6 +3666,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             openScreenHold.releaseForApplyingMatchingFrame(columns: frame.columns, rows: frame.rows)
         {
             trace("open_screen_hold_release reason=apply_matching_frame")
+            logFirstPaint(
+                holdReleasedBy: "matching_frame", columns: frame.columns, rows: frame.rows,
+                frame: reduction.decodedUpdate?.kind.rawValue ?? "full")
+        }
+        // The keyboard-caused resize `noteKeyboardToggled` armed reached the surface: this is a frame at
+        // the grid that resize's most recent target names, regardless of whether the open hold above also
+        // matched (the two are independent: this fires for every keyboard toggle, that fires once per
+        // open). It does not close the measurement immediately: the keyboard animation can still produce a
+        // later, different target before settling, so the elapsed time and grid are only recorded as a
+        // candidate, and a quiet window (below) confirms nothing has superseded it before logging. A
+        // refused out-of-band payload keeps its snapshot for diagnostics but never reaches the screen, so
+        // it cannot arm a candidate.
+        if !reduction.isRefusedOutOfBandPayload, let target = pendingKeyboardResizeTargetSize, let snapshot = payload.renderSnapshot,
+            snapshot.columns == target.columns, snapshot.rows == target.rows
+        {
+            armKeyboardResizeQuietWindow(
+                elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: pendingKeyboardResizeBeginUptimeNanoseconds),
+                columns: target.columns, rows: target.rows)
         }
         let holdsFirstPaint = openScreenHold.isHolding && ownerRenderEpochState == nil
         if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {
@@ -3535,6 +3748,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
             renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
             renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+            // `incomingPayload.renderUpdate` is already-decoded `Data` (`GhosttyRemoteSessionState
+            // .renderUpdate`'s `.encodedData`, decoded from the wire's base64 field by `JSONDecoder` before
+            // this payload ever reaches here), so this and the event's own `count:` below are decoded
+            // render-update bytes, not the larger base64 string the wire actually carried. Recovering the
+            // wire size would mean capturing the base64 string's length before decoding, upstream of this
+            // model entirely; not added here since nothing on this path already has it cheaply in hand.
             renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
             // The payloads this apply superseded report nothing of their own; this is their trace.
             renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
@@ -3691,6 +3910,30 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func logPerformanceEvent(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
         SpacesDeviceTerminalPerformanceLogger.emit(
             .init(sessionID: session.id, source: "ios-viewer", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
+    }
+
+    /// Emits `terminal_first_paint` for an open-hold release. The single place that builds the event's
+    /// attribute set, so every release path reports the same shape. `frame` is included only when a
+    /// decoded update kind is known.
+    ///
+    /// Only `matching_frame` and `stored_frame` mean a frame painted. For the other reasons (`timeout`,
+    /// `handshake_without_frame`, `not_owner`, `session_ended`) the event marks when the open wait ended
+    /// and the view stopped holding: the preparing screen may stay up longer, or nothing may paint at all.
+    /// The report keeps each reason in its own table, so those samples never mix into the paint numbers.
+    /// Opens that never arm the hold (an already-ended session, Demo Mode) log no first paint: the
+    /// baseline measures live sessions, and those opens have no network wait to time.
+    private func logFirstPaint(holdReleasedBy: String, columns: Int?, rows: Int?, frame: String? = nil) {
+        var attributes = [
+            "columns": columns.map { String($0) } ?? "",
+            "rows": rows.map { String($0) } ?? "",
+            "hold_released_by": holdReleasedBy,
+        ]
+        if let frame {
+            attributes["frame"] = frame
+        }
+        logPerformanceEvent(
+            name: "terminal_first_paint", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: openBeginUptimeNanoseconds),
+            attributes: attributes)
     }
 
     private func trace(_ message: @autoclosure () -> String) { terminalViewerTrace(session.id, message()) }
