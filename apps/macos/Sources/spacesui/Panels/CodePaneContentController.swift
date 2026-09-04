@@ -445,14 +445,18 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let workspaceStateStore = workspaceStateStore ?? ClientCodePaneWorkspaceStateStorage(deviceID: deviceID)
         let restoredState = Self.loadWorkspaceState(from: workspaceStateStore, workspaceID: workspaceID)
         self.initialMode = initialMode
-        switch initialModePolicy {
-        case .useRequestedMode:
-            currentMode = initialMode
-            forcedInitialMode = initialMode
-        case .restoreWorkspaceMode:
-            currentMode = restoredState?.codePaneMode ?? initialMode
-            forcedInitialMode = nil
-        }
+        // Read through the `hosting` parameter rather than the `self.hosting` property assigned
+        // below: the seeded mode must be settled before the first `spaces:init` payload, and this
+        // is the earliest point at which both the policy and the workspace's git-ness are known.
+        // Every construction path runs after the workspace's overview row exists: the open-editor
+        // gestures start from a sidebar or palette row, and launch-time restore holds a persisted
+        // Editor window back (`panelWindowRestoreDecision`'s `.waitForDevices`) until its device's
+        // overview has loaded. The `?? true` therefore only keeps the expression total; it is not a
+        // path a non-git workspace can take, so no later re-seeding of the mode is needed.
+        currentMode = Self.seededMode(
+            policy: initialModePolicy, requested: initialMode, restored: restoredState?.codePaneMode,
+            isGitRepository: hosting.codePaneWorkspaceInfo(workspaceID: workspaceID)?.isGitRepository ?? true)
+        forcedInitialMode = initialModePolicy == .useRequestedMode ? initialMode : nil
         self.currentScope = restoredState?.scope ?? .uncommitted
         self.diffLayout = restoredState?.diffLayout ?? "unified"
         self.diffSelectedPath = restoredState?.diffSelectedPath
@@ -490,6 +494,19 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         rootView.wantsLayer = true
         rootView.setAccessibilityIdentifier("code-pane-\(paneID)")
         bindAppearanceReactiveLayer(rootView) { view in view.layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor }
+    }
+
+    /// The mode a freshly constructed pane starts in. An explicit Editor navigation always wins with
+    /// the mode it requested. A restoration keeps the workspace's own saved mode when it has one;
+    /// with no saved mode, a workspace whose project is not a git repository starts in Editor,
+    /// because Diff has no comparison it could show there.
+    static func seededMode(
+        policy: CodePaneInitialModePolicy, requested: CodePaneMode, restored: CodePaneMode?, isGitRepository: Bool
+    ) -> CodePaneMode {
+        switch policy {
+        case .useRequestedMode: return requested
+        case .restoreWorkspaceMode: return restored ?? (isGitRepository ? requested : .editor)
+        }
     }
 
     var contentView: NSView { rootView }
@@ -1024,6 +1041,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         // is display-only (the toolbar's base preset and ref-dialog badge); it does not feed `refName(for:)`, which
         // no longer resolves a scope against the workspace's base branch at all.
         let baseBranch = workspaceInfo?.baseBranch.flatMap { $0.isEmpty ? nil : $0 }
+        // Same total-expression default as the mode seeding in `init`: the workspace row is already
+        // in the overview on every path that constructs this controller.
+        let isGitRepository = workspaceInfo?.isGitRepository ?? true
         // Reuses whatever `applyRunningAgents` already recorded (e.g. from an overview that landed
         // while this pane was still loading) instead of re-querying, so init and the dedupe guard
         // agree on the same value — matches `currentTheme`'s `??` fallback just above.
@@ -1035,7 +1055,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
         let payload = CodePaneBridge.InitPayload(
             workspaceId: workspaceID, workspaceName: workspaceName, theme: appearance.rawValue, baseBranch: baseBranch,
-            workspaceState: workspaceStatePayload(),
+            isGitRepository: isGitRepository, workspaceState: workspaceStatePayload(),
             agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
