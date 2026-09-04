@@ -1,0 +1,78 @@
+/* The inline diff editor's header and the autosave status chip.
+ *
+ * Pierre renders that header inside its `diffs-container` shadow root, and that root adopts only
+ * the library's own stylesheet (see `@pierre/diffs`' web-components.js), so no rule in app.css can
+ * reach it. This file is therefore loaded twice: once globally, for the Editor top bar's chip and
+ * its Retry now action, and once inline through Pierre's `unsafeCSS` option (see diffView.ts's
+ * `buildCodeViewOptions`). That is why the `.btn` and `.btn.primary` rules below are copied from
+ * app.css instead of shared: the header's Take disk / Keep mine buttons live inside the shadow root
+ * and would otherwise render unstyled. The color tokens are not copied, since they are declared on
+ * `:root` in app.css and inherit into the shadow root.
+ */
+
+.diff-edit-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diff-edit-header .sp {
+  flex: 1;
+}
+
+/* The autosave status pill: the one save affordance either surface has (neither the top bar nor the
+   inline header carries a Save button). Failed and blocked share the orange the conflict banner
+   uses for "something needs you", tinted from the same token rather than adding a second orange. */
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--chip);
+  font-size: 11px;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
+.save-status[data-state="saving"] {
+  color: var(--fg);
+}
+
+.save-status[data-state="failed"],
+.save-status[data-state="blocked"] {
+  background: var(--orange-tint);
+  color: var(--orange);
+}
+
+/* Copied from app.css for the shadow root; see this file's header comment. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg2);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* Borderless accent action for a secondary control that sits beside text rather than in a row of
+   buttons: the "Retry now" action on the save-status chip. */
+.btn.ghost {
+  border-color: transparent;
+  padding: 0 4px;
+  color: var(--accent);
+}

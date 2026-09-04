@@ -36,6 +36,7 @@ function makeBridge(result: WorkspaceFileReadResult): SpacesBridge {
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
+    notifyEditsFlushed: vi.fn(),
     reviewCommentList: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),
@@ -276,9 +277,10 @@ it("adopts a file that changed on disk into the rendered document and leaves the
     // from this text, so a stale document here would save the pre-reload file over the new one.
     expect(pierreEditor(view, "notes.txt").getText()).toBe(RELOADED_NOTES);
     expect(latestContent(view)).toBe(RELOADED_NOTES);
-    // Adopting disk is not an edit: Save stays disabled and nothing counts as unsaved.
+    // Adopting disk is not an edit: nothing counts as unsaved, so the save-status chip stays idle
+    // and no write is scheduled. (Editor mode has no Save button; autosave owns every write.)
     expect(isDirty(view)).toBe(false);
-    expect(container.querySelector<HTMLButtonElement>("button.primary")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLElement>("#code-pane-editor-save-status")?.dataset.state).toBe("idle");
 
     // The very next real edit still registers, so the adoption suppresses one event and no more.
     const editorElement = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0]!;

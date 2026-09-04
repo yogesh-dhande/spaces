@@ -1100,6 +1100,20 @@ import spacesterminalcore
             movingKeyboardFocus: TerminalPaneService.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: sessionIsTerminating))
     }
 
+    /// Gives every code pane's page a bounded chance to issue the file writes its editor autosave
+    /// debounce is still holding, before `closeAllContentForTermination` takes the panes down. Each
+    /// pane answers or times out on its own (see
+    /// `CodePaneContentController.flushEditsBeforeTermination`), so one wedged page delays quitting
+    /// by its timeout and no more, and `completion` runs on the main queue once all have reported.
+    func flushAllCodePaneEditsForTermination(completion: @escaping () -> Void) {
+        let group = DispatchGroup()
+        for codePane in codePaneControllers.values.compactMap({ $0 as? CodePaneContentController }) {
+            group.enter()
+            codePane.flushEditsBeforeTermination { group.leave() }
+        }
+        group.notify(queue: .main, execute: completion)
+    }
+
     /// Detaches every open pane's terminal client at app termination without stopping
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
