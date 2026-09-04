@@ -920,6 +920,19 @@ export class DiffView {
         edit: true,
       };
     }
+    if (file.submodule !== undefined) {
+      // A gitlink has no textual patch to render — it renders as a read-only pointer row, same
+      // renderer as a binary placeholder (`type: "file"`, no gutter/line ids/annotations).
+      //
+      // This check sits below the editing branch on purpose: a live inline edit session whose path
+      // turns into a submodule mid-session (the user replaces the very file they are editing with a
+      // submodule at the same path, on disk, while the Editor is open) keeps its edit surface until
+      // the session ends. Accepted: the transition is a deliberate, rare user action outside the
+      // Editor; the session's next save fails loudly through the ordinary file-write error path
+      // (the path is a directory now), and ending the session re-renders the pointer row. A
+      // pre-emptive teardown here would discard an unsaved buffer on a refresh tick instead.
+      return this.placeholderItem(file.path, submoduleLabel(file.submodule));
+    }
     if (file.isBinary) {
       return this.placeholderItem(file.path, "Binary file not shown.");
     }
@@ -1260,4 +1273,30 @@ function annotationListEquals(a: readonly AnchoredComment[] | undefined, b: read
     const other = b[index]!;
     return ac.comment === other.comment && ac.position!.lineNumber === other.position!.lineNumber && ac.position!.outdated === other.position!.outdated;
   });
+}
+
+/** Text for a submodule (gitlink) entry's placeholder row. `oldCommit`/`newCommit` are full
+ * 40-character shas; only the first 7 characters are shown, matching every other short-sha
+ * display in this pane (e.g. `DiffFileEntry.oldSHA`/`newSHA`). One side is absent exactly when the
+ * submodule was added (`oldCommit` absent) or removed (`newCommit` absent), both never absent at
+ * once, since a submodule entry always has at least one side. When both sides are present and
+ * identical, the pointer itself did not move (a renamed submodule, one whose own worktree is
+ * dirty, or one left unresolved by a conflicting merge): a single sha is shown rather than a
+ * no-op `X → X` arrow. `dirty` and `unmerged` are independent flags (a conflicted pointer's own
+ * worktree can also carry uncommitted edits), so both suffixes can appear together. */
+function submoduleLabel(submodule: NonNullable<DiffFileEntry["submodule"]>): string {
+  const oldShort = submodule.oldCommit?.slice(0, 7);
+  const newShort = submodule.newCommit?.slice(0, 7);
+  const base =
+    submodule.oldCommit !== undefined && submodule.oldCommit === submodule.newCommit
+      ? `Submodule ${newShort}`
+      : oldShort !== undefined && newShort !== undefined
+        ? `Submodule ${oldShort} → ${newShort}`
+        : newShort !== undefined
+          ? `Submodule added ${newShort}`
+          : `Submodule removed ${oldShort}`;
+  const flags = [submodule.dirty ? "dirty" : undefined, submodule.unmerged ? "unmerged" : undefined].filter(
+    (flag): flag is string => flag !== undefined,
+  );
+  return flags.length > 0 ? `${base} (${flags.join(", ")})` : base;
 }

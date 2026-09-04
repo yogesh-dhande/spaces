@@ -1240,6 +1240,23 @@ export class CommentsController {
     if (pending) await pending;
     const resolvedId = this.resolveId(id);
 
+    // Emptying a textarea and then clicking Delete fires the textarea's blur (silent auto-discard,
+    // see the caller above) before the click's own delete: `deleteDraft`'s `pendingDeleteById`
+    // coalescing only catches a click that lands while that blur delete is still IN FLIGHT, but a
+    // provisional's blur delete (the branch just below) finishes synchronously, so by the time the
+    // press-gate-deferred click reaches here (`pointerPressActive`'s setTimeout(0)) that entry is
+    // long gone and this call starts a fresh run. The id is then neither provisional nor present in
+    // `this.drafts` — treat that the same as "already gone" and skip the RPC, mirroring the
+    // provisional branch's local cleanup, instead of asking the daemon to delete a row it never had
+    // (or, for a persisted draft a mirror refresh already dropped, no longer has) and surfacing a
+    // spurious "was not found" error banner.
+    if (!this.provisionalIds.has(resolvedId) && !this.drafts.some((d) => d.id === resolvedId)) {
+      this.batchedIds.delete(resolvedId);
+      this.forgetDraftState(id, resolvedId);
+      this.refresh();
+      return;
+    }
+
     if (this.provisionalIds.has(resolvedId)) {
       this.provisionalIds.delete(resolvedId);
       this.drafts = this.drafts.filter((d) => d.id !== resolvedId);

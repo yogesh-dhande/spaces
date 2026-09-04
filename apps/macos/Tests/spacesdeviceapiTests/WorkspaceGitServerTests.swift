@@ -1853,6 +1853,56 @@
             }
         }
 
+        /// A submodule pointer (gitlink, mode 160000) is not file content: the manifest marks it
+        /// `isSubmodule` from the plan alone (before any patch is fetched), and its patch chunk answers
+        /// metadata-only — `submodule` set, no patch bytes — mirroring how a binary file's patch chunk
+        /// carries no byte stream either.
+        func testWorkspaceDiffManifestAndPatchChunkReportASubmodulePointerAsMetadataOnly() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let subrepo = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-submodule-source-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: subrepo, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: subrepo) }
+                try runGit(["init", "--initial-branch", "main"], cwd: subrepo.path)
+                try "sub content".write(to: subrepo.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "FILE.txt"], cwd: subrepo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "sub initial"], cwd: subrepo.path)
+                let subrepoSHA = try runGit(["rev-parse", "HEAD"], cwd: subrepo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", subrepo.path, "sub"], cwd: repo.path)
+                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add submodule"], cwd: repo.path)
+
+                let manifestResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
+                let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
+                let subManifestFile = try XCTUnwrap(manifest.files.first { $0.path == "sub" })
+                XCTAssertTrue(subManifestFile.isSubmodule)
+                let gitmodulesManifestFile = try XCTUnwrap(manifest.files.first { $0.path == ".gitmodules" })
+                XCTAssertFalse(gitmodulesManifestFile.isSubmodule)
+
+                let patchResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffFileChunk(
+                            .init(
+                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "sub", byteOffset: 0)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(patchResponse.ok, patchResponse.message)
+                let chunk = try XCTUnwrap(patchResponse.workspaceDiffFileChunk)
+                XCTAssertEqual(chunk.file.path, "sub")
+                let change = try XCTUnwrap(chunk.file.submodule)
+                XCTAssertNil(change.oldCommit)
+                XCTAssertEqual(change.newCommit, subrepoSHA)
+                XCTAssertFalse(change.dirty)
+                // Metadata-only, exactly like a binary file's patch chunk: no patch bytes, no continuation.
+                XCTAssertNil(chunk.patchBase64Data)
+                XCTAssertNil(chunk.transferID)
+                XCTAssertNil(chunk.nextByteOffset)
+            }
+        }
+
         /// `lastCommit` and `refName` are mutually exclusive scopes (see `SpacesDeviceWorkspaceDiffManifestChunkRequest`'s
         /// doc comment) — sending both is a client bug, rejected up front.
         func testWorkspaceDiffRejectsLastCommitCombinedWithRefName() throws {

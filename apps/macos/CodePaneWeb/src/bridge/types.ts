@@ -41,19 +41,39 @@ export interface DiffFileManifestEntry {
   status: FileChangeStatus;
   /** Immutable old-side tree for on-demand Git-filtered inline-edit hydration. */
   comparisonBaseRevision?: string;
+  /** True only for a git submodule (gitlink, mode 160000) entry; absent for every ordinary file.
+   * A gitlink has no textual patch — the daemon reports it as a pointer change instead (see
+   * `DiffFileEntry.submodule`), so the sidebar can render its read-only pointer row from the
+   * manifest alone, before the metadata-only chunk arrives. */
+  isSubmodule?: boolean;
 }
 
-/** One completed file patch. `patch` is absent only for a binary file. There is deliberately no
- * product truncation flag: the daemon transfers every textual patch in bounded transport chunks. */
+/** One completed file patch. `patch` is absent for a binary file or a submodule (gitlink) entry.
+ * There is deliberately no product truncation flag: the daemon transfers every textual patch in
+ * bounded transport chunks. */
 export interface DiffFileEntry {
   /** Workspace-relative path of the file's current (new) side. */
   path: string;
   /** Previous path, present only when `status` is `"renamed"`. */
   oldPath?: string;
   status: FileChangeStatus;
-  /** Git unified diff patch text for this file. Absent only when `isBinary` is true. */
+  /** Git unified diff patch text for this file. Absent when `isBinary` is true or `submodule` is
+   * present. */
   patch?: string;
   isBinary: boolean;
+  /** Carried over from the manifest entry (see `DiffFileManifestEntry.isSubmodule`) so the
+   * Changes list can badge a gitlink row while its metadata-only chunk is still queued; the
+   * pointer detail itself arrives later in `submodule`. */
+  isSubmodule?: boolean;
+  /** Present only for a git submodule (gitlink, mode 160000) entry: the pointer commits either
+   * side recorded, and whether the submodule's own worktree carried uncommitted changes. One of
+   * `oldCommit`/`newCommit` is absent when the submodule was added or removed. Mirrors how
+   * `isBinary` travels: repeated on every chunk reply's `file` metadata, with no patch bytes sent
+   * for the entry. `unmerged` is true when a conflicting merge left the pointer in git's
+   * unresolved-conflict index state; the reported commits are then the pointer the worktree
+   * currently holds (HEAD's side until the user resolves), not a merged result. The daemon never
+   * reports `dirty` together with `unmerged`. */
+  submodule?: { oldCommit?: string; newCommit?: string; dirty: boolean; unmerged: boolean };
   /** Ephemeral client-side transfer state, never persisted with workspace recovery data. */
   patchState?: "queued" | "streaming" | "ready";
   oldSHA?: string;

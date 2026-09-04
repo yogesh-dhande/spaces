@@ -137,6 +137,74 @@ describe("fileList — renderFileList (existing behavior)", () => {
       expect(row.querySelector(".st")).toBeNull();
     }
   });
+
+  it("shows a submodule badge instead of the stat span for a gitlink entry", () => {
+    const container = document.createElement("div");
+    const files = [
+      makeFile({
+        path: "sbc_hal",
+        patch: undefined,
+        submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false },
+      }),
+    ];
+
+    renderFileList(container, files, undefined, makeCallbacks());
+
+    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
+    expect(row.querySelector(".submodule-badge")?.textContent).toBe("submodule");
+    expect(row.querySelector(".st")).toBeNull();
+    expect(row.querySelector(".transfer")).toBeNull();
+  });
+
+  it("badges a gitlink row from the manifest flag alone, before its pointer metadata arrives", () => {
+    const container = document.createElement("div");
+    const files = [makeFile({ path: "sbc_hal", patch: undefined, patchState: "queued", isSubmodule: true })];
+
+    renderFileList(container, files, undefined, makeCallbacks());
+
+    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
+    expect(row.querySelector(".submodule-badge")?.textContent).toBe("submodule");
+    expect(row.querySelector(".transfer")).toBeNull();
+    expect(row.querySelector(".st")).toBeNull();
+  });
+
+  it("keeps exactly one badge on a submodule row across patch-state updates", () => {
+    const container = document.createElement("div");
+    renderFileList(
+      container,
+      [makeFile({ path: "sbc_hal", patch: undefined, patchState: "queued", isSubmodule: true })],
+      undefined,
+      makeCallbacks(),
+    );
+
+    expect(updateFileListRow(container, makeFile({ path: "sbc_hal", patch: undefined, patchState: "streaming", isSubmodule: true }))).toBe("updated");
+    expect(
+      updateFileListRow(
+        container,
+        makeFile({
+          path: "sbc_hal",
+          patch: undefined,
+          patchState: "ready",
+          isSubmodule: true,
+          submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false },
+        }),
+      ),
+    ).toBe("updated");
+
+    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
+    expect(row.querySelectorAll(".submodule-badge")).toHaveLength(1);
+    expect(row.querySelector(".fn")?.textContent).toBe("sbc_hal");
+  });
+
+  it("keeps data-path and the row identifier on a submodule row", () => {
+    const container = document.createElement("div");
+    const files = [makeFile({ path: "sbc_hal", patch: undefined, submodule: { dirty: false, unmerged: false } })];
+
+    renderFileList(container, files, undefined, makeCallbacks());
+
+    const row = container.querySelector<HTMLElement>(`.row[data-path="sbc_hal"]`)!;
+    expect(row.id).toBe(`code-pane-change-${encodeURIComponent("sbc_hal")}`);
+  });
 });
 
 describe("fileList — directory tree (docs mockup 'G — Tree with compacted chains')", () => {

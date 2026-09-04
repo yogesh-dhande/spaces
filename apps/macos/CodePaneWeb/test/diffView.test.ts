@@ -414,6 +414,116 @@ describe("DiffView progressive patch replacement", () => {
   });
 });
 
+describe("DiffView submodule (gitlink) entries", () => {
+  function submoduleFile(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
+    return file({
+      path: "sbc_hal",
+      patch: undefined,
+      patchState: "ready",
+      submodule: {
+        oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+        dirty: false,
+        unmerged: false,
+      },
+      ...overrides,
+    });
+  }
+
+  it("renders a modified submodule as a placeholder naming both short shas", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile()], false);
+
+    const item = control.items.get("sbc_hal");
+    expect(item?.type).toBe("file");
+    expect(item?.file?.contents).toBe("Submodule fa1d453 → 128a927");
+  });
+
+  it("appends '(dirty)' when the submodule's own worktree carried uncommitted changes", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (dirty)");
+  });
+
+  it("renders 'added' when only a newCommit is present", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({
+      status: "added",
+      submodule: { newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca", dirty: false, unmerged: false },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule added 128a927");
+  });
+
+  it("renders 'removed' when only an oldCommit is present", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({
+      status: "deleted",
+      submodule: { oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f", dirty: false, unmerged: false },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule removed fa1d453");
+  });
+
+  it("renders a single short sha, not a no-op arrow, when the pointer's commit did not move but the worktree is dirty", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      dirty: true,
+      unmerged: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (dirty)");
+  });
+
+  it("renders a single short sha for a submodule renamed without moving its pointer", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({
+      status: "renamed",
+      oldPath: "sub",
+      submodule: {
+        oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        dirty: false,
+        unmerged: false,
+      },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453");
+  });
+
+  it("appends '(unmerged)' when a conflicting merge left the pointer unresolved", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      dirty: false,
+      unmerged: true,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (unmerged)");
+  });
+
+  it("renders as a placeholder file item with no diff annotations/gutter, even though the manifest carries no isBinary", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks());
+    diffView.setFiles([submoduleFile({ isBinary: false })], false);
+
+    const item = control.items.get("sbc_hal");
+    // `type: "file"` is Pierre's non-diff renderer — it has no gutter, no line ids, and never
+    // receives `annotations` (only `type: "diff"` items do; see `buildAnnotations`'s only caller).
+    expect(item?.type).toBe("file");
+    expect(item?.annotations).toBeUndefined();
+    expect(item?.fileDiff).toBeUndefined();
+  });
+});
+
 describe("DiffView inline edit", () => {
   it("hydrates a replacement diff once before activating it", () => {
     const path = "src/foo.ts";

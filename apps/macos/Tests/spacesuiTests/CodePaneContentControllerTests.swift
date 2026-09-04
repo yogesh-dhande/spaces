@@ -1179,6 +1179,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         }
     }
 
+    /// Every subview reachable from `view`, depth-first, in add order — used to locate the crash
+    /// notice's Reload button and message label without depending on the exact stack shape.
+    private func descendants(in view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants(in: $0) } }
+
     @Test func descriptorCarriesTheDeviceAndWorkspaceItShows() {
         let content = makeController()
 
@@ -1249,6 +1253,114 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         evaluator.completeOldestPending(with: "__none__")
 
         #expect(content.contentView.subviews.isEmpty)
+    }
+
+    // MARK: - Web content process termination / failed load
+
+    @Test func webContentProcessTerminationShowsNoticeAndRemovesTheWebView() throws {
+        let content = makeController()
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+
+        content.webViewWebContentProcessDidTerminate(webView)
+
+        #expect(!content.contentView.subviews.contains { $0 is WKWebView }, "the dead web view is removed from the pane")
+        let notice = content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" }
+        #expect(notice != nil, "a crash notice replaces it")
+    }
+
+    @Test func reloadAfterTerminationInstallsAFreshWebViewAndRemovesTheNotice() throws {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstWebView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.webViewWebContentProcessDidTerminate(firstWebView)
+        let reloadButton = try #require(
+            descendants(in: content.contentView).first { $0.accessibilityIdentifier() == "codePaneCrashNoticeReload" } as? NSButton)
+
+        _ = reloadButton.target?.perform(reloadButton.action, with: reloadButton)
+
+        #expect(
+            content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" } == nil,
+            "Reload removes the notice")
+        let secondWebView = content.contentView.subviews.first { $0 is WKWebView }
+        #expect(secondWebView != nil, "Reload installs a fresh web view")
+        #expect(secondWebView !== firstWebView, "the fresh web view is a new instance, not the dead one")
+    }
+
+    /// Mirrors `staleGenerationReplyIsDroppedAfterHibernationReplacesTheWebView` for the
+    /// termination + Reload path: `installWebView()` bumps `pageGeneration` exactly like a hibernation
+    /// reactivate does, so a reply for a request the dead page issued must never reach the fresh page.
+    @Test func staleGenerationReplyIsDroppedAfterTerminationAndReload() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let staleEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = staleEvaluator
+
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+
+        let deadWebView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.webViewWebContentProcessDidTerminate(deadWebView)
+        let reloadButton = try #require(
+            descendants(in: content.contentView).first { $0.accessibilityIdentifier() == "codePaneCrashNoticeReload" } as? NSButton)
+        _ = reloadButton.target?.perform(reloadButton.action, with: reloadButton)
+        let freshEvaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = freshEvaluator
+
+        await gateway.completeDiffCall(
+            at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig", files: []))
+        await settle()
+
+        #expect(
+            !staleEvaluator.evaluatedScripts.contains { $0.contains("req-1") }, "the dead page's evaluator must never receive the stale reply")
+        #expect(freshEvaluator.evaluatedScripts.isEmpty, "the fresh page never issued this request, so it must not receive a reply for it either")
+    }
+
+    @Test func terminationOfAReplacedWebViewIsIgnored() throws {
+        let content = makeController()
+        content.activate(focus: false)
+        let firstWebView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.deactivate()
+        content.activate(focus: false)
+        let currentWebView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        #expect(currentWebView !== firstWebView)
+
+        // A stale termination callback for the web view hibernation already replaced must be ignored.
+        content.webViewWebContentProcessDidTerminate(firstWebView)
+
+        #expect(
+            content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" } == nil, "no notice for a stale termination")
+        #expect(content.contentView.subviews.contains { $0 === currentWebView }, "the current web view is untouched")
+    }
+
+    @Test func failedNavigationShowsNoticeWithTheFailedLoadMessage() throws {
+        let content = makeController()
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        let error = NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
+
+        content.webView(webView, didFailProvisionalNavigation: nil, withError: error)
+
+        #expect(!content.contentView.subviews.contains { $0 is WKWebView }, "the failed page's web view is removed")
+        let notice = try #require(content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" })
+        let messageLabel = descendants(in: notice).compactMap { $0 as? NSTextField }.first { $0.stringValue == "The Editor page failed to load." }
+        #expect(messageLabel != nil, "the notice carries the failed-load message")
+    }
+
+    @Test func cancelledNavigationFailureIsIgnored() throws {
+        let content = makeController()
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
+
+        content.webView(webView, didFail: nil, withError: error)
+
+        #expect(content.contentView.subviews.contains { $0 is WKWebView }, "a cancelled navigation leaves the live web view alone")
+        #expect(content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" } == nil, "and shows no notice")
     }
 
     // MARK: - Resource bundle layout

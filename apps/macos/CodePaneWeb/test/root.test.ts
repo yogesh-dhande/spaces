@@ -204,7 +204,16 @@ const hoisted = vi.hoisted(() => {
         return {
           manifestID,
           scopeSignature: manifest.scopeSignature,
-          files: files.map(({ path, oldPath, status }) => ({ path, oldPath, status })),
+          // Mirrors the real daemon's metadata-first manifest: only `isSubmodule` (derived here
+          // from whether the fixture `DiffFileEntry` carries `submodule` metadata) travels on the
+          // manifest page — the gitlink's actual pointer commits/dirty flag arrive later, on its
+          // chunk reply, same as `isBinary`'s file body arrives later for an ordinary file.
+          files: files.map(({ path, oldPath, status, submodule }) => ({
+            path,
+            oldPath,
+            status,
+            ...(submodule !== undefined ? { isSubmodule: true as const } : {}),
+          })),
           nextFileIndex: request.fileIndex + files.length < manifest.files.length ? request.fileIndex + files.length : undefined,
         };
       };
@@ -320,6 +329,23 @@ function makeFile(path: string): DiffFileEntry {
   // placeholder item), which keeps these tests independent of the diff patch
   // format — they only care which scope's file list won.
   return { path, status: "modified", isBinary: true };
+}
+
+/** A gitlink (submodule) manifest entry: like `makeFile`, has no patch — `workspaceDiffFileChunk`'s
+ *  mock above sends its `submodule` metadata on the one chunk reply and no patch bytes, the same
+ *  way it sends `isBinary` for `makeFile`'s entries. */
+function makeSubmoduleFile(path: string): DiffFileEntry {
+  return {
+    path,
+    status: "modified",
+    isBinary: false,
+    submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: false,
+    },
+  };
 }
 
 function resolveDiff(index: number, files: DiffFileEntry[], signature: string): void {
@@ -4762,6 +4788,58 @@ describe("mountRoot's Diff→Editor round trip re-attaches the sidebar's current
     clickButton(container, "Editor");
 
     expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("a.ts");
+  });
+});
+
+describe("mountRoot — submodule (gitlink) entries (A3)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceDiffFileChunk.mockClear();
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.notifyModeChanged.mockClear();
+    capturedCodeViewOptions.current = undefined;
+    container = document.createElement("div");
+  });
+
+  it("completes a submodule entry from its metadata-only chunk reply, with no patch bytes requested or needed", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeSubmoduleFile("sbc_hal")], "sig-a");
+    await mounted;
+
+    // The Changes list badges the row as soon as the diff completes — same one-chunk completion
+    // as a binary file (see `streamManifestPatches`' `patch = finalFile.isBinary || finalFile.submodule
+    // !== undefined ? undefined : ...`), so this also proves the entry reached patchState "ready".
+    await vi.waitFor(() => expect(container.querySelector(".submodule-badge")).not.toBeNull());
+    expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1);
+  });
+
+  it("a click on a submodule row in Editor mode is a no-op: no workspaceFileRead call and no banner", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeSubmoduleFile("sbc_hal")], "sig-a");
+    await mounted;
+    await vi.waitFor(() => expect(container.querySelector(".submodule-badge")).not.toBeNull());
+
+    clickButton(container, "Editor");
+    clickButton(container, "Changes");
+    await vi.waitFor(() => expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("sbc_hal"));
+
+    const row = container.querySelector<HTMLElement>('.row[data-path="sbc_hal"]')!;
+    row.click();
+
+    // Give any (wrongly) started async open a turn to actually call the bridge before asserting.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(hoisted.workspaceFileRead).not.toHaveBeenCalled();
+    // The discard-consent banner element always exists in the DOM; it is shown by clearing
+    // `display: none` (see the dirty-buffer "Finding C" tests above). A no-op click must leave it
+    // exactly as unshown as it started.
+    expect((container.querySelector(".banner.conflict") as HTMLElement | null)?.style.display).toBe("none");
+    expect(container.querySelector(".editor-path")?.textContent ?? "").not.toContain("sbc_hal");
   });
 });
 

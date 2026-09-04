@@ -402,6 +402,20 @@
   color: var(--del-fg);
 }
 
+/* Same chip treatment as the ref-search "base" badge: a fixed label, not a stat. */
+.file-list .row .submodule-badge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--chip);
+  color: var(--fg3);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .file-list .empty {
   padding: 10px;
   color: var(--fg3);

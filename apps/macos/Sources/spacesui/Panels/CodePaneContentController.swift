@@ -87,6 +87,13 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     private let rootView = NSView()
     private var webView: WKWebView?
+    /// The native "Editor stopped" notice shown in place of a dead web view (see
+    /// `showCrashNotice(message:)`). Non-`nil` exactly while it's in `rootView`'s subviews.
+    /// `installWebView()` clears it so both an explicit Reload click and an ordinary
+    /// hibernate/reactivate cycle recover the pane; `close()` clears it too; `teardownWebView()`
+    /// deliberately leaves it alone since hibernation must not erase a notice the user hasn't
+    /// dismissed yet.
+    private var crashNoticeView: NSView?
     /// Where a reply or pushed event is actually sent. Kept in lockstep with `webView` in production —
     /// set together in `installWebView()`, cleared together in `teardownWebView()` — so this is
     /// always the live page's evaluator there. Not `private`: a test substitutes a recording double
@@ -537,6 +544,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         closeLifetimeRetainer = self
         CodePaneWorkspaceStateHandoff.collectorStarted(storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
         teardownWebView()
+        removeCrashNotice()
         finishCloseIfReady()
     }
 
@@ -679,6 +687,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     static func codePaneIndexURL() -> URL? { Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "CodePane") }
 
     private func installWebView() {
+        // A fresh page load supersedes whatever crash/failed-load notice was standing in for the
+        // dead web view — both an explicit Reload click and an ordinary hibernate/reactivate cycle
+        // (deactivate() while the notice is showing, then activate()) go through here.
+        removeCrashNotice()
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: Self.messageHandlerName)
         // The built bundle's `index.html` loads its entry as `<script type="module" crossorigin>` plus
@@ -692,6 +704,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             configuration.setURLSchemeHandler(CodePaneSchemeHandler(baseDirectory: baseDirectory), forURLScheme: CodePaneSchemeHandler.scheme)
         }
         let webView = WKWebView(frame: rootView.bounds, configuration: configuration)
+        webView.navigationDelegate = self
         #if DEBUG
             // Lets Safari's Web Inspector attach to the code pane in dev builds, which is the only
             // way to probe the live page (computed styles, CSS variable resolution) inside the
@@ -767,6 +780,68 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         agentStartTasks.removeAll()
         agentStartTaskGenerations.removeAll()
     }
+
+    // MARK: - Crash / failed-load notice
+
+    /// Replaces the dead web view with a native notice offering Reload. The web app itself cannot
+    /// render this: its process is gone (termination) or its page never committed (a failed load), so
+    /// this is plain AppKit built directly against `rootView` rather than anything routed through the
+    /// bridge. Layout follows the picked "centered stack" design: title, one secondary line, Reload.
+    private func showCrashNotice(message: String) {
+        removeCrashNotice()
+
+        let titleLabel = NSTextField(labelWithString: "The Editor stopped.")
+        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        titleLabel.alignment = .center
+
+        let messageLabel = NSTextField(labelWithString: message)
+        messageLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.alignment = .center
+        messageLabel.lineBreakMode = .byWordWrapping
+        messageLabel.maximumNumberOfLines = 3
+        messageLabel.preferredMaxLayoutWidth = 360
+
+        let reloadButton = NSButton(title: "Reload", target: self, action: #selector(reloadAfterCrash))
+        reloadButton.setAccessibilityIdentifier("codePaneCrashNoticeReload")
+        reloadButton.bezelStyle = .rounded
+        // Deliberately no Return key equivalent: `performKeyEquivalent` is offered to every view in
+        // the window before the first responder sees the key, so a Return typed into a terminal pane
+        // next to this notice would reload the Editor.
+
+        let stack = NSStackView(views: [titleLabel, messageLabel, reloadButton])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        // No explicit background: left transparent so `rootView`'s own themed background layer (set
+        // in `init`) shows through, which is the pane's normal window background color.
+        let notice = NSView()
+        notice.setAccessibilityIdentifier("codePaneCrashNotice")
+        notice.translatesAutoresizingMaskIntoConstraints = false
+        notice.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: notice.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: notice.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: notice.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: notice.trailingAnchor, constant: -24),
+        ])
+
+        rootView.addSubview(notice)
+        NSLayoutConstraint.activate([
+            notice.leadingAnchor.constraint(equalTo: rootView.leadingAnchor), notice.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            notice.topAnchor.constraint(equalTo: rootView.topAnchor), notice.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+        ])
+        crashNoticeView = notice
+    }
+
+    private func removeCrashNotice() {
+        crashNoticeView?.removeFromSuperview()
+        crashNoticeView = nil
+    }
+
+    @objc private func reloadAfterCrash() { installWebView() }
 
     private func flushPendingWorkspaceState() {
         guard let webView, let scriptEvaluator else { return }
@@ -2493,6 +2568,50 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 extension CodePaneContentController: WKScriptMessageHandler {
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated { handleScriptMessage(name: message.name, body: message.body, senderWebView: message.webView) }
+    }
+}
+
+extension CodePaneContentController: WKNavigationDelegate {
+    /// WebKit's crash/OOM/GPU-restart signal: the live page's process is gone with no navigation
+    /// error to report through the methods below. Nothing can be recovered in place — no JS can run,
+    /// no bridge reply is possible — so this tears the dead page down and offers Reload, the same
+    /// recovery affordance the ordinary hibernate/reactivate cycle already provides via
+    /// `installWebView()`/`handleReady()`. Not `private`, matching `handleScriptMessage`'s own
+    /// testability precedent: a test drives this directly with a real `WKWebView` instead of needing
+    /// to force an actual process crash.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // A hibernation cycle (or an already-completed Reload) can install a replacement web view
+        // before this callback for the OLD page's death arrives; only the current page's termination
+        // is actionable — a stale one is silently ignored, mirroring `handleScriptMessage`'s own
+        // sender-identity guard.
+        guard webView === self.webView else { return }
+        fputs("spaces: code_pane_web_view_died workspace=\(workspaceID) reason=terminated\n", stderr)
+        teardownWebView()
+        showCrashNotice(
+            message: "The page behind this pane quit unexpectedly. Reload to pick up where you left off.")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleNavigationFailure(webView: webView, error: error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleNavigationFailure(webView: webView, error: error)
+    }
+
+    /// Shared by both failure delegate methods above: WebKit calls `didFailProvisionalNavigation`
+    /// when the load never committed and `didFail` when a committed load subsequently failed, but the
+    /// pane's recovery (teardown + notice) is identical either way.
+    private func handleNavigationFailure(webView: WKWebView, error: Error) {
+        guard webView === self.webView else { return }
+        let nsError = error as NSError
+        // A navigation abandoned in favor of a newer one already in flight (Reload firing again, or
+        // an ordinary reactivate racing a stale load) surfaces as a cancellation here, not a real
+        // failure worth showing.
+        guard nsError.code != NSURLErrorCancelled else { return }
+        fputs("spaces: code_pane_web_view_died workspace=\(workspaceID) reason=failed_load error=\(nsError.localizedDescription)\n", stderr)
+        teardownWebView()
+        showCrashNotice(message: "The Editor page failed to load.")
     }
 }
 
