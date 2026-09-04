@@ -499,6 +499,24 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Devices, choose Pair iPhone on the target device's row, and scan the QR code that opens under it from the iPhone or iPad.
 7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the daemon Device API.
 
+### iOS device performance baseline
+
+`apps/macos/Tests/ios_device_baseline.sh` is a repeatable, on-demand, measure-only performance baseline for the iOS app on a physical iPhone. It is not part of `scripts/verify.sh` or any CI lane; run it by hand when device-side timing, payload size, or battery behavior needs a real number. It measures only and fixes nothing: no scenario or metric in it can fail the run over a slow number, only a broken precondition (device unreachable, daemon unreachable, install failure) stops it.
+
+Most of each scenario happens on the phone by hand. The script prints an instruction, waits for Enter, and stamps the moment; the user performs the described step (open a terminal, toggle the keyboard, background the app, flip Wi-Fi) and presses Enter again when done. Where a scenario needs load from the Mac side (the `streaming` and `battery-30min` scenarios), the script drives it itself through `spaces terminal send`.
+
+Preconditions: the phone is paired with this worktree's dev daemon, unlocked, and on the same Wi-Fi network as the Mac (the Xcode device tunnel needs that for install and the final log pull); the `wifi-handoff`, `cellular-open`, and `battery-30min` scenarios also need cellular data and Tailscale reachable on the phone, since they run with Wi-Fi off. `SPACES_IOS_DEVICE_UDID` must be set in `.env`, same as the manual real-device steps above. The script cannot tell on its own whether this iPhone has already paired with this dev daemon's Device API (the reachability check reports only the daemon's endpoint, not its paired-client list), so it always prints a fresh pairing QR/link and waits for confirmation rather than guessing.
+
+```bash
+apps/macos/Tests/ios_device_baseline.sh
+```
+
+It builds and installs the debug build with `scripts/install-ios-device.sh`, seeds a `baseline-harbor` fixture project through this worktree's `spacese2e seed-fixture`, starts its workspace, then runs each scenario in order: `cold-open`, `back-and-forth`, `keyboard-toggle`, `streaming`, `background-foreground-terminal`, `background-foreground-list`, `wifi-handoff`, `cellular-open`, `battery-30min`. `--list` prints the scenario names and `--scenario NAME` (repeatable) limits the run to a subset, still executed in that fixed order.
+
+Each run gets its own root under `~/.spaces-dev/ios-baseline/<UTC timestamp>/`, holding the runner's own event stamps (`runner-events.jsonl`), the device performance log pulled off the phone (`device-perf.jsonl`, plus a rotated `device-perf.jsonl.1` when the app has rotated its log), run metadata (`run.json`, including the HEAD commit, whether the tree was dirty, and a digest of the uncommitted diff saved beside it as `worktree.diff`, so a before/after pair of runs names its exact source state), and the rendered report (`report.md`). The phone-side log comes from `Documents/perf/device-perf.jsonl` in the app's data container, pulled with `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier dev.usespaces.spacesmobile` after every scenario completes and the device tunnel has reconnected over Wi-Fi. The runner ends the ad hoc terminals it had the user open (`cold-open` and `cellular-open`) when it exits, so repeated runs do not leave sessions behind in the dev profile.
+
+`apps/macos/Tests/ios_device_baseline_report.py --run-root <dir>` renders the markdown report from a run root's `runner-events.jsonl` and `device-perf.jsonl(.1)`, assigning each device event to the scenario whose runner-stamped window it falls inside (with slack for clock and I/O latency around each boundary). It covers list-load timing, open-to-first-paint split by whether the hold released on a matching frame or timed out, keyboard viewport-resize timing, input round-trip timing, foreground-resume timing, Wi-Fi/cellular handoff recovery timing and connection-stage sequencing, render-update payload size and rate, battery drain and thermal state, and connection-error alerts. Every figure is n, p50, p95, and max (nearest-rank); missing data prints `n/a` rather than failing the report. Its unit tests run with `python3 apps/macos/Tests/ios_device_baseline_report_test.py`.
+
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted Device API, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
 ```bash

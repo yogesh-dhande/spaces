@@ -1223,9 +1223,16 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // Let the armed retry run its course against the real server; it must actually reconnect.
         await model.drainPendingReconnectForTesting()
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
-        // See the matching comment in `testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe`:
-        // a bare reconnect is deliberately not treated as proof the link is healthy, only a frame is.
-        XCTAssertTrue(model.isStateStreamDisconnected, "a reconnect alone is not proof of a healthy link; only a frame is")
+        // Unlike `testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe`, which keeps
+        // a stub client that never delivers a frame, the retry here resubscribes to the live fixture
+        // server, and that server sends its state payload as soon as the subscription lands. That frame
+        // is what clears the notice (`applyStreamEvent`), and it arrives on its own schedule relative to
+        // the drain above, so the recovery is asserted as the state it settles into rather than sampled.
+        let recoveryDeadline = ContinuousClock.now + .seconds(5)
+        while model.isStateStreamDisconnected, ContinuousClock.now < recoveryDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.isStateStreamDisconnected, "the first frame over the reconnected stream must clear the notice")
     }
 
     /// `establishStateStreamConnection`'s own failure path (a connect that reports failure) already calls

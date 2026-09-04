@@ -1,6 +1,6 @@
 #if canImport(UIKit)
     import XCTest
-    import spacesterminalcore
+    @testable import spacesterminalcore
     import spacesdevicecore
     @testable import SpacesMobile
 
@@ -36,6 +36,26 @@
         func increment() -> Int {
             count += 1
             return count
+        }
+    }
+
+    /// Collects events emitted through `SpacesDeviceTerminalPerformanceLogger.sinkForTesting` under a
+    /// lock, mirroring `DevicePerformanceEventsTests`' own collector: `emit` can run from contexts other
+    /// than the test body, so a plain array captured by a closure is not safely readable without one.
+    private final class EventCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [SpacesDeviceTerminalPerformanceEvent] = []
+
+        func record(_ event: SpacesDeviceTerminalPerformanceEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        var recorded: [SpacesDeviceTerminalPerformanceEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
         }
     }
 
@@ -92,6 +112,11 @@
     }
 
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
+        override func tearDown() {
+            SpacesDeviceTerminalPerformanceLogger.sinkForTesting = nil
+            super.tearDown()
+        }
+
         /// The Spaces tab's live search: a workspace-level match keeps the whole workspace, a row-level
         /// match keeps the workspace as the band over just its matching rows, and anything matching
         /// neither drops out. Order is the list's own throughout — searching narrows, it never reranks.
@@ -2258,6 +2283,27 @@
             await model.refresh()
 
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// A refresh that fails below `refreshFailureAlertDelay` still owes the baseline a completed
+        /// measurement: `overviewRefreshBegin()` already logged `overview_refresh_begin` before this
+        /// attempt's alert-delay guard returns early, so `overview_refresh_end` must still land, or the
+        /// baseline report is left with a begin that never closes.
+        func testFailureBelowTheAlertDelayStillLogsOverviewRefreshEnd() async {
+            let events = EventCollector()
+            SpacesDeviceTerminalPerformanceLogger.sinkForTesting = { events.record($0) }
+            let model = makeModel(refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"))
+
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage, "sanity: this failure must stay below the alert delay")
+            let beginEvents = events.recorded.filter { $0.name == "overview_refresh_begin" }
+            let endEvents = events.recorded.filter { $0.name == "overview_refresh_end" }
+            XCTAssertEqual(beginEvents.count, 1)
+            XCTAssertEqual(endEvents.count, 1, "every overview_refresh_begin must get exactly one overview_refresh_end")
+            XCTAssertEqual(endEvents.first?.attributes["success"], "0")
+            XCTAssertEqual(endEvents.first?.attributes["error"], "Socket is not connected")
+            XCTAssertNil(endEvents.first?.count)
         }
 
         /// A device that is genuinely unreachable keeps failing, and the alert must still arrive once the
