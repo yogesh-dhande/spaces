@@ -140,6 +140,20 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     oldSHA: "b5a4c3d",
     newSHA: "d3c4a5b",
   },
+  // A submodule (gitlink) entry: no patch, a pointer-commit pair instead. Exercises the
+  // dev harness's read-only placeholder row (see diffView.ts's `submoduleLabel`) alongside every
+  // other fixture status.
+  {
+    path: "sbc_hal",
+    status: "modified",
+    isBinary: false,
+    submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: false,
+    },
+  },
 ];
 
 /** A second snapshot used by `simulateSignatureChange` to demonstrate a live refresh: one file's patch grows, and a new addition appears. */
@@ -196,7 +210,14 @@ export function fixtureDiffFiles(scope: DiffScope, version: number): DiffFileEnt
 /** Metadata-first counterpart to `fixtureDiffFiles`: the mock deliberately strips patch bodies so
  * dev mode exercises the same immediate-sidebar / deferred-file rendering path as production. */
 export function fixtureDiffManifest(scope: DiffScope, version: number): DiffFileManifestEntry[] {
-  return fixtureDiffFiles(scope, version).map(({ path, oldPath, status }) => ({ path, oldPath, status }));
+  return fixtureDiffFiles(scope, version).map(({ path, oldPath, status, submodule }) => ({
+    path,
+    oldPath,
+    status,
+    // `isSubmodule` is a manifest-only flag: present (true) only for a gitlink entry, absent for
+    // every ordinary file, matching the wire contract's "absent otherwise" (`DiffFileManifestEntry`).
+    ...(submodule !== undefined ? { isSubmodule: true as const } : {}),
+  }));
 }
 
 /** Backs the mock's `workspaceRefList()` — the compare menu's "Branch…" / "Commit or ref…" search

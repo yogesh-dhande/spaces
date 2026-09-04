@@ -12,7 +12,7 @@ type FakeCodeViewItem = {
   version: number | undefined;
   annotations: unknown;
   file?: { contents: string; cacheKey?: string };
-  fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+  fileDiff?: { additionLines?: string[]; deletionLines?: string[]; cacheKey?: string };
   edit?: boolean;
 };
 
@@ -22,7 +22,7 @@ type FakeCodeViewInput = {
   version: number | undefined;
   annotations?: unknown;
   file?: { contents: string; cacheKey?: string };
-  fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+  fileDiff?: { additionLines?: string[]; deletionLines?: string[]; cacheKey?: string };
   edit?: boolean;
 };
 
@@ -47,6 +47,7 @@ const control = vi.hoisted(() => ({
   lastInstance: undefined as { setSelectedLines(selection: unknown): void } | undefined,
   setItemsCalls: [] as Array<ReadonlyArray<FakeCodeViewInput>>,
   addItemCalls: [] as FakeCodeViewInput[],
+  updateItemCalls: [] as FakeCodeViewInput[],
   processFileCalls: 0,
 }));
 
@@ -58,7 +59,7 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     version: number | undefined;
     annotations?: unknown;
     file?: { contents: string; cacheKey?: string };
-    fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+    fileDiff?: { additionLines?: string[]; deletionLines?: string[]; cacheKey?: string };
     edit?: boolean;
   }): boolean {
     const existing = items.get(next.id);
@@ -120,9 +121,10 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
       version: number | undefined;
       annotations?: unknown;
       file?: { contents: string; cacheKey?: string };
-      fileDiff?: { additionLines?: string[]; deletionLines?: string[] };
+      fileDiff?: { additionLines?: string[]; deletionLines?: string[]; cacheKey?: string };
       edit?: boolean;
     }): boolean {
+      control.updateItemCalls.push(input);
       const existing = this.items.get(input.id);
       if (!existing) return false;
       // Pierre keeps a concrete renderer instance per item type. `updateItem` can update a
@@ -237,6 +239,7 @@ beforeEach(() => {
   control.lastInstance = undefined;
   control.setItemsCalls = [];
   control.addItemCalls = [];
+  control.updateItemCalls = [];
   control.processFileCalls = 0;
 });
 
@@ -438,6 +441,116 @@ describe("DiffView progressive patch replacement", () => {
       behavior: "instant",
     });
     host.remove();
+  });
+});
+
+describe("DiffView submodule (gitlink) entries", () => {
+  function submoduleFile(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
+    return file({
+      path: "sbc_hal",
+      patch: undefined,
+      patchState: "ready",
+      submodule: {
+        oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+        dirty: false,
+        unmerged: false,
+      },
+      ...overrides,
+    });
+  }
+
+  it("renders a modified submodule as a placeholder naming both short shas", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile()], false);
+
+    const item = control.items.get("sbc_hal");
+    expect(item?.type).toBe("file");
+    expect(item?.file?.contents).toBe("Submodule fa1d453 → 128a927");
+  });
+
+  it("appends '(dirty)' when the submodule's own worktree carried uncommitted changes", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (dirty)");
+  });
+
+  it("renders 'added' when only a newCommit is present", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({
+      status: "added",
+      submodule: { newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca", dirty: false, unmerged: false },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule added 128a927");
+  });
+
+  it("renders 'removed' when only an oldCommit is present", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({
+      status: "deleted",
+      submodule: { oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f", dirty: false, unmerged: false },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule removed fa1d453");
+  });
+
+  it("renders a single short sha, not a no-op arrow, when the pointer's commit did not move but the worktree is dirty", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      dirty: true,
+      unmerged: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (dirty)");
+  });
+
+  it("renders a single short sha for a submodule renamed without moving its pointer", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({
+      status: "renamed",
+      oldPath: "sub",
+      submodule: {
+        oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+        dirty: false,
+        unmerged: false,
+      },
+    })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453");
+  });
+
+  it("appends '(unmerged)' when a conflicting merge left the pointer unresolved", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      dirty: false,
+      unmerged: true,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (unmerged)");
+  });
+
+  it("renders as a placeholder file item with no diff annotations/gutter, even though the manifest carries no isBinary", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ isBinary: false })], false);
+
+    const item = control.items.get("sbc_hal");
+    // `type: "file"` is Pierre's non-diff renderer: it has no gutter, no line ids, and never
+    // receives `annotations` (only `type: "diff"` items do; see `buildAnnotations`'s only caller).
+    expect(item?.type).toBe("file");
+    expect(item?.annotations).toBeUndefined();
+    expect(item?.fileDiff).toBeUndefined();
   });
 });
 
@@ -1643,5 +1756,105 @@ describe("DiffView gutter-utility click", () => {
 
     expect(control.lastOptions?.onGutterUtilityClick).toBeDefined();
     expect(control.lastOptions?.renderGutterUtility).toBeUndefined();
+  });
+});
+
+// Regression: `@pierre/diffs` compares two diffs by `cacheKey` for change detection
+// (`utils/areDiffTargetsEqual`) but compares the rendered object against the prepared one by
+// identity in `VirtualizedFileDiff.finalizeRender`. Handing Pierre a freshly parsed diff under an
+// unchanged `cacheKey` therefore makes it skip the render and then throw
+// "VirtualizedFileDiff.render: rendered a different diff than its prepared layout" when the item
+// is redrawn with nothing else changed (a deleted comment draft, then scrolling the file back into
+// view). One `cacheKey` must always name one object while the patch text holds still.
+describe("DiffView parsed diff reuse", () => {
+  const CHANGED_PATCH = `diff --git a/src/foo.ts b/src/foo.ts
+index 3333333..4444444 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -1,5 +1,6 @@
+ function compute() {
+ const a = 1;
+-const b = oldHelper();
++const b = changedHelper();
++const c = 3;
+ const d = 4;
+ return a + b;
+`;
+
+  function suppliedFileDiff(path: string): { cacheKey?: string } | undefined {
+    const items = control.setItemsCalls.at(-1);
+    return items?.find((item) => item.id === path)?.fileDiff;
+  }
+
+  function updatedFileDiff(): { cacheKey?: string } | undefined {
+    return control.updateItemCalls.at(-1)?.fileDiff;
+  }
+
+  it("reuses one parsed diff object while a file's patch text is unchanged", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file()], false);
+    const first = suppliedFileDiff("src/foo.ts");
+    expect(first).toBeDefined();
+
+    diffView.updateFile(file());
+
+    expect(updatedFileDiff()).toBe(first);
+    expect(updatedFileDiff()?.cacheKey).toBe(first?.cacheKey);
+  });
+
+  it("parses a new diff object under a new cache key when a file's patch text changes", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file()], false);
+    const first = suppliedFileDiff("src/foo.ts");
+
+    diffView.updateFile(file({ patch: CHANGED_PATCH }));
+
+    const updated = updatedFileDiff();
+    expect(updated).toBeDefined();
+    expect(updated).not.toBe(first);
+    // Pierre reads no further than the key to decide a diff is unchanged, so replacement content
+    // has to arrive under a key it has not rendered.
+    expect(updated?.cacheKey).not.toBe(first?.cacheKey);
+  });
+
+  it("keys a diff by path and revision rather than by the bare path", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file()], false);
+    const first = suppliedFileDiff("src/foo.ts");
+    expect(first?.cacheKey).toBe("src/foo.ts#1");
+
+    // Same text keeps the key (and the object); changed text advances the revision.
+    diffView.updateFile(file());
+    expect(updatedFileDiff()?.cacheKey).toBe("src/foo.ts#1");
+    diffView.updateFile(file({ patch: CHANGED_PATCH }));
+    expect(updatedFileDiff()?.cacheKey).toBe("src/foo.ts#2");
+    diffView.updateFile(file({ patch: CHANGED_PATCH }));
+    expect(updatedFileDiff()?.cacheKey).toBe("src/foo.ts#2");
+  });
+
+  it("keeps the parsed diff object across a comment annotation change", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file()], false);
+    const first = suppliedFileDiff("src/foo.ts");
+
+    diffView.setComments([anchoredAt(comment())]);
+    expect(updatedFileDiff()).toBe(first);
+
+    // Deleting the draft is the observed trigger: the annotations go away, the patch does not.
+    diffView.setComments([]);
+    expect(updatedFileDiff()).toBe(first);
+  });
+
+  it("parses a file again after it leaves and re-enters the file set", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file()], false);
+    diffView.setFiles([], false);
+    control.processFileCalls = 0;
+
+    diffView.setFiles([file()], false);
+
+    // A dropped path keeps no parsed diff, so its next appearance is parsed from scratch.
+    expect(control.processFileCalls).toBe(1);
+    expect(suppliedFileDiff("src/foo.ts")).toBeDefined();
   });
 });
