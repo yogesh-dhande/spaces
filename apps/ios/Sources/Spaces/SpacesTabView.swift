@@ -36,7 +36,7 @@ struct SpacesTabView: View {
             // A `spaces://terminal/…` deep link resolves to a session on the model; consume it here so
             // the Spaces tab (the deep link's landing tab) pushes its detail route.
             guard let session else { return }
-            selectedSession = SelectedTerminalSessionRoute(session: session)
+            selectedSession = SelectedTerminalSessionRoute(session: session, openSource: "deep_link")
             model.pendingTerminalDeepLinkSession = nil
         }.accessibilityIdentifier("tab.spaces").overviewPolling(
             model: model, tab: .spaces, activeDetailRouteID: activeDetailRouteID, refreshGeneration: terminalListRefreshGeneration

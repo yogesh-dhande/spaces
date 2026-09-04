@@ -76,6 +76,7 @@ struct RootTabView: View {
         // also ends any run of failed refreshes, since a suspended app polls nothing and cannot claim the
         // connection kept failing while it was away.
         .task { model.browserProxyStart() }.onChange(of: scenePhase) { _, newPhase in
+            DevicePerformanceLog.sceneChanged(phase: scenePhaseName(newPhase), openTerminal: model.activeTerminalSessionID != nil)
             switch newPhase {
             case .active:
                 model.browserProxyStart()
@@ -102,6 +103,19 @@ struct RootTabView: View {
             case .inactive: break
             @unknown default: break
             }
+        }
+    }
+
+    /// `ScenePhase` has no `String` conversion of its own; this is the on-device performance log's
+    /// `app_scene_phase` vocabulary (`active`/`inactive`/`background`), matched to the three cases the
+    /// switch above actually branches on. An unrecognized future case reports `inactive`, the phase this
+    /// app already treats as a no-op transitional state.
+    private func scenePhaseName(_ phase: ScenePhase) -> String {
+        switch phase {
+        case .active: return "active"
+        case .inactive: return "inactive"
+        case .background: return "background"
+        @unknown default: return "inactive"
         }
     }
 

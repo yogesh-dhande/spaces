@@ -506,7 +506,24 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// this, pushes the session's detail route, and clears it. Model-driven (rather than a tab-local
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
     var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
-    var errorMessage: String?
+    /// `didSet` rather than a dedicated setter wrapping every assignment site: this is set from many
+    /// places (the poll's own failure path in `performRefresh`, mutation failures, deep-link misses,
+    /// authentication recovery), and `RootTabView`'s "Connection Error" alert appears on exactly one
+    /// transition (nil to non-nil), regardless of which call site caused it. Reporting any other
+    /// transition (non-nil to a different message, or to nil) would log alert-adjacent bookkeeping the
+    /// user never saw as a second alert.
+    var errorMessage: String? {
+        didSet {
+            guard let errorMessage, oldValue == nil else { return }
+            let streakSeconds = refreshFailureStreak.map { streak -> Double in
+                let components = (now() - streak.startedAt).components
+                return Double(components.seconds) + Double(components.attoseconds) / 1e18
+            }
+            DevicePerformanceLog.connectionErrorAlert(
+                message: errorMessage, refreshFailureStreakSeconds: streakSeconds, openTerminal: activeTerminalSessionID != nil,
+                hostCount: settings.hosts.count)
+        }
+    }
     /// The branch-deletion report a completed workspace delete came back with, shown once and cleared.
     /// Only a delete that asked for a branch to be deleted produces one, so a plain delete stays silent.
     var deletedWorkspaceNotice: String?
@@ -692,8 +709,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// or outside a watch window exactly, instead of racing the real clock's sub-millisecond gaps against
     /// the comparison's skew tolerance. Production always uses the real clock.
     @ObservationIgnored private let wallClock: @Sendable () -> Date
+    /// Kept alive for the model's lifetime so the on-device performance log's `thermal_state_change`
+    /// subscription (see `DevicePerformanceLog.observeThermalStateChanges`) is not torn down the moment
+    /// the token that owns it would otherwise be released.
+    @ObservationIgnored private let thermalStateObserverToken: any NSObjectProtocol
 
     init() {
+        // The earliest point in this app's own startup path: every other perf-log call site, on this
+        // model and on every `TerminalViewerModel`, assumes the default path is already configured by the
+        // time it runs. See `DevicePerformanceLog.configureLoggerAtLaunch` for why the path has to be
+        // supplied from inside the app rather than read from the environment on a physical device.
+        DevicePerformanceLog.configureLoggerAtLaunch()
+        DevicePerformanceLog.appLaunch()
+        thermalStateObserverToken = DevicePerformanceLog.observeThermalStateChanges()
         #if DEBUG
             SpacesMobileDeviceStore.applyDebugSeed()
         #endif
@@ -761,6 +789,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.now = now
         self.wallClock = wallClock
         relativeTimeReference = wallClock()
+        // Test-only construction path (every test in this suite goes through it): a real
+        // `thermal_state_change` subscription is pointless here and would leak a `NotificationCenter`
+        // observer per test instance across the whole run, so this carries an inert token instead.
+        thermalStateObserverToken = DevicePerformanceLog.inertObserverToken()
     }
 
     /// The workspaces this client lists: neither archived, hidden, nor under a hidden project, matching
@@ -1343,6 +1375,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // Captured before the fetch is issued: this overview describes the daemon as of now, so a mutation
         // applied while it is in flight makes it stale and it must be dropped rather than published.
         let mutationGenerationAtFetch = mutationGeneration
+        let perfBeganAtUptimeNanoseconds = DevicePerformanceLog.overviewRefreshBegin()
+        // Set at this attempt's one success or one reported-failure exit (`publishOverview` below, or the
+        // failure branch in the `catch` once the failure has updated `refreshFailureStreak`); left nil for
+        // every other exit (a stale-identity discard, cancellation, the blocked-device branch, an
+        // authentication failure, or a daemon-update-suppressed poll): none of those is a completed
+        // list-load measurement worth reporting into the baseline. The failure branch sets it regardless
+        // of whether the streak has crossed `refreshFailureAlertDelay`, so a failure that never reaches the
+        // user-facing alert still closes out the `overview_refresh_begin` this attempt opened.
+        var perfOutcome: (count: Int?, success: Bool, error: String?)?
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -1353,6 +1394,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // reference sat untouched for the whole gap, so labels catch straight up with no separate
             // "just resumed" case to write.
             advanceRelativeTimeReferenceIfDue()
+            if let perfOutcome {
+                DevicePerformanceLog.overviewRefreshEnd(
+                    beganAtUptimeNanoseconds: perfBeganAtUptimeNanoseconds, count: perfOutcome.count, success: perfOutcome.success,
+                    error: perfOutcome.error)
+            }
         }
         do {
             // Read compatibility from the overview's inline frozen-core status so the compatible steady
@@ -1382,6 +1428,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             errorMessage = nil
             refreshFailureStreak = nil
             publishOverview(acceptedOverview)
+            // A refresh that decoded but published nothing (the daemon needs an update) is not a list load
+            // the user saw, so it does not count as one.
+            perfOutcome =
+                acceptedOverview.map { (count: $0.sessions.count, success: true, error: nil) }
+                ?? (count: nil, success: false, error: "daemon_update_required")
             // Rebuilds the live client only after the overview above is already published, deliberately:
             // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
             // in this method could drop the very overview the user is waiting for. Publishing first means
@@ -1437,6 +1488,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
             let startedAt = streakStartedAt ?? attemptStartedAt
             refreshFailureStreak = (identity: identity, startedAt: startedAt)
+            // Set before the alert-delay guard, not after: this attempt failed regardless of whether the
+            // streak has run long enough to raise the user-facing alert, and the `defer` above needs a
+            // `perfOutcome` on every reported-failure exit or overview_refresh_begin never gets its
+            // matching overview_refresh_end for a refresh that fails below the delay.
+            perfOutcome = (count: nil, success: false, error: DevicePerformanceLog.sanitized(error.localizedDescription))
             guard now() - startedAt >= refreshFailureAlertDelay else { return }
             errorMessage = error.localizedDescription
         }
