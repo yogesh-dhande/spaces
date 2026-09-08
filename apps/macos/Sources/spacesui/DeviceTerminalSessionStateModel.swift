@@ -87,9 +87,12 @@
         // (`TerminalConnectionNotice.bannerGraceSeconds`), so a blip that heals within the grace never
         // paints anything. Cancelled the instant the outage resolves or escalates past needing it.
         private var graceTask: Task<Void, Never>?
-        // Overrides the grace timer's delay for tests, mirroring `reconnectBackoff`'s test-mutable knobs.
-        // Internal (not `private`) so behavior tests can shorten it instead of waiting out a real second.
-        var graceDelayForTesting: Duration?
+        // Overrides what the grace timer awaits in place of `Task.sleep`, mirroring
+        // `stateStreamConnectOverrideForTesting`'s shape: tests hold this open and release it on demand
+        // (see `GraceGate` in `spacesuiTests`), driving the grace deterministically instead of racing a
+        // real duration against a fixed sleep. Internal (not `private`) so behavior tests can set it. Nil
+        // in production, where the real one-second grace always runs.
+        var graceWaitForTesting: (@MainActor () async -> Void)?
 
         private struct Listener {
             let id: UUID
@@ -1458,9 +1461,13 @@
         /// (or one past it, in stage 2) never restarts or duplicates the grace.
         private func armGraceTimer() {
             graceTask?.cancel()
-            let delay = graceDelayForTesting ?? .seconds(TerminalConnectionNotice.bannerGraceSeconds)
+            let wait = graceWaitForTesting
             graceTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: delay)
+                if let wait {
+                    await wait()
+                } else {
+                    try? await Task.sleep(for: .seconds(TerminalConnectionNotice.bannerGraceSeconds))
+                }
                 guard let self, !Task.isCancelled else { return }
                 self.graceTask = nil
                 self.applyStageTransition { $0.graceElapsed() }
@@ -1471,6 +1478,14 @@
             graceTask?.cancel()
             graceTask = nil
         }
+
+        /// The grace timer's current task, if any. `spacesuiTests` captures this right after arming and
+        /// awaits `.value` on the captured handle after releasing the held `graceWaitForTesting`, which
+        /// proves the resulting transition (or, for a heal that already cancelled and cleared this
+        /// property, the guarded no-op) deterministically instead of racing a real duration. Reading the
+        /// live property again after a heal would not work: `cancelGraceTimer()` clears it synchronously,
+        /// before the orphaned task itself gets a chance to run.
+        var graceTaskForTesting: Task<Void, Never>? { graceTask }
 
         /// Retires any connect already in flight, and any client it already installed but that has not yet
         /// produced a frame: an automatic reconnect timer can start one before something else needs the

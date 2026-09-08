@@ -144,10 +144,13 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
     /// Stage 1 hides the banner during a short grace window: a redial that heals within it must never
     /// have painted anything. The grace itself is caller-owned (`DeviceTerminalSessionStateModel`), so
-    /// this drives it through `graceDelayForTesting` instead of waiting out the real one-second grace.
+    /// this drives it through `graceWaitForTesting`/`GraceGate` instead of racing the real one-second
+    /// grace against a fixed sleep: the gate holds the timer's task exactly where `Task.sleep` would
+    /// have, and releasing it stands in for the grace elapsing, deterministically.
     @MainActor func testStreamLossHidesTheBannerUntilTheGraceElapses() async throws {
         let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
-        model.graceDelayForTesting = .milliseconds(20)
+        let gate = GraceGate()
+        model.graceWaitForTesting = { await gate.wait() }
         let generation = model.installStreamClientForTesting(FakeStreamClient())
 
         model.handleStreamDisconnect(nil, generation: generation)
@@ -155,7 +158,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible, "a blip must not paint anything before the grace elapses")
 
-        try await Task.sleep(for: .milliseconds(80))
+        let armedGraceTask = model.graceTaskForTesting
+        gate.release()
+        await armedGraceTask?.value
 
         XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
         XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "the grace elapsing without a frame is what raises the banner")
@@ -164,13 +169,21 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// A redial that succeeds inside the grace window must never have shown the banner at all: the
     /// whole point of the grace is to keep ordinary blips invisible, and a frame arriving is what the
     /// tracker's contract means by the connection being proven healthy again.
+    ///
+    /// The gate is held closed for the whole test, so the grace provably cannot fire on its own: this
+    /// proves the "cancelled timer never fires late" half of the contract deterministically instead of
+    /// outliving what would have been a real grace with a fixed sleep.
     @MainActor func testStreamHealingWithinTheGraceNeverShowsTheBanner() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.graceDelayForTesting = .milliseconds(50)
+        let gate = GraceGate()
+        model.graceWaitForTesting = { await gate.wait() }
         let generation = model.installStreamClientForTesting(FakeStreamClient())
         model.handleStreamDisconnect(nil, generation: generation)
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+        // Captured before the heal below cancels and clears the model's own reference, so it can still
+        // be awaited afterward: see `graceTaskForTesting`'s doc comment.
+        let armedGraceTask = model.graceTaskForTesting
 
         let newGeneration = model.installStreamClientForTesting(FakeStreamClient())
         model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: newGeneration)
@@ -178,8 +191,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertEqual(model.connectionStageTracker.stage, .connected)
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
 
-        // Outlive what would have been the grace, to prove the cancelled timer never fires late.
-        try await Task.sleep(for: .milliseconds(90))
+        // Release the gate the still-suspended (but already cancelled) grace task is parked on, and
+        // await that captured instance running to completion: if cancellation did not actually stop it,
+        // it would run `graceElapsed()` here and raise the banner.
+        gate.release()
+        await armedGraceTask?.value
 
         XCTAssertEqual(model.connectionStageTracker.stage, .connected)
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
@@ -196,11 +212,14 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testFrameFromARetiredStreamCannotClearTheOutage() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.graceDelayForTesting = .milliseconds(20)
+        let gate = GraceGate()
+        model.graceWaitForTesting = { await gate.wait() }
         let oldGeneration = model.installStreamClientForTesting(FakeStreamClient())
 
         model.handleStreamDisconnect(nil, generation: oldGeneration)
-        try await Task.sleep(for: .milliseconds(80))
+        let armedGraceTask = model.graceTaskForTesting
+        gate.release()
+        await armedGraceTask?.value
         XCTAssertEqual(model.connectionStageTracker.stage, .reconnecting)
         XCTAssertTrue(model.connectionStageTracker.isBannerVisible, "the grace elapsing without a frame is what raises the banner")
 
@@ -475,12 +494,21 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a failed request must leave the question open")
         XCTAssertFalse(model.hasArmedReconnectForTesting, "nothing is worth reconnecting to until the device says the session is live")
 
-        // The device comes back and answers. Stretch the shared cadence first: the reconnect that answer
-        // arms is what this asserts on, and at the 1ms cadence above it would fire (and dial the
-        // unreachable fixture device) before the assertion could read it.
+        // The device comes back and answers. Hold the recheck's next attempt open first, so the cadence
+        // stretch below and the new answer land atomically: the recheck loop calls `answer()` only once
+        // per iteration after fully settling the last one, so a parked call proves nothing is still
+        // running against the old (1ms) cadence — without this, an attempt already past the script but not
+        // yet through `settleLivenessRecheck` could still read the stretched cadence and arm the reconnect
+        // on it instead of on the answer that reaches it after (issue confirmed via a full-verify flake).
+        await script.armHold()
+        await script.waitUntilHeld()
+        // Stretch the shared cadence: the reconnect the held answer arms is what this asserts on, and at
+        // the 1ms cadence above it would fire (and dial the unreachable fixture device) before the
+        // assertion could read it.
         model.reconnectBackoff.retryDelay = .seconds(600)
         model.reconnectBackoff.maxRetryDelay = .seconds(600)
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await script.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -611,10 +639,16 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.isStateStreamDisconnected, "a pane that cannot reach its session must say so")
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "no unreadable failure may close the question")
 
-        // The device answers properly, and the question closes on that.
+        // The device answers properly, and the question closes on that. Hold the next attempt open first
+        // (see the matching comment in `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`)
+        // so the cadence stretch and the new answer below land atomically, rather than racing an attempt
+        // still in flight at the old 1ms cadence.
+        await script.armHold()
+        await script.waitUntilHeld()
         model.reconnectBackoff.retryDelay = .seconds(600)
         model.reconnectBackoff.maxRetryDelay = .seconds(600)
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await script.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -675,10 +709,16 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.isStateStreamDisconnected, "a pane whose credentials were refused still cannot reach its session")
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a refusal about credentials must not close the question")
 
-        // Re-authorized, the device answers about the session, and that settles it.
+        // Re-authorized, the device answers about the session, and that settles it. Hold the next attempt
+        // open first (see the matching comment in
+        // `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`) so the cadence stretch and
+        // the new answer below land atomically.
+        await script.armHold()
+        await script.waitUntilHeld()
         model.reconnectBackoff.retryDelay = .seconds(600)
         model.reconnectBackoff.maxRetryDelay = .seconds(600)
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
+        await script.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -793,16 +833,25 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     ///
     /// Drives a real in-process `SpacesDeviceAPIServer` with the session registered as genuinely live
     /// (`startLiveSession`), so the retry armed by the honored drop actually reconnects — proving the model
-    /// is left able to resubscribe, not merely that it cleared a field.
+    /// is left able to resubscribe, not merely that it cleared a field. The subscription itself is quiet
+    /// (`deliversInitialFrame: false`): the final assertion below checks that the reconnect alone left the
+    /// outage still reported, and a real frame arriving on its own schedule would race that check. The
+    /// catch-up `.state` request `ensureSubscriptionStarted` fires ahead of every (re)connect is answered
+    /// through `liveTerminalSessionStateProvider` instead, so it does not fall back to reading the same
+    /// (deliberately quiet) subscription socket and block for its 2-second receive timeout: that answer
+    /// flows through `apply(_:)`, not `applyStreamEvent`, so it never touches the outage this test checks.
     @MainActor func testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe() async throws {
         let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
         let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
-        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        let sessionID = "session-\(UUID().uuidString)"
+        let catchUpPayload = runningStatePayload(sessionID: sessionID)
+        let server = SpacesDeviceAPIServer(
+            host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+            liveTerminalSessionStateProvider: { requestedSessionID in requestedSessionID == sessionID ? catchUpPayload : nil })
         try server.start()
         defer { server.stop() }
 
-        let sessionID = "session-\(UUID().uuidString)"
-        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        let subscriptionServer = try startLiveSession(sessionID: sessionID, deliversInitialFrame: false)
         defer { subscriptionServer.stop() }
         let device = SpacesPairedDeviceRecord(
             id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
@@ -1145,16 +1194,26 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// The session is registered as genuinely live (`startLiveSession`) so the retry's subscribe is
     /// ACCEPTED. An unregistered session's subscribe is rejected asynchronously by the server after
     /// `start()` has returned, and that rejection reaches `handleStreamDisconnect` at an unpredictable
-    /// moment — on a loaded runner, before these assertions rather than after, which is issue #406.
+    /// moment — on a loaded runner, before these assertions rather than after, which is issue #406. The
+    /// subscription itself is also quiet (`deliversInitialFrame: false`): the final assertion checks that
+    /// the reconnect alone left the outage still reported, and a real frame arriving on its own schedule
+    /// would race that check. The catch-up `.state` request `ensureSubscriptionStarted` fires ahead of
+    /// every (re)connect is answered through `liveTerminalSessionStateProvider` instead, so it does not
+    /// fall back to reading that same (deliberately quiet) subscription socket and block for its 2-second
+    /// receive timeout: that answer flows through `apply(_:)`, not `applyStreamEvent`, so it never touches
+    /// the outage this test checks.
     @MainActor func testAFailedInputSendDuringAnInFlightConnectStillArmsAReconnectAndRecovers() async throws {
         let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
         let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
-        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        let sessionID = "session-\(UUID().uuidString)"
+        let catchUpPayload = runningStatePayload(sessionID: sessionID)
+        let server = SpacesDeviceAPIServer(
+            host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+            liveTerminalSessionStateProvider: { requestedSessionID in requestedSessionID == sessionID ? catchUpPayload : nil })
         try server.start()
         defer { server.stop() }
 
-        let sessionID = "session-\(UUID().uuidString)"
-        let subscriptionServer = try startLiveSession(sessionID: sessionID)
+        let subscriptionServer = try startLiveSession(sessionID: sessionID, deliversInitialFrame: false)
         defer { subscriptionServer.stop() }
         let device = SpacesPairedDeviceRecord(
             id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
@@ -2045,7 +2104,14 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// what keeps it off the ended-session branch, and the listening socket is what it relays. A test that
     /// skips this gets a subscribe the server rejects asynchronously, and the rejection lands on
     /// `handleStreamDisconnect` at an unpredictable moment.
-    @MainActor private func startLiveSession(sessionID: String) throws -> LiveSubscriptionSocketServer {
+    ///
+    /// `deliversInitialFrame` defaults to true (a session behaving like a real one, which is what most
+    /// callers want). A test whose own assertions run immediately after a real, uncontrolled reconnect and
+    /// depend on no frame having arrived yet must pass false: `SpacesDeviceAPIServer.handleSubscribeRequest`
+    /// starts relaying the local subscription socket the moment it connects, so a frame written on accept
+    /// (the default) reaches the model's `onEvent` at an unpredictable moment relative to those assertions,
+    /// racing them under load instead of being held off deterministically.
+    @MainActor private func startLiveSession(sessionID: String, deliversInitialFrame: Bool = true) throws -> LiveSubscriptionSocketServer {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
         try TerminalSessionPersistence.writeLaunchConfiguration(
@@ -2056,7 +2122,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
                 state: .running, updatedAt: "2026-07-24T00:00:01Z", title: "t", workingDirectory: "/tmp"), paths: paths)
-        let server = try LiveSubscriptionSocketServer(socketPath: paths.subscriptionSocketPath, payload: runningStatePayload(sessionID: sessionID))
+        let server = try LiveSubscriptionSocketServer(
+            socketPath: paths.subscriptionSocketPath, payload: deliversInitialFrame ? runningStatePayload(sessionID: sessionID) : nil)
         try server.start()
         return server
     }
@@ -2097,6 +2164,34 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     }
 }
 
+/// Stands in for `Task.sleep` inside `armGraceTimer()` via `graceWaitForTesting`, so a test can hold the
+/// grace open and release it on demand instead of racing a short real duration against a fixed sleep.
+/// `@MainActor` (not a Swift actor) because the grace timer's task and every test driving it are already
+/// on the main actor: a plain checked continuation is enough, with no cross-actor hop needed to call or
+/// resume it, matching how `stateStreamConnectOverrideForTesting` is threaded through `openStateStream`.
+@MainActor
+private final class GraceGate {
+    private var isReleased = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    /// What `graceWaitForTesting` is set to: suspends until `release()` is called, or returns
+    /// immediately if `release()` already ran (mirroring `HeldLivenessFetch.request()`'s pending-answer
+    /// case), so a test that releases before the timer even reaches this wait still behaves correctly.
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    /// Lets a held grace timer proceed, as if its delay had just elapsed. Synchronous, not async: it
+    /// only resumes the parked continuation, which the caller then awaits to completion through the
+    /// task handle `graceTaskForTesting` returned when the grace was armed.
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as
 /// an installed stream, which is all these tests need. Counts `stop()` calls so a test can tell a
 /// superseded client was released rather than left connected and forgotten.
@@ -2115,6 +2210,12 @@ private actor LivenessFetchScript {
     private var attempts = 0
     private let onAttempt: @Sendable (Int) -> Void
 
+    // Holds one attempt open for a test that needs to change `repeating` (and something outside this
+    // actor, like the model's own backoff) atomically with respect to the recheck loop: see `armHold()`.
+    private var isHoldArmed = false
+    private var heldContinuation: CheckedContinuation<Result<GhosttyRemoteSessionStatePayload, any Error>, Never>?
+    private var heldWaiter: CheckedContinuation<Void, Never>?
+
     init(
         queued: [Result<GhosttyRemoteSessionStatePayload, any Error>] = [], repeating: Result<GhosttyRemoteSessionStatePayload, any Error>,
         onAttempt: @escaping @Sendable (Int) -> Void = { _ in }
@@ -2126,14 +2227,41 @@ private actor LivenessFetchScript {
 
     var attemptCount: Int { attempts }
 
-    func answer() -> Result<GhosttyRemoteSessionStatePayload, any Error> {
+    func answer() async -> Result<GhosttyRemoteSessionStatePayload, any Error> {
         attempts += 1
         onAttempt(attempts)
-        return queued.isEmpty ? repeating : queued.removeFirst()
+        guard isHoldArmed else { return queued.isEmpty ? repeating : queued.removeFirst() }
+        isHoldArmed = false
+        return await withCheckedContinuation { continuation in
+            heldContinuation = continuation
+            heldWaiter?.resume()
+            heldWaiter = nil
+        }
     }
 
     /// What every attempt from now on answers with — the device coming back, or going away.
     func setRepeating(_ result: Result<GhosttyRemoteSessionStatePayload, any Error>) { repeating = result }
+
+    /// Arms a one-shot hold on the next call to `answer()`: instead of answering immediately, it parks
+    /// until `release()` runs. A test uses this to reconfigure `repeating` and the model's backoff
+    /// together without racing the recheck loop's own cadence — the loop calls `answer()` only once per
+    /// iteration, after fully settling the last one, so a parked call proves nothing is mid-flight against
+    /// the pre-transition state (see `waitUntilHeld()`).
+    func armHold() { isHoldArmed = true }
+
+    /// Suspends until a call to `answer()` has actually parked on the armed hold, confirming the previous
+    /// attempt was already fully processed and no further attempt can start until `release()` runs.
+    func waitUntilHeld() async {
+        guard heldContinuation == nil else { return }
+        await withCheckedContinuation { heldWaiter = $0 }
+    }
+
+    /// Resolves the parked call with whatever `repeating` (or the next queued answer) reads right now.
+    func release() {
+        guard let heldContinuation else { return }
+        self.heldContinuation = nil
+        heldContinuation.resume(returning: queued.isEmpty ? repeating : queued.removeFirst())
+    }
 }
 
 /// Holds one liveness request open until the test answers it, so a test can act while the question is
@@ -2211,7 +2339,12 @@ private final class PayloadDeliveryCounter: @unchecked Sendable {
 /// support module for one small socket fixture would cost more than these few lines.
 private final class LiveSubscriptionSocketServer: @unchecked Sendable {
     private let socketPath: String
-    private let payloadLine: Data
+    /// Nil for a session that is live for subscription purposes (the socket exists, `connect` succeeds)
+    /// but never actually writes anything: some tests race a real reconnect's completion against this
+    /// server's own delivery of the initial frame and need that delivery held off entirely, rather than
+    /// timed, to stay deterministic. See the two `startLiveSession(deliversInitialFrame: false)` call
+    /// sites.
+    private let payloadLine: Data?
     private let queue = DispatchQueue(label: "spaces.ui.tests.live.subscription")
     private let accepted = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -2219,8 +2352,12 @@ private final class LiveSubscriptionSocketServer: @unchecked Sendable {
     private var clientSocketFDs: [Int32] = []
     private var isStopped = false
 
-    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload) throws {
+    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload?) throws {
         self.socketPath = socketPath
+        guard let payload else {
+            payloadLine = nil
+            return
+        }
         var line = try GhosttyRemoteSessionStateCodec.encodeLine(payload)
         line.append(0x0A)
         payloadLine = line
@@ -2284,7 +2421,7 @@ private final class LiveSubscriptionSocketServer: @unchecked Sendable {
                 close(clientFD)
                 return
             }
-            payloadLine.withUnsafeBytes { buffer in
+            payloadLine?.withUnsafeBytes { buffer in
                 guard let baseAddress = buffer.baseAddress else { return }
                 _ = Darwin.write(clientFD, baseAddress, buffer.count)
             }
