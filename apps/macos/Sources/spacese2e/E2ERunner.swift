@@ -4,7 +4,7 @@ import Foundation
 struct E2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "e2e", abstract: "Run manual real-system E2E and profiling lanes.")
 
-    @Argument(help: "Lane to run: app, terminal, mobile, device-api, all, exhaustive, or mobile-demo.") var lane: E2ELane
+    @Argument(help: "Lane to run: app, terminal, mobile, device-api, all, exhaustive, mobile-demo, or mobile-baseline.") var lane: E2ELane
 
     @Argument(help: "Optional device-api target: all, local, remote, profile, or latency-compare.") var deviceAPITarget: E2EDeviceAPITarget?
 
@@ -23,6 +23,9 @@ struct E2ECommand: ParsableCommand {
     @Flag(name: .long, help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
     var local = false
 
+    @Flag(name: .long, help: "mobile-baseline only: target this worktree's remote Linux dev profile instead of the local dev daemon.")
+    var remote = false
+
     func run() throws {
         try validateOptions()
         if list {
@@ -39,6 +42,7 @@ struct E2ECommand: ParsableCommand {
         if let durationSeconds, durationSeconds <= 0 { throw ValidationError("--duration-seconds must be a positive integer.") }
         if lane != .deviceAPI, deviceAPITarget != nil { throw ValidationError("Only the device-api lane accepts a positional target.") }
         if local, lane != .mobileDemo { throw ValidationError("--local is only valid for the mobile-demo lane.") }
+        if remote, lane != .mobileBaseline { throw ValidationError("--remote is only valid for the mobile-baseline lane.") }
 
         let allowed = lane.scenarios
         for requested in scenario where !allowed.contains(requested) { throw ValidationError("Unknown \(lane.rawValue) scenario: \(requested)") }
@@ -72,6 +76,7 @@ enum E2ELane: String, ExpressibleByArgument {
     case all
     case exhaustive
     case mobileDemo = "mobile-demo"
+    case mobileBaseline = "mobile-baseline"
 
     var scenarios: [String] {
         switch self {
@@ -81,6 +86,7 @@ enum E2ELane: String, ExpressibleByArgument {
         case .deviceAPI: return E2EDeviceAPITarget.allCases.map(\.rawValue)
         case .all, .exhaustive: return []
         case .mobileDemo: return ["demo"]
+        case .mobileBaseline: return ["baseline"]
         }
     }
 }
@@ -284,6 +290,7 @@ private struct E2ERunner {
         case .all: try runAll()
         case .exhaustive: try runExhaustive()
         case .mobileDemo: try runScript("run_mobile_terminal_demo.sh", environment: mobileDemoEnvironment())
+        case .mobileBaseline: try runScript("e2e_mobile_baseline.sh", arguments: command.remote ? ["--remote"] : [], environment: sharedEnvironment)
         }
     }
 

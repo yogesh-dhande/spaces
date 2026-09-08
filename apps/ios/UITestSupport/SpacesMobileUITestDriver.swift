@@ -195,4 +195,86 @@ enum SpacesMobileUITestDriver {
         }
         return !element.exists
     }
+
+    // MARK: - Terminal surface input
+
+    /// Taps the terminal surface to activate it as first responder, which is how a real user brings up
+    /// the on-screen keyboard: the surface conforms to `UIKeyInput` and requests first-responder status
+    /// from its own tap-to-activate gesture (`GhosttyRemoteTerminalHostView.handleTapToActivateInput` in
+    /// spacesterminalmobileghostty), the same call the takeover UI test's private `focusTerminalSurface`
+    /// makes before a scrollback drag.
+    static func focusTerminalSurface(in app: XCUIApplication) {
+        let surface = app.otherElements["terminal.surface"]
+        if surface.waitForExistence(timeout: 5) { surface.tap() }
+    }
+
+    /// Polls for the system software keyboard to be on screen.
+    static func waitForKeyboard(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if app.keyboards.element.exists { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return app.keyboards.element.exists
+    }
+
+    /// Taps the terminal accessory toolbar's keyboard-toggle button (`terminal.accessory.keyboard-toggle`
+    /// in `GhosttyRemoteTerminalView`), which hides a visible software keyboard and shows a hidden one.
+    static func tapKeyboardAccessoryToggle(in app: XCUIApplication, timeout: TimeInterval) {
+        let toggle = app.descendants(matching: .any)["terminal.accessory.keyboard-toggle"]
+        if toggle.waitForExistence(timeout: timeout), toggle.isHittable { toggle.tap() }
+    }
+
+    // MARK: - Terminal surface scrolling
+
+    enum TerminalFlickDirection {
+        case towardHistory
+        case towardBottom
+    }
+
+    /// One flick on the terminal surface, matching the drag gesture and coordinates the takeover UI
+    /// test's private `performScrollback` uses (a short press-then-drag rather than `swipeUp`/
+    /// `swipeDown`, which XCUITest can deliver too fast for the terminal's own scroll-gesture recognizer
+    /// to pick up as scrollback intent rather than a tap). `.towardHistory` drags downward, which reveals
+    /// older content that had scrolled up out of view; `.towardBottom` drags upward, back toward the live
+    /// tail.
+    static func flickTerminalSurface(_ direction: TerminalFlickDirection, in app: XCUIApplication) {
+        let topPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
+        let bottomPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
+        switch direction {
+        case .towardHistory: topPoint.press(forDuration: 0.05, thenDragTo: bottomPoint)
+        case .towardBottom: bottomPoint.press(forDuration: 0.05, thenDragTo: topPoint)
+        }
+    }
+
+    // MARK: - Render-dump text detection
+
+    /// Reads the app's E2E render-dump file, the same on-disk mechanism `SpacesMobileUITests`'s takeover
+    /// and scrollback scenarios use to see terminal content: the terminal surface paints through Metal
+    /// with no accessible text, so the app writes its current render text to
+    /// `SPACES_MOBILE_E2E_RENDER_DUMP_PATH` on every frame, whenever `SPACES_MOBILE_E2E_TARGET_SESSION_ID`
+    /// names the session under test (see `SpacesMobileE2EConfig`/`SpacesMobileE2EDumpWriter` in the app
+    /// sources). This target does not link against the app module, so the JSON is decoded independently
+    /// here, picking out only the two fields needed rather than mirroring the app's full render-dump
+    /// schema (`JSONDecoder` ignores the rest).
+    static func waitForRenderedText(containing substring: String, sessionID: String, renderDumpPath: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if renderedText(sessionID: sessionID, renderDumpPath: renderDumpPath)?.contains(substring) == true { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        return renderedText(sessionID: sessionID, renderDumpPath: renderDumpPath)?.contains(substring) == true
+    }
+
+    private struct RenderDumpTextSnapshot: Decodable {
+        let sessionID: String
+        let renderedText: String
+    }
+
+    private static func renderedText(sessionID: String, renderDumpPath: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: renderDumpPath)),
+            let dump = try? JSONDecoder().decode(RenderDumpTextSnapshot.self, from: data), dump.sessionID == sessionID
+        else { return nil }
+        return dump.renderedText
+    }
 }

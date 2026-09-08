@@ -1,50 +1,58 @@
 #!/usr/bin/env python3
-"""Renders a markdown performance report for one iOS device baseline run.
+"""Renders a markdown performance report for one iOS performance baseline lane run.
 
-Reads the runner's own event stamps (runner-events.jsonl) and the device-side
-performance log pulled off the phone (device-perf.jsonl, plus a rotated
-device-perf.jsonl.1 when present) from a run root produced by
-apps/macos/Tests/ios_device_baseline.sh, and prints one markdown report to
-stdout.
+Reads a run root produced by apps/macos/Tests/e2e_mobile_baseline.sh:
+- device-perf.jsonl: the app's own performance events plus the lane markers the UI test and
+  the runner append into the same stream (source "ios-uitest" / "lane-runner", name
+  "lane_marker").
+- shaper.jsonl: the shaping proxy's own log (profile, connection, and byte-accounting events).
+- sessions.json: {"target": {"kind": "local"|"remote", "host": ...}, "scenarios": [...]}.
 
-This script only measures; it never judges pass or fail. Every section
-degrades to "n/a" rather than raising when the data it needs is missing, and
-an unrecognized event name or a malformed JSONL line is skipped rather than
-treated as an error, so a partial or interrupted run still produces a report.
+and prints one markdown report to stdout (header plus the cold-open table) while writing the
+full report to <run root>/report.md.
+
+This script only measures; it never judges pass or fail. A run root missing one or more of its
+three input files still produces a report (each missing file is called out in the header and
+every metric that needed it degrades to "n/a" or "no data" rather than raising), so a partial or
+interrupted run is still readable.
 """
 
 import argparse
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Device events within this much of a scenario's begin/end stamp still count as
-# belonging to that scenario. The runner's own stamps and the phone's emittedAt
-# both carry real (if small) clock and I/O latency around the moment the user
-# actually performs the step, so a hard boundary would misfile the very events
-# nearest the edges most likely to matter (the first paint right after open,
-# the last frame right before back).
-ASSIGNMENT_SLACK = timedelta(seconds=2)
+PROFILES = ["good", "constrained", "poor"]
+
+# Fixed report/section order, matching the lane contract's marker list.
+SCENARIOS = [
+    "cold-open",
+    "back-and-forth",
+    "keyboard",
+    "streaming",
+    "scrollback",
+    "background-terminal",
+    "background-list",
+    "reconnect",
+    "idle",
+]
 
 ISO8601_PATTERN = re.compile(
     r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})T(?P<h>\d{2}):(?P<mi>\d{2}):(?P<s>\d{2})"
     r"(?:\.(?P<frac>\d+))?(?P<tz>Z|[+-]\d{2}:?\d{2})?$"
 )
 
-THERMAL_STATE_ORDER = {"nominal": 0, "fair": 1, "serious": 2, "critical": 3}
-
 
 def parse_iso8601(value):
     """Parses an ISO 8601 timestamp with 'Z' or an offset and any fractional-second width.
 
-    Python's stdlib `datetime.fromisoformat` did not accept 'Z' or variable-width
-    fractional seconds until 3.11, and this script runs under whatever python3 the
-    developer machine has, so it parses the format by hand instead of assuming 3.11.
-    Returns None for anything that does not match rather than raising, matching this
-    report's "missing data degrades to n/a" contract.
+    Python's stdlib `datetime.fromisoformat` did not accept 'Z' or variable-width fractional
+    seconds until 3.11, and this script runs under whatever python3 the developer machine has,
+    so it parses the format by hand instead of assuming 3.11. Returns None for anything that
+    does not match rather than raising, matching this report's "missing data degrades" contract.
     """
     if not value:
         return None
@@ -87,95 +95,6 @@ def iter_jsonl(path: Path):
             continue
 
 
-def load_device_events(run_root: Path) -> list[dict]:
-    # The rotated file is the older half of the log, so it is read first; this keeps
-    # every consumer of the returned list (uptime-ordered pairing in particular) in
-    # chronological order without a second sort pass.
-    events: list[dict] = []
-    events.extend(iter_jsonl(run_root / "device-perf.jsonl.1"))
-    events.extend(iter_jsonl(run_root / "device-perf.jsonl"))
-    return events
-
-
-@dataclass
-class ScenarioWindow:
-    scenario: str
-    begin: datetime
-    end: "datetime | None"
-
-
-def load_scenario_windows(run_root: Path) -> list[ScenarioWindow]:
-    """Builds each scenario's [begin, end] wall-clock window from the runner's own stamps.
-
-    A scenario whose `scenario_end` stamp is missing (the run was interrupted mid-scenario)
-    keeps an open window that runs to the next scenario's begin, or to no bound at all for
-    the last scenario in the run: better to over-assign device events to an interrupted
-    scenario than to silently drop them.
-    """
-    windows: list[ScenarioWindow] = []
-    open_by_scenario: dict[str, ScenarioWindow] = {}
-    for obj in iter_jsonl(run_root / "runner-events.jsonl"):
-        kind = obj.get("kind")
-        scenario = obj.get("scenario")
-        stamped_at = parse_iso8601(obj.get("t"))
-        if not scenario or stamped_at is None:
-            continue
-        if kind == "scenario_begin":
-            window = ScenarioWindow(scenario=scenario, begin=stamped_at, end=None)
-            windows.append(window)
-            open_by_scenario[scenario] = window
-        elif kind == "scenario_end":
-            window = open_by_scenario.pop(scenario, None)
-            if window is not None:
-                window.end = stamped_at
-    windows.sort(key=lambda window: window.begin)
-    for index, window in enumerate(windows):
-        if window.end is None:
-            window.end = windows[index + 1].begin if index + 1 < len(windows) else None
-    return windows
-
-
-def scenario_order(windows: list[ScenarioWindow]) -> list[str]:
-    return [window.scenario for window in windows]
-
-
-def assign_scenario(at, windows: list[ScenarioWindow]):
-    """Assigns a device-side timestamp to the scenario window it belongs to.
-
-    A window that contains `at` with no slack always wins outright: the runner stamps the
-    next scenario's begin right at the previous scenario's end, so an event just after that
-    shared boundary is inside the later window for real and must not be pulled back into the
-    earlier one just because it is also within slack of the earlier window's end. Only when no
-    window contains `at` for real does the slack-expanded search run, and there the LAST
-    (latest-begin) matching window wins: for two adjacent windows, a time within slack of both
-    the earlier window's end and the later window's begin is closer, in real-world terms, to
-    the window it is about to (or just did) begin.
-    """
-    if at is None:
-        return None
-    for window in windows:
-        if at >= window.begin and (window.end is None or at <= window.end):
-            return window.scenario
-    match = None
-    for window in windows:
-        begin = window.begin - ASSIGNMENT_SLACK
-        end = window.end + ASSIGNMENT_SLACK if window.end is not None else None
-        if at >= begin and (end is None or at <= end):
-            match = window.scenario
-    return match
-
-
-def event_time(event: dict):
-    return parse_iso8601(event.get("emittedAt"))
-
-
-def event_uptime_ns(event: dict):
-    try:
-        return int(event["emittedUptimeNanoseconds"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
 def numeric(value):
     if value is None:
         return None
@@ -185,11 +104,7 @@ def numeric(value):
         return None
 
 
-def elapsed_ms(event: dict):
-    return numeric(event.get("elapsedMS"))
-
-
-def percentile(values: list[float], pct: float):
+def percentile(values, pct):
     """Nearest-rank percentile: rank = ceil(pct/100 * n), clamped into [1, n]."""
     if not values:
         return None
@@ -198,24 +113,39 @@ def percentile(values: list[float], pct: float):
     return ordered[rank - 1]
 
 
-def stats_row(values: list[float]) -> dict:
-    return {
-        "n": len(values),
-        "p50": percentile(values, 50),
-        "p95": percentile(values, 95),
-        "max": max(values) if values else None,
-    }
+def stats(values):
+    values = [v for v in values if v is not None]
+    if not values:
+        return {"n": 0, "p50": None, "p95": None, "max": None}
+    return {"n": len(values), "p50": percentile(values, 50), "p95": percentile(values, 95), "max": max(values)}
 
 
-def fmt_num(value, decimals: int = 1) -> str:
+def numeric_sort_key(value):
+    """Sorts marker attribute values (iteration/cycle/index/burst, always small integers stored
+    as strings) numerically when possible, falling back to lexical order for anything else."""
+    try:
+        return (0, int(value))
+    except (TypeError, ValueError):
+        return (1, str(value))
+
+
+def fmt_num(value, decimals=1):
     return "n/a" if value is None else f"{value:.{decimals}f}"
 
 
-def fmt_bytes(value) -> str:
-    return "n/a" if value is None else f"{int(value):,}"
+def fmt_count(value):
+    return "n/a" if value is None else str(int(value))
 
 
-def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+def fmt_str(value):
+    return value if value else "n/a"
+
+
+fmt_ms = fmt_num
+fmt_kb = fmt_num
+
+
+def markdown_table(headers, rows):
     if not rows:
         return "n/a"
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
@@ -224,488 +154,857 @@ def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def group_by_scenario(events, windows, name, predicate=None, value_fn=elapsed_ms) -> dict[str, list]:
-    grouped: dict[str, list] = {scenario: [] for scenario in scenario_order(windows)}
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+
+def event_time(event):
+    if not event:
+        return None
+    return parse_iso8601(event.get("emittedAt") or event.get("at"))
+
+
+def event_uptime_ns(event):
+    try:
+        return int(event["emittedUptimeNanoseconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def attr(event, key):
+    if not event:
+        return None
+    return (event.get("attributes") or {}).get(key)
+
+
+def event_elapsed_ms(event):
+    return numeric(event.get("elapsedMS")) if event else None
+
+
+def is_marker(event):
+    return event.get("name") == "lane_marker"
+
+
+def load_device_events(run_root: Path):
+    events = list(iter_jsonl(run_root / "device-perf.jsonl"))
+    events.sort(key=lambda e: event_time(e) or datetime.min.replace(tzinfo=timezone.utc))
+    return events
+
+
+def load_shaper_events(run_root: Path):
+    events = list(iter_jsonl(run_root / "shaper.jsonl"))
+    events.sort(key=lambda e: event_time(e) or datetime.min.replace(tzinfo=timezone.utc))
+    return events
+
+
+def load_sessions(run_root: Path):
+    path = run_root / "sessions.json"
+    if not path.exists():
+        return {"target": None, "scenarios": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"target": None, "scenarios": []}
+    if not isinstance(data, dict):
+        return {"target": None, "scenarios": []}
+    data.setdefault("target", None)
+    data.setdefault("scenarios", [])
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Scenario windows
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScenarioWindow:
+    profile: str
+    scenario: str
+    begin: "datetime"
+    end: "datetime"
+    source: str  # "test" (ios-uitest scenario_begin/end) or "runner" (lane-runner fallback)
+    app_events: list = field(default_factory=list)
+    app_events_by_uptime: list = field(default_factory=list)
+    markers: dict = field(default_factory=dict)  # marker name -> list of lane_marker events
+    shaper_bytes: list = field(default_factory=list)  # shaper "bytes" events within [begin, end]
+    # The app_launch closest to (at or before) this window's end, searched across the WHOLE run
+    # rather than scoped to [begin, end]: whether the test writes its scenario_begin marker before
+    # or after the app finishes launching is not specified by the lane contract, and app_launch
+    # fires from deep inside app startup, so pinning the search to the window risks silently
+    # missing it. Searching the whole run and taking the latest one at-or-before window.end is
+    # correct under either ordering, since each scenario's own launch is definitionally the most
+    # recent one before that scenario's window closes (scenarios run strictly one at a time).
+    app_launch_event: dict = None
+
+
+def marker(window, name):
+    events = window.markers.get(name) if window else None
+    return events[0] if events else None
+
+
+def markers_keyed(window, name, key_attr):
+    result = {}
+    for event in (window.markers.get(name) if window else None) or []:
+        key = attr(event, key_attr)
+        if key is not None:
+            result[key] = event
+    return result
+
+
+def build_scenario_windows(device_events, shaper_events):
+    test_begin, test_end, runner_begin, runner_end = {}, {}, {}, {}
+    for event in device_events:
+        if not is_marker(event):
+            continue
+        attrs = event.get("attributes") or {}
+        profile, scenario, marker_name = attrs.get("profile"), attrs.get("scenario"), attrs.get("marker")
+        if not profile or not scenario or not marker_name:
+            continue
+        at = event_time(event)
+        if at is None:
+            continue
+        key = (profile, scenario)
+        source = event.get("source")
+        if source == "ios-uitest" and marker_name == "scenario_begin":
+            test_begin.setdefault(key, at)
+        elif source == "ios-uitest" and marker_name == "scenario_end":
+            test_end[key] = at
+        elif source == "lane-runner" and marker_name == "runner_scenario_start":
+            runner_begin.setdefault(key, at)
+        elif source == "lane-runner" and marker_name == "runner_scenario_finish":
+            runner_end[key] = at
+
+    all_app_launches = sorted(
+        (e for e in device_events if e.get("name") == "app_launch" and event_time(e) is not None), key=event_time
+    )
+
+    windows = {}
+    for profile in PROFILES:
+        for scenario in SCENARIOS:
+            key = (profile, scenario)
+            if key in test_begin and key in test_end:
+                begin, end, source = test_begin[key], test_end[key], "test"
+            elif key in runner_begin and key in runner_end:
+                begin, end, source = runner_begin[key], runner_end[key], "runner"
+            else:
+                windows[key] = None
+                continue
+
+            window = ScenarioWindow(profile=profile, scenario=scenario, begin=begin, end=end, source=source)
+            for event in device_events:
+                if is_marker(event):
+                    continue
+                at = event_time(event)
+                if at is not None and begin <= at <= end:
+                    window.app_events.append(event)
+            window.app_events_by_uptime = sorted(
+                (e for e in window.app_events if event_uptime_ns(e) is not None), key=event_uptime_ns
+            )
+            for event in device_events:
+                if not is_marker(event):
+                    continue
+                attrs = event.get("attributes") or {}
+                if attrs.get("profile") != profile or attrs.get("scenario") != scenario:
+                    continue
+                window.markers.setdefault(attrs.get("marker"), []).append(event)
+            for marker_list in window.markers.values():
+                marker_list.sort(key=lambda e: event_time(e) or begin)
+            window.shaper_bytes = [
+                s
+                for s in shaper_events
+                if s.get("event") == "bytes" and event_time(s) is not None and begin <= event_time(s) <= end
+            ]
+            candidates = [launch for launch in all_app_launches if event_time(launch) <= end]
+            window.app_launch_event = candidates[-1] if candidates else None
+            windows[key] = window
+    return windows
+
+
+# ---------------------------------------------------------------------------
+# Shared metric helpers
+# ---------------------------------------------------------------------------
+
+
+def first_named(events, name, predicate=None):
     for event in events:
         if event.get("name") != name:
             continue
         if predicate is not None and not predicate(event):
             continue
-        scenario = assign_scenario(event_time(event), windows)
-        if scenario not in grouped:
+        return event
+    return None
+
+
+def first_named_any(events, names, predicate=None):
+    """Like `first_named`, but matches any of `names`: whichever name occurs first in `events`
+    wins, rather than searching for one name and only falling back to the next on a total miss."""
+    for event in events:
+        if event.get("name") not in names:
             continue
-        value = value_fn(event)
-        if value is not None:
-            grouped[scenario].append(value)
-    return grouped
+        if predicate is not None and not predicate(event):
+            continue
+        return event
+    return None
 
 
-def stats_rows(grouped: dict[str, list], windows: list[ScenarioWindow]) -> list[list[str]]:
+def first_after_uptime(events_by_uptime, after_ns, names, predicate=None):
+    for event in events_by_uptime:
+        ns = event_uptime_ns(event)
+        if ns is None or (after_ns is not None and ns < after_ns):
+            continue
+        if event.get("name") not in names:
+            continue
+        if predicate is not None and not predicate(event):
+            continue
+        return event
+    return None
+
+
+def uptime_delta_ms(event_a, event_b):
+    ns_a, ns_b = event_uptime_ns(event_a), event_uptime_ns(event_b)
+    if ns_a is None or ns_b is None:
+        return None
+    return (ns_b - ns_a) / 1_000_000.0
+
+
+def wall_delta_ms(event_a, event_b):
+    at_a, at_b = event_time(event_a), event_time(event_b)
+    if at_a is None or at_b is None:
+        return None
+    return (at_b - at_a).total_seconds() * 1000.0
+
+
+def render_frames_in_wall_range(app_events, start_t, end_t):
+    if start_t is None or end_t is None:
+        return []
+    return [
+        e
+        for e in app_events
+        if e.get("name") == "render_frame_payload_receive"
+        and attr(e, "render_update") == "1"
+        and event_time(e) is not None
+        and start_t <= event_time(e) <= end_t
+    ]
+
+
+def decoded_kb(frames):
+    return sum((numeric(e.get("count")) or 0) for e in frames) / 1024.0
+
+
+def shaper_bytes_in_range(window, start_t, end_t, direction):
+    if start_t is None or end_t is None:
+        return 0.0
+    return sum(
+        (numeric(s.get(direction)) or 0)
+        for s in window.shaper_bytes
+        if event_time(s) is not None and start_t <= event_time(s) <= end_t
+    )
+
+
+def shaper_kb(window, direction):
+    return shaper_bytes_in_range(window, window.begin, window.end, direction) / 1024.0
+
+
+# ---------------------------------------------------------------------------
+# Per-scenario metrics: each function takes the scenario's ScenarioWindow (or None for "no
+# data") and returns a small dict of raw values; rendering (formatting, table layout) happens
+# separately in the render_* section below.
+# ---------------------------------------------------------------------------
+
+
+def metric_cold_open(window):
+    if window is None:
+        return None
+    overview_ok = None
+    if window.app_launch_event is not None:
+        overview_ok = first_after_uptime(
+            window.app_events_by_uptime,
+            event_uptime_ns(window.app_launch_event),
+            ("overview_refresh_end",),
+            predicate=lambda e: attr(e, "success") == "1",
+        )
+    launch_to_list_ms = uptime_delta_ms(window.app_launch_event, overview_ok) if overview_ok is not None else None
+
+    open_tap = marker(window, "open_tap")
+    first_paint = first_named(window.app_events, "terminal_first_paint")
+    open_to_paint_ms = wall_delta_ms(open_tap, first_paint) if open_tap and first_paint else None
+
+    def render_frames(start_ns, end_ns):
+        return [
+            e
+            for e in window.app_events_by_uptime
+            if e.get("name") == "render_frame_payload_receive"
+            and attr(e, "render_update") == "1"
+            and start_ns <= event_uptime_ns(e) <= end_ns
+        ]
+
+    # The frames that make up the open itself (every full frame between the open beginning and the
+    # first paint) are the cost a user waits for; the 3 s after the paint show what the open still
+    # pays once the screen is already up (resize round trips, duplicate frames).
+    frames_to_paint, kb_to_paint, frames_3s, kb_3s = None, None, None, None
+    open_begin = first_named(window.app_events, "terminal_open_begin")
+    if first_paint is not None and event_uptime_ns(first_paint) is not None:
+        paint_ns = event_uptime_ns(first_paint)
+        if open_begin is not None and event_uptime_ns(open_begin) is not None:
+            frames = render_frames(event_uptime_ns(open_begin), paint_ns)
+            frames_to_paint, kb_to_paint = len(frames), decoded_kb(frames)
+        frames = render_frames(paint_ns + 1, paint_ns + 3_000_000_000)
+        frames_3s, kb_3s = len(frames), decoded_kb(frames)
+
+    return {
+        "launch_to_list_ms": launch_to_list_ms,
+        "open_to_paint_ms": open_to_paint_ms,
+        "paint_elapsed_ms": event_elapsed_ms(first_paint),
+        "hold_released_by": attr(first_paint, "hold_released_by"),
+        "frames_to_paint": frames_to_paint,
+        "decoded_kb_to_paint": kb_to_paint,
+        "frames_3s": frames_3s,
+        "decoded_kb_3s": kb_3s,
+        "wire_kb_down": shaper_kb(window, "down"),
+    }
+
+
+def metric_back_and_forth(window):
+    if window is None:
+        return None
+    open_taps = markers_keyed(window, "open_tap", "iteration")
+    back_taps = markers_keyed(window, "back_tap", "iteration")
+    first_paints = sorted(
+        (e for e in window.app_events if e.get("name") == "terminal_first_paint"),
+        key=lambda e: event_time(e) or window.begin,
+    )
+
+    open_to_paint, frames_per_reopen, kb_per_reopen = [], [], []
+    paint_cursor = 0
+    for iteration in sorted(open_taps, key=numeric_sort_key):
+        open_tap = open_taps[iteration]
+        open_time = event_time(open_tap)
+        if open_time is None:
+            continue
+        # Consume paints in chronological order rather than re-searching from the start each time,
+        # so a missing paint for one iteration cannot get matched to a later iteration's paint.
+        paint = None
+        while paint_cursor < len(first_paints):
+            candidate = first_paints[paint_cursor]
+            paint_cursor += 1
+            candidate_time = event_time(candidate)
+            if candidate_time is not None and candidate_time >= open_time:
+                paint = candidate
+                break
+        if paint is not None:
+            open_to_paint.append(wall_delta_ms(open_tap, paint))
+        back_tap = back_taps.get(iteration)
+        window_end = event_time(back_tap) if back_tap is not None else window.end
+        frames = render_frames_in_wall_range(window.app_events, open_time, window_end)
+        frames_per_reopen.append(len(frames))
+        kb_per_reopen.append(decoded_kb(frames))
+
+    open_stats, frame_stats, kb_stats = stats(open_to_paint), stats(frames_per_reopen), stats(kb_per_reopen)
+    return {
+        "open_paint_p50": open_stats["p50"],
+        "open_paint_max": open_stats["max"],
+        "frames_p50": frame_stats["p50"],
+        "frames_max": frame_stats["max"],
+        "kb_p50": kb_stats["p50"],
+        "kb_max": kb_stats["max"],
+    }
+
+
+def metric_keyboard(window):
+    if window is None:
+        return None
+    toggles = sorted(
+        (e for e in window.app_events if e.get("name") == "keyboard_toggle" and event_uptime_ns(e) is not None),
+        key=event_uptime_ns,
+    )
+    resizes = sorted(
+        (
+            e
+            for e in window.app_events
+            if e.get("name") == "viewport_resize_frame_visible" and event_uptime_ns(e) is not None
+        ),
+        key=event_uptime_ns,
+    )
+    # A toggle pairs only with a resize that lands before the next toggle. The first show after an
+    # open has no resize event of its own (the frame for the reduced grid arrives before the viewport
+    # target is armed), and a running cursor would hand that show the following hide's resize and shift
+    # every later pair by one.
+    show_ms, hide_ms = [], []
+    for position, toggle in enumerate(toggles):
+        toggle_ns = event_uptime_ns(toggle)
+        next_toggle_ns = event_uptime_ns(toggles[position + 1]) if position + 1 < len(toggles) else None
+        resize = next(
+            (
+                candidate
+                for candidate in resizes
+                if event_uptime_ns(candidate) >= toggle_ns and (next_toggle_ns is None or event_uptime_ns(candidate) < next_toggle_ns)
+            ),
+            None,
+        )
+        if resize is None:
+            continue
+        # The resize event's own `elapsedMS` is the toggle-to-frame time the app measured; the event is
+        # logged 500 ms later, after its quiet window, so its timestamp would overstate every transition.
+        delta = event_elapsed_ms(resize)
+        if delta is None:
+            continue
+        (show_ms if attr(toggle, "visible") == "1" else hide_ms).append(delta)
+
+    show_taps = markers_keyed(window, "keyboard_show_tap", "cycle")
+    cycles = sorted(show_taps, key=numeric_sort_key)
+    frames_per_cycle, kb_per_cycle = [], []
+    for index, cycle in enumerate(cycles):
+        start_t = event_time(show_taps[cycle])
+        if start_t is None:
+            continue
+        end_t = event_time(show_taps[cycles[index + 1]]) if index + 1 < len(cycles) else window.end
+        frames = render_frames_in_wall_range(window.app_events, start_t, end_t or window.end)
+        frames_per_cycle.append(len(frames))
+        kb_per_cycle.append(decoded_kb(frames))
+
+    input_rpc_ms = [
+        event_elapsed_ms(e)
+        for e in window.app_events
+        if e.get("name") == "input_command_rpc_end" and attr(e, "success") == "1"
+    ]
+
+    show_stats, hide_stats = stats(show_ms), stats(hide_ms)
+    frame_stats, kb_stats, input_stats = stats(frames_per_cycle), stats(kb_per_cycle), stats(input_rpc_ms)
+    return {
+        "show_p50": show_stats["p50"],
+        "show_max": show_stats["max"],
+        "hide_p50": hide_stats["p50"],
+        "hide_max": hide_stats["max"],
+        "frames_p50": frame_stats["p50"],
+        "frames_max": frame_stats["max"],
+        "kb_p50": kb_stats["p50"],
+        "kb_max": kb_stats["max"],
+        "input_p50": input_stats["p50"],
+        "input_p95": input_stats["p95"],
+        "input_max": input_stats["max"],
+    }
+
+
+BURST_SETTLE_SECONDS = 1.0
+
+
+def _streaming_burst(window, burst_sent, burst_wait_end, streaming_ready, burst):
+    start_marker = burst_sent.get(burst)
+    start_t = event_time(start_marker) if start_marker is not None else event_time(streaming_ready)
+    end_marker = burst_wait_end.get(burst)
+    end_t = event_time(end_marker)
+    # `burst_wait_end` is stamped when BURST_DONE shows on screen; the prompt repaint that follows it
+    # still belongs to the burst, so the window keeps one settle second after the marker.
+    if end_t is not None:
+        end_t = end_t + timedelta(seconds=BURST_SETTLE_SECONDS)
+    if start_t is None or end_t is None:
+        return {"frames": None, "decoded_kb": None, "wire_kb": None, "duration_ms": None, "frames_per_sec": None, "kb_per_frame": None}
+
+    frames = render_frames_in_wall_range(window.app_events, start_t, end_t)
+    kb = decoded_kb(frames)
+    wire_kb = shaper_bytes_in_range(window, start_t, end_t, "down") / 1024.0
+
+    # Duration between the first and last frame of the burst pairs two app events, so uptime ns
+    # is the right clock even though the burst's own start/end come from wall-clock markers.
+    frame_ns = sorted(ns for ns in (event_uptime_ns(f) for f in frames) if ns is not None)
+    if len(frame_ns) >= 2:
+        duration_ms = (frame_ns[-1] - frame_ns[0]) / 1_000_000.0
+    elif frame_ns:
+        duration_ms = 0.0
+    else:
+        duration_ms = None
+
+    return {
+        "frames": len(frames),
+        "decoded_kb": kb,
+        "wire_kb": wire_kb,
+        "duration_ms": duration_ms,
+        "frames_per_sec": (len(frames) / (duration_ms / 1000.0)) if duration_ms else None,
+        "kb_per_frame": (kb / len(frames)) if frames else None,
+    }
+
+
+def metric_streaming(window):
+    if window is None:
+        return None
+    burst_sent = markers_keyed(window, "burst_sent", "burst")
+    burst_wait_end = markers_keyed(window, "burst_wait_end", "burst")
+    streaming_ready = marker(window, "streaming_ready")
+    result = {}
+    for burst in ("1", "2"):
+        for key, value in _streaming_burst(window, burst_sent, burst_wait_end, streaming_ready, burst).items():
+            result[f"burst{burst}_{key}"] = value
+    return result
+
+
+def metric_scrollback(window):
+    if window is None:
+        return None
+    # Flicks are ordered by time, not by their `index` attribute: the flicks back toward the bottom
+    # restart at index 1, so keying by index would collapse them onto the history flicks.
+    flicks = sorted((m for m in (window.markers.get("flick") or []) if event_time(m) is not None), key=event_time)
+    rpc_ms, frames_per_flick, kb_per_flick, settle_ms = [], [], [], []
+    for position, flick in enumerate(flicks):
+        start_t = event_time(flick)
+        end_t = event_time(flicks[position + 1]) if position + 1 < len(flicks) else window.end
+        end_t = end_t or window.end
+
+        # Every scroll round trip the flick caused counts, since a flick decelerates through dozens of
+        # scroll requests and each one is a full round trip the user waits on.
+        rpc_ms.extend(
+            event_elapsed_ms(e)
+            for e in window.app_events
+            if e.get("name") == "input_command_rpc_end"
+            and attr(e, "input_kind") == "send_scroll"
+            and attr(e, "success") == "1"
+            and event_time(e) is not None
+            and start_t <= event_time(e) <= end_t
+            and event_elapsed_ms(e) is not None
+        )
+
+        frames = render_frames_in_wall_range(window.app_events, start_t, end_t)
+        frames_per_flick.append(len(frames))
+        kb_per_flick.append(decoded_kb(frames))
+        # "flick -> settled" is approximated as the flick's own start to its last in-window frame:
+        # a true 500 ms trailing-quiet check would need to look past this flick's own end boundary
+        # into the next flick's frames to rule out a frame arriving just after this slice, which
+        # this per-flick slicing does not attempt.
+        if frames:
+            last_frame_t = max(event_time(f) for f in frames if event_time(f) is not None)
+            settle_ms.append((last_frame_t - start_t).total_seconds() * 1000.0)
+
+    rpc_stats, frame_stats, kb_stats, settle_stats = stats(rpc_ms), stats(frames_per_flick), stats(kb_per_flick), stats(settle_ms)
+    return {
+        "rpc_p50": rpc_stats["p50"],
+        "rpc_max": rpc_stats["max"],
+        "frames_p50": frame_stats["p50"],
+        "frames_max": frame_stats["max"],
+        "kb_p50": kb_stats["p50"],
+        "kb_max": kb_stats["max"],
+        "settle_p50": settle_stats["p50"],
+        "settle_max": settle_stats["max"],
+    }
+
+
+def metric_background(window, mode):
+    """mode "terminal": foreground -> next stream_first_frame/render_frame_payload_receive.
+    mode "list": foreground -> next successful overview_refresh_end."""
+    if window is None:
+        return None
+    backgrounds = markers_keyed(window, "background", "iteration")
+    foregrounds = markers_keyed(window, "foreground", "iteration")
+    iterations = sorted(foregrounds, key=numeric_sort_key)
+
+    resume_ms, frames_per_resume, kb_per_resume = [], [], []
+    for iteration in iterations:
+        fg = foregrounds[iteration]
+        fg_time = event_time(fg)
+        if fg_time is None:
+            continue
+        candidates = [e for e in window.app_events if event_time(e) is not None and event_time(e) >= fg_time]
+        if mode == "terminal":
+            target = first_named_any(
+                candidates,
+                ("stream_first_frame", "render_frame_payload_receive"),
+                predicate=lambda e: e.get("name") != "render_frame_payload_receive" or attr(e, "render_update") == "1",
+            )
+        else:
+            target = first_named(candidates, "overview_refresh_end", predicate=lambda e: attr(e, "success") == "1")
+        if target is not None:
+            resume_ms.append(wall_delta_ms(fg, target))
+
+        next_iteration = str(int(iteration) + 1) if numeric_sort_key(iteration)[0] == 0 else None
+        next_bg = backgrounds.get(next_iteration) if next_iteration is not None else None
+        end_t = event_time(next_bg) if next_bg is not None else window.end
+        frames = render_frames_in_wall_range(window.app_events, fg_time, end_t or window.end)
+        frames_per_resume.append(len(frames))
+        kb_per_resume.append(decoded_kb(frames))
+
+    resume_stats, frame_stats, kb_stats = stats(resume_ms), stats(frames_per_resume), stats(kb_per_resume)
+    return {
+        "resume_p50": resume_stats["p50"],
+        "resume_max": resume_stats["max"],
+        "frames_p50": frame_stats["p50"],
+        "frames_max": frame_stats["max"],
+        "kb_p50": kb_stats["p50"],
+        "kb_max": kb_stats["max"],
+        "connection_stage_events": len([e for e in window.app_events if e.get("name") == "connection_stage"]),
+    }
+
+
+def metric_reconnect(window):
+    if window is None:
+        return None
+    link_down, link_up, recovered = marker(window, "link_down"), marker(window, "link_up"), marker(window, "recovered")
+
+    banner_event = None
+    if link_down is not None and event_time(link_down) is not None:
+        down_time = event_time(link_down)
+        banner_event = first_named(
+            [e for e in window.app_events if event_time(e) is not None and event_time(e) >= down_time],
+            "connection_stage",
+            predicate=lambda e: attr(e, "stage") == "reconnecting",
+        )
+
+    first_frame_after_up, banner_clear_event = None, None
+    if link_up is not None and event_time(link_up) is not None:
+        up_time = event_time(link_up)
+        candidates = [e for e in window.app_events if event_time(e) is not None and event_time(e) >= up_time]
+        first_frame_after_up = first_named(candidates, "stream_first_frame")
+        banner_clear_event = first_named(
+            candidates, "connection_stage", predicate=lambda e: attr(e, "banner") == "0"
+        )
+
+    recovery_frames, recovery_kb = None, None
+    if link_down is not None and recovered is not None:
+        frames = render_frames_in_wall_range(window.app_events, event_time(link_down), event_time(recovered))
+        recovery_frames, recovery_kb = len(frames), decoded_kb(frames)
+
+    return {
+        "link_down_to_banner_ms": wall_delta_ms(link_down, banner_event) if banner_event else None,
+        "link_up_to_first_frame_ms": wall_delta_ms(link_up, first_frame_after_up) if first_frame_after_up else None,
+        "link_up_to_banner_clear_ms": wall_delta_ms(link_up, banner_clear_event) if banner_clear_event else None,
+        "recovery_frames": recovery_frames,
+        "recovery_kb": recovery_kb,
+        "connection_error_alerts": len([e for e in window.app_events if e.get("name") == "connection_error_alert"]),
+    }
+
+
+def metric_idle(window):
+    if window is None:
+        return None
+    idle_begin, idle_end = marker(window, "idle_begin"), marker(window, "idle_end")
+    start_t = event_time(idle_begin) if idle_begin is not None else window.begin
+    end_t = event_time(idle_end) if idle_end is not None else window.end
+    if start_t is None or end_t is None or end_t <= start_t:
+        return {"up_bytes_per_sec": None, "down_bytes_per_sec": None, "decoded_frames": None, "connection_events": None}
+
+    duration_s = (end_t - start_t).total_seconds()
+    up_total = shaper_bytes_in_range(window, start_t, end_t, "up")
+    down_total = shaper_bytes_in_range(window, start_t, end_t, "down")
+    frames = render_frames_in_wall_range(window.app_events, start_t, end_t)
+    connection_events = [
+        e for e in window.app_events if e.get("name") in ("connection_stage", "stream_disconnect", "stream_first_frame")
+    ]
+    return {
+        "up_bytes_per_sec": up_total / duration_s,
+        "down_bytes_per_sec": down_total / duration_s,
+        "decoded_frames": len(frames),
+        "connection_events": len(connection_events),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+COLD_OPEN_COLUMNS = [
+    ("launch_to_list_ms", "launch to list ms", fmt_ms),
+    ("open_to_paint_ms", "open tap to paint ms", fmt_ms),
+    ("paint_elapsed_ms", "open begin to paint ms (device)", fmt_ms),
+    ("hold_released_by", "hold released by", fmt_str),
+    ("frames_to_paint", "frames to paint", fmt_count),
+    ("decoded_kb_to_paint", "decoded KB to paint", fmt_kb),
+    ("frames_3s", "frames (3s after paint)", fmt_count),
+    ("decoded_kb_3s", "decoded KB (3s after paint)", fmt_kb),
+    ("wire_kb_down", "wire KB down", fmt_kb),
+]
+
+BACK_AND_FORTH_COLUMNS = [
+    ("open_paint_p50", "open->paint p50 ms", fmt_ms),
+    ("open_paint_max", "open->paint max ms", fmt_ms),
+    ("frames_p50", "frames/reopen p50", fmt_count),
+    ("frames_max", "frames/reopen max", fmt_count),
+    ("kb_p50", "decoded KB/reopen p50", fmt_kb),
+    ("kb_max", "decoded KB/reopen max", fmt_kb),
+]
+
+KEYBOARD_COLUMNS = [
+    ("show_p50", "show->resize p50 ms", fmt_ms),
+    ("show_max", "show->resize max ms", fmt_ms),
+    ("hide_p50", "hide->resize p50 ms", fmt_ms),
+    ("hide_max", "hide->resize max ms", fmt_ms),
+    ("frames_p50", "frames/cycle p50", fmt_count),
+    ("frames_max", "frames/cycle max", fmt_count),
+    ("kb_p50", "decoded KB/cycle p50", fmt_kb),
+    ("kb_max", "decoded KB/cycle max", fmt_kb),
+    ("input_p50", "input rpc p50 ms", fmt_ms),
+    ("input_p95", "input rpc p95 ms", fmt_ms),
+    ("input_max", "input rpc max ms", fmt_ms),
+]
+
+STREAMING_COLUMNS = []
+for _burst in ("1", "2"):
+    STREAMING_COLUMNS.extend(
+        [
+            (f"burst{_burst}_frames", f"burst {_burst} frames", fmt_count),
+            (f"burst{_burst}_decoded_kb", f"burst {_burst} decoded KB", fmt_kb),
+            (f"burst{_burst}_wire_kb", f"burst {_burst} wire KB", fmt_kb),
+            (f"burst{_burst}_duration_ms", f"burst {_burst} duration ms", fmt_ms),
+            (f"burst{_burst}_frames_per_sec", f"burst {_burst} frames/s", fmt_num),
+            (f"burst{_burst}_kb_per_frame", f"burst {_burst} KB/frame", fmt_kb),
+        ]
+    )
+
+SCROLLBACK_COLUMNS = [
+    ("rpc_p50", "scroll rpc p50 ms", fmt_ms),
+    ("rpc_max", "scroll rpc max ms", fmt_ms),
+    ("frames_p50", "frames/flick p50", fmt_count),
+    ("frames_max", "frames/flick max", fmt_count),
+    ("kb_p50", "decoded KB/flick p50", fmt_kb),
+    ("kb_max", "decoded KB/flick max", fmt_kb),
+    ("settle_p50", "flick->settled p50 ms", fmt_ms),
+    ("settle_max", "flick->settled max ms", fmt_ms),
+]
+
+BACKGROUND_COLUMNS = [
+    ("resume_p50", "foreground->frame p50 ms", fmt_ms),
+    ("resume_max", "foreground->frame max ms", fmt_ms),
+    ("frames_p50", "frames/resume p50", fmt_count),
+    ("frames_max", "frames/resume max", fmt_count),
+    ("kb_p50", "decoded KB/resume p50", fmt_kb),
+    ("kb_max", "decoded KB/resume max", fmt_kb),
+    ("connection_stage_events", "connection_stage events", fmt_count),
+]
+
+RECONNECT_COLUMNS = [
+    ("link_down_to_banner_ms", "link down->banner ms", fmt_ms),
+    ("link_up_to_first_frame_ms", "link up->first frame ms", fmt_ms),
+    ("link_up_to_banner_clear_ms", "link up->banner clear ms", fmt_ms),
+    ("recovery_frames", "frames during recovery", fmt_count),
+    ("recovery_kb", "decoded KB during recovery", fmt_kb),
+    ("connection_error_alerts", "connection_error_alert count", fmt_count),
+]
+
+IDLE_COLUMNS = [
+    ("up_bytes_per_sec", "wire KB/s up", lambda v: fmt_num(v / 1024.0) if v is not None else "n/a"),
+    ("down_bytes_per_sec", "wire KB/s down", lambda v: fmt_num(v / 1024.0) if v is not None else "n/a"),
+    ("decoded_frames", "decoded frames", fmt_count),
+    ("connection_events", "connection events", fmt_count),
+]
+
+
+def render_table(title, columns, metrics_by_profile):
+    headers = ["Profile"] + [header for _, header, _ in columns]
     rows = []
-    for scenario in scenario_order(windows):
-        stats = stats_row(grouped.get(scenario, []))
-        rows.append([scenario, str(stats["n"]), fmt_num(stats["p50"]), fmt_num(stats["p95"]), fmt_num(stats["max"])])
-    return rows
+    for profile in PROFILES:
+        metrics = metrics_by_profile.get(profile)
+        if metrics is None:
+            rows.append([profile] + ["no data"] * len(columns))
+            continue
+        rows.append([profile] + [fmt(metrics.get(key)) for key, _, fmt in columns])
+    return f"## {title}\n\n" + markdown_table(headers, rows) + "\n"
 
 
-def _pick_app_launch(events: list[dict], windows: list[ScenarioWindow]):
-    """Picks the app_launch event that describes this run's build.
+def build_header(run_root: Path, device_events, shaper_events, sessions, windows) -> str:
+    app_launch = next((e for e in device_events if e.get("name") == "app_launch"), None)
+    attrs = (app_launch.get("attributes") if app_launch else None) or {}
 
-    The device log persists across installs and the rotated `.1` file loads first, so the
-    first app_launch in `events` can describe a previous build rather than the one this run
-    exercised. Instead this picks the LAST app_launch at or after the run's earliest scenario
-    window begin (minus the shared ASSIGNMENT_SLACK, for the same clock/IO latency reasons
-    assign_scenario allows it at a window edge); a run with no scenario windows, or whose
-    app_launch events all predate that bound, falls back to the last app_launch in the log.
-    """
-    app_launches = [event for event in events if event.get("name") == "app_launch"]
-    earliest_begin = min((window.begin for window in windows), default=None)
-    if earliest_begin is not None:
-        run_start = earliest_begin - ASSIGNMENT_SLACK
-        in_run = [event for event in app_launches if (event_time(event) or run_start) >= run_start]
-        if in_run:
-            return in_run[-1]
-    return app_launches[-1] if app_launches else None
+    target = sessions.get("target") or {}
+    if target.get("kind") == "remote":
+        target_desc = f"remote ({target.get('host', 'n/a')})"
+    elif target.get("kind") == "local":
+        target_desc = "local"
+    else:
+        target_desc = "n/a"
 
+    bounds = [w.begin for w in windows.values() if w is not None] + [w.end for w in windows.values() if w is not None]
+    run_time = f"{min(bounds).isoformat()} to {max(bounds).isoformat()}" if bounds else "n/a"
 
-def build_header(events: list[dict], windows: list[ScenarioWindow], run_root: Path) -> str:
-    app_launch = _pick_app_launch(events, windows)
-    attrs = (app_launch or {}).get("attributes") or {}
-    times = [window.begin for window in windows] + [window.end for window in windows if window.end is not None]
-    run_time = f"{min(times).isoformat()} to {max(times).isoformat()}" if times else "n/a"
-    scenarios_run = ", ".join(scenario_order(windows)) if windows else "n/a"
+    missing = [
+        name
+        for name in ("device-perf.jsonl", "shaper.jsonl", "sessions.json")
+        if not (run_root / name).exists()
+    ]
+    missing_note = ", ".join(missing) if missing else "none"
+
+    profile_events = {}
+    for event in shaper_events:
+        if event.get("event") == "profile" and event.get("name") not in profile_events:
+            profile_events[event.get("name")] = event
+    profile_rows = []
+    for profile in PROFILES:
+        event = profile_events.get(profile)
+        if event is None:
+            profile_rows.append([profile, "n/a", "n/a"])
+            continue
+        delay_ms = numeric(event.get("delay_ms"))
+        bandwidth_mbit = numeric(event.get("bandwidth_mbit"))
+        profile_rows.append(
+            [
+                profile,
+                fmt_num(delay_ms, 0) if delay_ms is not None else "n/a",
+                f"{bandwidth_mbit:.0f} Mbit/s" if bandwidth_mbit is not None else "n/a",
+            ]
+        )
+
     lines = [
-        f"# iOS device performance baseline: {run_root.name}",
+        f"# iOS performance baseline: {run_root.name}",
         "",
         "| Field | Value |",
         "| --- | --- |",
+        f"| Target | {target_desc} |",
         f"| Device model | {attrs.get('device_model', 'n/a')} |",
         f"| iOS version | {attrs.get('ios_version', 'n/a')} |",
         f"| Build | {attrs.get('build', 'n/a')} |",
         f"| Run time (UTC) | {run_time} |",
-        f"| Scenarios run | {scenarios_run} |",
+        f"| Missing input files | {missing_note} |",
+        "",
+        "### Network profiles",
+        "",
+        markdown_table(["Profile", "one-way delay ms", "bandwidth"], profile_rows),
         "",
     ]
     return "\n".join(lines)
 
 
-def build_list_load_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    ok = group_by_scenario(events, windows, "overview_refresh_end", predicate=lambda e: (e.get("attributes") or {}).get("success") == "1")
-    failed = group_by_scenario(
-        events,
-        windows,
-        "overview_refresh_end",
-        predicate=lambda e: (e.get("attributes") or {}).get("success") != "1",
-        value_fn=lambda e: 1,
-    )
-    rows = []
-    for scenario in scenario_order(windows):
-        stats = stats_row(ok.get(scenario, []))
-        rows.append(
-            [
-                scenario,
-                str(stats["n"]),
-                fmt_num(stats["p50"]),
-                fmt_num(stats["p95"]),
-                fmt_num(stats["max"]),
-                str(len(failed.get(scenario, []))),
-            ]
-        )
-    body = markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms", "failures"], rows)
-    return "## List load\n\n" + body + "\n"
+def build_report_sections(run_root: Path):
+    device_events = load_device_events(run_root)
+    shaper_events = load_shaper_events(run_root)
+    sessions = load_sessions(run_root)
+    windows = build_scenario_windows(device_events, shaper_events)
 
+    def metrics_for(scenario, metric_fn, *extra_args):
+        return {profile: metric_fn(windows.get((profile, scenario)), *extra_args) for profile in PROFILES}
 
-def _terminal_back_opened_in_window(event: dict, windows: list[ScenarioWindow]) -> bool:
-    """Keeps a terminal_back sample only when the terminal it closes was also opened in the
-    same scenario window as the back itself.
-
-    A terminal_back's elapsedMS is dwell time since terminal_open_begin, not since the
-    scenario began. In back-and-forth the terminal is already open when the scenario starts
-    (from cold-open or the runner's open prompt), so that first back's elapsedMS spans the
-    prompt delay before the scenario and would inflate p95/max if counted. Missing timing data
-    is let through unfiltered; group_by_scenario's own value_fn check drops it regardless.
-    """
-    at = event_time(event)
-    elapsed = elapsed_ms(event)
-    if at is None or elapsed is None:
-        return True
-    opened_at = at - timedelta(milliseconds=elapsed)
-    return assign_scenario(opened_at, windows) == assign_scenario(at, windows)
-
-
-def build_open_to_first_paint_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    lines = ["## Open to first paint", ""]
-    # One table per release reason seen in this run, the requested-frame case first: `matching_frame` is
-    # the number an open is judged by, and the other reasons explain the opens that did not get there.
-    seen = {(e.get("attributes") or {}).get("hold_released_by") for e in events if e.get("name") == "terminal_first_paint"}
-    holds = ["matching_frame"] + sorted(hold for hold in seen if hold and hold != "matching_frame")
-    for hold in holds:
-        grouped = group_by_scenario(
-            events,
-            windows,
-            "terminal_first_paint",
-            predicate=lambda e, hold=hold: (e.get("attributes") or {}).get("hold_released_by") == hold,
-        )
-        lines.append(f"### First paint (hold_released_by={hold})")
-        lines.append("")
-        lines.append(markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms"], stats_rows(grouped, windows)))
-        lines.append("")
-    dwell = group_by_scenario(
-        events,
-        windows,
-        "terminal_back",
-        predicate=lambda e: _terminal_back_opened_in_window(e, windows),
-    )
-    lines.append("### Dwell before back (terminal_back)")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms"], stats_rows(dwell, windows)))
-    lines.append("")
-    return "\n".join(lines)
-
-
-def build_keyboard_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    grouped = group_by_scenario(events, windows, "viewport_resize_frame_visible")
-    body = markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms"], stats_rows(grouped, windows))
-    return "## Keyboard\n\n" + body + "\n"
-
-
-def build_input_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    # `input_command_rpc_end` is emitted for failed sends too (attributes["success"] == "0"), so
-    # latency percentiles are computed over successful events only; failures are reported as a
-    # separate count so a scenario with retries or drops is still visible in the table.
-    ok = group_by_scenario(
-        events, windows, "input_command_rpc_end", predicate=lambda e: (e.get("attributes") or {}).get("success") == "1"
-    )
-    failed = group_by_scenario(
-        events,
-        windows,
-        "input_command_rpc_end",
-        predicate=lambda e: (e.get("attributes") or {}).get("success") != "1",
-        value_fn=lambda e: 1,
-    )
-    rows = []
-    for scenario in scenario_order(windows):
-        stats = stats_row(ok.get(scenario, []))
-        rows.append(
-            [
-                scenario,
-                str(stats["n"]),
-                fmt_num(stats["p50"]),
-                fmt_num(stats["p95"]),
-                fmt_num(stats["max"]),
-                str(len(failed.get(scenario, []))),
-            ]
-        )
-    body = markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms", "failed"], rows)
-    return "## Input\n\n" + body + "\n"
-
-
-def _next_matching(
-    ordered: list[dict],
-    start_index: int,
-    names: tuple,
-    at_or_after_ns: int,
-    windows: list[ScenarioWindow],
-    scenario: str,
-    session_id=None,
-):
-    """Finds the next event of one of `names` at or after a device uptime, bounded to the
-    source event's own scenario window.
-
-    A resume or handoff whose target event never arrives before the scenario ends must not
-    fall through to a frame from a later scenario: pairing across scenarios would attribute a
-    misleadingly huge duration to the source scenario. So a candidate is skipped unless the
-    shared scenario-window assignment (assign_scenario) places it in `scenario`, and the
-    search stops once a candidate's wall-clock time passes the window's end (plus the shared
-    ASSIGNMENT_SLACK). Returns None, and the pair is dropped, when nothing qualifies.
-    """
-    window = next((w for w in windows if w.scenario == scenario), None)
-    deadline = window.end + ASSIGNMENT_SLACK if window is not None and window.end is not None else None
-    for candidate in ordered[start_index + 1 :]:
-        candidate_at = event_time(candidate)
-        if deadline is not None and candidate_at is not None and candidate_at > deadline:
-            break
-        if assign_scenario(candidate_at, windows) != scenario:
-            continue
-        if candidate.get("name") not in names:
-            continue
-        if session_id is not None and candidate.get("sessionID") != session_id:
-            continue
-        candidate_ns = event_uptime_ns(candidate)
-        if candidate_ns is None or candidate_ns < at_or_after_ns:
-            continue
-        return candidate
-    return None
-
-
-def build_foreground_resume_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    ordered = sorted((event for event in events if event_uptime_ns(event) is not None), key=event_uptime_ns)
-    to_terminal: dict[str, list[float]] = {scenario: [] for scenario in scenario_order(windows)}
-    to_list: dict[str, list[float]] = {scenario: [] for scenario in scenario_order(windows)}
-    for index, event in enumerate(ordered):
-        if event.get("name") != "app_scene_phase":
-            continue
-        attrs = event.get("attributes") or {}
-        if attrs.get("phase") != "active":
-            continue
-        phase_ns = event_uptime_ns(event)
-        scenario = assign_scenario(event_time(event), windows)
-        if scenario not in to_terminal:
-            continue
-        if attrs.get("open_terminal") == "1":
-            target = _next_matching(
-                ordered, index, ("stream_first_frame", "render_frame_payload_receive"), phase_ns, windows, scenario
-            )
-            if target is not None:
-                to_terminal[scenario].append((event_uptime_ns(target) - phase_ns) / 1_000_000)
-        elif attrs.get("open_terminal") == "0":
-            target = _next_matching(ordered, index, ("overview_refresh_end",), phase_ns, windows, scenario)
-            if target is not None:
-                to_list[scenario].append((event_uptime_ns(target) - phase_ns) / 1_000_000)
-
-    lines = ["## Foreground resume", ""]
-    lines.append("### Resume to terminal (open_terminal=1 to next stream_first_frame/render_frame_payload_receive)")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms"], stats_rows(to_terminal, windows)))
-    lines.append("")
-    lines.append("### Resume to list (open_terminal=0 to next overview_refresh_end)")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms"], stats_rows(to_list, windows)))
-    lines.append("")
-    return "\n".join(lines)
-
-
-def build_handoff_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    ordered = sorted((event for event in events if event_uptime_ns(event) is not None), key=event_uptime_ns)
-    recovery: dict[str, list[float]] = {scenario: [] for scenario in scenario_order(windows)}
-    hosts_seen: dict[str, set] = {scenario: set() for scenario in scenario_order(windows)}
-    # Per session id, the uptime (ns) of the stream_first_frame most recently turned into a
-    # recovery sample. An outage that spans failed redials emits one stream_disconnect per
-    # failed attempt, and every one of them would pair with the same eventual stream_first_frame,
-    # turning one outage into several samples all biased short. A disconnect that precedes an
-    # already-consumed recovery frame (the failed-redial disconnects, which all happen before that
-    # frame arrives) or whose own matched frame is that same consumed frame adds no sample, so only
-    # an outage's first disconnect ever produces one, measured from that first disconnect.
-    consumed_frame_ns: dict = {}
-    for index, event in enumerate(ordered):
-        if event.get("name") != "stream_disconnect":
-            continue
-        disconnect_ns = event_uptime_ns(event)
-        session = event.get("sessionID")
-        scenario = assign_scenario(event_time(event), windows)
-        if scenario not in recovery:
-            continue
-        already_consumed_ns = consumed_frame_ns.get(session)
-        if already_consumed_ns is not None and disconnect_ns <= already_consumed_ns:
-            continue
-        target = _next_matching(
-            ordered, index, ("stream_first_frame",), disconnect_ns, windows, scenario, session_id=session
-        )
-        if target is not None:
-            target_ns = event_uptime_ns(target)
-            if already_consumed_ns is not None and target_ns == already_consumed_ns:
-                continue
-            recovery[scenario].append((target_ns - disconnect_ns) / 1_000_000)
-            consumed_frame_ns[session] = target_ns
-            host = (target.get("attributes") or {}).get("host")
-            if host:
-                hosts_seen[scenario].add(host)
-
-    rows = []
-    for scenario in scenario_order(windows):
-        stats = stats_row(recovery.get(scenario, []))
-        hosts = ", ".join(sorted(hosts_seen.get(scenario, ()))) or "n/a"
-        rows.append([scenario, str(stats["n"]), fmt_num(stats["p50"]), fmt_num(stats["p95"]), fmt_num(stats["max"]), hosts])
-
-    lines = ["## Handoff", ""]
-    lines.append("### Disconnect to next first frame")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "n", "p50 ms", "p95 ms", "max ms", "hosts seen"], rows))
-    lines.append("")
-
-    stage_rows = []
-    for window in windows:
-        stage_events = sorted(
-            (e for e in ordered if e.get("name") == "connection_stage" and assign_scenario(event_time(e), windows) == window.scenario),
-            key=event_uptime_ns,
-        )
-        if not stage_events:
-            continue
-        base_ns = event_uptime_ns(stage_events[0])
-        for stage_event in stage_events:
-            attrs = stage_event.get("attributes") or {}
-            offset_ms = (event_uptime_ns(stage_event) - base_ns) / 1_000_000
-            stage_rows.append([window.scenario, fmt_num(offset_ms), attrs.get("stage", "n/a"), attrs.get("banner", "n/a")])
-    lines.append("### Connection stage sequence")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "offset ms", "stage", "banner"], stage_rows))
-    lines.append("")
-    return "\n".join(lines)
-
-
-def build_payload_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    def render_update_bytes(event: dict):
-        attrs = event.get("attributes") or {}
-        wire_bytes = numeric(attrs.get("wire_bytes"))
-        return wire_bytes if wire_bytes is not None else numeric(event.get("count"))
-
-    # `render_frame_payload_receive` is also emitted for state payloads that carried no render
-    # update (attributes["render_update"] == "0"), so the byte/frame statistics here are scoped
-    # to events that actually carried one; a frameless event would otherwise pad the frame count
-    # and drag the byte percentiles toward zero without representing any rendered frame.
-    grouped = group_by_scenario(
-        events,
-        windows,
-        "render_frame_payload_receive",
-        predicate=lambda e: (e.get("attributes") or {}).get("render_update") == "1",
-        value_fn=render_update_bytes,
-    )
-    rows = []
-    for window in windows:
-        values = grouped.get(window.scenario, [])
-        stats = stats_row(values)
-        total = sum(values) if values else 0
-        duration_s = (window.end - window.begin).total_seconds() if window.begin and window.end else None
-        bytes_per_sec = total / duration_s if values and duration_s else None
-        frames_per_sec = len(values) / duration_s if values and duration_s else None
-        rows.append(
-            [
-                window.scenario,
-                str(stats["n"]),
-                fmt_bytes(stats["p50"]),
-                fmt_bytes(stats["p95"]),
-                fmt_bytes(stats["max"]),
-                fmt_bytes(total) if values else "n/a",
-                fmt_num(bytes_per_sec),
-                fmt_num(frames_per_sec),
-            ]
-        )
-    body = markdown_table(
-        ["Scenario", "frames", "p50 bytes", "p95 bytes", "max bytes", "total bytes", "bytes/sec", "frames/sec"], rows
-    )
-    return "## Payload\n\n" + body + "\n"
-
-
-def _battery_attrs(event: dict):
-    attrs = event.get("attributes") or {}
-    return attrs if "battery_level" in attrs else None
-
-
-def build_battery_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    drain_rows = []
-    thermal_rows = []
-    for window in windows:
-        samples = []
-        for event in events:
-            attrs = _battery_attrs(event)
-            if attrs is None:
-                continue
-            if assign_scenario(event_time(event), windows) != window.scenario:
-                continue
-            at = event_time(event)
-            if at is None:
-                continue
-            samples.append((at, attrs))
-        samples.sort(key=lambda item: item[0])
-
-        if not samples:
-            drain_rows.append([window.scenario, "n/a", "n/a", "n/a", "n/a"])
-        else:
-            first_at, first_attrs = samples[0]
-            last_at, last_attrs = samples[-1]
-            was_charging = any(attrs.get("battery_state") in ("charging", "full") for _, attrs in samples)
-            level_first = numeric(first_attrs.get("battery_level"))
-            level_last = numeric(last_attrs.get("battery_level"))
-            if was_charging or level_first is None or level_last is None:
-                drain_rows.append(
-                    [
-                        window.scenario,
-                        fmt_num(level_first, 2) if level_first is not None else "n/a",
-                        fmt_num(level_last, 2) if level_last is not None else "n/a",
-                        "n/a",
-                        "charging" if was_charging else "n/a",
-                    ]
-                )
-            else:
-                hours = (last_at - first_at).total_seconds() / 3600
-                drain_per_hour_pct = ((level_first - level_last) * 100 / hours) if hours > 0 else None
-                drain_rows.append(
-                    [
-                        window.scenario,
-                        fmt_num(level_first, 2),
-                        fmt_num(level_last, 2),
-                        fmt_num(hours, 2),
-                        f"{fmt_num(drain_per_hour_pct)}%/hr" if drain_per_hour_pct is not None else "n/a",
-                    ]
-                )
-
-        changes = [
-            event
-            for event in events
-            if event.get("name") == "thermal_state_change" and assign_scenario(event_time(event), windows) == window.scenario
-        ]
-        # A thermal excursion that begins and ends between two 60-second battery samples is invisible to
-        # those samples alone, but `thermal_state_change` events capture it as it happens, so their states
-        # are folded into the set before taking the max.
-        thermal_states_seen = {attrs.get("thermal_state") for _, attrs in samples if attrs.get("thermal_state")}
-        thermal_states_seen |= {(event.get("attributes") or {}).get("thermal_state") for event in changes} - {None}
-        max_thermal = max(thermal_states_seen, key=lambda state: THERMAL_STATE_ORDER.get(state, -1), default=None)
-        change_summary = ", ".join((event.get("attributes") or {}).get("thermal_state", "n/a") for event in changes) or "none"
-        thermal_rows.append([window.scenario, max_thermal or "n/a", change_summary])
-
-    lines = ["## Battery", ""]
-    lines.append(markdown_table(["Scenario", "level first", "level last", "elapsed hours", "drain/hr"], drain_rows))
-    lines.append("")
-    lines.append("### Thermal")
-    lines.append("")
-    lines.append(markdown_table(["Scenario", "max thermal state", "thermal_state_change events"], thermal_rows))
-    lines.append("")
-    return "\n".join(lines)
-
-
-def build_alerts_section(events: list[dict], windows: list[ScenarioWindow]) -> str:
-    rows = []
-    for window in windows:
-        alerts = sorted(
-            (event for event in events if event.get("name") == "connection_error_alert" and assign_scenario(event_time(event), windows) == window.scenario),
-            key=lambda event: event_time(event) or window.begin,
-        )
-        for event in alerts:
-            at = event_time(event)
-            offset_ms = (at - window.begin).total_seconds() * 1000 if at is not None else None
-            attrs = event.get("attributes") or {}
-            detail = ", ".join(f"{key}={value}" for key, value in sorted(attrs.items()) if key != "message") or "n/a"
-            rows.append([window.scenario, fmt_num(offset_ms), attrs.get("message", "n/a"), detail])
-    return "## Alerts\n\n" + markdown_table(["Scenario", "offset ms", "message", "attributes"], rows) + "\n"
+    return [
+        build_header(run_root, device_events, shaper_events, sessions, windows),
+        render_table("Cold open", COLD_OPEN_COLUMNS, metrics_for("cold-open", metric_cold_open)),
+        render_table("Back and forth", BACK_AND_FORTH_COLUMNS, metrics_for("back-and-forth", metric_back_and_forth)),
+        render_table("Keyboard", KEYBOARD_COLUMNS, metrics_for("keyboard", metric_keyboard)),
+        render_table("Streaming", STREAMING_COLUMNS, metrics_for("streaming", metric_streaming)),
+        render_table("Scrollback", SCROLLBACK_COLUMNS, metrics_for("scrollback", metric_scrollback)),
+        render_table(
+            "Background/foreground: terminal", BACKGROUND_COLUMNS, metrics_for("background-terminal", metric_background, "terminal")
+        ),
+        render_table(
+            "Background/foreground: list", BACKGROUND_COLUMNS, metrics_for("background-list", metric_background, "list")
+        ),
+        render_table("Reconnect", RECONNECT_COLUMNS, metrics_for("reconnect", metric_reconnect)),
+        render_table("Idle", IDLE_COLUMNS, metrics_for("idle", metric_idle)),
+    ]
 
 
 def build_report(run_root: Path) -> str:
-    windows = load_scenario_windows(run_root)
-    events = load_device_events(run_root)
-    sections = [
-        build_header(events, windows, run_root),
-        build_list_load_section(events, windows),
-        build_open_to_first_paint_section(events, windows),
-        build_keyboard_section(events, windows),
-        build_input_section(events, windows),
-        build_foreground_resume_section(events, windows),
-        build_handoff_section(events, windows),
-        build_payload_section(events, windows),
-        build_battery_section(events, windows),
-        build_alerts_section(events, windows),
-    ]
-    return "\n".join(sections)
+    return "\n".join(build_report_sections(run_root))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render a markdown performance report for one iOS device baseline run.")
-    parser.add_argument("--run-root", required=True, help="Run root directory produced by ios_device_baseline.sh.")
+    parser = argparse.ArgumentParser(description="Render a markdown performance report for one iOS performance baseline lane run.")
+    parser.add_argument("--run-root", required=True, help="Run root directory produced by e2e_mobile_baseline.sh.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    print(build_report(Path(args.run_root)))
+    run_root = Path(args.run_root)
+    run_root.mkdir(parents=True, exist_ok=True)
+    sections = build_report_sections(run_root)
+    (run_root / "report.md").write_text("\n".join(sections) + "\n", encoding="utf-8")
+    print(sections[0])
+    print(sections[1])
 
 
 if __name__ == "__main__":

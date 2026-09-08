@@ -71,9 +71,8 @@
         /// Same round-trip contract for the paired-device record type.
         func testPairedDeviceRecordMultiHostRoundTripPreservesOrderAndOmitsLegacyKey() throws {
             let record = SpacesMobilePairedDeviceRecord(
-                id: "device-abc", name: "Mac", hosts: ["10.0.0.5", "100.64.0.5"], port: 47_900,
-                certificateFingerprint: "SHA256:mac", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
-                lastSelectedAt: nil, activeHost: nil)
+                id: "device-abc", name: "Mac", hosts: ["10.0.0.5", "100.64.0.5"], port: 47_900, certificateFingerprint: "SHA256:mac",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: nil)
 
             let data = try JSONEncoder().encode(record)
             let json = try XCTUnwrap(String(data: data, encoding: .utf8))
@@ -208,7 +207,8 @@
         /// would advertise. Reports no change, since a caller (`SpacesMobileAppModel`) uses that to decide
         /// whether its live client needs rebuilding.
         func testMergeAdvertisedHostsIsNoOpWhenHostsIsEmpty() throws {
-            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let id = try XCTUnwrap(state.devices.first?.id)
 
             let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts([], certificateFingerprint: "SHA256:mac")
@@ -225,7 +225,8 @@
         /// fallback to append — see `testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback`
         /// for the case that exercises the union's other half.)
         func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
-            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let id = try XCTUnwrap(state.devices.first?.id)
 
             let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
@@ -346,6 +347,37 @@
             XCTAssertFalse(changed)
             let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
             XCTAssertEqual(reloaded.devices.first?.hosts, ["10.0.0.5"])
+        }
+
+        /// The performance lane pins the paired device to a single shaping-proxy host by disabling the
+        /// merge entirely (see the doc comment on `mergeAdvertisedHosts`): with the flag set, a daemon
+        /// report that would otherwise change `hosts` is ignored and the seeded host survives untouched.
+        func testMergeAdvertisedHostsSkipsMergeWhenFixedHostsFlagIsSet() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["127.0.0.1"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+                ["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac", environment: ["SPACES_MOBILE_TEST_FIXED_HOSTS": "1"])
+
+            XCTAssertFalse(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["127.0.0.1"])
+        }
+
+        /// Without the flag, the same daemon report merges as usual: the fixed-hosts gate must not be
+        /// on by default.
+        func testMergeAdvertisedHostsMergesNormallyWhenFixedHostsFlagIsUnset() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["127.0.0.1"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+                ["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac", environment: [:])
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5", "127.0.0.1"])
         }
 
         /// The single warm-start mechanism lives in `SpacesDeviceEndpointResolver` seeding its cached
