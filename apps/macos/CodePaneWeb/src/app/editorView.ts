@@ -200,6 +200,9 @@ export class EditorView {
   /** Unsubscribes the previous `subscribeFileSignature` listener; replaced (not layered) every time
    *  a new path becomes "the currently open file" — see `subscribeToFileSignature`. */
   private fileSignatureUnsubscribe: Unsubscribe | undefined;
+  /** The content the last `loadIntoCodeView` handed to Pierre, held until the one document-change
+   *  callback that replacement provokes. See `ensureCodeView`'s `onItemEditChange`. */
+  private pendingControlledContent: string | undefined;
 
   constructor(
     container: HTMLElement,
@@ -266,9 +269,28 @@ export class EditorView {
     if (!this.codeView) {
       this.codeView = new CodeView({
         theme: CODE_PANE_THEME_NAME,
-        createEditor: (options) => new Editor(options),
-        onItemEditChange: (_item, file) => {
-          this.latestContent = file.contents;
+        createEditor: (editorType, options, editStateKey) => new Editor(editorType, options, editStateKey),
+        // Pierre reports every document change on one event carrying the whole edited document as
+        // `file`, and the event names no source: a controlled replacement (every `loadIntoCodeView`
+        // branch) raises it exactly like typing does. `pendingControlledContent` swallows the one
+        // echo of the content this view just installed, so adopting disk or a merge result stays a
+        // clean buffer instead of becoming an unsaved edit. Any change event clears the marker, so
+        // at most one is ever swallowed and a real edit is never lost.
+        //
+        // Accepted window: a controlled install takes effect on Pierre's next render frame, so a
+        // keystroke inside that frame reaches this callback first and clears the marker. That
+        // keystroke is discarded either way, because the install replaces the whole document
+        // rather than rebasing the edit onto it, so nothing typed is lost that the marker could
+        // have saved. The only effect is that the install is then counted as an edit: the content
+        // this view just adopted is marked dirty once and later written back unchanged. Not
+        // serialized against typing, since the window is one frame wide and only reachable while
+        // an external change or a merge is being applied.
+        onItemEditChange: (event) => {
+          const contents = event.file.contents;
+          const controlled = this.pendingControlledContent;
+          this.pendingControlledContent = undefined;
+          if (controlled !== undefined && contents === controlled) return;
+          this.latestContent = contents;
           this.dirty = true;
           this.bufferEditGeneration += 1;
           this.focusedLine = this.readFocusedLine() ?? this.focusedLine;
@@ -296,12 +318,21 @@ export class EditorView {
     const codeView = this.ensureCodeView();
     this.focusRestoreGeneration += 1;
     this.editGeneration += 1;
-    const item: CodeViewItem = {
+    this.pendingControlledContent = content;
+    const item: CodeViewItem<undefined> = {
       id: path,
       type: "file",
       // Forced explicitly rather than left to auto-detection; see
-      // theme/index.ts's resolveAllowedLanguage doc comment.
-      file: { name: path, contents: content, cacheKey: path, lang: resolveAllowedLanguage(path) },
+      // theme/index.ts's resolveAllowedLanguage doc comment. The cache key carries this load's
+      // generation because Pierre treats a non-null cache key as the document's identity
+      // (`areFileTargetsEqual`): reusing one key for the same path would make a reload of changed
+      // content a no-op, leaving the old document rendered and editable under the new baseline.
+      file: {
+        name: path,
+        contents: content,
+        cacheKey: `${path}:${this.editGeneration}`,
+        lang: resolveAllowedLanguage(path),
+      },
       edit: true,
       version: this.editGeneration,
     };
@@ -313,11 +344,11 @@ export class EditorView {
    * Works around an attach-order gap in `@pierre/diffs` for items born with `edit: true`: the
    * render loop renders the item first (editor still null, so `File.render` skips its
    * `syncRenderViewToEditor` call) and only then attaches the editor — whose own attach path
-   * (`File.attachEditor`) syncs immediately only when `editorRenderReady()` already holds, which
-   * it never does on that first pass (the highlight result hasn't landed, and once the edit
-   * session is active `onHighlightSuccess` drops it without triggering a re-render). Nothing
-   * re-renders a single always-visible item after that, so the editor never takes over the DOM:
-   * the file stays a static, non-editable `PRE` forever.
+   * (`File.__attachEditor` into `resumeEditorRendering`) syncs immediately only when
+   * `editorRenderReady()` already holds, which it never does on that first pass (the highlight
+   * result hasn't landed, and once the edit session is active `onHighlightSuccess` drops it
+   * without triggering a re-render). Nothing re-renders a single always-visible item after that,
+   * so the editor never takes over the DOM: the file stays a static, non-editable `PRE` forever.
    *
    * The escape is one forced full re-render AFTER the editor has attached: a version-bumped
    * `updateItem` marks the item render-dirty, and that render's `File.render` sees a non-null
@@ -327,7 +358,7 @@ export class EditorView {
    * For reloads of an already-attached editor the poll resolves on the first frame and the extra
    * re-render is a cheap no-op on top of the sync the forced render already performs.
    */
-  private completeEditorAttach(codeView: CodeView, item: CodeViewItem): void {
+  private completeEditorAttach(codeView: CodeView, item: CodeViewItem<undefined>): void {
     const generation = this.editGeneration;
     const poll = () => {
       if (generation !== this.editGeneration) return; // a newer load owns the CodeView now
@@ -419,10 +450,7 @@ export class EditorView {
     // shadow-root editor: WebKit's document Selection can be empty while the editor still has a
     // focused logical selection, which would otherwise lose the focused line on a workspace switch.
     if (this.currentPath !== undefined) {
-      const editor = this.codeView?.getEditor(this.currentPath) as {
-        getState?: () => { selections?: Array<{ start: { line: number }; end: { line: number }; direction?: number }> };
-      } | undefined;
-      const selection = editor?.getState?.().selections?.at(-1);
+      const selection = this.codeView?.getEditor(this.currentPath)?.getViewState().selections?.at(-1);
       if (selection !== undefined) {
         const caret = selection.direction === -1 ? selection.start : selection.end;
         if (Number.isInteger(caret.line) && caret.line >= 0) return caret.line + 1;

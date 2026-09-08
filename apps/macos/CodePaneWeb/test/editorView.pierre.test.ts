@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCustomCSSVariableTheme } from "@pierre/diffs";
 import { EditorView } from "../src/app/editorView";
-import type { SpacesBridge, WorkspaceFileReadResult } from "../src/bridge/types";
+import type { FileSignatureEvent, SpacesBridge, WorkspaceFileReadResult } from "../src/bridge/types";
 
 registerCustomCSSVariableTheme("spaces", {}, true);
 
@@ -52,6 +52,100 @@ function queryOpenShadowRoots(root: ParentNode, selector: string): HTMLElement[]
   }
   return matches;
 }
+
+/** The Pierre editor instance driving the open file, reached through the view's private CodeView
+ *  because EditorView deliberately exposes no editor handle of its own. */
+function pierreEditor(view: EditorView, path: string): {
+  setSelections(selections: Array<{
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+    direction: "forward" | "backward" | "none";
+  }>): void;
+  getViewState(): { selections?: Array<{ start: { line: number }; end: { line: number }; direction: number }> };
+  getText(): string;
+} {
+  const editor = (view as unknown as {
+    codeView?: {
+      getEditor(id: string): {
+        setSelections(selections: Array<{
+          start: { line: number; character: number };
+          end: { line: number; character: number };
+          direction: "forward" | "backward" | "none";
+        }>): void;
+        getViewState(): { selections?: Array<{ start: { line: number }; end: { line: number }; direction: number }> };
+        getText(): string;
+      } | undefined;
+    };
+  }).codeView?.getEditor(path);
+  expect(editor).toBeDefined();
+  return editor!;
+}
+
+/** The buffer EditorView would write on Save. */
+function latestContent(view: EditorView): string | undefined {
+  return (view as unknown as { latestContent?: string }).latestContent;
+}
+
+/** Whether the buffer holds unsaved edits, which is what gates Save and the discard prompts. */
+function isDirty(view: EditorView): boolean {
+  return (view as unknown as { dirty: boolean }).dirty;
+}
+
+/** A bridge that serves `reads` in order and hands back the file-signature listener EditorView
+ *  registers, so a test can push a real "this file changed on disk" event. */
+function makeReloadBridge(reads: WorkspaceFileReadResult[]): {
+  bridge: SpacesBridge;
+  fireFileSignature: (event: FileSignatureEvent) => void;
+} {
+  let index = 0;
+  let listener: ((event: FileSignatureEvent) => void) | undefined;
+  const bridge: SpacesBridge = {
+    ...makeBridge(reads[0]!),
+    workspaceFileRead: vi.fn(() => Promise.resolve(reads[Math.min(index++, reads.length - 1)]!)),
+    subscribeFileSignature: vi.fn((_path: string, next: (event: FileSignatureEvent) => void) => {
+      listener = next;
+      return () => {
+        listener = undefined;
+      };
+    }),
+  };
+  return { bridge, fireFileSignature: (event) => listener?.(event) };
+}
+
+/** Dispatches a paste of `text` over the editor's whole document. */
+function pasteOverWholeDocument(editorElement: HTMLElement, text: string): void {
+  const paste = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, "clipboardData", {
+    value: { getData: (type: string) => (type === "text" ? text : undefined) },
+  });
+  editorElement.dispatchEvent(paste);
+}
+
+/** The text of each rendered line, read straight off the editor surface's child divs: the DOM the
+ *  user actually sees, which is what a stale render leaves behind. */
+function renderedLines(editorElement: HTMLElement): string[] {
+  return [...editorElement.children].map((line) => line.textContent ?? "");
+}
+
+/** Lets Pierre finish the render pass that follows an edit. A stale-render regression paints the
+ *  new text and then reverts the line divs on the next frame, so the rendered text is only worth
+ *  asserting once those frames have run. */
+async function settleRender(frames = 3): Promise<void> {
+  for (let i = 0; i < frames; i += 1) await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+}
+
+/** Opens `path` and resolves once Pierre's editable surface carries its automation identifier. */
+async function openAndWaitForEditor(container: HTMLElement, view: EditorView, path: string): Promise<HTMLElement> {
+  view.open(path);
+  await vi.waitFor(() => {
+    const editor = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0];
+    expect(editor?.id).toBe("code-pane-editor-input");
+  });
+  return queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0]!;
+}
+
+const SIX_LINE_NOTES = "state line 001\nstate line 002\nstate line 003\nstate line 004\nstate line 005\nstate line 006\n";
+const RELOADED_NOTES = "reloaded line 1\nreloaded line 2\n";
 
 describe("EditorView with the real Pierre renderer", () => {
   beforeEach(() => {
@@ -105,32 +199,95 @@ describe("EditorView with the real Pierre renderer", () => {
     });
     expect(view.visibleLine()).toBe(1);
 
-    const editor = (view as unknown as {
-      codeView?: {
-        getEditor(path: string): {
-          setSelections(selections: Array<{
-            start: { line: number; character: number };
-            end: { line: number; character: number };
-            direction: "forward" | "backward";
-          }>): void;
-          getState(): { selections?: Array<{ start: { line: number }; end: { line: number }; direction: number }> };
-        } | undefined;
-      };
-    }).codeView?.getEditor("src/example.txt");
-    expect(editor).toBeDefined();
+    const editor = pierreEditor(view, "src/example.txt");
 
     // Pierre normalizes a backward range so start <= end but keeps direction, making the active
     // caret the start endpoint for backward selections and the end endpoint for forward ones.
-    editor!.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" }]);
+    editor.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" }]);
     expect(view.focusedLineNumber()).toBe(3);
-    editor!.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "backward" }]);
+    editor.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "backward" }]);
     expect(view.focusedLineNumber()).toBe(1);
 
     const line = queryOpenShadowRoots(container, "[data-line]").find((candidate) => candidate.dataset.line === "1");
     expect(line).not.toBeUndefined();
     view.restorePosition(null, 4);
     await vi.waitFor(() => expect(view.focusedLineNumber()).toBe(4));
-    expect(editor!.getState().selections?.at(-1)?.end.line).toBe(3);
+    expect(editor.getViewState().selections?.at(-1)?.end.line).toBe(3);
+
+    container.remove();
+  });
+
+  it("repaints every line when a paste replaces a selection spanning the whole file", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new EditorView(container, makeBridge({ content: SIX_LINE_NOTES, sha256: "sha-1", size: SIX_LINE_NOTES.length }));
+    const editorElement = await openAndWaitForEditor(container, view, "notes.txt");
+    const editor = pierreEditor(view, "notes.txt");
+
+    editor.setSelections([{ start: { line: 0, character: 0 }, end: { line: 6, character: 0 }, direction: "forward" }]);
+    pasteOverWholeDocument(editorElement, "PASTED\n");
+
+    await vi.waitFor(() => expect(latestContent(view)).toBe("PASTED\n"));
+    await settleRender();
+    expect(renderedLines(editorElement)).toEqual(["PASTED", ""]);
+
+    container.remove();
+  });
+
+  it("repaints the joined line when Backspace at the start of a line joins it with the one above", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const view = new EditorView(container, makeBridge({ content: SIX_LINE_NOTES, sha256: "sha-1", size: SIX_LINE_NOTES.length }));
+    const editorElement = await openAndWaitForEditor(container, view, "notes.txt");
+    const editor = pierreEditor(view, "notes.txt");
+    const lineCountBefore = renderedLines(editorElement).length;
+
+    editor.setSelections([{ start: { line: 1, character: 0 }, end: { line: 1, character: 0 }, direction: "none" }]);
+    const backspace = new Event("beforeinput", { bubbles: true, cancelable: true });
+    Object.defineProperty(backspace, "inputType", { value: "deleteContentBackward" });
+    Object.defineProperty(backspace, "data", { value: null });
+    editorElement.dispatchEvent(backspace);
+
+    const joined = "state line 001state line 002\nstate line 003\nstate line 004\nstate line 005\nstate line 006\n";
+    await vi.waitFor(() => expect(latestContent(view)).toBe(joined));
+    await settleRender();
+    expect(renderedLines(editorElement)[0]).toBe("state line 001state line 002");
+    expect(renderedLines(editorElement).length).toBe(lineCountBefore - 1);
+
+    container.remove();
+  });
+it("adopts a file that changed on disk into the rendered document and leaves the buffer clean", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const { bridge, fireFileSignature } = makeReloadBridge([
+      { content: SIX_LINE_NOTES, sha256: "sha-1", size: SIX_LINE_NOTES.length },
+      { content: RELOADED_NOTES, sha256: "sha-2", size: RELOADED_NOTES.length },
+    ]);
+    const view = new EditorView(container, bridge);
+    await openAndWaitForEditor(container, view, "notes.txt");
+
+    fireFileSignature({ path: "notes.txt", sha256: "sha-2", missing: false });
+
+    await vi.waitFor(() => {
+      const surface = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0];
+      expect(surface === undefined ? [] : renderedLines(surface)).toEqual(["reloaded line 1", "reloaded line 2", ""]);
+    });
+    // Pierre's own document, not just the painted lines: an edit made after the reload is written
+    // from this text, so a stale document here would save the pre-reload file over the new one.
+    expect(pierreEditor(view, "notes.txt").getText()).toBe(RELOADED_NOTES);
+    expect(latestContent(view)).toBe(RELOADED_NOTES);
+    // Adopting disk is not an edit: Save stays disabled and nothing counts as unsaved.
+    expect(isDirty(view)).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>("button.primary")?.disabled).toBe(true);
+
+    // The very next real edit still registers, so the adoption suppresses one event and no more.
+    const editorElement = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0]!;
+    pierreEditor(view, "notes.txt").setSelections([
+      { start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" },
+    ]);
+    pasteOverWholeDocument(editorElement, "TYPED\n");
+    await vi.waitFor(() => expect(latestContent(view)).toBe("TYPED\n"));
+    expect(isDirty(view)).toBe(true);
 
     container.remove();
   });

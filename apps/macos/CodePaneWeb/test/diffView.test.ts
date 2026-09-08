@@ -670,9 +670,9 @@ describe("DiffView inline edit", () => {
     expect(onResolveDiffEdit).toHaveBeenNthCalledWith(2, "src/foo.ts", "keepMine");
 
     // A stale editor callback cannot mutate the frozen buffer after conflict entry.
-    (control.lastOptions?.onItemEditChange as ((item: { id: string; type: string }, file: { contents: string }) => void) | undefined)?.(
+    (control.lastOptions?.onItemEditChange as ((event: { file: { contents: string } }, item: { id: string; type: string }) => void) | undefined)?.(
+      { file: { contents: "must not replace mine\n" } },
       { id: "src/foo.ts", type: "file" },
-      { contents: "must not replace mine\n" },
     );
     expect(onDiffEditChange).not.toHaveBeenCalled();
   });

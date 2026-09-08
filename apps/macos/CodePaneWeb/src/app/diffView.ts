@@ -47,6 +47,11 @@ export interface PreparedDiffEdit {
   oldContent: string | null;
 }
 
+/** Pierre's `CodeView` generics are (line-annotation metadata, remote-caret metadata). Diff mode
+ *  renders comment cards from `AnchoredComment` and renders no externally owned carets, so the
+ *  caret parameter stays `undefined`. */
+type DiffCodeViewOptions = CodeViewOptions<AnchoredComment, undefined>;
+
 /**
  * Diff mode's content area: a single `@pierre/diffs` `CodeView` holding every changed file in
  * order, rather than a two-region layout (real diffs in one scrolling area, binary
@@ -134,6 +139,10 @@ export class DiffView {
   /** Changes only when externally supplied content replaces an edit document. It gives Pierre a
    * new file cache key for disk adoption while ordinary typing keeps the active document intact. */
   private editSessionGeneration = 0;
+  /** The content the last controlled install (`beginPreparedEdit`/`replaceEditContent`) handed to
+   *  Pierre, held until the one document-change callback that replacement provokes. See
+   *  `buildCodeViewOptions`' `onItemEditChange`. */
+  private pendingControlledContent: string | undefined;
   private pendingEditPath: string | undefined;
   private focusedLocation: { path: string; line: number; side: ReviewCommentSide } | undefined;
   /** The initial workspace snapshot names a source location, while a selected manifest row names
@@ -332,6 +341,7 @@ export class DiffView {
     }
     if (this.editing?.path !== undefined && this.editing.path !== path) this.endEdit(this.editing.path);
     this.editing = { path, content, dirty, fileDiff, oldContent, session: ++this.editSessionGeneration };
+    this.pendingControlledContent = content;
     this.syncRecoveryEditFile();
     this.emptyEl.style.display = "none";
     this.root.style.display = "";
@@ -371,6 +381,7 @@ export class DiffView {
     const hydrated = this.createEditableFileDiff(this.filesByPath.get(path), path, content, this.editing.oldContent);
     if (hydrated === undefined) return;
     this.editing = { ...this.editing, content, dirty, ...hydrated, conflict: undefined, session: ++this.editSessionGeneration };
+    this.pendingControlledContent = content;
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     const file = this.filesByPath.get(path);
@@ -745,10 +756,10 @@ export class DiffView {
     });
   }
 
-  private buildCodeViewOptions(): CodeViewOptions<AnchoredComment> {
-    const renderAnnotation: NonNullable<CodeViewOptions<AnchoredComment>["renderAnnotation"]> = (annotation) =>
+  private buildCodeViewOptions(): DiffCodeViewOptions {
+    const renderAnnotation: NonNullable<DiffCodeViewOptions["renderAnnotation"]> = (annotation) =>
       this.hooks.renderCard(annotation.metadata);
-    const onLineClick: NonNullable<CodeViewOptions<AnchoredComment>["onLineClick"]> = (event, context) => {
+    const onLineClick: NonNullable<DiffCodeViewOptions["onLineClick"]> = (event, context) => {
       // Pierre reports a diff click as one `diff-line` event object. CodeView appends the owning
       // item context as the second argument; this shape differs from the selected-range object
       // used by CodeView's selection callbacks, so do not read `side`/`start` from it.
@@ -830,13 +841,32 @@ export class DiffView {
       // for ordinary read-only diffs.
       unsafeCSS: "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
       enableGutterUtility: true,
-      createEditor: (options) => new Editor(options),
-      onItemEditChange: (item, file) => {
+      createEditor: (editorType, options, editStateKey) => new Editor(editorType, options, editStateKey),
+      // Pierre reports every document change on one event carrying the whole edited document as
+      // `file`, and the event names no source: a controlled replacement (`beginPreparedEdit`,
+      // `replaceEditContent`) raises it exactly like typing does. `pendingControlledContent`
+      // swallows the one echo of the content this view just installed, so a disk adoption stays a
+      // clean edit instead of being reported to the host as unsaved typing. Any change event clears
+      // the marker, so at most one is ever swallowed and a real edit is never lost.
+      //
+      // Accepted window: a controlled install takes effect on Pierre's next render frame, so a
+      // keystroke inside that frame reaches this callback first and clears the marker. That
+      // keystroke is discarded either way, because the install replaces the whole document rather
+      // than rebasing the edit onto it, so nothing typed is lost that the marker could have saved.
+      // The only effect is that the install is then reported as an edit: the content just adopted
+      // is marked dirty once and later written back unchanged. Not serialized against typing,
+      // since the window is one frame wide and only reachable while an external change or a merge
+      // is being applied.
+      onItemEditChange: (event, item) => {
         if (item.type !== "diff" || this.editing?.path !== item.id || this.editing.conflict !== undefined) return;
-        this.editing.content = file.contents;
+        const contents = event.file.contents;
+        const controlled = this.pendingControlledContent;
+        this.pendingControlledContent = undefined;
+        if (controlled !== undefined && contents === controlled) return;
+        this.editing.content = contents;
         this.editing.dirty = true;
         this.clearEditError();
-        this.hooks.onDiffEditChange?.(item.id, file.contents);
+        this.hooks.onDiffEditChange?.(item.id, contents);
         this.generation += 1;
         this.itemVersions.set(item.id, this.generation);
         const currentFile = this.filesByPath.get(item.id);
@@ -847,11 +877,11 @@ export class DiffView {
         if (context.type !== "diff" || range.side === undefined) return;
         if (this.editing?.path === context.item.id) return;
         this.requestNewComment(context.item.id, range.side === "deletions" ? "old" : "new", range.start);
-      }) as NonNullable<CodeViewOptions<AnchoredComment>["onGutterUtilityClick"]>,
+      }) as NonNullable<DiffCodeViewOptions["onGutterUtilityClick"]>,
       renderAnnotation,
       // Metadata augments Pierre's standard filename header. Supplying `renderCustomHeader` even
       // when it returns undefined replaces that header for every rendered file.
-      renderHeaderMetadata: renderHeaderMetadata as NonNullable<CodeViewOptions<AnchoredComment>["renderHeaderMetadata"]>,
+      renderHeaderMetadata: renderHeaderMetadata as NonNullable<DiffCodeViewOptions["renderHeaderMetadata"]>,
       onPostRender: ((node: HTMLElement, ...args: unknown[]) => {
         const context = args.at(-1) as { item?: { id?: string } } | undefined;
         const path = context?.item?.id;
@@ -863,7 +893,7 @@ export class DiffView {
           this.decorateRenderedLines(node, path);
           this.retryPendingRestorePosition(path);
         }
-      }) as NonNullable<CodeViewOptions<AnchoredComment>["onPostRender"]>,
+      }) as NonNullable<DiffCodeViewOptions["onPostRender"]>,
     };
   }
 
